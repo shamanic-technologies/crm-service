@@ -1,0 +1,20 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1784272075186,
+      "tag": "0000_minor_kate_bishop",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1784272090567,
+      "tag": "0001_gold_and_email_unique",
+      "breakpoints": true
+    }
+  ]
+}
