@@ -1,0 +1,101 @@
+/**
+ * HTTP client for chat-service LLM completion (POST /complete).
+ *
+ * crm-service uses exactly ONE chat-service call per upload: the column-typing
+ * classification. The upload route requires org + user + run identity, so this
+ * always hits the org-scoped, run-attributed /complete endpoint.
+ *
+ * chat-service owns the LLM cost: it self-declares the spend against the run id
+ * crm-service forwards (x-run-id = this service's own run). crm-service imports
+ * NO LLM SDK and declares NO cost of its own.
+ */
+
+export type ChatProvider = "google" | "anthropic";
+export type ChatModel =
+  | "flash"
+  | "flash-lite"
+  | "flash-pro"
+  | "pro"
+  | "sonnet"
+  | "haiku"
+  | "opus";
+
+export interface ChatCompleteParams {
+  message: string;
+  systemPrompt: string;
+  provider: ChatProvider;
+  model: ChatModel;
+  responseFormat?: "json";
+  responseSchema?: Record<string, unknown>;
+  temperature?: number;
+  maxTokens?: number;
+  disableThinking?: boolean;
+}
+
+export interface ChatCompleteResult {
+  content: string;
+  json?: Record<string, unknown>;
+  tokensInput: number;
+  tokensOutput: number;
+  model: string;
+}
+
+/** Identity/tracking headers forwarded to chat-service for cost attribution. */
+export interface ChatTrackingHeaders {
+  orgId: string;
+  userId: string;
+  /** Outbound x-run-id: this service's own runId, not the inbound parent. */
+  runId: string;
+  brandIds?: string[];
+}
+
+function baseUrl(): string {
+  const url = process.env.CHAT_SERVICE_URL;
+  if (!url) throw new Error("[crm-service] CHAT_SERVICE_URL is required");
+  return url;
+}
+
+function buildHeaders(tracking: ChatTrackingHeaders): Record<string, string> {
+  const apiKey = process.env.CHAT_SERVICE_API_KEY;
+  if (!apiKey) throw new Error("[crm-service] CHAT_SERVICE_API_KEY is required");
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    "x-api-key": apiKey,
+    "x-org-id": tracking.orgId,
+    "x-user-id": tracking.userId,
+    "x-run-id": tracking.runId,
+  };
+  if (tracking.brandIds?.length) headers["x-brand-id"] = tracking.brandIds.join(",");
+  return headers;
+}
+
+export async function chatComplete(
+  params: ChatCompleteParams,
+  tracking: ChatTrackingHeaders,
+): Promise<ChatCompleteResult> {
+  const body = {
+    message: params.message,
+    systemPrompt: params.systemPrompt,
+    provider: params.provider,
+    model: params.model,
+    ...(params.responseFormat && { responseFormat: params.responseFormat }),
+    ...(params.responseSchema && { responseSchema: params.responseSchema }),
+    ...(params.temperature !== undefined && { temperature: params.temperature }),
+    ...(params.maxTokens !== undefined && { maxTokens: params.maxTokens }),
+    ...(params.disableThinking !== undefined && { disableThinking: params.disableThinking }),
+  };
+
+  const res = await fetch(`${baseUrl()}/complete`, {
+    method: "POST",
+    headers: buildHeaders(tracking),
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`[crm-service][chat-client] POST /complete returned ${res.status}: ${text}`);
+  }
+
+  return (await res.json()) as ChatCompleteResult;
+}
