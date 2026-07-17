@@ -19,6 +19,7 @@ import {
   ColumnMapping,
 } from "../lib/column-typing.js";
 import { promoteUpload } from "../lib/promote.js";
+import { serveNext, serveStats } from "../lib/serve.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { SERVICE_NAME } from "../middleware/auth.js";
 
@@ -185,6 +186,48 @@ router.post(
 
     // Kick silver promotion only AFTER the response is sent.
     setImmediate(() => void runAsyncPromotion(uploadId));
+  },
+);
+
+// ─── POST /orgs/contacts/serve-next ──────────────────────────────────────────
+
+const serveNextBodySchema = z.object({
+  brandId: z.string().uuid(),
+  limit: z.number().int().positive().max(5000).optional(),
+});
+
+router.post(
+  "/orgs/contacts/serve-next",
+  apiKeyAuth,
+  requireOrg("contacts.serve-next"),
+  async (req: AuthenticatedRequest, res) => {
+    const parsed = serveNextBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res
+        .status(400)
+        .json({ type: "validation", error: "brandId (uuid) required; limit optional 1..5000" });
+    }
+    const { brandId } = parsed.data;
+    const limit = parsed.data.limit ?? 100;
+
+    const result = await serveNext(req.orgId!, brandId, limit, req.runId!);
+    res.json(result);
+  },
+);
+
+// ─── GET /orgs/contacts/serve-stats?brandId= ─────────────────────────────────
+
+router.get(
+  "/orgs/contacts/serve-stats",
+  apiKeyAuth,
+  requireOrg("contacts.serve-stats"),
+  async (req: AuthenticatedRequest, res) => {
+    const brandParse = brandIdSchema.safeParse(req.query.brandId);
+    if (!brandParse.success) {
+      return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
+    }
+    const stats = await serveStats(req.orgId!, brandParse.data);
+    res.json(stats);
   },
 );
 

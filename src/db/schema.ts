@@ -118,9 +118,50 @@ export const contacts = pgTable(
   (table) => [index("contacts_org_brand_idx").on(table.orgId, table.brandId)],
 );
 
+/**
+ * SERVE-TRACKING — permanent, per-(brand, contact) suppression list.
+ *
+ * crm-service serves sendable contacts to human-service (the people gateway).
+ * Once a contact has been served for a brand it must NEVER be served again for
+ * that brand — the atomic-member no-re-serve invariant (identity-keying rule).
+ *
+ * The suppression key is the DURABLE contact identity `lower(primary_email)`,
+ * NOT the silver `contacts.id`. Silver rows are delete-and-reinserted on every
+ * re-promotion, so their uuid changes; keying on the volatile uuid would leak a
+ * re-serve after any re-promote. The gold `sendable_contacts` view already
+ * requires a non-null valid email, so every servable contact has a stable email.
+ * `contact_id` is stored for provenance only (may be stale after a re-promote).
+ *
+ * UNIQUE(brand_id, email) is the permanent no-re-serve guarantee AND the
+ * concurrency guard: two parallel serve-next calls that race on the same email
+ * cannot both insert. `email` is stored already-lowercased (silver normalizes it).
+ */
+export const contactServes = pgTable(
+  "contact_serves",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    // Provenance only — the silver row served at the time. May be stale after a
+    // re-promote (that row's uuid changes); the suppression key is `email`.
+    contactId: uuid("contact_id").notNull(),
+    // Durable atomic-member identity = lower(primary_email). Suppression key.
+    email: text("email").notNull(),
+    // The org run under which this serve happened.
+    servedRunId: text("served_run_id").notNull(),
+    servedAt: timestamp("served_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("contact_serves_brand_email_uq").on(table.brandId, table.email),
+    index("contact_serves_org_brand_idx").on(table.orgId, table.brandId),
+  ],
+);
+
 export type ContactUpload = typeof contactUploads.$inferSelect;
 export type NewContactUpload = typeof contactUploads.$inferInsert;
 export type ContactRowRaw = typeof contactRowsRaw.$inferSelect;
 export type NewContactRowRaw = typeof contactRowsRaw.$inferInsert;
 export type Contact = typeof contacts.$inferSelect;
 export type NewContact = typeof contacts.$inferInsert;
+export type ContactServe = typeof contactServes.$inferSelect;
+export type NewContactServe = typeof contactServes.$inferInsert;

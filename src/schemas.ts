@@ -91,6 +91,52 @@ export const UploadsListResponseSchema = registry.register(
   z.object({ uploads: z.array(UploadSummarySchema) }).openapi("UploadsListResponse"),
 );
 
+// ─── Serve ─────────────────────────────────────────────────────────────────
+
+export const ServeNextRequestSchema = registry.register(
+  "ServeNextRequest",
+  z
+    .object({
+      brandId: z.string().uuid(),
+      limit: z
+        .number()
+        .int()
+        .positive()
+        .max(5000)
+        .optional()
+        .openapi({ description: "Max contacts to serve this call. Defaults to 100.", example: 100 }),
+    })
+    .openapi("ServeNextRequest"),
+);
+
+export const ServeNextResponseSchema = registry.register(
+  "ServeNextResponse",
+  z
+    .object({
+      contacts: z.array(ContactSchema),
+      served: z.number().int().openapi({ description: "How many contacts this call served." }),
+      exhausted: z.boolean().openapi({
+        description:
+          "True when no un-served sendable contacts remain for the brand after this serve.",
+      }),
+    })
+    .openapi("ServeNextResponse"),
+);
+
+export const ServeStatsResponseSchema = registry.register(
+  "ServeStatsResponse",
+  z
+    .object({
+      served: z.number().int().openapi({ description: "Distinct contacts already served." }),
+      remainingSendable: z
+        .number()
+        .int()
+        .openapi({ description: "Sendable contacts not yet served." }),
+      totalSendable: z.number().int().openapi({ description: "All sendable contacts (served + remaining)." }),
+    })
+    .openapi("ServeStatsResponse"),
+);
+
 export const PromoteResponseSchema = registry.register(
   "PromoteResponse",
   z
@@ -163,6 +209,47 @@ registry.registerPath({
     200: {
       description: "Contacts",
       content: { "application/json": { schema: ContactsListResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/contacts/serve-next",
+  summary: "Serve the next batch of not-yet-served sendable contacts for a brand",
+  description:
+    "Returns up to `limit` sendable contacts for the brand that have not yet been served, and " +
+    "ATOMICALLY marks them served so no concurrent or subsequent call ever returns them again. " +
+    "Suppression is permanent and per (brand, contact). When the brand is drained, returns an " +
+    "empty list with `exhausted: true`. Requires x-api-key, x-org-id.",
+  request: {
+    body: {
+      content: { "application/json": { schema: ServeNextRequestSchema } },
+    },
+  },
+  responses: {
+    200: {
+      description: "Served contacts",
+      content: { "application/json": { schema: ServeNextResponseSchema } },
+    },
+    400: {
+      description: "Bad request",
+      content: { "application/json": { schema: ErrorResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/contacts/serve-stats",
+  summary: "Served vs remaining sendable counts for a brand",
+  request: {
+    query: z.object({ brandId: z.string().uuid() }),
+  },
+  responses: {
+    200: {
+      description: "Serve stats",
+      content: { "application/json": { schema: ServeStatsResponseSchema } },
     },
   },
 });
