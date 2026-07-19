@@ -64,6 +64,38 @@ Filters to sendable contacts: non-null valid email (regex), `NOT unsubscribed`,
 rarely carry an explicit consent column; only an explicit denial or unsubscribe
 excludes). Materialize later only if perf demands.
 
+### Serve-tracking — `contact_serves` (per-brand no-re-serve suppression)
+
+crm-service is a lead PROVIDER to human-service (the people gateway), a third
+provider alongside apollo-service / apify-service. `POST /orgs/contacts/serve-next`
+hands human-service the next batch of not-yet-served sendable contacts for a brand
+and **atomically marks them served** so no concurrent or subsequent call ever
+returns them again. crm-service OWNS this tracking because it performs the terminal
+serve (identity-keying rule: the emitter owns "don't re-emit").
+
+- `contact_serves` — one row per (brand, contact) served. Columns: `org_id`,
+  `brand_id`, `contact_id` (provenance only), `email`, `served_run_id`, `served_at`.
+- **Suppression natural key = `UNIQUE(brand_id, email)`** where `email =
+  lower(primary_email)`. Suppression is keyed on the DURABLE contact identity
+  (email), NOT the silver `contacts.id` — silver rows are delete-and-reinserted on
+  every re-promotion so their uuid changes; keying on the uuid would leak a
+  re-serve after any re-promote. The gold view already requires a non-null valid
+  email, so every servable contact has a stable email. **Invariant: once a contact
+  is served for a brand it is excluded from every future serve for that brand,
+  forever** — permanent, per atomic member.
+- **serve-next atomicity**: one SQL statement — a `candidate` CTE reads
+  `sendable_contacts` anti-joined against `contact_serves`, `ORDER BY
+  last_rebuilt_at`, `LIMIT`, `FOR UPDATE SKIP LOCKED` (concurrent calls lock
+  disjoint rows); an `ins` CTE inserts the picked rows with `ON CONFLICT
+  (brand_id, email) DO NOTHING` (permanent-suppression + race guard); the final
+  SELECT returns only rows THIS call won. No double-serve sequential OR concurrent.
+- **Truthful exhaustion**: `exhausted` is computed live (remaining un-served
+  sendable count == 0 after the serve), never fabricated. A drained brand returns
+  `{ contacts: [], served: 0, exhausted: true }`.
+- `GET /orgs/contacts/serve-stats?brandId=` → `{ served, remainingSendable,
+  totalSendable }`.
+- Zero cost declared (DB-only). Org run per request via `requireOrg`.
+
 ## Column typing (the mapping step)
 
 CSV headers from arbitrary CRM exports must be classified against the FIXED enum
