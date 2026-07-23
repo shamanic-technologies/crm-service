@@ -55,6 +55,18 @@ function baseUrl(): string {
   return url;
 }
 
+/**
+ * Hard ceiling on the /complete round-trip. The column-typing call is on the
+ * SYNCHRONOUS upload response path, which itself sits behind the api-service
+ * gateway and Cloudflare's ~100s edge timeout. Without a bound, a stalled
+ * chat-service (or a slow downstream of it) hangs the whole upload past that
+ * edge limit → the client sees a Cloudflare 502 and NOTHING is written. The
+ * caller (classifyColumns) catches the resulting abort and falls back to a
+ * deterministic mapping, so the upload always completes. Override via
+ * CHAT_SERVICE_TIMEOUT_MS.
+ */
+const COMPLETE_TIMEOUT_MS = Number(process.env.CHAT_SERVICE_TIMEOUT_MS) || 25_000;
+
 function buildHeaders(tracking: ChatTrackingHeaders): Record<string, string> {
   const apiKey = process.env.CHAT_SERVICE_API_KEY;
   if (!apiKey) throw new Error("[crm-service] CHAT_SERVICE_API_KEY is required");
@@ -86,16 +98,30 @@ export async function chatComplete(
     ...(params.disableThinking !== undefined && { disableThinking: params.disableThinking }),
   };
 
-  const res = await fetch(`${baseUrl()}/complete`, {
-    method: "POST",
-    headers: buildHeaders(tracking),
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), COMPLETE_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${baseUrl()}/complete`, {
+      method: "POST",
+      headers: buildHeaders(tracking),
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
 
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`[crm-service][chat-client] POST /complete returned ${res.status}: ${text}`);
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`[crm-service][chat-client] POST /complete returned ${res.status}: ${text}`);
+    }
+
+    return (await res.json()) as ChatCompleteResult;
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(
+        `[crm-service][chat-client] POST /complete aborted after ${COMPLETE_TIMEOUT_MS}ms (chat-service unresponsive)`,
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
   }
-
-  return (await res.json()) as ChatCompleteResult;
 }

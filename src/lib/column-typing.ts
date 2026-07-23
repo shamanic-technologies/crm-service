@@ -67,6 +67,38 @@ export function normalizeMapping(
   return mapping;
 }
 
+/**
+ * Deterministic header-NAME classifier — the fallback when the chat-service
+ * classify call fails or times out. It never touches the network, so the upload
+ * can always produce a usable mapping instead of hanging on (or hard-failing on)
+ * an unresponsive chat-service. First matching rule wins; email/phone are tried
+ * before the name rules so an "email"-in-header never loses to a name pattern.
+ * Anything unmatched is "other" (lands in silver raw_attributes), exactly as an
+ * LLM "other" would — no data is dropped, only its typing is coarser.
+ */
+const HEURISTIC_RULES: ReadonlyArray<readonly [ColumnField, RegExp]> = [
+  ["email", /e[-_ ]?mail/i],
+  ["phone", /\b(phone|mobile|cell|tel(?:ephone)?|whats[-_ ]?app|msisdn)\b/i],
+  ["first_name", /\b(first[-_ ]?name|given[-_ ]?name|forename|fname|pr[eé]nom)\b/i],
+  ["last_name", /\b(last[-_ ]?name|surname|family[-_ ]?name|lname|nom)\b/i],
+  ["full_name", /(full[-_ ]?name|contact[-_ ]?name|customer[-_ ]?name|^\s*name\s*$)/i],
+];
+
+export function heuristicMapping(headers: string[]): ColumnMapping {
+  const mapping: ColumnMapping = {};
+  for (const header of headers) {
+    let field: ColumnField = "other";
+    for (const [candidate, re] of HEURISTIC_RULES) {
+      if (re.test(header)) {
+        field = candidate;
+        break;
+      }
+    }
+    mapping[header] = field;
+  }
+  return mapping;
+}
+
 const SYSTEM_PROMPT =
   "You are a data-mapping assistant. You classify spreadsheet columns for a CRM " +
   "contact importer. For each column you are given its header name and a few " +

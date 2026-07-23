@@ -15,6 +15,7 @@ import { parseCsv } from "../lib/csv.js";
 import {
   buildColumnProfiles,
   classifyColumns,
+  heuristicMapping,
   normalizeMapping,
   ColumnMapping,
 } from "../lib/column-typing.js";
@@ -125,7 +126,7 @@ router.post(
 
     // Resolve column mapping — override skips the LLM entirely.
     let mapping: ColumnMapping;
-    let mappingProvenance: "llm" | "override";
+    let mappingProvenance: "llm" | "override" | "heuristic";
     const overrideRaw = req.body?.columnMapping;
     if (overrideRaw !== undefined && overrideRaw !== "") {
       let parsed: Record<string, unknown>;
@@ -139,14 +140,29 @@ router.post(
       mapping = normalizeMapping(headers, parsed);
       mappingProvenance = "override";
     } else {
+      // The classify call is on the synchronous response path, behind the gateway
+      // + Cloudflare edge timeout. chatComplete is time-bounded; if it stalls or
+      // errors we MUST NOT hang or fail the upload — fall back to a deterministic
+      // header-name mapping so bronze is still written and the client gets a fast
+      // 200. Re-typing can happen later via /internal/contacts/promote or an
+      // override re-upload.
       const profiles = buildColumnProfiles(headers, rows);
-      mapping = await classifyColumns(profiles, {
-        orgId: req.orgId!,
-        userId: req.userId!,
-        runId: req.runId!,
-        brandIds: req.brandIds,
-      });
-      mappingProvenance = "llm";
+      try {
+        mapping = await classifyColumns(profiles, {
+          orgId: req.orgId!,
+          userId: req.userId!,
+          runId: req.runId!,
+          brandIds: req.brandIds,
+        });
+        mappingProvenance = "llm";
+      } catch (err) {
+        console.error(
+          "[crm-service] column typing via chat-service failed; using header-name heuristic:",
+          err,
+        );
+        mapping = heuristicMapping(headers);
+        mappingProvenance = "heuristic";
+      }
     }
 
     // Bronze write: upload row + raw rows, one transaction.
