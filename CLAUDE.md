@@ -107,6 +107,16 @@ chat-service `/complete` call per upload:
   ONE `/complete` call (anthropic/haiku, strict `responseSchema`), org-billed via
   the forwarded `x-org-id` + `x-user-id` + `x-run-id`. Provenance `llm`.
 - Rows are then parsed DETERMINISTICALLY against the stored mapping — no per-row LLM.
+- **The classify call is on the SYNCHRONOUS upload response path, behind the
+  api-service gateway + Cloudflare's ~100s edge timeout.** So `chatComplete` is
+  hard-bounded by `CHAT_SERVICE_TIMEOUT_MS` (default 25s, AbortController), and
+  `classifyColumns` failure/timeout is caught: the upload falls back to a
+  deterministic header-NAME heuristic (`heuristicMapping`, provenance `heuristic`)
+  instead of hanging or 500-ing. Without this, a stalled chat-service hung the
+  whole upload past the edge limit → the client saw a Cloudflare 502 and NOTHING
+  was written to bronze (prod incident 2026-07-23). Provenance is one of
+  `llm` | `override` | `heuristic`; a `heuristic` upload can be re-typed later via
+  `/internal/contacts/promote` or an override re-upload.
 
 ## Async-promotion trigger
 
