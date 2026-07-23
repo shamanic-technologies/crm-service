@@ -118,5 +118,5 @@ background for schema migration / logic changes; idempotent.
 
 ## Env vars
 
-`DATABASE_URL`, `CRM_SERVICE_API_KEY`, `RUNS_SERVICE_URL`, `RUNS_SERVICE_API_KEY`,
+`CRM_SERVICE_DATABASE_URL`, `CRM_SERVICE_API_KEY`, `RUNS_SERVICE_URL`, `RUNS_SERVICE_API_KEY`,
 `CHAT_SERVICE_URL`, `CHAT_SERVICE_API_KEY`. See `.env.example`.

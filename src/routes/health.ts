@@ -8,7 +8,7 @@ router.get("/health", (_req, res) => {
 });
 
 router.get("/health/debug", async (_req, res) => {
-  const dbUrl = process.env.DATABASE_URL;
+  const dbUrl = process.env.CRM_SERVICE_DATABASE_URL;
 
   let dbStatus = "not configured";
   if (dbUrl) {

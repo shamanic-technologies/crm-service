@@ -50,7 +50,7 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 });
 
 if (process.env.NODE_ENV !== "test") {
-  const dbUrl = process.env.DATABASE_URL;
+  const dbUrl = process.env.CRM_SERVICE_DATABASE_URL;
 
   const startServer = () => {
     app.listen(Number(PORT), "::", () => {
@@ -70,7 +70,7 @@ if (process.env.NODE_ENV !== "test") {
         process.exit(1);
       });
   } else {
-    console.warn("[crm-service] DATABASE_URL not set, skipping migrations");
+    console.warn("[crm-service] CRM_SERVICE_DATABASE_URL not set, skipping migrations");
     startServer();
   }
 }
