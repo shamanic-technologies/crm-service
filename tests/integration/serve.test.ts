@@ -5,9 +5,9 @@ import { contacts, contactServes, NewContact } from "../../src/db/schema.js";
 import { serveNext, serveStats } from "../../src/lib/serve.js";
 
 /**
- * DB-backed serve tests. Gated on CRM_TEST_DB so CI (mock DATABASE_URL) skips.
+ * DB-backed serve tests. Gated on CRM_TEST_DB so CI (mock CRM_SERVICE_DATABASE_URL) skips.
  * Run against a real Neon dev branch with BOTH env vars pointed at it:
- *   DATABASE_URL=<branch> CRM_TEST_DB=1 pnpm vitest run tests/integration/serve.test.ts
+ *   CRM_SERVICE_DATABASE_URL=<branch> CRM_TEST_DB=1 pnpm vitest run tests/integration/serve.test.ts
  */
 const RUN = !!process.env.CRM_TEST_DB;
 

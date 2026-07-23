@@ -4,8 +4,8 @@ import { beforeAll, afterAll } from "vitest";
 // if CRM_SERVICE_API_KEY is missing).
 process.env.NODE_ENV = "test";
 process.env.CRM_SERVICE_API_KEY = process.env.CRM_SERVICE_API_KEY || "test-crm-key";
-process.env.DATABASE_URL =
-  process.env.DATABASE_URL || "postgresql://mock:mock@localhost:5432/mock";
+process.env.CRM_SERVICE_DATABASE_URL =
+  process.env.CRM_SERVICE_DATABASE_URL || "postgresql://mock:mock@localhost:5432/mock";
 process.env.RUNS_SERVICE_URL = process.env.RUNS_SERVICE_URL || "http://localhost:9999";
 process.env.RUNS_SERVICE_API_KEY = process.env.RUNS_SERVICE_API_KEY || "test-runs-key";
 process.env.CHAT_SERVICE_URL = process.env.CHAT_SERVICE_URL || "http://localhost:9998";
