@@ -20,7 +20,7 @@ import {
   ColumnMapping,
 } from "../lib/column-typing.js";
 import { promoteUpload } from "../lib/promote.js";
-import { serveNext, serveStats } from "../lib/serve.js";
+import { serveNext, serveStats, normalizeUploadIdsQuery } from "../lib/serve.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { SERVICE_NAME } from "../middleware/auth.js";
 
@@ -207,9 +207,16 @@ router.post(
 
 // ─── POST /orgs/contacts/serve-next ──────────────────────────────────────────
 
+// `uploadIds` restricts the serve to a subset of the brand's imported CRM files
+// (the product's per-file ON/OFF switch). Omitted → whole brand, as before.
+// Bounded so one call can't emit an unbounded number of SQL parameters.
+const MAX_UPLOAD_IDS = 200;
+const uploadIdsSchema = z.array(z.string().uuid()).min(1).max(MAX_UPLOAD_IDS);
+
 const serveNextBodySchema = z.object({
   brandId: z.string().uuid(),
   limit: z.number().int().positive().max(5000).optional(),
+  uploadIds: uploadIdsSchema.optional(),
 });
 
 router.post(
@@ -219,14 +226,15 @@ router.post(
   async (req: AuthenticatedRequest, res) => {
     const parsed = serveNextBodySchema.safeParse(req.body ?? {});
     if (!parsed.success) {
-      return res
-        .status(400)
-        .json({ type: "validation", error: "brandId (uuid) required; limit optional 1..5000" });
+      return res.status(400).json({
+        type: "validation",
+        error: `brandId (uuid) required; limit optional 1..5000; uploadIds optional array of 1..${MAX_UPLOAD_IDS} uuids`,
+      });
     }
-    const { brandId } = parsed.data;
+    const { brandId, uploadIds } = parsed.data;
     const limit = parsed.data.limit ?? 100;
 
-    const result = await serveNext(req.orgId!, brandId, limit, req.runId!);
+    const result = await serveNext(req.orgId!, brandId, limit, req.runId!, uploadIds);
     res.json(result);
   },
 );
@@ -242,7 +250,22 @@ router.get(
     if (!brandParse.success) {
       return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
     }
-    const stats = await serveStats(req.orgId!, brandParse.data);
+
+    // Optional per-file scope: ?uploadIds=a,b or repeated ?uploadIds=a&uploadIds=b.
+    const rawUploadIds = normalizeUploadIdsQuery(req.query.uploadIds);
+    let uploadIds: string[] | undefined;
+    if (rawUploadIds.length > 0) {
+      const idsParse = uploadIdsSchema.safeParse(rawUploadIds);
+      if (!idsParse.success) {
+        return res.status(400).json({
+          type: "validation",
+          error: `uploadIds must be 1..${MAX_UPLOAD_IDS} uuids (comma-separated or repeated)`,
+        });
+      }
+      uploadIds = idsParse.data;
+    }
+
+    const stats = await serveStats(req.orgId!, brandParse.data, uploadIds);
     res.json(stats);
   },
 );

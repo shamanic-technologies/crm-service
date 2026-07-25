@@ -96,6 +96,41 @@ serve (identity-keying rule: the emitter owns "don't re-emit").
   totalSendable }`.
 - Zero cost declared (DB-only). Org run per request via `requireOrg`.
 
+### Per-file serve restriction (`uploadIds`) — each imported file is its own pool
+
+Staff can toggle an imported CRM file ON/OFF, so a serve must be restrictable to a
+subset of the brand's `contact_uploads`. Both serve routes take an OPTIONAL
+`uploadIds`; omitting it is the pre-existing whole-brand behaviour, unchanged.
+
+- `POST /orgs/contacts/serve-next` body `uploadIds?: uuid[]` (1..200).
+- `GET /orgs/contacts/serve-stats?brandId=&uploadIds=a,b` (comma-separated or
+  repeated) → the same `{ served, remainingSendable, totalSendable }` shape,
+  scoped to those files.
+- **The restriction narrows the CANDIDATE pool only — suppression stays
+  BRAND-WIDE.** `contact_serves` has NO upload dimension (key stays
+  `UNIQUE(brand_id, email)`), so a contact served through file A can never be
+  re-served through file B. Restricting can only ever return FEWER contacts, never
+  a repeat. Implemented as one extra `AND c.source_upload_id IN (…)` predicate on
+  the candidate CTE (one bound param per id via `sql.join`); the anti-join is
+  untouched.
+- **File identity = the silver `source_upload_id` attribution**, the same one
+  `GET /orgs/contacts/uploads` and the admin per-file contact view already use.
+  Silver dedups on `(org, brand, lower(email))`, so a person present in two files
+  is ONE row attributed to the file that promoted LAST. Per-file pools therefore
+  PARTITION the brand's sendable contacts: every contact belongs to exactly one
+  file and the per-file counts sum to the brand total. No membership bridge table,
+  no promote change.
+- `exhausted` under a restriction answers the asked scope ("these files are
+  drained"), not the whole brand — the question the caller actually asked.
+- **`served` in file-scoped stats** = sendable contacts OF THOSE FILES already
+  served (the only file-attributable definition, and it keeps
+  `served + remainingSendable == totalSendable`). Whole-brand `served` keeps its
+  original meaning: every suppression row for the brand, including emails no
+  longer present in silver.
+- Gateway gap: api-service's `/v1/orgs/contacts/serve-stats` proxy currently
+  forwards ONLY `brandId`, so `uploadIds` is stripped there — a per-file read
+  through the gateway needs that proxy widened to a passthrough.
+
 ## Column typing (the mapping step)
 
 CSV headers from arbitrary CRM exports must be classified against the FIXED enum
