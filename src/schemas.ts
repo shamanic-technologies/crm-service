@@ -105,6 +105,17 @@ export const ServeNextRequestSchema = registry.register(
         .max(5000)
         .optional()
         .openapi({ description: "Max contacts to serve this call. Defaults to 100.", example: 100 }),
+      uploadIds: z
+        .array(z.string().uuid())
+        .min(1)
+        .max(200)
+        .optional()
+        .openapi({
+          description:
+            "Restrict the serve to these imported CRM files (ids from GET /orgs/contacts/uploads). " +
+            "Omit for the whole brand. Suppression stays brand-wide: a contact already served " +
+            "through another file is never returned again, whichever file is used.",
+        }),
     })
     .openapi("ServeNextRequest"),
 );
@@ -117,7 +128,8 @@ export const ServeNextResponseSchema = registry.register(
       served: z.number().int().openapi({ description: "How many contacts this call served." }),
       exhausted: z.boolean().openapi({
         description:
-          "True when no un-served sendable contacts remain for the brand after this serve.",
+          "True when no un-served sendable contacts remain after this serve — for the brand, or " +
+          "for the restricted files when `uploadIds` was supplied.",
       }),
     })
     .openapi("ServeNextResponse"),
@@ -127,12 +139,19 @@ export const ServeStatsResponseSchema = registry.register(
   "ServeStatsResponse",
   z
     .object({
-      served: z.number().int().openapi({ description: "Distinct contacts already served." }),
+      served: z.number().int().openapi({
+        description:
+          "Contacts already served. Whole-brand scope: every suppression row for the brand. " +
+          "File scope (`uploadIds`): sendable contacts of those files that are already served.",
+      }),
       remainingSendable: z
         .number()
         .int()
-        .openapi({ description: "Sendable contacts not yet served." }),
-      totalSendable: z.number().int().openapi({ description: "All sendable contacts (served + remaining)." }),
+        .openapi({ description: "Sendable contacts not yet served, in the requested scope." }),
+      totalSendable: z
+        .number()
+        .int()
+        .openapi({ description: "All sendable contacts in the requested scope." }),
     })
     .openapi("ServeStatsResponse"),
 );
@@ -221,7 +240,10 @@ registry.registerPath({
     "Returns up to `limit` sendable contacts for the brand that have not yet been served, and " +
     "ATOMICALLY marks them served so no concurrent or subsequent call ever returns them again. " +
     "Suppression is permanent and per (brand, contact). When the brand is drained, returns an " +
-    "empty list with `exhausted: true`. Requires x-api-key, x-org-id.",
+    "empty list with `exhausted: true`. Optionally restrict the pool to a subset of the brand's " +
+    "imported CRM files with `uploadIds` (per-file ON/OFF): the restriction narrows the candidate " +
+    "pool only — suppression stays brand-wide, so a person present in two files is served at most " +
+    "once for the brand, whichever file is used. Requires x-api-key, x-org-id.",
   request: {
     body: {
       content: { "application/json": { schema: ServeNextRequestSchema } },
@@ -242,9 +264,23 @@ registry.registerPath({
 registry.registerPath({
   method: "get",
   path: "/orgs/contacts/serve-stats",
-  summary: "Served vs remaining sendable counts for a brand",
+  summary: "Served vs remaining sendable counts for a brand, or for given imported files",
+  description:
+    "Whole-brand by default. Pass `uploadIds` (comma-separated, or repeated) to read progress for " +
+    "one or several imported CRM files instead — for a file scope, " +
+    "`served + remainingSendable == totalSendable`.",
   request: {
-    query: z.object({ brandId: z.string().uuid() }),
+    query: z.object({
+      brandId: z.string().uuid(),
+      uploadIds: z
+        .string()
+        .optional()
+        .openapi({
+          description:
+            "Comma-separated upload ids (from GET /orgs/contacts/uploads). Scopes the counts to " +
+            "those files. May also be repeated. Omit for whole-brand counts.",
+        }),
+    }),
   },
   responses: {
     200: {

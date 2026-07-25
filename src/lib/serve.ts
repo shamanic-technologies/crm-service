@@ -11,6 +11,26 @@ import { db } from "../db/index.js";
  * Suppression is permanent and keyed on the atomic member — the individual
  * contact, identified by its durable `lower(primary_email)` (see the
  * `contact_serves` note in schema.ts for why not the volatile silver uuid).
+ *
+ * PER-FILE RESTRICTION (`uploadIds`)
+ * A serve can optionally be restricted to one or several of the brand's
+ * imported CRM files (`contact_uploads` rows), so the product can toggle a file
+ * ON/OFF and have outreach draw only from the enabled ones. The restriction is
+ * applied at SERVE time on the silver `source_upload_id` attribution — the same
+ * file identity the uploads list and the admin per-file view already use. It
+ * narrows the CANDIDATE pool only:
+ *
+ *  - suppression stays BRAND-WIDE. `contact_serves` is keyed on
+ *    (brand_id, email) with NO upload dimension, so a contact served through
+ *    file A can never be re-served through file B. Restricting can only ever
+ *    return FEWER contacts, never a repeat.
+ *  - omitting `uploadIds` is the pre-existing whole-brand behaviour, unchanged.
+ *
+ * Silver dedups on (org, brand, lower(email)), so a person appearing in two
+ * files is ONE silver row attributed to the file that promoted last — exactly
+ * what `GET /orgs/contacts/uploads` + the admin per-file contact view show. So
+ * per-file pools partition the brand's sendable contacts: every contact belongs
+ * to exactly one file, and the per-file counts sum to the brand total.
  */
 
 /** A served silver contact — same shape the list endpoint returns. */
@@ -81,6 +101,37 @@ function toServedContact(r: RawContactRow): ServedContact {
 }
 
 /**
+ * SQL fragment restricting the candidate pool to a set of imported files.
+ * Empty (no-op) when no restriction is asked for — the whole-brand path emits
+ * exactly the pre-existing query.
+ *
+ * One bound parameter per id (not an array literal) so the fragment is safe and
+ * driver-agnostic; the route caps the list length.
+ */
+function uploadFilter(uploadIds?: string[]) {
+  if (!uploadIds || uploadIds.length === 0) return sql.empty();
+  return sql` AND c.source_upload_id IN (${sql.join(
+    uploadIds.map((id) => sql`${id}::uuid`),
+    sql`, `,
+  )})`;
+}
+
+/**
+ * Normalize the `uploadIds` query parameter into a list of raw strings.
+ * Accepts a repeated param (`?uploadIds=a&uploadIds=b`) or a comma-separated
+ * one (`?uploadIds=a,b`). Returns `[]` when absent — i.e. no restriction.
+ * Values are NOT validated here; the route zod-checks them as uuids.
+ */
+export function normalizeUploadIdsQuery(raw: unknown): string[] {
+  if (raw === undefined || raw === null) return [];
+  const parts = Array.isArray(raw) ? raw : [raw];
+  return parts
+    .flatMap((p) => String(p).split(","))
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/**
  * Select up to `limit` sendable, not-yet-served contacts for (org, brand) and
  * atomically mark them served in ONE statement:
  *
@@ -94,13 +145,18 @@ function toServedContact(r: RawContactRow): ServedContact {
  *  - the final SELECT returns ONLY rows THIS call actually inserted (won).
  *
  * Result: no double-serve across sequential OR concurrent calls.
+ *
+ * `uploadIds` (optional) narrows the candidate pool to those imported files.
+ * It does NOT touch the anti-join, so brand-wide suppression is untouched.
  */
 export async function serveNext(
   orgId: string,
   brandId: string,
   limit: number,
   runId: string,
+  uploadIds?: string[],
 ): Promise<ServeNextResult> {
+  const files = uploadFilter(uploadIds);
   const rows = (await db.execute(sql`
     WITH candidate AS (
       SELECT c.id, c.org_id, c.brand_id, c.primary_email, c.phone_e164,
@@ -109,7 +165,7 @@ export async function serveNext(
              c.source_row_id, c.last_rebuilt_at
       FROM sendable_contacts c
       WHERE c.org_id = ${orgId}
-        AND c.brand_id = ${brandId}
+        AND c.brand_id = ${brandId}${files}
         AND NOT EXISTS (
           SELECT 1 FROM contact_serves s
           WHERE s.brand_id = c.brand_id AND s.email = c.primary_email
@@ -132,18 +188,25 @@ export async function serveNext(
   const contacts = rows.map(toServedContact);
 
   // Truthful exhaustion: count sendable contacts still not served AFTER this
-  // serve. Zero → the brand is drained. Computed live, never fabricated.
-  const remaining = await countRemaining(orgId, brandId);
+  // serve. Zero → the pool is drained. Computed live, never fabricated. Under a
+  // file restriction the pool IS the restricted one, so `exhausted` answers
+  // "these files are drained" — the question the caller actually asked.
+  const remaining = await countRemaining(orgId, brandId, uploadIds);
 
   return { contacts, served: contacts.length, exhausted: remaining === 0 };
 }
 
-async function countRemaining(orgId: string, brandId: string): Promise<number> {
+async function countRemaining(
+  orgId: string,
+  brandId: string,
+  uploadIds?: string[],
+): Promise<number> {
+  const files = uploadFilter(uploadIds);
   const res = (await db.execute(sql`
     SELECT count(*)::int AS remaining
     FROM sendable_contacts c
     WHERE c.org_id = ${orgId}
-      AND c.brand_id = ${brandId}
+      AND c.brand_id = ${brandId}${files}
       AND NOT EXISTS (
         SELECT 1 FROM contact_serves s
         WHERE s.brand_id = c.brand_id AND s.email = c.primary_email
@@ -161,7 +224,24 @@ export interface ServeStats {
   totalSendable: number;
 }
 
-export async function serveStats(orgId: string, brandId: string): Promise<ServeStats> {
+/**
+ * Served vs remaining counts. Whole-brand by default; scoped to one or several
+ * imported files when `uploadIds` is given (the per-file progress read).
+ *
+ * The two scopes count `served` from different angles, on purpose:
+ *  - whole-brand: every suppression row for the brand (the full permanent
+ *    suppression size, including emails no longer present in silver).
+ *  - per-file: sendable contacts OF THOSE FILES that are already served — the
+ *    only definition that can be attributed to a file, and the one that keeps
+ *    `served + remainingSendable == totalSendable` for the file.
+ */
+export async function serveStats(
+  orgId: string,
+  brandId: string,
+  uploadIds?: string[],
+): Promise<ServeStats> {
+  if (uploadIds && uploadIds.length > 0) return serveStatsForFiles(orgId, brandId, uploadIds);
+
   const res = (await db.execute(sql`
     SELECT
       (SELECT count(*)::int FROM contact_serves s
@@ -180,6 +260,34 @@ export async function serveStats(orgId: string, brandId: string): Promise<ServeS
   return {
     served: row.served,
     remainingSendable: row.remaining_sendable,
+    totalSendable: row.total_sendable,
+  };
+}
+
+async function serveStatsForFiles(
+  orgId: string,
+  brandId: string,
+  uploadIds: string[],
+): Promise<ServeStats> {
+  const files = uploadFilter(uploadIds);
+  const res = (await db.execute(sql`
+    SELECT
+      count(*)::int AS total_sendable,
+      (count(*) FILTER (
+        WHERE EXISTS (
+          SELECT 1 FROM contact_serves s
+          WHERE s.brand_id = c.brand_id AND s.email = c.primary_email
+        )
+      ))::int AS served
+    FROM sendable_contacts c
+    WHERE c.org_id = ${orgId}
+      AND c.brand_id = ${brandId}${files}
+  `)) as unknown as { total_sendable: number; served: number }[];
+
+  const row = res[0] ?? { total_sendable: 0, served: 0 };
+  return {
+    served: row.served,
+    remainingSendable: row.total_sendable - row.served,
     totalSendable: row.total_sendable,
   };
 }
