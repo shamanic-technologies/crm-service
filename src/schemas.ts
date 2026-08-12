@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { extendZodWithOpenApi, OpenAPIRegistry } from "@asteasolutions/zod-to-openapi";
 import { COLUMN_FIELDS } from "./lib/column-typing.js";
+import { MATRIX_CHANNELS } from "./lib/matrix/events.js";
+import { LEAD_STATUSES } from "./lib/matrix/leads.js";
 
 extendZodWithOpenApi(z);
 
@@ -27,7 +29,7 @@ export const UploadResponseSchema = registry.register(
       uploadId: z.string().uuid(),
       rowCount: z.number().int(),
       status: z.string().openapi({ example: "uploaded" }),
-      mappingProvenance: z.enum(["llm", "override"]),
+      mappingProvenance: z.enum(["llm", "override", "heuristic"]),
     })
     .openapi("UploadResponse"),
 );
@@ -58,8 +60,21 @@ export const ContactSchema = registry.register(
       rawAttributes: z.record(z.string(), z.string()),
       consentStatus: z.string(),
       unsubscribed: z.boolean(),
-      sourceUploadId: z.string().uuid(),
-      sourceRowId: z.string().uuid(),
+      source: z.enum(["csv", "matrix"]).openapi({
+        description:
+          "Which source this contact came from. Only 'csv' contacts are sendable — a 'matrix' " +
+          "contact wrote in first and is already in conversation, so it never reaches serve-next.",
+      }),
+      channel: z
+        .enum(MATRIX_CHANNELS)
+        .nullable()
+        .openapi({ description: "Matrix contacts only. Null for CSV contacts." }),
+      channelHandle: z
+        .string()
+        .nullable()
+        .openapi({ description: "Matrix contacts only: the counterpart's bridged Matrix user id." }),
+      sourceUploadId: z.string().uuid().nullable(),
+      sourceRowId: z.string().uuid().nullable(),
       lastRebuiltAt: z.string(),
     })
     .openapi("Contact"),
@@ -318,6 +333,233 @@ registry.registerPath({
     202: {
       description: "Promotion started",
       content: { "application/json": { schema: PromoteResponseSchema } },
+    },
+  },
+});
+
+// ─── Matrix (direct-message ingestion) ───────────────────────────────────────
+
+export const MatrixChannelSchema = z.enum(MATRIX_CHANNELS);
+
+export const MatrixConnectionSchema = registry.register(
+  "MatrixConnection",
+  z
+    .object({
+      id: z.string().uuid(),
+      brandId: z.string().uuid(),
+      channel: MatrixChannelSchema,
+      matrixUserId: z.string().openapi({
+        description: "The MXID of the user's OWN bridged account (sender == this → outbound).",
+      }),
+      counterpartPrefix: z.string().openapi({
+        description:
+          "Bridge ghost-user MXID prefix identifying this channel's rooms (e.g. '@whatsapp_').",
+        example: "@whatsapp_",
+      }),
+      status: z.enum(["active", "paused", "error"]),
+      synced: z
+        .boolean()
+        .openapi({ description: "True once the connection holds a /sync cursor." }),
+      lastSyncedAt: z.string().nullable(),
+      lastError: z.string().nullable(),
+      lastRunId: z.string().nullable(),
+      createdAt: z.string(),
+    })
+    .openapi("MatrixConnection"),
+);
+
+export const MatrixConnectionResponseSchema = registry.register(
+  "MatrixConnectionResponse",
+  z.object({ connection: MatrixConnectionSchema }).openapi("MatrixConnectionResponse"),
+);
+
+export const MatrixConnectionsListResponseSchema = registry.register(
+  "MatrixConnectionsListResponse",
+  z
+    .object({ connections: z.array(MatrixConnectionSchema) })
+    .openapi("MatrixConnectionsListResponse"),
+);
+
+export const MatrixConnectionRequestSchema = registry.register(
+  "MatrixConnectionRequest",
+  z
+    .object({
+      brandId: z.string().uuid(),
+      channel: MatrixChannelSchema,
+      matrixUserId: z.string(),
+      counterpartPrefix: z.string(),
+    })
+    .openapi("MatrixConnectionRequest"),
+);
+
+export const MatrixLeadSchema = registry.register(
+  "MatrixLead",
+  z
+    .object({
+      id: z.string().uuid(),
+      brandId: z.string().uuid(),
+      status: z.enum(LEAD_STATUSES),
+      nextStep: z.string(),
+      estimatedValueUsd: z.number().int(),
+      summary: z.string(),
+      model: z.string().openapi({ description: "Versioned model that produced this reading." }),
+      computedAt: z.string(),
+      computedThroughEventId: z.string().openapi({
+        description:
+          "The conversation watermark this reading was computed through. The lead is recomputed " +
+          "only when the conversation's last event id moves past it.",
+      }),
+      contactId: z.string().uuid(),
+      contactName: z.string().nullable(),
+      channel: MatrixChannelSchema,
+      channelHandle: z.string().nullable(),
+      phoneE164: z.string().nullable(),
+      conversationId: z.string().uuid(),
+      firstMessageAt: z.string(),
+      lastMessageAt: z.string(),
+      messageCount: z.number().int(),
+      inboundCount: z.number().int(),
+      outboundCount: z.number().int(),
+    })
+    .openapi("MatrixLead"),
+);
+
+export const MatrixLeadsListResponseSchema = registry.register(
+  "MatrixLeadsListResponse",
+  z.object({ leads: z.array(MatrixLeadSchema) }).openapi("MatrixLeadsListResponse"),
+);
+
+export const MatrixSyncRequestSchema = registry.register(
+  "MatrixSyncRequest",
+  z
+    .object({
+      connectionId: z
+        .string()
+        .uuid()
+        .optional()
+        .openapi({ description: "Sync a single connection. Omit for every active connection." }),
+    })
+    .openapi("MatrixSyncRequest"),
+);
+
+export const MatrixSyncResponseSchema = registry.register(
+  "MatrixSyncAcceptedResponse",
+  z
+    .object({ status: z.literal("accepted"), platformRunId: z.string().uuid() })
+    .openapi("MatrixSyncAcceptedResponse"),
+);
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/matrix/connections",
+  summary: "Register (or update) a Matrix DM connection for a brand + channel",
+  description:
+    "One connection per (org, brand, channel). Requires x-api-key, x-org-id, x-user-id — the " +
+    "creating user is persisted, because the sync cron has no inbound identity and the org run " +
+    "it opens must still be attributed.",
+  request: {
+    body: { content: { "application/json": { schema: MatrixConnectionRequestSchema } } },
+  },
+  responses: {
+    200: {
+      description: "Connection",
+      content: { "application/json": { schema: MatrixConnectionResponseSchema } },
+    },
+    400: {
+      description: "Bad request",
+      content: { "application/json": { schema: ErrorResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "patch",
+  path: "/orgs/matrix/connections/{id}",
+  summary: "Pause or resume a Matrix connection",
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": { schema: z.object({ status: z.enum(["active", "paused"]) }) },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Connection",
+      content: { "application/json": { schema: MatrixConnectionResponseSchema } },
+    },
+    404: {
+      description: "Not found",
+      content: { "application/json": { schema: ErrorResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/matrix/connections",
+  summary: "Connection health for a brand",
+  request: { query: z.object({ brandId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Connections",
+      content: { "application/json": { schema: MatrixConnectionsListResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/matrix/leads",
+  summary: "List inbound DM leads for a brand",
+  description:
+    "The gold layer: one row per conversation, carrying the LLM's reading of the thread (status, " +
+    "next step, estimated value, summary) plus the deterministic conversation counters.",
+  request: {
+    query: z.object({
+      brandId: z.string().uuid(),
+      status: z.enum(LEAD_STATUSES).optional(),
+      limit: z.coerce.number().int().optional(),
+      offset: z.coerce.number().int().optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Leads",
+      content: { "application/json": { schema: MatrixLeadsListResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/matrix/sync",
+  summary: "Run a Matrix sync pass (bronze → silver → gold)",
+  description:
+    "Driven by a 5-minute cron. Opens one ORG run per connection (the spend belongs to the org " +
+    "that owns it) and returns immediately; the pass runs in the background.",
+  request: { body: { content: { "application/json": { schema: MatrixSyncRequestSchema } } } },
+  responses: {
+    202: {
+      description: "Sync started",
+      content: { "application/json": { schema: MatrixSyncResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/matrix/rebuild",
+  summary: "Rebuild silver + gold from bronze (no /sync call)",
+  description:
+    "Reproduces conversations and leads from the mirrored events alone — the path that makes gold " +
+    "fully rebuildable after a truncate or a prompt change.",
+  request: { body: { content: { "application/json": { schema: MatrixSyncRequestSchema } } } },
+  responses: {
+    202: {
+      description: "Rebuild started",
+      content: { "application/json": { schema: MatrixSyncResponseSchema } },
     },
   },
 });

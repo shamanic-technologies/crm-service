@@ -1,8 +1,17 @@
 # crm-service — agent notes
 
-Greenfield lead-provider sibling of `apollo-service` / `apify-service`. Ingests a
-client's own B2C CRM CSV exports as contacts. Scaffold mirrors apollo-service
-(Express + drizzle-orm + postgres.js + zod + drizzle-kit + migrate-on-boot).
+The fleet's contact registry. Scaffold mirrors apollo-service (Express +
+drizzle-orm + postgres.js + zod + drizzle-kit + migrate-on-boot).
+
+**The CSV is not crm-service's identity, it is its first source.** Two sources
+feed the same registry, both layered bronze/silver/gold:
+
+| Source | Direction | What it ingests | Sendable? |
+|--------|-----------|-----------------|-----------|
+| `csv`    | OUTBOUND | a client's own B2C CRM export, uploaded as a file | YES — feeds `serve-next` → human-service → cold email |
+| `matrix` | INBOUND  | direct messages the client RECEIVED on WhatsApp / Telegram / Discord, mirrored into Matrix | NEVER — these people wrote first and are already in conversation |
+
+As a CSV lead-provider it is a sibling of `apollo-service` / `apify-service`.
 
 ## Route tiers (service-architecture)
 
@@ -18,14 +27,27 @@ client's own B2C CRM CSV exports as contacts. Scaffold mirrors apollo-service
 
 ## Cost
 
-crm-service declares **NO cost of its own**. The only external/metered call is the
-column-typing completion, routed through chat-service `POST /complete`, which
-self-declares its LLM cost against the run id crm-service forwards. crm-service
-imports no LLM SDK and holds no provider key.
+crm-service declares **NO cost of its own**. Every external/metered call is an LLM
+completion routed through chat-service `POST /complete`, which self-declares its
+LLM cost against the run id crm-service forwards. crm-service imports no LLM SDK
+and holds no provider key, so no costs-service catalog row is needed.
+
+There are exactly TWO such calls, both once-per-artifact, never per row:
+1. column typing, one per CSV upload;
+2. thread reading, one per CHANGED Matrix conversation (watermark-gated).
+
+**Models are named CONFIGS, not literals** (`@ src/lib/chat-config.ts`). A config
+is an env var holding `"<provider>/<model>"`, so pointing a task at a cheaper
+provider landing in chat-service later is a change on the box with ZERO code
+change here. `CRM_LEAD_READING_CHAT_CONFIG` is the Matrix one. Unset or malformed
+→ throws; it never falls back to some default model.
 
 ## Data layering (bronze / silver / gold)
 
-crm-service owns bronze + silver + gold for CRM CSV contacts.
+crm-service owns bronze + silver + gold for BOTH sources. The CSV layering is
+below; the Matrix layering is in its own section further down and follows the
+same shape (source artifact + verbatim rows → deterministic silver → business
+gold).
 
 ### Bronze — append-only raw mirror
 
@@ -41,6 +63,16 @@ crm-service owns bronze + silver + gold for CRM CSV contacts.
   `UNIQUE(upload_id, row_number)` → chunked / retried inserts are idempotent.
 
 ### Silver — canonical typed contact (`contacts`)
+
+`contacts` is SHARED by both sources, discriminated by `source` (`csv`|`matrix`,
+NOT NULL DEFAULT `'csv'`). Two natural keys coexist, and they cannot collide:
+`(org, brand, lower(primary_email))` for CSV, `(org, brand, channel,
+channel_handle)` for Matrix — the second is a plain unique index and Postgres
+treats NULLs as distinct, so every CSV row (both columns null) is exempt from it.
+`source_upload_id` / `source_row_id` (CSV) and `source_connection_id` (Matrix) are
+each nullable; exactly one side is populated.
+
+CSV specifics:
 
 - Deterministically derived from bronze via `promoteUpload()` — **zero per-row
   LLM**. The column mapping (one LLM call at upload time) is applied in code.
@@ -60,9 +92,18 @@ crm-service owns bronze + silver + gold for CRM CSV contacts.
 ### Gold — `sendable_contacts` view
 
 Filters to sendable contacts: non-null valid email (regex), `NOT unsubscribed`,
-`consent_status <> 'denied'`. `unknown` consent IS sendable (B2C CRM exports
-rarely carry an explicit consent column; only an explicit denial or unsubscribe
-excludes). Materialize later only if perf demands.
+`consent_status <> 'denied'`, **`source = 'csv'`**. `unknown` consent IS sendable
+(B2C CRM exports rarely carry an explicit consent column; only an explicit denial
+or unsubscribe excludes). Materialize later only if perf demands.
+
+**The `source = 'csv'` guard is load-bearing and must never be relaxed.** This
+view feeds `serve-next` → human-service → live cold email for real paying brands.
+A Matrix-sourced contact reaching it would cold-email someone who is already in
+conversation with the user. It is an ALLOWLIST on purpose: a future source has to
+opt into outreach deliberately. It is also byte-identical in behaviour for every
+row that existed before it — the migration adds `source` with
+`DEFAULT 'csv' NOT NULL`, which backfills every pre-existing contact, so the
+guard cannot drop a row that used to be sendable (proved by a test).
 
 ### Serve-tracking — `contact_serves` (per-brand no-re-serve suppression)
 
@@ -161,7 +202,110 @@ chat-service `/complete` call per upload:
 `POST /internal/contacts/promote` reprocesses one upload (or all) in the
 background for schema migration / logic changes; idempotent.
 
+## Matrix DM ingestion (second source)
+
+An org receives its leads as DMs on WhatsApp / Telegram / Discord. A Matrix
+homeserver (conduwuit) + three mautrix bridges run as containers on the Hetzner
+box, **outside this repo** — they log into the user's personal accounts and mirror
+every DM into Matrix rooms. crm-service does NOT build, configure or deploy them;
+it CONSUMES the homeserver over the standard client-server API
+(`GET /_matrix/client/v3/sync` with a `since` cursor), read-only.
+
+**There is no send path, ever, by design.** `src/lib/matrix/client.ts` exposes
+`sync()` and nothing else. That is what makes Discord read-only, and it is a
+deliberate requirement — do not add a write.
+
+### Bronze — `matrix_connections` + `matrix_raw_events`
+
+- `matrix_connections` — one row per (org, brand, channel). The analogue of
+  `contact_uploads`: it IS the source artifact. Holds `matrix_user_id` (the
+  user's OWN bridged MXID — `sender == this` is what makes a message OUTBOUND),
+  `counterpart_prefix` (the bridge ghost namespace, e.g. `@whatsapp_`),
+  `since_token` (the `/sync` cursor), `status`, `last_error`, `last_synced_at`.
+  - **Natural key = `UNIQUE(org_id, brand_id, channel)`.**
+  - `created_by_user_id` is persisted at create time ON PURPOSE: the sync runs
+    from a cron with NO inbound identity headers, and the org run + the
+    chat-service call it triggers must still be attributed. A request-scoped
+    header does not survive that async boundary — the row is the carrier.
+- `matrix_raw_events` — one row per event, `payload` jsonb = the event verbatim.
+  - **Natural key = `UNIQUE(event_id)`.** The Matrix event id is globally unique,
+    so it IS the idempotency key — no content hash needed (unlike CSV, where the
+    same bytes can legitimately be re-uploaded). Re-running a pass inserts nothing.
+  - Room metadata (who the counterpart is) arrives as Matrix STATE events
+    (`m.room.member`) and lands in this SAME table. There is no third bronze table.
+
+**INGESTION FLOOR — why bronze has nothing before August.** `MATRIX_INGESTION_FLOOR`
+(`2026-08-01` for the first org) is a hard floor: a `m.room.message` older than it
+is NEVER mirrored. Bronze normally means "everything", so this is the one
+deliberate exception — these are the user's PERSONAL accounts and back-filling
+years of private DMs is not what anyone asked for. Unset → the sync throws.
+Room STATE (`m.room.member`) is exempt from the floor because it is IDENTITY, not
+content: a room joined in 2019 carries a 2019 membership event, and it is the only
+thing that says who the counterpart is. Dropping it would leave every real room
+unresolvable from bronze and would break "gold is rebuildable from bronze".
+
+### Silver — `contacts` (source `matrix`) + `conversations`
+
+Deterministic, **zero per-row LLM** — knowing who wrote to you needs no model.
+
+- Counterpart resolution is STATE-EVENT work, not guesswork: `m.room.member`
+  events, minus the connection's own MXID, keep the member in the bridge ghost
+  namespace, most recent event wins (so a display-name change is picked up). No
+  match → the room belongs to another bridge and is skipped. One access token
+  yields one sync stream carrying every bridge's rooms, which is why each
+  connection keeps its OWN cursor and filters by prefix.
+- A WhatsApp ghost MXID encodes the phone (`@whatsapp_33612345678:hs` →
+  `+33612345678`); other bridges use opaque ids and get `null` — deterministically,
+  never a guess.
+- `conversations` — one row per (contact, channel), a pure aggregation over the
+  raw events: first/last message timestamp, message / inbound / outbound counts,
+  and `last_event_id`, which doubles as the freshness watermark.
+  **Natural key = `UNIQUE(contact_id, channel)`.**
+
+### Gold — `matrix_leads`
+
+Materialized (not a view) because the value is an LLM reading, not SQL: `status`
+(fixed enum `new|qualifying|negotiating|won|lost|unresponsive`), `next_step`,
+`estimated_value_usd`, `summary`, plus provenance `computed_through_event_id`,
+`model`, `run_id`.
+
+- **The watermark is what keeps the LLM bill near zero.** A row is recomputed ONLY
+  when `conversations.last_event_id` differs from the stored
+  `computed_through_event_id`. Get this wrong and every 5-minute tick re-reads
+  every thread.
+- **Fully rebuildable from bronze**: truncate `matrix_leads` and
+  `POST /internal/matrix/rebuild` re-derives conversations and leads from the
+  mirrored events alone, with no `/sync` call (proved by a test).
+
+### Ingestion trigger + cron
+
+`POST /internal/matrix/sync` (apiKeyAuth, optional `connectionId`) runs a pass in
+the background and 202s. Cron on the box, every 5 minutes:
+
+```
+*/5 * * * * curl -fsS -X POST "$CRM_SERVICE_URL/internal/matrix/sync" \
+  -H "x-api-key: $CRM_SERVICE_API_KEY" -H 'content-type: application/json' -d '{}'
+```
+
+The route's own platform run tracks only the TRIGGER. The pass itself opens **one
+ORG run per connection**, using the org + creator stored on the connection row —
+the spend belongs to the org that owns the connection, so this is not a
+platform-run case. A per-connection failure is written to that connection
+(`status='error'`, `last_error`), fails its run, and is returned in the pass
+result — never swallowed, and one broken bridge does not stop the others.
+
+### Read routes
+
+- `POST /orgs/matrix/connections` (needs `x-user-id`), `PATCH
+  /orgs/matrix/connections/:id` (pause/resume), `GET /orgs/matrix/connections?brandId=`
+  → connection health (`status`, `synced`, `lastSyncedAt`, `lastError`).
+- `GET /orgs/matrix/leads?brandId=&status=&limit=&offset=` → the gold leads joined
+  with contact identity + conversation counters.
+
 ## Env vars
 
 `CRM_SERVICE_DATABASE_URL`, `CRM_SERVICE_API_KEY`, `RUNS_SERVICE_URL`, `RUNS_SERVICE_API_KEY`,
-`CHAT_SERVICE_URL`, `CHAT_SERVICE_API_KEY`. See `.env.example`.
+`CHAT_SERVICE_URL`, `CHAT_SERVICE_API_KEY`, `MATRIX_HOMESERVER_URL`,
+`MATRIX_ACCESS_TOKEN`, `MATRIX_INGESTION_FLOOR`, `CRM_LEAD_READING_CHAT_CONFIG`.
+See `.env.example`. The four Matrix ones are REQUIRED for the sync to run at all —
+without them `/internal/matrix/sync` fails loud instead of silently no-op-ing.
