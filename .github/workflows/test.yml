@@ -1,0 +1,66 @@
+name: Test
+
+on:
+  pull_request:
+    branches: [main, staging]
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # A throwaway database, created and thrown away with the runner. The suite
+    # never points at staging or at production.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: crm_service_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # sslmode=disable — the runner's Postgres speaks plaintext, and without it
+      # every test dies on "Client network socket disconnected before secure TLS".
+      CRM_SERVICE_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/crm_service_test?sslmode=disable
+      CRM_TEST_DB: "1"
+      CRM_SERVICE_API_KEY: test-crm-key
+      RUNS_SERVICE_URL: http://localhost:9999
+      RUNS_SERVICE_API_KEY: test-runs-key
+      CHAT_SERVICE_URL: http://localhost:9998
+      CHAT_SERVICE_API_KEY: test-chat-key
+      KEY_SERVICE_URL: http://localhost:9997
+      KEY_SERVICE_API_KEY: test-key-service-key
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # Replay the migrations exactly as the service does at boot, so a broken
+      # migration fails here rather than on the deploy's health check.
+      - name: Apply migrations
+        run: pnpm db:migrate
+
+      - name: Typecheck and build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test

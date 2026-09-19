@@ -3,13 +3,14 @@
 The fleet's contact registry. Scaffold mirrors apollo-service (Express +
 drizzle-orm + postgres.js + zod + drizzle-kit + migrate-on-boot).
 
-**The CSV is not crm-service's identity, it is its first source.** Two sources
+**The CSV is not crm-service's identity, it is its first source.** Three sources
 feed the same registry, both layered bronze/silver/gold:
 
 | Source | Direction | What it ingests | Sendable? |
 |--------|-----------|-----------------|-----------|
 | `csv`    | OUTBOUND | a client's own B2C CRM export, uploaded as a file | YES — feeds `serve-next` → human-service → cold email |
 | `matrix` | INBOUND  | direct messages the client RECEIVED on WhatsApp / Telegram / Discord, mirrored into Matrix | NEVER — these people wrote first and are already in conversation |
+| `gohighlevel` | MIRROR | the client's live GoHighLevel CRM: their contacts and their sales pipeline, read-only | NEVER — these are the client's own people, already theirs |
 
 As a CSV lead-provider it is a sibling of `apollo-service` / `apify-service`.
 
@@ -35,6 +36,9 @@ and holds no provider key, so no costs-service catalog row is needed.
 There are exactly TWO such calls, both once-per-artifact, never per row:
 1. column typing, one per CSV upload;
 2. thread reading, one per CHANGED Matrix conversation (watermark-gated).
+
+The GoHighLevel source adds NEITHER. Its data arrives already structured, so
+deriving it is pure code — no model, no metered call, no catalogue row.
 
 **Models are named CONFIGS, not literals** (`@ src/lib/chat-config.ts`). A config
 is an env var holding `"<provider>/<model>"`, so pointing a task at a cheaper
@@ -99,7 +103,10 @@ or unsubscribe excludes). Materialize later only if perf demands.
 **The `source = 'csv'` guard is load-bearing and must never be relaxed.** This
 view feeds `serve-next` → human-service → live cold email for real paying brands.
 A Matrix-sourced contact reaching it would cold-email someone who is already in
-conversation with the user. It is an ALLOWLIST on purpose: a future source has to
+conversation with the user; a GoHighLevel-sourced contact reaching it would cold-
+email the client's own customer. Because the guard is an ALLOWLIST, the
+GoHighLevel source was excluded the moment it existed, with no change to this
+view — proved by a test. It is an ALLOWLIST on purpose: a future source has to
 opt into outreach deliberately. It is also byte-identical in behaviour for every
 row that existed before it — the migration adds `source` with
 `DEFAULT 'csv' NOT NULL`, which backfills every pre-existing contact, so the
@@ -302,10 +309,138 @@ result — never swallowed, and one broken bridge does not stop the others.
 - `GET /orgs/matrix/leads?brandId=&status=&limit=&offset=` → the gold leads joined
   with contact identity + conversation counters.
 
+## GoHighLevel ingestion (third source)
+
+A customer runs their business on GoHighLevel. They paste their credential once
+and the dashboard shows them their own CRM — contacts and sales pipeline —
+read-only, kept up to date on its own.
+
+**There is no write path to GoHighLevel, ever, by design.**
+`src/lib/gohighlevel/client.ts` exposes reads and nothing else. Do not add one.
+
+### The credential lives in key-service, not here
+
+crm-service does NOT store the token, and there is deliberately no column to
+write one into. key-service owns it, scoped to an (organisation, brand) pair,
+and every call resolves it at
+`GET /keys/brands/{brandId}/gohighlevel/decrypt` (contract verified against the
+DEPLOYED key-service, 2026-09-19: `{ brandId, provider, key, keySource, userId }`,
+404 when the brand has none).
+
+**There is no org-wide fallback and none may be added.** An agency org holds many
+brands, each a different end client; falling back to the org key would connect
+one brand to another brand's GoHighLevel account. A 404 from key-service is a
+refusal, full stop.
+
+`location_id` is supplied by the customer alongside the token. A Private
+Integration Token is an opaque static bearer that neither expires nor refreshes,
+and GoHighLevel publishes no way to read the target sub-account out of it
+(checked against the v2 docs, 2026-09-19), so the id cannot be derived. Every
+request carries `Version: 2021-07-28` — GoHighLevel picks its API version per
+request from that header.
+
+### Bronze — `ghl_connections` + `ghl_raw_records`
+
+- `ghl_connections` — one row per (org, brand). The analogue of
+  `contact_uploads` / `matrix_connections`: it IS the source artifact. Holds
+  `location_id`, `status`, `last_error`, `last_synced_at`, `last_run_id`.
+  - **Natural key = `UNIQUE(org_id, brand_id)`** — one GoHighLevel account per brand.
+  - `created_by_user_id` is persisted at create time ON PURPOSE: the sync runs
+    from a cron with NO inbound identity headers, and the org run + the
+    key-service resolve must still be attributed. A request-scoped header does
+    not survive that async boundary — the row is the carrier.
+- `ghl_raw_records` — one row per record, `payload` = the record verbatim.
+  - **Natural key = `UNIQUE(connection_id, kind, external_id)`**, `kind` one of
+    `contact` | `opportunity` | `pipeline`. GoHighLevel's own record id IS the
+    idempotency key, so a re-run inserts nothing.
+  - **`content_hash` is the NO-CHURN guard**, and it is a different property from
+    idempotency. The upsert carries `setWhere content_hash <> excluded.content_hash`,
+    so an unchanged record is not rewritten at all: `mirrored_at` does not move,
+    the row is not returned as changed, and nothing downstream re-derives. Get
+    this wrong and every tick rewrites the customer's whole CRM.
+
+### Silver — `contacts` (source `gohighlevel`) + `ghl_pipelines` + `ghl_opportunities`
+
+Deterministic, **zero LLM**. The data arrives structured; reading it needs no model.
+
+- Contacts land in the SHARED `contacts` table with `source = 'gohighlevel'`.
+  - **Natural key = `(org_id, brand_id, source, external_id)`** — GoHighLevel's
+    own contact id. NULLs are distinct, so CSV and Matrix rows are exempt.
+  - ⚠️ **The CSV email dedup index is now PARTIAL, `WHERE source = 'csv'`.** That
+    rule exists because one CRM export lists a person once; it is a statement
+    about the CSV source, not about contacts in general. Left unconditional, a
+    GoHighLevel contact sharing an email with a CSV contact would collide and one
+    source would silently overwrite the other. Behaviour is unchanged for every
+    row that existed before (all `csv`, or `matrix` with a null email).
+  - `dnd` is carried through as `unsubscribed` — it IS the customer's own
+    do-not-contact mark on that person.
+- `ghl_pipelines` — one row per pipeline with its ordered `stages`. This is what
+  lets the read group by stage NAME instead of by opaque id.
+- `ghl_opportunities` — one row per opportunity, with pipeline and stage names
+  resolved. Whatever GoHighLevel reports is what is stored: its pipeline, its
+  stage, its status, its value, none of it re-bucketed. `contact_id` is null
+  rather than guessed when GoHighLevel names a contact we have not mirrored.
+
+There is no gold TABLE. The pipeline view (`src/lib/gohighlevel/view.ts`) is a
+deterministic grouping computed on read — there is no model in the loop, so
+materializing it would buy nothing.
+
+### Re-syncing changes nothing, and rebuilding needs no vendor call
+
+- A second identical pass reports `contactsChanged: 0, opportunitiesChanged: 0,
+  pipelinesChanged: 0` and writes not one row — proved by a test that compares
+  every table row-for-row, timestamps included.
+- Only records whose bronze row actually moved are re-derived. One coupling is
+  deliberate: a pipeline can be renamed or re-staged without any opportunity
+  changing, and every opportunity carries its pipeline and stage name, so a
+  pipeline change re-derives every opportunity of the connection.
+- `POST /internal/gohighlevel/rebuild` re-derives all of silver from the mirror
+  alone, with no call to GoHighLevel and no credential (proved by a test).
+
+### Ingestion trigger + cron
+
+`POST /internal/gohighlevel/sync` (apiKeyAuth, optional `connectionId`) runs a
+pass in the background and 202s. Cron on the box, every 15 minutes:
+
+```
+*/15 * * * * curl -fsS -X POST "$CRM_SERVICE_URL/internal/gohighlevel/sync" \
+  -H "x-api-key: $CRM_SERVICE_API_KEY" -H 'content-type: application/json' -d '{}'
+```
+
+The route's own platform run tracks only the TRIGGER. The pass opens **one ORG
+run per connection**, using the org + creator stored on the connection row. A
+per-connection failure is written to that connection (`status='error'`,
+`last_error`), fails its run, and is returned in the pass result — never
+swallowed, and one broken connection does not stop the others.
+
+### Routes
+
+- `POST /orgs/gohighlevel/connections` (needs `x-user-id`) — resolves the
+  credential, PROVES it against GoHighLevel, and only then writes the row. A
+  refusal quotes GoHighLevel's own status and message
+  (`{ vendorStatus, vendorError }`). The probe is `GET /contacts/?limit=1`
+  rather than `GET /locations/{id}` on purpose: it exercises the exact scope the
+  sync needs, so a token that passes can actually do the job, and a token bound
+  to a different sub-account is refused by GoHighLevel itself.
+- `PATCH /orgs/gohighlevel/connections/:id` — pause / resume.
+- `DELETE /orgs/gohighlevel/connections/:id` — disconnect. The row goes and, by
+  cascade, everything derived from it; with no row there is nothing for a pass to
+  iterate, so the syncing stops.
+- `GET /orgs/gohighlevel/connections?brandId=` — health (`status`, `synced`,
+  `lastSyncedAt`, `lastError`).
+- `GET /orgs/gohighlevel/contacts?brandId=&limit=&offset=`.
+- `GET /orgs/gohighlevel/opportunities?brandId=` — the pipeline, grouped by
+  pipeline then stage. Opportunities in a pipeline we have not mirrored come back
+  under `ungrouped` rather than being dropped, so the counts add up to what the
+  customer sees in GoHighLevel.
+
 ## Env vars
 
 `CRM_SERVICE_DATABASE_URL`, `CRM_SERVICE_API_KEY`, `RUNS_SERVICE_URL`, `RUNS_SERVICE_API_KEY`,
 `CHAT_SERVICE_URL`, `CHAT_SERVICE_API_KEY`, `MATRIX_HOMESERVER_URL`,
-`MATRIX_ACCESS_TOKEN`, `MATRIX_INGESTION_FLOOR`, `CRM_LEAD_READING_CHAT_CONFIG`.
+`MATRIX_ACCESS_TOKEN`, `MATRIX_INGESTION_FLOOR`, `CRM_LEAD_READING_CHAT_CONFIG`,
+`KEY_SERVICE_URL`, `KEY_SERVICE_API_KEY`.
 See `.env.example`. The four Matrix ones are REQUIRED for the sync to run at all —
 without them `/internal/matrix/sync` fails loud instead of silently no-op-ing.
+The two `KEY_SERVICE_*` ones are REQUIRED for GoHighLevel — they are how the
+brand's credential is resolved, and crm-service holds no copy of it.

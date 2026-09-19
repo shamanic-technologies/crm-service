@@ -11,6 +11,7 @@ import healthRoutes from "./routes/health.js";
 import contactsRoutes from "./routes/contacts.js";
 import internalRoutes from "./routes/internal.js";
 import matrixRoutes from "./routes/matrix.js";
+import gohighlevelRoutes from "./routes/gohighlevel.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -39,6 +40,7 @@ app.use(healthRoutes);
 app.use(contactsRoutes);
 app.use(internalRoutes);
 app.use(matrixRoutes);
+app.use(gohighlevelRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ type: "not_found", error: "Not found" });
