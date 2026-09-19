@@ -434,6 +434,23 @@ swallowed, and one broken connection does not stop the others.
   under `ungrouped` rather than being dropped, so the counts add up to what the
   customer sees in GoHighLevel.
 
+## Test fixture ids must be REAL v4 uuids, not `0000`-padded placeholders
+
+`z.string().uuid()` on zod 4 validates the version and variant nibbles, so a
+readable placeholder like `aaaaaaaa-0000-0000-0000-000000000001` is REJECTED —
+its version nibble is `0`. A direct `db.insert` accepts it happily (Postgres only
+checks the shape), so a fixture id works everywhere until the first test that
+goes through a ROUTE, where it comes back as `400 "brandId (uuid) query is
+required"`. That message names the field as missing rather than as malformed,
+which reads like a body-parsing or header problem and sends you to look at
+`express.json()`.
+
+Use `bbbbbbbb-1111-4111-8111-…` (version `4`, variant `8`) for anything a route
+will parse. The older Matrix and CSV fixtures still carry `0000`-padded ids and
+pass only because they never cross a zod boundary — do not copy them for a test
+that calls a handler. (Set 2026-09-19, cost a debugging round on the GoHighLevel
+integration suite.)
+
 ## Env vars
 
 `CRM_SERVICE_DATABASE_URL`, `CRM_SERVICE_API_KEY`, `RUNS_SERVICE_URL`, `RUNS_SERVICE_API_KEY`,
