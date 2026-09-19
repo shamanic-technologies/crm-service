@@ -5,6 +5,7 @@ import {
   timestamp,
   integer,
   jsonb,
+  numeric,
   boolean,
   uniqueIndex,
   index,
@@ -132,6 +133,13 @@ export const contacts = pgTable(
     // identity of the person who wrote in). Null for CSV contacts.
     channelHandle: text("channel_handle"),
 
+    // The id this contact carries in the SOURCE system, when the source has one
+    // of its own (GoHighLevel's contact id). Null for CSV (a spreadsheet row has
+    // no durable vendor id) and for Matrix (whose identity is channel_handle).
+    // (org, brand, source, external_id) is a unique index — Postgres treats NULLs
+    // as distinct, so both older sources are exempt from it.
+    externalId: text("external_id"),
+
     // Source attribution. CSV contacts carry upload + row; Matrix contacts carry
     // the connection. Exactly one side is populated, so both are nullable.
     sourceUploadId: uuid("source_upload_id"),
@@ -150,6 +158,14 @@ export const contacts = pgTable(
       table.brandId,
       table.channel,
       table.channelHandle,
+    ),
+    // Third natural key, for any source that carries its OWN durable record id
+    // (GoHighLevel). NULLs are distinct, so CSV and Matrix rows never collide here.
+    uniqueIndex("contacts_org_brand_source_external_uq").on(
+      table.orgId,
+      table.brandId,
+      table.source,
+      table.externalId,
     ),
   ],
 );
@@ -379,6 +395,182 @@ export const matrixLeads = pgTable(
   ],
 );
 
+/**
+ * BRONZE — one row per (org, brand) GoHighLevel connection.
+ *
+ * The analogue of `contact_uploads` / `matrix_connections`: it IS the source
+ * artifact. It names the GoHighLevel sub-account ("location") whose records are
+ * mirrored, and holds the connection's health.
+ *
+ * THE CREDENTIAL IS NOT HERE. crm-service never stores a GoHighLevel Private
+ * Integration Token; key-service holds it, scoped to this exact (org, brand)
+ * pair, and every sync resolves it at call time. There is deliberately no token
+ * column to accidentally write one into.
+ *
+ * `location_id` is supplied by the customer alongside the token: a Private
+ * Integration Token is an opaque static bearer and GoHighLevel publishes no way
+ * to read the target sub-account out of it (verified against the v2 docs,
+ * 2026-09-19), so the id cannot be derived and must be stated.
+ *
+ * `created_by_user_id` is persisted at create time ON PURPOSE — the sync runs
+ * from a cron with NO inbound identity headers, and the org run it opens must
+ * still be attributed. A request-scoped header does not survive that async
+ * boundary; the row is the carrier.
+ */
+export const ghlConnections = pgTable(
+  "ghl_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+
+    // The GoHighLevel sub-account ("location") id this connection mirrors.
+    locationId: text("location_id").notNull(),
+    createdByUserId: text("created_by_user_id").notNull(),
+
+    // 'active' | 'paused' | 'error'
+    status: text("status").notNull().default("active"),
+    lastError: text("last_error"),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    lastRunId: text("last_run_id"),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // ONE GoHighLevel account per brand.
+    uniqueIndex("ghl_connections_org_brand_uq").on(table.orgId, table.brandId),
+    index("ghl_connections_status_idx").on(table.status),
+  ],
+);
+
+/**
+ * BRONZE — verbatim, append-only-in-spirit mirror of GoHighLevel records.
+ *
+ * One row per (connection, kind, external_id), `payload` = the record JSON
+ * exactly as GoHighLevel sent it. GoHighLevel's own record id IS the idempotency
+ * key, so a re-run of a sync writes nothing new.
+ *
+ * `content_hash` (sha256 of the canonical payload) is what keeps a re-sync from
+ * CHURNING rows that have not changed: the upsert only writes when the hash
+ * differs, so `mirrored_at` and the derived silver rows stay still for unchanged
+ * records. That is the difference between "does not duplicate" and "does not
+ * touch", and the acceptance criteria ask for both.
+ *
+ * Everything downstream (contacts, opportunities, pipelines) is derived from
+ * THIS table, so wiping the derived layers and rebuilding needs no vendor call.
+ */
+export const ghlRawRecords = pgTable(
+  "ghl_raw_records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => ghlConnections.id, { onDelete: "cascade" }),
+
+    // 'contact' | 'opportunity' | 'pipeline' — see GHL_RECORD_KINDS.
+    kind: text("kind").notNull(),
+    // GoHighLevel's own id for the record. The natural idempotency key.
+    externalId: text("external_id").notNull(),
+    // sha256 of the canonical payload — the no-churn guard.
+    contentHash: text("content_hash").notNull(),
+
+    payload: jsonb("payload").notNull(),
+    mirroredAt: timestamp("mirrored_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("ghl_raw_records_conn_kind_external_uq").on(
+      table.connectionId,
+      table.kind,
+      table.externalId,
+    ),
+    index("ghl_raw_records_org_brand_kind_idx").on(table.orgId, table.brandId, table.kind),
+  ],
+);
+
+/**
+ * SILVER — one row per GoHighLevel pipeline, with its ordered stages.
+ *
+ * Deterministically derived from the mirrored `kind='pipeline'` records — zero
+ * LLM. The stage list is what lets the opportunities read group things "the way
+ * GoHighLevel groups them" instead of by opaque stage ids.
+ */
+export const ghlPipelines = pgTable(
+  "ghl_pipelines",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => ghlConnections.id, { onDelete: "cascade" }),
+
+    externalId: text("external_id").notNull(),
+    name: text("name").notNull(),
+    // Ordered [{ id, name, position }] as GoHighLevel lists them.
+    stages: jsonb("stages").notNull(),
+
+    lastRebuiltAt: timestamp("last_rebuilt_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("ghl_pipelines_conn_external_uq").on(table.connectionId, table.externalId),
+    index("ghl_pipelines_org_brand_idx").on(table.orgId, table.brandId),
+  ],
+);
+
+/**
+ * SILVER — one row per GoHighLevel opportunity (the sales pipeline itself).
+ *
+ * Deterministically derived from the mirrored `kind='opportunity'` records, with
+ * the pipeline and stage NAMES resolved against `ghl_pipelines`. Whatever
+ * GoHighLevel reports is what is stored: its pipeline, its stage, its status and
+ * its monetary value, none of it re-interpreted.
+ *
+ * `contact_id` links to the silver contact when GoHighLevel named one we have
+ * mirrored; it stays null otherwise rather than inventing an attachment.
+ */
+export const ghlOpportunities = pgTable(
+  "ghl_opportunities",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => ghlConnections.id, { onDelete: "cascade" }),
+
+    externalId: text("external_id").notNull(),
+    name: text("name").notNull(),
+
+    pipelineExternalId: text("pipeline_external_id"),
+    pipelineName: text("pipeline_name"),
+    stageExternalId: text("stage_external_id"),
+    stageName: text("stage_name"),
+
+    // GoHighLevel's own status vocabulary: open | won | lost | abandoned | ...
+    status: text("status"),
+    // Whole-currency amount as GoHighLevel reports it. Numeric, not integer —
+    // GoHighLevel returns fractional values.
+    monetaryValue: numeric("monetary_value"),
+
+    assignedTo: text("assigned_to"),
+    // GoHighLevel's contact id, kept even when no silver contact matched.
+    externalContactId: text("external_contact_id"),
+    contactId: uuid("contact_id").references(() => contacts.id, { onDelete: "set null" }),
+
+    ghlCreatedAt: timestamp("ghl_created_at", { withTimezone: true }),
+    ghlUpdatedAt: timestamp("ghl_updated_at", { withTimezone: true }),
+
+    lastRebuiltAt: timestamp("last_rebuilt_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("ghl_opportunities_conn_external_uq").on(table.connectionId, table.externalId),
+    index("ghl_opportunities_org_brand_idx").on(table.orgId, table.brandId),
+    index("ghl_opportunities_pipeline_idx").on(table.connectionId, table.pipelineExternalId),
+  ],
+);
+
 export type ContactUpload = typeof contactUploads.$inferSelect;
 export type NewContactUpload = typeof contactUploads.$inferInsert;
 export type ContactRowRaw = typeof contactRowsRaw.$inferSelect;
@@ -395,3 +587,11 @@ export type Conversation = typeof conversations.$inferSelect;
 export type NewConversation = typeof conversations.$inferInsert;
 export type MatrixLead = typeof matrixLeads.$inferSelect;
 export type NewMatrixLead = typeof matrixLeads.$inferInsert;
+export type GhlConnection = typeof ghlConnections.$inferSelect;
+export type NewGhlConnection = typeof ghlConnections.$inferInsert;
+export type GhlRawRecord = typeof ghlRawRecords.$inferSelect;
+export type NewGhlRawRecord = typeof ghlRawRecords.$inferInsert;
+export type GhlPipeline = typeof ghlPipelines.$inferSelect;
+export type NewGhlPipeline = typeof ghlPipelines.$inferInsert;
+export type GhlOpportunity = typeof ghlOpportunities.$inferSelect;
+export type NewGhlOpportunity = typeof ghlOpportunities.$inferInsert;

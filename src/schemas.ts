@@ -60,10 +60,11 @@ export const ContactSchema = registry.register(
       rawAttributes: z.record(z.string(), z.string()),
       consentStatus: z.string(),
       unsubscribed: z.boolean(),
-      source: z.enum(["csv", "matrix"]).openapi({
+      source: z.enum(["csv", "matrix", "gohighlevel"]).openapi({
         description:
-          "Which source this contact came from. Only 'csv' contacts are sendable — a 'matrix' " +
-          "contact wrote in first and is already in conversation, so it never reaches serve-next.",
+          "Which source this contact came from. Only 'csv' contacts are sendable. A 'matrix' " +
+          "contact wrote in first and is already in conversation; a 'gohighlevel' contact is the " +
+          "client's own person, mirrored from their CRM. Neither ever reaches serve-next.",
       }),
       channel: z
         .enum(MATRIX_CHANNELS)
@@ -560,6 +561,334 @@ registry.registerPath({
     202: {
       description: "Rebuild started",
       content: { "application/json": { schema: MatrixSyncResponseSchema } },
+    },
+  },
+});
+
+// ─── GoHighLevel (third CRM source) ──────────────────────────────────────────
+
+export const GhlConnectionSchema = registry.register(
+  "GhlConnection",
+  z
+    .object({
+      id: z.string().uuid(),
+      brandId: z.string().uuid(),
+      locationId: z.string().openapi({
+        description:
+          "The GoHighLevel sub-account ('location') id this connection mirrors. Supplied by the " +
+          "customer: a Private Integration Token is opaque and GoHighLevel publishes no way to " +
+          "read the target sub-account out of it.",
+      }),
+      status: z.enum(["active", "paused", "error"]),
+      synced: z.boolean().openapi({ description: "True once a sync has completed." }),
+      lastSyncedAt: z.string().nullable(),
+      lastError: z
+        .string()
+        .nullable()
+        .openapi({ description: "Why the last sync failed, verbatim. Null when healthy." }),
+      lastRunId: z.string().nullable(),
+      createdAt: z.string(),
+    })
+    .openapi("GhlConnection"),
+);
+
+export const GhlConnectionRequestSchema = registry.register(
+  "GhlConnectionRequest",
+  z.object({ brandId: z.string().uuid(), locationId: z.string() }).openapi("GhlConnectionRequest"),
+);
+
+export const GhlConnectionResponseSchema = registry.register(
+  "GhlConnectionResponse",
+  z.object({ connection: GhlConnectionSchema }).openapi("GhlConnectionResponse"),
+);
+
+export const GhlConnectionsListResponseSchema = registry.register(
+  "GhlConnectionsListResponse",
+  z.object({ connections: z.array(GhlConnectionSchema) }).openapi("GhlConnectionsListResponse"),
+);
+
+export const GhlVendorErrorSchema = registry.register(
+  "GhlVendorError",
+  z
+    .object({
+      type: z.literal("vendor"),
+      error: z.string(),
+      vendorStatus: z.number().int().openapi({ description: "GoHighLevel's own HTTP status." }),
+      vendorError: z.string().openapi({ description: "GoHighLevel's own message, verbatim." }),
+    })
+    .openapi("GhlVendorError"),
+);
+
+export const GhlContactSchema = registry.register(
+  "GhlContact",
+  z
+    .object({
+      id: z.string().uuid(),
+      brandId: z.string().uuid(),
+      externalId: z.string().nullable().openapi({ description: "GoHighLevel's own contact id." }),
+      primaryEmail: z.string().nullable(),
+      phoneE164: z.string().nullable(),
+      fullName: z.string().nullable(),
+      firstName: z.string().nullable(),
+      lastName: z.string().nullable(),
+      unsubscribed: z
+        .boolean()
+        .openapi({ description: "GoHighLevel's do-not-disturb flag on this contact." }),
+      lastRebuiltAt: z.string(),
+    })
+    .openapi("GhlContact"),
+);
+
+export const GhlContactsListResponseSchema = registry.register(
+  "GhlContactsListResponse",
+  z.object({ contacts: z.array(GhlContactSchema) }).openapi("GhlContactsListResponse"),
+);
+
+export const GhlOpportunitySchema = registry.register(
+  "GhlOpportunity",
+  z
+    .object({
+      id: z.string().uuid(),
+      externalId: z.string(),
+      name: z.string(),
+      status: z
+        .string()
+        .nullable()
+        .openapi({ description: "GoHighLevel's own status: open | won | lost | abandoned." }),
+      monetaryValue: z
+        .string()
+        .nullable()
+        .openapi({ description: "Amount as GoHighLevel reports it, unrounded." }),
+      assignedTo: z.string().nullable(),
+      pipelineId: z.string().nullable(),
+      pipelineName: z.string().nullable(),
+      stageId: z.string().nullable(),
+      stageName: z.string().nullable(),
+      contactId: z
+        .string()
+        .uuid()
+        .nullable()
+        .openapi({ description: "The mirrored contact, when GoHighLevel named one we hold." }),
+      externalContactId: z.string().nullable(),
+      contactName: z.string().nullable(),
+      contactEmail: z.string().nullable(),
+      createdAt: z.string().nullable(),
+      updatedAt: z.string().nullable(),
+    })
+    .openapi("GhlOpportunity"),
+);
+
+export const GhlPipelineStageSchema = registry.register(
+  "GhlPipelineStage",
+  z
+    .object({
+      id: z.string(),
+      name: z.string().nullable(),
+      position: z.number().int().nullable(),
+      count: z.number().int(),
+      totalValue: z.string(),
+      opportunities: z.array(GhlOpportunitySchema),
+    })
+    .openapi("GhlPipelineStage"),
+);
+
+export const GhlPipelineSchema = registry.register(
+  "GhlPipeline",
+  z
+    .object({
+      id: z.string(),
+      name: z.string(),
+      count: z.number().int(),
+      totalValue: z.string(),
+      stages: z.array(GhlPipelineStageSchema),
+    })
+    .openapi("GhlPipeline"),
+);
+
+export const GhlOpportunitiesResponseSchema = registry.register(
+  "GhlOpportunitiesResponse",
+  z
+    .object({
+      pipelines: z.array(GhlPipelineSchema),
+      ungrouped: z.array(GhlOpportunitySchema).openapi({
+        description:
+          "Opportunities GoHighLevel placed in no pipeline, or in one we have not mirrored. " +
+          "Returned rather than dropped so the counts add up to what the customer sees.",
+      }),
+      totalOpportunities: z.number().int(),
+    })
+    .openapi("GhlOpportunitiesResponse"),
+);
+
+export const GhlSyncRequestSchema = registry.register(
+  "GhlSyncRequest",
+  z
+    .object({
+      connectionId: z
+        .string()
+        .uuid()
+        .optional()
+        .openapi({ description: "Sync one connection. Omit for every active connection." }),
+    })
+    .openapi("GhlSyncRequest"),
+);
+
+export const GhlSyncAcceptedResponseSchema = registry.register(
+  "GhlSyncAcceptedResponse",
+  z
+    .object({ status: z.literal("accepted"), platformRunId: z.string().uuid() })
+    .openapi("GhlSyncAcceptedResponse"),
+);
+
+export const GhlDisconnectResponseSchema = registry.register(
+  "GhlDisconnectResponse",
+  z
+    .object({ disconnected: z.literal(true), connectionId: z.string().uuid() })
+    .openapi("GhlDisconnectResponse"),
+);
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/gohighlevel/connections",
+  summary: "Connect a brand to GoHighLevel",
+  description:
+    "Resolves the brand's Private Integration Token from key-service, then PROVES it against " +
+    "GoHighLevel before the connection is written. A credential that cannot authenticate, or one " +
+    "bound to a different sub-account than the locationId supplied, is refused with " +
+    "GoHighLevel's own status and message. Requires x-api-key, x-org-id, x-user-id.",
+  request: { body: { content: { "application/json": { schema: GhlConnectionRequestSchema } } } },
+  responses: {
+    200: {
+      description: "Connection",
+      content: { "application/json": { schema: GhlConnectionResponseSchema } },
+    },
+    400: {
+      description: "Refused — no credential stored, or GoHighLevel rejected it",
+      content: { "application/json": { schema: GhlVendorErrorSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "patch",
+  path: "/orgs/gohighlevel/connections/{id}",
+  summary: "Pause or resume a GoHighLevel connection",
+  request: {
+    params: z.object({ id: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": { schema: z.object({ status: z.enum(["active", "paused"]) }) },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Connection",
+      content: { "application/json": { schema: GhlConnectionResponseSchema } },
+    },
+    404: {
+      description: "Not found",
+      content: { "application/json": { schema: ErrorResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/orgs/gohighlevel/connections/{id}",
+  summary: "Disconnect GoHighLevel from a brand",
+  description:
+    "Removes the connection and everything derived from it. With no connection row there is " +
+    "nothing for a sync pass to iterate, so the syncing stops.",
+  request: { params: z.object({ id: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Disconnected",
+      content: { "application/json": { schema: GhlDisconnectResponseSchema } },
+    },
+    404: {
+      description: "Not found",
+      content: { "application/json": { schema: ErrorResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/gohighlevel/connections",
+  summary: "GoHighLevel connection health for a brand",
+  request: { query: z.object({ brandId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Connections",
+      content: { "application/json": { schema: GhlConnectionsListResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/gohighlevel/contacts",
+  summary: "List a brand's GoHighLevel contacts",
+  request: {
+    query: z.object({
+      brandId: z.string().uuid(),
+      limit: z.coerce.number().int().optional(),
+      offset: z.coerce.number().int().optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Contacts",
+      content: { "application/json": { schema: GhlContactsListResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/gohighlevel/opportunities",
+  summary: "A brand's GoHighLevel sales pipeline, grouped by pipeline then stage",
+  description:
+    "Grouped the way GoHighLevel groups it: its pipelines, its stage order, its statuses and its " +
+    "values, none of them re-bucketed.",
+  request: { query: z.object({ brandId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Pipelines",
+      content: { "application/json": { schema: GhlOpportunitiesResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/gohighlevel/sync",
+  summary: "Run a GoHighLevel sync pass (bronze → silver)",
+  description:
+    "Driven by a cron on the box. Opens one ORG run per connection and returns immediately; the " +
+    "pass runs in the background. Re-running it over unchanged records writes nothing.",
+  request: { body: { content: { "application/json": { schema: GhlSyncRequestSchema } } } },
+  responses: {
+    202: {
+      description: "Sync started",
+      content: { "application/json": { schema: GhlSyncAcceptedResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/gohighlevel/rebuild",
+  summary: "Rebuild GoHighLevel silver from bronze (no vendor call)",
+  description:
+    "Reproduces contacts, pipelines and opportunities from the mirrored records alone — no call " +
+    "to GoHighLevel and no credential needed.",
+  request: { body: { content: { "application/json": { schema: GhlSyncRequestSchema } } } },
+  responses: {
+    202: {
+      description: "Rebuild started",
+      content: { "application/json": { schema: GhlSyncAcceptedResponseSchema } },
     },
   },
 });

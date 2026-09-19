@@ -3,8 +3,11 @@ FROM node:20-slim AS builder
 
 WORKDIR /app
 
-# Install pnpm
-RUN npm install -g pnpm
+# Install pnpm — PINNED to the major that matches pnpm-lock.yaml's
+# lockfileVersion 9.0. Unpinned, the deploy host installs pnpm 10, which fails
+# the install outright on ignored dependency build scripts (ERR_PNPM_IGNORED_BUILDS)
+# and leaves the container frozen on its previous image with no error surfaced.
+RUN npm install -g pnpm@9
 
 # Copy package files
 COPY package.json pnpm-lock.yaml* ./
@@ -23,8 +26,11 @@ FROM node:20-slim
 
 WORKDIR /app
 
-# Install pnpm
-RUN npm install -g pnpm
+# Install pnpm — PINNED to the major that matches pnpm-lock.yaml's
+# lockfileVersion 9.0. Unpinned, the deploy host installs pnpm 10, which fails
+# the install outright on ignored dependency build scripts (ERR_PNPM_IGNORED_BUILDS)
+# and leaves the container frozen on its previous image with no error surfaced.
+RUN npm install -g pnpm@9
 
 # Copy package files
 COPY package.json pnpm-lock.yaml* ./
