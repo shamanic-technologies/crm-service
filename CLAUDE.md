@@ -517,6 +517,21 @@ pass only because they never cross a zod boundary — do not copy them for a tes
 that calls a handler. (Set 2026-09-19, cost a debugging round on the GoHighLevel
 integration suite.)
 
+## `npm run build` fails LOCALLY on the openapi step — the failure is `pnpm`, not your diff
+
+`build` is `tsc && pnpm generate:openapi`, and that second half dies on macOS
+under Node 20 with a bare `ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING` stack and no
+mention of any file. It reads as a compile error in whatever you just edited, so
+the reflex is to go hunting through the diff — there is nothing there. The same
+script run through npm works: `npm run generate:openapi` prints
+`openapi.json generated`, and `pnpm generate:openapi` alone reproduces the crash
+on a clean `origin/main`. It is the pnpm → tsx → node hand-off, not the code, and
+CI is unaffected.
+
+So the local build gate is `npx tsc --noEmit` plus `npm run generate:openapi`,
+run separately. Do not read the chained failure as a signal about your change.
+(Set 2026-09-22.)
+
 ## Env vars
 
 `CRM_SERVICE_DATABASE_URL`, `CRM_SERVICE_API_KEY`, `RUNS_SERVICE_URL`, `RUNS_SERVICE_API_KEY`,
