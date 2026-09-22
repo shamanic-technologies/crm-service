@@ -635,6 +635,78 @@ export const GhlContactSchema = registry.register(
         .boolean()
         .openapi({ description: "GoHighLevel's do-not-disturb flag on this contact." }),
       lastRebuiltAt: z.string(),
+      company: z
+        .object({
+          name: z.string().nullable(),
+          website: z.string().nullable(),
+        })
+        .openapi({
+          description:
+            "The company GoHighLevel attaches to this person. Null fields mean the " +
+            "vendor holds nothing there — never a default. On the first customer " +
+            "455 of 2,694 contacts carry a company name and 454 of those carry no " +
+            "email, so this is the only non-name signal most of them have.",
+        }),
+      location: z
+        .object({
+          city: z.string().nullable(),
+          stateRegion: z
+            .string()
+            .nullable()
+            .openapi({ description: "State, province or county, in the vendor's own words." }),
+          country: z
+            .string()
+            .nullable()
+            .openapi({ description: "Verbatim. ISO-3166 alpha-2 in practice; not validated." }),
+          postalCode: z.string().nullable(),
+          streetAddress: z.string().nullable(),
+        })
+        .openapi({ description: "Where GoHighLevel places this person. Verbatim, unnormalized." }),
+      record: z
+        .object({
+          type: z
+            .string()
+            .nullable()
+            .openapi({
+              description:
+                "GoHighLevel's own classification of the record ('lead', 'customer', …). " +
+                "Free text per customer, served verbatim and mapped to nothing.",
+            }),
+          leadSource: z
+            .string()
+            .nullable()
+            .openapi({
+              description:
+                "Where the customer says this record came from. Arbitrary free text " +
+                "per account; never mapped onto a vocabulary of ours.",
+            }),
+          tags: z
+            .array(z.string())
+            .nullable()
+            .openapi({
+              description:
+                "The customer's own labels. Null when GoHighLevel reports no tags " +
+                "field at all; [] when it reports an empty one — those differ.",
+            }),
+          createdAt: z
+            .string()
+            .nullable()
+            .openapi({ description: "When GoHighLevel created its record, not when we mirrored it." }),
+          updatedAt: z.string().nullable(),
+          origin: z
+            .object({
+              medium: z.string().nullable(),
+              url: z.string().nullable(),
+              referrer: z.string().nullable(),
+            })
+            .openapi({
+              description:
+                "First-touch attribution, when GoHighLevel recorded one. Only where " +
+                "the person came FROM is served; the IPs and user agents the vendor " +
+                "attaches to the same entry stay in the raw mirror.",
+            }),
+        })
+        .openapi({ description: "Where this record came from, in the customer's own vocabulary." }),
     })
     .openapi("GhlContact"),
 );

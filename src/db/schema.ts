@@ -140,6 +140,53 @@ export const contacts = pgTable(
     // as distinct, so both older sources are exempt from it.
     externalId: text("external_id"),
 
+    // ── What the SOURCE holds about the person beyond identity ──────────────
+    //
+    // Every column below is nullable and written only when the source actually
+    // reports it: absent stays NULL, never a default, never a guess. They exist
+    // because identity alone cannot answer "is this CRM record the same human as
+    // one of our leads" — measured on the first GoHighLevel customer, 454 of the
+    // 455 contacts carrying a company name carry NO email, so company is the only
+    // non-name signal those records have anywhere.
+    //
+    // They are generic on purpose (a CSV export names a company too); today only
+    // the GoHighLevel derivation populates them.
+    companyName: text("company_name"),
+    website: text("website"),
+
+    city: text("city"),
+    // The source's own word for the sub-national region — a state, a province, a
+    // county. Kept verbatim, not normalized against any list of ours.
+    stateRegion: text("state_region"),
+    // Verbatim. GoHighLevel reports ISO-3166 alpha-2 in practice, but nothing
+    // here validates or converts it — what the source said is what is stored.
+    country: text("country"),
+    postalCode: text("postal_code"),
+    streetAddress: text("street_address"),
+
+    // Where the record came from, in the source's OWN vocabulary. Free text per
+    // customer ("STripe Test ", "order_form") — never mapped to a vocabulary of
+    // ours, exactly as the pipeline stage names are not.
+    leadSource: text("lead_source"),
+    // The source's own classification of the record ('lead', 'customer', …).
+    // Verbatim, uninterpreted.
+    contactType: text("contact_type"),
+    // The source's labels, as an array, verbatim. NULL when the source reports no
+    // tags field at all; `[]` when it reports an empty one — those differ.
+    tags: jsonb("tags"),
+
+    // FIRST-touch attribution, when the source records one. Only the three fields
+    // that say where the person came FROM are lifted; the raw attribution blob in
+    // bronze also carries IPs and user agents, which are not re-served.
+    originMedium: text("origin_medium"),
+    originUrl: text("origin_url"),
+    originReferrer: text("origin_referrer"),
+
+    // When the SOURCE created and last touched its own record — not when we
+    // mirrored it (`last_rebuilt_at` is ours).
+    sourceCreatedAt: timestamp("source_created_at", { withTimezone: true }),
+    sourceUpdatedAt: timestamp("source_updated_at", { withTimezone: true }),
+
     // Source attribution. CSV contacts carry upload + row; Matrix contacts carry
     // the connection. Exactly one side is populated, so both are nullable.
     sourceUploadId: uuid("source_upload_id"),
