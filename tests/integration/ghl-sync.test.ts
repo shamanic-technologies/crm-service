@@ -46,9 +46,51 @@ const PIPELINES = [
   },
 ];
 
-const CONTACTS = [
-  { id: "c1", email: "Alice@Example.com", firstName: "Alice", lastName: "Martin", phone: "+33612345678", dnd: false },
-  { id: "c2", email: "bob@example.com", firstName: "Bob", lastName: "Durand", dnd: true },
+const CONTACTS: Record<string, unknown>[] = [
+  // c1 is the rich case: company, place and provenance all present.
+  {
+    id: "c1",
+    email: "Alice@Example.com",
+    firstName: "Alice",
+    lastName: "Martin",
+    phone: "+33612345678",
+    dnd: false,
+    companyName: "Martin Traiteur",
+    website: "https://martin-traiteur.fr",
+    city: "Lyon",
+    state: "Auvergne-Rhône-Alpes",
+    country: "FR",
+    postalCode: "69002",
+    address1: "3 rue de la Ré",
+    source: "Salon des Mariages ",
+    type: "customer",
+    tags: ["wedding", "vip"],
+    dateAdded: "2026-08-19T15:23:58.577Z",
+    dateUpdated: "2026-08-20T09:00:00.000Z",
+    attributions: [
+      { isLast: true, medium: "referral", url: "https://later.example" },
+      {
+        isFirst: true,
+        medium: "order_form",
+        url: "https://sites.leadconnectorhq.com/preview/x",
+        referrer: "https://app.gohighlevel.com",
+        ip: "151.158.212.9",
+        userAgent: "Mozilla/5.0",
+      },
+    ],
+  },
+  // c2 carries a company and NO email — the 454-of-455 case that makes company
+  // the only non-name signal those records have anywhere.
+  {
+    id: "c2",
+    email: "bob@example.com",
+    firstName: "Bob",
+    lastName: "Durand",
+    dnd: true,
+    companyName: "Durand SARL",
+    tags: [],
+  },
+  // c3 is the bare case: GoHighLevel holds nothing beyond a name and a phone.
   { id: "c3", firstName: "Carol", lastName: "Nguyen", phone: "0612345678", dnd: false },
 ];
 
@@ -227,6 +269,111 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
     expect(won?.status).toBe("won");
     expect(won?.stageName).toBe("Won");
     expect(won?.contactId).not.toBeNull();
+  });
+
+  it("carries the company, the place and the provenance GoHighLevel holds", async () => {
+    await seedConnection();
+    await runSyncPass();
+
+    const [alice] = await db
+      .select()
+      .from(contacts)
+      .where(and(eq(contacts.source, "gohighlevel"), eq(contacts.externalId, "c1")));
+
+    expect(alice).toMatchObject({
+      companyName: "Martin Traiteur",
+      website: "https://martin-traiteur.fr",
+      city: "Lyon",
+      stateRegion: "Auvergne-Rhône-Alpes",
+      country: "FR",
+      postalCode: "69002",
+      streetAddress: "3 rue de la Ré",
+      // The customer's own words, trimmed but never mapped onto anything of ours.
+      leadSource: "Salon des Mariages",
+      contactType: "customer",
+      tags: ["wedding", "vip"],
+      // FIRST touch, and never the ip or the user agent sitting beside it.
+      originMedium: "order_form",
+      originUrl: "https://sites.leadconnectorhq.com/preview/x",
+      originReferrer: "https://app.gohighlevel.com",
+    });
+    expect(alice.sourceCreatedAt?.toISOString()).toBe("2026-08-19T15:23:58.577Z");
+    expect(alice.sourceUpdatedAt?.toISOString()).toBe("2026-08-20T09:00:00.000Z");
+  });
+
+  it("states what GoHighLevel does not hold as absent, never as a default", async () => {
+    await seedConnection();
+    await runSyncPass();
+
+    const [carol] = await db
+      .select()
+      .from(contacts)
+      .where(and(eq(contacts.source, "gohighlevel"), eq(contacts.externalId, "c3")));
+
+    expect(carol.companyName).toBeNull();
+    expect(carol.website).toBeNull();
+    expect(carol.city).toBeNull();
+    expect(carol.country).toBeNull();
+    expect(carol.leadSource).toBeNull();
+    expect(carol.contactType).toBeNull();
+    expect(carol.originMedium).toBeNull();
+    expect(carol.sourceCreatedAt).toBeNull();
+    // No tags FIELD at all reads null; an empty tags field reads [] — those differ.
+    expect(carol.tags).toBeNull();
+
+    const [bob] = await db
+      .select()
+      .from(contacts)
+      .where(and(eq(contacts.source, "gohighlevel"), eq(contacts.externalId, "c2")));
+    expect(bob.tags).toEqual([]);
+    // Company with no email: the whole reason this exists.
+    expect(bob.companyName).toBe("Durand SARL");
+  });
+
+  it("serves the company and the provenance on the brand's contacts read", async () => {
+    await seedConnection();
+    await runSyncPass();
+
+    const app = express();
+    app.use(express.json());
+    app.use(gohighlevelRoutes);
+
+    const res = await request(app)
+      .get(`/orgs/gohighlevel/contacts?brandId=${BRAND}`)
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", ORG)
+      .set("x-user-id", USER);
+
+    expect(res.status).toBe(200);
+    const alice = res.body.contacts.find((c: { externalId: string }) => c.externalId === "c1");
+    expect(alice).toMatchObject({
+      primaryEmail: "alice@example.com",
+      company: { name: "Martin Traiteur", website: "https://martin-traiteur.fr" },
+      location: {
+        city: "Lyon",
+        stateRegion: "Auvergne-Rhône-Alpes",
+        country: "FR",
+        postalCode: "69002",
+        streetAddress: "3 rue de la Ré",
+      },
+      record: {
+        type: "customer",
+        leadSource: "Salon des Mariages",
+        tags: ["wedding", "vip"],
+        origin: {
+          medium: "order_form",
+          url: "https://sites.leadconnectorhq.com/preview/x",
+          referrer: "https://app.gohighlevel.com",
+        },
+      },
+    });
+    // The raw attribution blob's ip and user agent stay in bronze.
+    expect(JSON.stringify(alice)).not.toContain("151.158.212.9");
+
+    const carol = res.body.contacts.find((c: { externalId: string }) => c.externalId === "c3");
+    expect(carol.company).toEqual({ name: null, website: null });
+    expect(carol.record.tags).toBeNull();
+    expect(carol.record.origin).toEqual({ medium: null, url: null, referrer: null });
   });
 
   it("groups opportunities the way GoHighLevel groups them, and the counts add up", async () => {

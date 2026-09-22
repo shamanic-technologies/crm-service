@@ -220,7 +220,15 @@ router.get(
 
 // ─── GET /orgs/gohighlevel/contacts?brandId= ─────────────────────────────────
 
-/** The brand's GoHighLevel contacts, as mirrored. */
+/**
+ * The brand's GoHighLevel contacts, as mirrored.
+ *
+ * Serves what GoHighLevel actually holds about the person: identity, the company
+ * they are attached to, where they are, and where the record came from. A field
+ * the vendor does not hold reads `null` — absent is stated, never defaulted, and
+ * never filled with a guess. Free-text values (`leadSource`, `contactType`,
+ * `tags`) are the customer's own words, unmapped.
+ */
 router.get(
   "/orgs/gohighlevel/contacts",
   apiKeyAuth,
@@ -245,6 +253,21 @@ router.get(
         lastName: contacts.lastName,
         unsubscribed: contacts.unsubscribed,
         lastRebuiltAt: contacts.lastRebuiltAt,
+        companyName: contacts.companyName,
+        website: contacts.website,
+        city: contacts.city,
+        stateRegion: contacts.stateRegion,
+        country: contacts.country,
+        postalCode: contacts.postalCode,
+        streetAddress: contacts.streetAddress,
+        leadSource: contacts.leadSource,
+        contactType: contacts.contactType,
+        tags: contacts.tags,
+        originMedium: contacts.originMedium,
+        originUrl: contacts.originUrl,
+        originReferrer: contacts.originReferrer,
+        sourceCreatedAt: contacts.sourceCreatedAt,
+        sourceUpdatedAt: contacts.sourceUpdatedAt,
       })
       .from(contacts)
       .where(
@@ -258,7 +281,46 @@ router.get(
       .limit(limit)
       .offset(offset);
 
-    res.json({ contacts: rows });
+    // Grouped on the way out so a reader can tell identity from company, from
+    // place, from provenance at a glance. Every pre-existing key keeps its name
+    // and position, so nothing already served changes shape.
+    res.json({
+      contacts: rows.map((row) => ({
+        id: row.id,
+        brandId: row.brandId,
+        externalId: row.externalId,
+        primaryEmail: row.primaryEmail,
+        phoneE164: row.phoneE164,
+        fullName: row.fullName,
+        firstName: row.firstName,
+        lastName: row.lastName,
+        unsubscribed: row.unsubscribed,
+        lastRebuiltAt: row.lastRebuiltAt,
+        company: {
+          name: row.companyName,
+          website: row.website,
+        },
+        location: {
+          city: row.city,
+          stateRegion: row.stateRegion,
+          country: row.country,
+          postalCode: row.postalCode,
+          streetAddress: row.streetAddress,
+        },
+        record: {
+          type: row.contactType,
+          leadSource: row.leadSource,
+          tags: row.tags,
+          createdAt: row.sourceCreatedAt,
+          updatedAt: row.sourceUpdatedAt,
+          origin: {
+            medium: row.originMedium,
+            url: row.originUrl,
+            referrer: row.originReferrer,
+          },
+        },
+      })),
+    });
   },
 );
 

@@ -363,7 +363,29 @@ request from that header.
 
 Deterministic, **zero LLM**. The data arrives structured; reading it needs no model.
 
-- Contacts land in the SHARED `contacts` table with `source = 'gohighlevel'`.
+- Contacts land in the SHARED `contacts` table with `source = 'gohighlevel'`,
+  carrying identity PLUS what GoHighLevel holds about the person's company and
+  about where the record came from. Identity alone cannot answer "is this CRM
+  record the same human as one of our leads": measured in prod on the first
+  customer's 2,694 contacts, only 420 carry an email while **455 carry a company
+  name and 454 of those 455 carry NO email** — so for those 454 the company is
+  the only non-name signal that exists anywhere, and that set is almost entirely
+  disjoint from the email set. The columns are `company_name`, `website`, `city`,
+  `state_region`, `country`, `postal_code`, `street_address`, `lead_source`,
+  `contact_type`, `tags`, `origin_medium`/`origin_url`/`origin_referrer`,
+  `source_created_at`, `source_updated_at`.
+  - **Every one is nullable and written only when the vendor reports it.** Absent
+    stays NULL — never a default, never a guess. `tags` distinguishes NULL (no
+    tags field at all) from `[]` (an empty one); those are different facts.
+  - **`lead_source`, `contact_type` and `tags` are the customer's own free text**
+    and are served verbatim, mapped onto no vocabulary of ours — the same rule
+    the pipeline stage names live under.
+  - `origin_*` is the FIRST-touch attribution entry. The same entry also carries
+    an IP and a user agent; those stay in bronze and are never lifted or served.
+  - The columns are generic on purpose (a CSV export names a company too), but
+    today only the GoHighLevel derivation populates them. They are additive: a
+    pre-existing row reads NULL everywhere and nothing already served changed
+    shape.
   - **Natural key = `(org_id, brand_id, source, external_id)`** — GoHighLevel's
     own contact id. NULLs are distinct, so CSV and Matrix rows are exempt.
   - ⚠️ **The CSV email dedup index is now PARTIAL, `WHERE source = 'csv'`.** That
@@ -428,7 +450,13 @@ swallowed, and one broken connection does not stop the others.
   iterate, so the syncing stops.
 - `GET /orgs/gohighlevel/connections?brandId=` — health (`status`, `synced`,
   `lastSyncedAt`, `lastError`).
-- `GET /orgs/gohighlevel/contacts?brandId=&limit=&offset=`.
+- `GET /orgs/gohighlevel/contacts?brandId=&limit=&offset=` — identity, plus
+  `company`, `location` and `record` (type, leadSource, tags, createdAt,
+  updatedAt, origin). Grouped on the way out so identity, company, place and
+  provenance are distinguishable at a glance; every pre-existing key keeps its
+  name. Backfilling the columns onto contacts mirrored before they existed needs
+  no vendor call — `POST /internal/gohighlevel/rebuild` re-derives silver from
+  the mirror alone.
 - `GET /orgs/gohighlevel/opportunities?brandId=` — the pipeline, grouped by
   pipeline then stage. Opportunities in a pipeline we have not mirrored come back
   under `ungrouped` rather than being dropped, so the counts add up to what the

@@ -32,7 +32,7 @@ describe("deriveContact", () => {
       lastName: "Deo",
       dnd: false,
     });
-    expect(contact).toEqual({
+    expect(contact).toMatchObject({
       externalId: "ocQHyuzHvysMo5N5VsXc",
       primaryEmail: "john.deo@gmail.com",
       phoneE164: "+33612345678",
@@ -41,6 +41,99 @@ describe("deriveContact", () => {
       fullName: "John Deo",
       unsubscribed: false,
     });
+  });
+
+  it("lifts the company, the place and the record's provenance", () => {
+    // The shape of a real prod record (2026-09-22), trimmed to the fields read.
+    const contact = deriveContact({
+      id: "V5m8Ae7nFZ4wdNmKR3EN",
+      email: "shahab@docdinners.com",
+      companyName: "Doc",
+      website: "https://docdinners.com",
+      city: "Lahore",
+      state: "Punjab",
+      country: "PK",
+      postalCode: "46000",
+      address1: "12 Mall Road",
+      source: "STripe Test ",
+      type: "lead",
+      tags: ["vip", "trial"],
+      dateAdded: "2026-08-19T15:23:58.577Z",
+      dateUpdated: "2026-08-19T15:24:06.360Z",
+      attributions: [
+        { isLast: true, medium: "referral", url: "https://later", referrer: "https://later.ref" },
+        {
+          isFirst: true,
+          medium: "order_form",
+          url: "https://sites.leadconnectorhq.com/preview/x",
+          referrer: "https://app.gohighlevel.com",
+          ip: "151.158.212.9",
+          userAgent: "Mozilla/5.0",
+        },
+      ],
+    });
+    expect(contact).toMatchObject({
+      companyName: "Doc",
+      website: "https://docdinners.com",
+      city: "Lahore",
+      stateRegion: "Punjab",
+      country: "PK",
+      postalCode: "46000",
+      streetAddress: "12 Mall Road",
+      // Trimmed but otherwise verbatim — the customer's own words, unmapped.
+      leadSource: "STripe Test",
+      contactType: "lead",
+      tags: ["vip", "trial"],
+      // FIRST touch, not the last one, and never the ip or the user agent.
+      originMedium: "order_form",
+      originUrl: "https://sites.leadconnectorhq.com/preview/x",
+      originReferrer: "https://app.gohighlevel.com",
+    });
+    expect(contact?.sourceCreatedAt?.toISOString()).toBe("2026-08-19T15:23:58.577Z");
+    expect(contact?.sourceUpdatedAt?.toISOString()).toBe("2026-08-19T15:24:06.360Z");
+  });
+
+  it("states absence rather than defaulting it", () => {
+    const contact = deriveContact({
+      id: "a",
+      companyName: null,
+      website: "",
+      city: "   ",
+      country: undefined,
+    });
+    expect(contact).toMatchObject({
+      companyName: null,
+      website: null,
+      city: null,
+      stateRegion: null,
+      country: null,
+      postalCode: null,
+      streetAddress: null,
+      leadSource: null,
+      contactType: null,
+      // No tags FIELD at all is null; an empty tags field is [] — those differ.
+      tags: null,
+      originMedium: null,
+      originUrl: null,
+      originReferrer: null,
+      sourceCreatedAt: null,
+      sourceUpdatedAt: null,
+    });
+  });
+
+  it("distinguishes an empty tag list from no tag field", () => {
+    expect(deriveContact({ id: "a", tags: [] })?.tags).toEqual([]);
+    expect(deriveContact({ id: "a" })?.tags).toBeNull();
+  });
+
+  it("takes the first attribution when none is flagged isFirst", () => {
+    const contact = deriveContact({
+      id: "a",
+      attributions: [{ medium: "paid", pageUrl: "https://p" }, { medium: "organic" }],
+    });
+    expect(contact?.originMedium).toBe("paid");
+    // `pageUrl` is GoHighLevel's other spelling of the same thing.
+    expect(contact?.originUrl).toBe("https://p");
   });
 
   it("carries GoHighLevel's do-not-disturb flag through as unsubscribed", () => {

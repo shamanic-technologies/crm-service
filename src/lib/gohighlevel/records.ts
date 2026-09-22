@@ -55,13 +55,63 @@ export interface DerivedContact {
   fullName: string | null;
   /** GoHighLevel's do-not-disturb flag — the customer's own opt-out. */
   unsubscribed: boolean;
+
+  companyName: string | null;
+  website: string | null;
+
+  city: string | null;
+  stateRegion: string | null;
+  country: string | null;
+  postalCode: string | null;
+  streetAddress: string | null;
+
+  leadSource: string | null;
+  contactType: string | null;
+  /** Verbatim labels. `null` when GoHighLevel reports no tags field at all. */
+  tags: string[] | null;
+
+  originMedium: string | null;
+  originUrl: string | null;
+  originReferrer: string | null;
+
+  sourceCreatedAt: Date | null;
+  sourceUpdatedAt: Date | null;
+}
+
+/**
+ * The FIRST-touch attribution entry, if GoHighLevel recorded one.
+ *
+ * The array carries one entry flagged `isFirst` and one flagged `isLast`; when
+ * neither flag is present the first element is the earliest, which is the order
+ * GoHighLevel returns them in. Only the three fields naming WHERE the person came
+ * from are read — the same entries also carry IP addresses and user agents, which
+ * stay in bronze and are not lifted into silver.
+ */
+function firstAttribution(value: unknown): Record<string, unknown> | null {
+  if (!Array.isArray(value)) return null;
+  const entries = value.filter(
+    (e): e is Record<string, unknown> => !!e && typeof e === "object" && !Array.isArray(e),
+  );
+  if (entries.length === 0) return null;
+  return entries.find((e) => e.isFirst === true) ?? entries[0];
+}
+
+/** Verbatim string labels. Non-string members are dropped, nothing is coerced. */
+function tagList(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  return value.map(str).filter((t): t is string => t !== null);
 }
 
 /**
  * A GoHighLevel contact as a silver contact.
  *
- * The full record stays verbatim in bronze, so only the canonical identity
- * fields are lifted here — nothing is invented and nothing is re-interpreted.
+ * The full record stays verbatim in bronze; what is lifted here is identity plus
+ * what GoHighLevel holds about the person's COMPANY and about where the record
+ * came from. Nothing is invented and nothing is re-interpreted: a field the
+ * vendor does not hold reads null, free-text values (`source`, `type`, tags) are
+ * carried through in the customer's own words, and no value is mapped onto any
+ * vocabulary of ours.
+ *
  * `dnd` is carried through as `unsubscribed` because it IS the customer's own
  * do-not-contact mark on that person.
  */
@@ -77,6 +127,8 @@ export function deriveContact(payload: Record<string, unknown>): DerivedContact 
 
   const phone = str(payload.phone);
 
+  const attribution = firstAttribution(payload.attributions);
+
   return {
     externalId,
     primaryEmail: email ? email.toLowerCase() : null,
@@ -87,6 +139,26 @@ export function deriveContact(payload: Record<string, unknown>): DerivedContact 
     lastName: last,
     fullName,
     unsubscribed: payload.dnd === true,
+
+    companyName: str(payload.companyName),
+    website: str(payload.website),
+
+    city: str(payload.city),
+    stateRegion: str(payload.state),
+    country: str(payload.country),
+    postalCode: str(payload.postalCode),
+    streetAddress: str(payload.address1),
+
+    leadSource: str(payload.source),
+    contactType: str(payload.type),
+    tags: tagList(payload.tags),
+
+    originMedium: attribution ? str(attribution.medium) : null,
+    originUrl: attribution ? (str(attribution.url) ?? str(attribution.pageUrl)) : null,
+    originReferrer: attribution ? str(attribution.referrer) : null,
+
+    sourceCreatedAt: date(payload.dateAdded),
+    sourceUpdatedAt: date(payload.dateUpdated),
   };
 }
 
