@@ -30,6 +30,40 @@ export function parseBrandIds(raw: string | undefined): string[] {
     .filter(Boolean);
 }
 
+/** A v4-shaped uuid. Anything else is not a brand id and is not attributed. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Attribute a brand to this request's run.
+ *
+ * The x-brand-id identity header is authoritative when present, but the
+ * api-service gateway only ever promotes `brandId` to that header from a header
+ * or a QUERY param — never from a request BODY and never from a path param. So
+ * every crm-service route whose brand lives in the body (GoHighLevel / Matrix
+ * connection create, serve-next) arrives with no brand at all.
+ *
+ * Rather than make each of those callers send an extra header (the consumer-side
+ * patch that was already applied once, for the CSV upload, and which every route
+ * added since has had to inherit), read the brand off the request the caller
+ * already sends. `express.json()` runs app-wide before any router, so the parsed
+ * body is available here. A multipart upload's body is NOT parsed yet (multer
+ * runs inside the route), so that one keeps using its header.
+ *
+ * Attribution is best-effort: a route whose brand is only reachable via a path
+ * param + a DB lookup gets no brand, and its run opens unattributed rather than
+ * failing.
+ */
+export function resolveBrandIds(req: Request): string[] {
+  const fromHeader = parseBrandIds(req.headers["x-brand-id"] as string | undefined);
+  if (fromHeader.length) return fromHeader;
+
+  const body = req.body as Record<string, unknown> | undefined;
+  for (const candidate of [body?.brandId, req.query?.brandId]) {
+    if (typeof candidate === "string" && UUID_RE.test(candidate)) return [candidate];
+  }
+  return [];
+}
+
 /** apiKeyAuth — validates x-api-key on every /public, /internal, /orgs request. */
 export function apiKeyAuth(req: Request, res: Response, next: NextFunction) {
   const provided = req.headers["x-api-key"] as string | undefined;
@@ -95,7 +129,7 @@ export function requireOrg(taskName: string) {
     req.orgId = orgId;
     if (req.headers["x-user-id"]) req.userId = req.headers["x-user-id"] as string;
     req.parentRunId = (req.headers["x-run-id"] as string | undefined) ?? undefined;
-    req.brandIds = parseBrandIds(req.headers["x-brand-id"] as string | undefined);
+    req.brandIds = resolveBrandIds(req);
 
     if (await attachRun(req, res, taskName)) next();
   };
@@ -115,7 +149,7 @@ export function requireOrgAndUser(taskName: string) {
     req.orgId = orgId;
     req.userId = userId;
     req.parentRunId = (req.headers["x-run-id"] as string | undefined) ?? undefined;
-    req.brandIds = parseBrandIds(req.headers["x-brand-id"] as string | undefined);
+    req.brandIds = resolveBrandIds(req);
 
     if (await attachRun(req, res, taskName)) next();
   };

@@ -434,6 +434,44 @@ swallowed, and one broken connection does not stop the others.
   under `ungrouped` rather than being dropped, so the counts add up to what the
   customer sees in GoHighLevel.
 
+## An org-scoped run must open even when the request carries NO brand
+
+Run tracking is mandatory here, and `attachRun` runs BEFORE every `/orgs/*`
+handler — so anything that makes run creation fail kills the route without the
+handler running once. runs-service validates the body-level `brandIds` as
+min-1-WHEN-PRESENT (its own schema marks the field deprecated in favour of the
+`x-brand-id` header), so sending `[]` is a hard 400 and the route answers
+`502 "run tracking unavailable"`. The customer sees a generic failure and no
+diagnostic about their actual input.
+
+That fires on EVERY org route whose brand lives in the request BODY or in a
+PATH PARAM, because the api-service gateway only promotes `brandId` to the
+identity header from a header or a query param — never from a body. GoHighLevel
+connection create / pause / resume / delete, Matrix connection create and
+update, and `serve-next` were all 100% broken in prod on 2026-09-21 for exactly
+this reason.
+
+Two rules, both in `src/lib/runs-client.ts` + `src/middleware/auth.ts`:
+
+- **`createRun` OMITS `brandIds` entirely when there is no brand — never `[]`.**
+  A brand-less org-scoped request is legitimate and must still open its run.
+- **`resolveBrandIds()` reads the brand off the request the caller ALREADY
+  sends**: `x-brand-id` first, then a uuid-shaped `brandId` in the parsed JSON
+  body, then the query. `express.json()` runs app-wide before any router, so the
+  body is available in middleware. A multipart upload's body is not parsed yet
+  (multer runs inside the route), so that route keeps its header.
+
+Attribution is best-effort and the route working is not: a path-param route
+whose brand needs a DB lookup opens an UNATTRIBUTED run rather than failing. A
+genuine runs-service outage still fails loud with a 502 — that is unchanged.
+
+Do NOT fix a recurrence of this by having one more caller send `x-brand-id`.
+That consumer-side patch already happened once (distribute.you#2968, the CSV
+upload, 2026-07) and every route added since inherited the landmine. The tests
+in `tests/unit/run-tracking.test.ts` assert what goes ON THE WIRE against a fake
+runs-service that reproduces the real min-1-when-present validation — a suite
+that mocks the run client cannot see this bug at all.
+
 ## Test fixture ids must be REAL v4 uuids, not `0000`-padded placeholders
 
 `z.string().uuid()` on zod 4 validates the version and variant nibbles, so a

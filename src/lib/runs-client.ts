@@ -145,18 +145,29 @@ export interface CreateRunParams {
 /**
  * Create an org-scoped run. parentRunId is sent as x-run-id → becomes
  * parentRunId on the runs-service row.
+ *
+ * ⚠️ `brandIds` is OMITTED entirely when we have no brand, never sent as `[]`.
+ * runs-service validates the body-level list as min-1-WHEN-PRESENT (and its own
+ * schema marks it deprecated in favour of the x-brand-id header), so an empty
+ * array is a 400 — `{"fieldErrors":{"brandIds":["Too small: expected array to
+ * have >=1 items"]}}` — which fails run creation and therefore the whole
+ * request, before the route handler ever runs. A legitimately brand-less
+ * org-scoped request (a brand that lives in the BODY or in a path param, which
+ * the gateway never promotes to the identity header) must still be able to open
+ * its run.
  */
 export async function createRun(params: CreateRunParams): Promise<Run> {
+  const brandIds = params.brandIds?.length ? params.brandIds : undefined;
   return runsRequest<Run>("/v1/runs", {
     method: "POST",
     identity: {
       orgId: params.orgId,
       userId: params.userId,
       runId: params.parentRunId,
-      brandIds: params.brandIds,
+      brandIds,
     },
     body: {
-      brandIds: params.brandIds,
+      ...(brandIds ? { brandIds } : {}),
       serviceName: params.serviceName,
       taskName: params.taskName,
     },
