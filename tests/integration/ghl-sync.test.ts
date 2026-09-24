@@ -942,6 +942,21 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
     }
   });
 
+  it("observes opportunities mirrored before the history existed, even when nothing moved", async () => {
+    // The production shape: bronze and silver already hold every opportunity,
+    // nothing changes on the next pass, and the history is empty.
+    const connectionId = await seedConnection();
+    await runSyncPass(connectionId);
+    await db.delete(ghlOpportunityHistory);
+
+    const quiet = await runSyncPass(connectionId);
+    expect(quiet.results[0].opportunitiesChanged).toBe(0);
+    expect(quiet.results[0].historyAppended).toBe(6);
+
+    const again = await runSyncPass(connectionId);
+    expect(again.results[0].historyAppended).toBe(0);
+  });
+
   it("decides each stage's meaning once, records the model, and never re-asks", async () => {
     const connectionId = await seedConnection();
     const first = await runSyncPass(connectionId);
