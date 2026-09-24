@@ -509,6 +509,19 @@ in `tests/unit/run-tracking.test.ts` assert what goes ON THE WIRE against a fake
 runs-service that reproduces the real min-1-when-present validation — a suite
 that mocks the run client cannot see this bug at all.
 
+## Every limit/offset list needs a TOTAL order — end the ORDER BY on a unique column
+
+Callers walk these lists page by page (lead-service pages
+`/orgs/gohighlevel/contacts` and hands out `nextOffset` positions into it), and
+Postgres keeps no stable order among TIES across different LIMIT/OFFSET
+windows. A sort on a non-unique column (a name, a timestamp) can serve one row
+on two pages and another on none, silently — nothing errors and the counts look
+plausible. So every paged read ends its `orderBy` with a unique column
+(`external_id` then `id` for GoHighLevel contacts, `id` elsewhere), keeping the
+human-facing sort first. Measured before the fix (v0.4.1): walking 23 tied rows
+in pages of 1 returned 21 distinct. `tests/integration/ghl-sync.test.ts` pins it
+by walking in pages of 1, 7 and 1000.
+
 ## Test fixture ids must be REAL v4 uuids, not `0000`-padded placeholders
 
 `z.string().uuid()` on zod 4 validates the version and variant nibbles, so a
