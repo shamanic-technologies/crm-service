@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../db/index.js";
 import { contacts, conversations, matrixConnections, matrixLeads } from "../db/schema.js";
@@ -219,7 +219,8 @@ router.get(
       .innerJoin(conversations, eq(conversations.id, matrixLeads.conversationId))
       .innerJoin(contacts, eq(contacts.id, matrixLeads.contactId))
       .where(and(...filters))
-      .orderBy(desc(conversations.lastMessageAt))
+      // `id` breaks ties so the order is total and limit/offset paging is stable.
+      .orderBy(desc(conversations.lastMessageAt), asc(matrixLeads.id))
       .limit(limit)
       .offset(offset);
 

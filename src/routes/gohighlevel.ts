@@ -278,7 +278,14 @@ router.get(
           eq(contacts.source, GHL_SOURCE),
         ),
       )
-      .orderBy(asc(contacts.fullName))
+      // A TOTAL order, so walking this list with limit/offset visits every
+      // contact exactly once. Names are not unique (and can be null), and
+      // Postgres does not keep ties in the same order across different
+      // LIMIT/OFFSET windows, so a name-only sort could serve one contact on
+      // two pages and another on none. GoHighLevel's own contact id is unique
+      // per (org, brand, source) and survives a rebuild; the row id is the
+      // last resort for a null external id.
+      .orderBy(asc(contacts.fullName), asc(contacts.externalId), asc(contacts.id))
       .limit(limit)
       .offset(offset);
 
