@@ -716,6 +716,59 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
     expect(resumed.results).toHaveLength(1);
   });
 
+  it("the contacts list has a total order: paging visits every contact exactly once", async () => {
+    // Heavy name ties (and a null name) are exactly what a name-only sort
+    // cannot page through safely. 3 names over 22 contacts + 1 unnamed.
+    const names = ["Jean Dupont", "Marie Curie", "Paul Martin"];
+    const rows = Array.from({ length: 23 }, (_, i) => ({
+      orgId: ORG,
+      brandId: BRAND,
+      source: "gohighlevel",
+      externalId: `tie-${String(i).padStart(2, "0")}`,
+      fullName: i === 22 ? null : names[i % 3],
+      rawAttributes: {},
+    }));
+    // Inserted in reverse so physical order disagrees with the tie-break.
+    await db.insert(contacts).values([...rows].reverse());
+
+    async function walk(pageSize: number): Promise<string[]> {
+      const seen: string[] = [];
+      for (let offset = 0; ; offset += pageSize) {
+        const res = await request(app())
+          .get(`/orgs/gohighlevel/contacts?brandId=${BRAND}&limit=${pageSize}&offset=${offset}`)
+          .set("x-api-key", API_KEY)
+          .set("x-org-id", ORG)
+          .set("x-user-id", USER);
+        expect(res.status).toBe(200);
+        const page = res.body.contacts as { externalId: string }[];
+        seen.push(...page.map((c) => c.externalId));
+        if (page.length < pageSize) return seen;
+      }
+    }
+
+    for (const size of [1, 7, 1000]) {
+      const seen = await walk(size);
+      expect(seen).toHaveLength(23);
+      expect(new Set(seen).size).toBe(23);
+    }
+
+    // Still sorted by name for a human reader; ties broken by GoHighLevel's id.
+    const all = await walk(1000);
+    const expected = [...rows]
+      .sort((a, b) =>
+        a.fullName === b.fullName
+          ? a.externalId.localeCompare(b.externalId)
+          : a.fullName === null
+            ? 1
+            : b.fullName === null
+              ? -1
+              : a.fullName.localeCompare(b.fullName),
+      )
+      .map((r) => r.externalId);
+    expect(all).toEqual(expected);
+    expect(await walk(7)).toEqual(expected);
+  });
+
   it("every /orgs read is scoped to the calling org", async () => {
     await seedConnection();
     await runSyncPass();

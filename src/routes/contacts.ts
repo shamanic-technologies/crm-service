@@ -1,7 +1,7 @@
 import { Router } from "express";
 import multer from "multer";
 import { createHash } from "crypto";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../db/index.js";
 import { contactUploads, contactRowsRaw, contacts, NewContactRowRaw } from "../db/schema.js";
@@ -288,7 +288,8 @@ router.get(
       .select()
       .from(contacts)
       .where(and(eq(contacts.orgId, req.orgId!), eq(contacts.brandId, brandParse.data)))
-      .orderBy(desc(contacts.lastRebuiltAt))
+      // `id` breaks ties so the order is total and limit/offset paging is stable.
+      .orderBy(desc(contacts.lastRebuiltAt), asc(contacts.id))
       .limit(limit)
       .offset(offset);
 
