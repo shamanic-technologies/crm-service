@@ -57,3 +57,17 @@ export function leadReadingChatConfig(): ChatConfig {
     process.env[LEAD_READING_CHAT_CONFIG_ENV],
   );
 }
+
+/**
+ * The config used to decide what each of a customer's GoHighLevel pipeline
+ * stages MEANS in our funnel vocabulary. One call per sync that finds a stage
+ * name never decided before — the decision is recorded and never re-asked.
+ */
+export const STAGE_MEANING_CHAT_CONFIG_ENV = "CRM_STAGE_MEANING_CHAT_CONFIG";
+
+export function stageMeaningChatConfig(): ChatConfig {
+  return parseChatConfig(
+    STAGE_MEANING_CHAT_CONFIG_ENV,
+    process.env[STAGE_MEANING_CHAT_CONFIG_ENV],
+  );
+}

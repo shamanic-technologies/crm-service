@@ -841,6 +841,112 @@ export const GhlSyncRequestSchema = registry.register(
     .openapi("GhlSyncRequest"),
 );
 
+const FUNNEL_STEP_VALUES = [
+  "meeting_booked",
+  "meeting_attended",
+  "meeting_not_held",
+  "sale",
+  "deal_lost",
+] as const;
+
+export const GhlFunnelEventSchema = registry.register(
+  "GhlFunnelEvent",
+  z
+    .object({
+      step: z.enum(FUNNEL_STEP_VALUES).openapi({
+        description:
+          "The funnel step the CRM evidences. `meeting_not_held` = a scheduled meeting did not " +
+          "take place (no-show or cancelled).",
+      }),
+      occurredAt: z.string().nullable().openapi({
+        description:
+          "When it happened, as GoHighLevel recorded it (ISO 8601). NULL when GoHighLevel gave " +
+          "no date — never a guessed one.",
+      }),
+      dateBasis: z
+        .enum(["booked_at", "scheduled_start", "stage_entered_at", "status_changed_at"])
+        .openapi({
+          description:
+            "Which GoHighLevel date `occurredAt` is: when the appointment was created, its " +
+            "scheduled start, when the opportunity entered the stage, or when its status changed.",
+        }),
+      source: z.enum(["appointment", "stage_entry", "won_status", "lost_status"]).openapi({
+        description:
+          "Where the evidence came from: a calendar appointment, an opportunity entering a " +
+          "stage whose recorded meaning is this step, or the opportunity's won / lost status.",
+      }),
+      sourceId: z.string().openapi({ description: "GoHighLevel's appointment or opportunity id." }),
+      detail: z.object({
+        calendarName: z.string().nullable(),
+        appointmentStatus: z.string().nullable().openapi({
+          description: "GoHighLevel's appointment status, verbatim (appointments only).",
+        }),
+        scheduledStart: z.string().nullable(),
+        pipelineName: z.string().nullable(),
+        stageName: z.string().nullable().openapi({
+          description: "The customer's own stage name, verbatim (stage entries only).",
+        }),
+        observedAt: z.string().nullable().openapi({
+          description: "When crm-service observed the stage / status (opportunity evidence only).",
+        }),
+      }),
+    })
+    .openapi("GhlFunnelEvent"),
+);
+
+export const GhlFunnelEventsResponseSchema = registry.register(
+  "GhlFunnelEventsResponse",
+  z
+    .object({
+      brandId: z.string().uuid(),
+      contacts: z.array(
+        z.object({
+          contactId: z.string().uuid().openapi({
+            description: "crm-service contact id — the `id` served by /orgs/gohighlevel/contacts.",
+          }),
+          externalContactId: z.string(),
+          primaryEmail: z.string().nullable(),
+          fullName: z.string().nullable(),
+          events: z.array(GhlFunnelEventSchema).openapi({
+            description: "Oldest first; events with an unknown date last.",
+          }),
+        }),
+      ),
+      totalContacts: z.number().int().openapi({
+        description: "Contacts of the brand carrying at least one event (the paging population).",
+      }),
+      limit: z.number().int(),
+      offset: z.number().int(),
+      nextOffset: z.number().int().nullable(),
+      undecidedStages: z.number().int().openapi({
+        description:
+          "Stage names observed but not yet given a meaning; their entries appear once decided " +
+          "(the next sync decides them).",
+      }),
+    })
+    .openapi("GhlFunnelEventsResponse"),
+);
+
+export const GhlStageMeaningsResponseSchema = registry.register(
+  "GhlStageMeaningsResponse",
+  z
+    .object({
+      stageMeanings: z.array(
+        z.object({
+          pipelineId: z.string().nullable(),
+          pipelineName: z.string().nullable(),
+          stageId: z.string(),
+          stageName: z.string(),
+          meaning: z.enum([...FUNNEL_STEP_VALUES, "none"]),
+          model: z.string().openapi({ description: "The model that decided it." }),
+          runId: z.string(),
+          decidedAt: z.string(),
+        }),
+      ),
+    })
+    .openapi("GhlStageMeaningsResponse"),
+);
+
 export const GhlSyncAcceptedResponseSchema = registry.register(
   "GhlSyncAcceptedResponse",
   z
@@ -983,6 +1089,48 @@ registry.registerPath({
     200: {
       description: "Pipelines",
       content: { "application/json": { schema: GhlOpportunitiesResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/gohighlevel/funnel-events",
+  summary: "The dated funnel events a brand's GoHighLevel CRM evidences, per contact",
+  description:
+    "Booked / attended / not-held meetings from calendar appointments, stage entries whose " +
+    "recorded meaning is a funnel step, and won / lost statuses — each dated by GoHighLevel's own " +
+    "timestamp (null when it gave none) and naming its source. Paged over contacts in a total " +
+    "order; pass `contactId` for one contact. Stage history accumulates from the first sync " +
+    "onwards: the past before it is not reconstructed.",
+  request: {
+    query: z.object({
+      brandId: z.string().uuid(),
+      contactId: z.string().uuid().optional(),
+      limit: z.coerce.number().int().optional().openapi({ description: "Contacts per page, max 1000." }),
+      offset: z.coerce.number().int().optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Funnel events",
+      content: { "application/json": { schema: GhlFunnelEventsResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/gohighlevel/stage-meanings",
+  summary: "What each of a brand's GoHighLevel pipeline stages was decided to mean",
+  description:
+    "Decided once per stage name by an LLM (through chat-service) and recorded with the model " +
+    "that produced it; re-decided only when a new stage name appears.",
+  request: { query: z.object({ brandId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Stage meanings",
+      content: { "application/json": { schema: GhlStageMeaningsResponseSchema } },
     },
   },
 });

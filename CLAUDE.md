@@ -10,7 +10,7 @@ feed the same registry, both layered bronze/silver/gold:
 |--------|-----------|-----------------|-----------|
 | `csv`    | OUTBOUND | a client's own B2C CRM export, uploaded as a file | YES — feeds `serve-next` → human-service → cold email |
 | `matrix` | INBOUND  | direct messages the client RECEIVED on WhatsApp / Telegram / Discord, mirrored into Matrix | NEVER — these people wrote first and are already in conversation |
-| `gohighlevel` | MIRROR | the client's live GoHighLevel CRM: their contacts and their sales pipeline, read-only | NEVER — these are the client's own people, already theirs |
+| `gohighlevel` | MIRROR | the client's live GoHighLevel CRM: their contacts, sales pipeline and calendar appointments, read-only | NEVER — these are the client's own people, already theirs |
 
 As a CSV lead-provider it is a sibling of `apollo-service` / `apify-service`.
 
@@ -33,12 +33,14 @@ completion routed through chat-service `POST /complete`, which self-declares its
 LLM cost against the run id crm-service forwards. crm-service imports no LLM SDK
 and holds no provider key, so no costs-service catalog row is needed.
 
-There are exactly TWO such calls, both once-per-artifact, never per row:
+There are exactly THREE such calls, all once-per-artifact, never per row:
 1. column typing, one per CSV upload;
-2. thread reading, one per CHANGED Matrix conversation (watermark-gated).
+2. thread reading, one per CHANGED Matrix conversation (watermark-gated);
+3. stage meaning, one per GoHighLevel sync that finds a pipeline stage NAME
+   never decided before (recorded, so every later sync makes zero calls).
 
-The GoHighLevel source adds NEITHER. Its data arrives already structured, so
-deriving it is pure code — no model, no metered call, no catalogue row.
+Everything else GoHighLevel sends arrives already structured, so deriving it is
+pure code — no model, no metered call, no catalogue row.
 
 **Models are named CONFIGS, not literals** (`@ src/lib/chat-config.ts`). A config
 is an env var holding `"<provider>/<model>"`, so pointing a task at a cheaper
@@ -470,6 +472,52 @@ swallowed, and one broken connection does not stop the others.
   pipeline then stage. Opportunities in a pipeline we have not mirrored come back
   under `ungrouped` rather than being dropped, so the counts add up to what the
   customer sees in GoHighLevel.
+- `GET /orgs/gohighlevel/funnel-events?brandId=&contactId=&limit=&offset=` — the
+  DATED funnel events the CRM evidences, grouped per crm-service contact (the
+  `id` lead-service pairs on), paged over contacts in a total order. See below.
+- `GET /orgs/gohighlevel/stage-meanings?brandId=` — the recorded stage decisions.
+
+### Funnel evidence — appointments, stage history, stage meanings
+
+The CRM knows things our funnel does not (a meeting BOOKED, ATTENDED or not, a
+deal WON). This is where those facts become dated events lead-service can read.
+lead-service never learns a GoHighLevel stage name; this service owns the
+customer's vocabulary.
+
+- **Appointments** — bronze `kind='calendar'` + `kind='appointment'`, silver
+  `ghl_appointments`. Read per calendar via `GET /calendars/events` (Version
+  `2021-04-15`), 2018 → ~13 months ahead in 180-day windows, de-duplicated on
+  GoHighLevel's id. NOT the per-contact appointments read: it serves zone-less
+  wall-clock times, and a zone-less time is stored NULL, never parsed in the
+  server's zone. `booked_at` = `dateAdded`, `starts_at` = `startTime`, `status` =
+  GoHighLevel's fixed appointment vocabulary, verbatim.
+- **Opportunity history** — `ghl_opportunity_history`, APPEND-ONLY. GoHighLevel
+  keeps no stage history (only the current stage + `lastStageChangeAt` /
+  `lastStatusChangeAt`), so this accumulates it from the first sync onwards. A
+  row is appended when (value, GoHighLevel's change date) differs from the
+  latest row of that kind — a re-sync appends nothing. `changed_at` is
+  GoHighLevel's date or NULL, never our observation time. It cannot be rebuilt
+  from bronze (bronze keeps the latest payload only): it is a record, like
+  bronze. The past before the first sync is lost and is NOT reconstructed.
+- **Stage meanings** — `ghl_stage_meanings`, keyed (connection, stage id, stage
+  NAME). An LLM decides (chat-service, `CRM_STAGE_MEANING_CHAT_CONFIG`) which of
+  `meeting_booked | meeting_attended | meeting_not_held | sale | deal_lost |
+  none` a stage means, and the decision is recorded with its model and run.
+  **No stage name is ever mapped in code** — no string matching, no keyword
+  list; the recorded decision is the only source. Re-decided only when a NEW
+  name appears (a rename is a new statement by the customer). An answer that
+  skips, duplicates or invents a meaning fails the sync loud.
+- **The events** (`src/lib/gohighlevel/funnel-events.ts`), computed on read:
+  appointment → `meeting_booked` at `booked_at`; appointment `showed` →
+  `meeting_attended`, `noshow`/`cancelled` → `meeting_not_held`, both at the
+  scheduled start; `invalid` → nothing. A history stage row whose meaning is not
+  `none` → that step at `changed_at` (`stage_entry`). Status `won` / `lost` →
+  `sale` / `deal_lost` at the status change date. Mapping GoHighLevel's FIXED
+  status vocabularies in code is fine; mapping the customer's free-text stage
+  names is not. Each event carries `occurredAt` (null when GoHighLevel gave no
+  date), `dateBasis` naming which date it is, `source`, and GoHighLevel's id.
+  The same fact can be evidenced twice (a calendar booking AND a "Booked" stage)
+  — both are served, with their sources; the consumer picks.
 
 ## An org-scoped run must open even when the request carries NO brand
 
@@ -559,8 +607,10 @@ run separately. Do not read the chained failure as a signal about your change.
 `CRM_SERVICE_DATABASE_URL`, `CRM_SERVICE_API_KEY`, `RUNS_SERVICE_URL`, `RUNS_SERVICE_API_KEY`,
 `CHAT_SERVICE_URL`, `CHAT_SERVICE_API_KEY`, `MATRIX_HOMESERVER_URL`,
 `MATRIX_ACCESS_TOKEN`, `MATRIX_INGESTION_FLOOR`, `CRM_LEAD_READING_CHAT_CONFIG`,
-`KEY_SERVICE_URL`, `KEY_SERVICE_API_KEY`.
+`CRM_STAGE_MEANING_CHAT_CONFIG`, `KEY_SERVICE_URL`, `KEY_SERVICE_API_KEY`.
 See `.env.example`. The four Matrix ones are REQUIRED for the sync to run at all —
 without them `/internal/matrix/sync` fails loud instead of silently no-op-ing.
 The two `KEY_SERVICE_*` ones are REQUIRED for GoHighLevel — they are how the
 brand's credential is resolved, and crm-service holds no copy of it.
+`CRM_STAGE_MEANING_CHAT_CONFIG` is REQUIRED for a GoHighLevel sync that meets an
+undecided stage — unset, that sync fails loud rather than picking a model.

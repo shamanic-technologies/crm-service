@@ -516,7 +516,7 @@ export const ghlRawRecords = pgTable(
       .notNull()
       .references(() => ghlConnections.id, { onDelete: "cascade" }),
 
-    // 'contact' | 'opportunity' | 'pipeline' — see GHL_RECORD_KINDS.
+    // 'contact' | 'opportunity' | 'pipeline' | 'calendar' | 'appointment' — see GHL_RECORD_KINDS.
     kind: text("kind").notNull(),
     // GoHighLevel's own id for the record. The natural idempotency key.
     externalId: text("external_id").notNull(),
@@ -618,6 +618,153 @@ export const ghlOpportunities = pgTable(
   ],
 );
 
+/**
+ * SILVER — one row per GoHighLevel calendar APPOINTMENT.
+ *
+ * Deterministically derived from the mirrored `kind='appointment'` records.
+ * This is the real, dated source of a booked meeting: `booked_at` is when the
+ * appointment was CREATED in GoHighLevel, `starts_at` is when the meeting is
+ * scheduled, and `status` is GoHighLevel's own fixed appointment vocabulary
+ * (`new | confirmed | cancelled | showed | noshow | invalid`), verbatim.
+ *
+ * `contact_id` links to the silver contact when GoHighLevel named one we have
+ * mirrored; it stays null otherwise rather than inventing an attachment.
+ */
+export const ghlAppointments = pgTable(
+  "ghl_appointments",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => ghlConnections.id, { onDelete: "cascade" }),
+
+    externalId: text("external_id").notNull(),
+    calendarExternalId: text("calendar_external_id"),
+    calendarName: text("calendar_name"),
+    title: text("title"),
+
+    // GoHighLevel's own appointment status, verbatim.
+    status: text("status"),
+
+    // GoHighLevel's contact id, kept even when no silver contact matched.
+    externalContactId: text("external_contact_id"),
+    contactId: uuid("contact_id").references(() => contacts.id, { onDelete: "set null" }),
+
+    // When the appointment was created in GoHighLevel — the booking moment.
+    bookedAt: timestamp("booked_at", { withTimezone: true }),
+    startsAt: timestamp("starts_at", { withTimezone: true }),
+    endsAt: timestamp("ends_at", { withTimezone: true }),
+    ghlUpdatedAt: timestamp("ghl_updated_at", { withTimezone: true }),
+
+    lastRebuiltAt: timestamp("last_rebuilt_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("ghl_appointments_conn_external_uq").on(table.connectionId, table.externalId),
+    index("ghl_appointments_org_brand_idx").on(table.orgId, table.brandId),
+  ],
+);
+
+/**
+ * APPEND-ONLY — every stage or status an opportunity was OBSERVED in, with the
+ * date GoHighLevel itself gives for entering it.
+ *
+ * GoHighLevel keeps no stage history: an opportunity carries only its CURRENT
+ * stage plus `lastStageChangeAt` / `lastStatusChangeAt`. So the moment it moves
+ * on, when it entered the previous stage is gone. This table is where that
+ * history accumulates FROM THE FIRST SYNC ONWARDS. It is never rewritten and it
+ * cannot be rebuilt from bronze (bronze keeps the latest payload only), so it is
+ * a record in its own right, like the bronze tables.
+ *
+ * A row is appended when the (value, changed_at) pair differs from the latest
+ * row of the same kind for that opportunity — so a re-sync of an unchanged
+ * opportunity appends nothing, and a stage left and re-entered is recorded.
+ *
+ * `changed_at` is GoHighLevel's own timestamp, or NULL when it gives none — it is
+ * never filled with the observation time. `observed_at` is when we saw it.
+ * The past before the first sync is lost and is not fabricated: the first row of
+ * an opportunity is its CURRENT stage, dated by GoHighLevel's `lastStageChangeAt`.
+ */
+export const ghlOpportunityHistory = pgTable(
+  "ghl_opportunity_history",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => ghlConnections.id, { onDelete: "cascade" }),
+
+    opportunityExternalId: text("opportunity_external_id").notNull(),
+    externalContactId: text("external_contact_id"),
+
+    // 'stage' | 'status'
+    kind: text("kind").notNull(),
+    // kind='stage': the stage id. kind='status': GoHighLevel's status, verbatim.
+    value: text("value"),
+
+    // Names as they were when observed — stage names are the customer's free text.
+    pipelineExternalId: text("pipeline_external_id"),
+    pipelineName: text("pipeline_name"),
+    stageName: text("stage_name"),
+
+    changedAt: timestamp("changed_at", { withTimezone: true }),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("ghl_opportunity_history_conn_opp_idx").on(
+      table.connectionId,
+      table.opportunityExternalId,
+      table.kind,
+    ),
+    index("ghl_opportunity_history_org_brand_idx").on(table.orgId, table.brandId),
+  ],
+);
+
+/**
+ * What each of a customer's free-text pipeline stages MEANS in our funnel
+ * vocabulary — decided ONCE by an LLM (through chat-service) and recorded.
+ *
+ * Keyed on (connection, stage id, stage NAME): the same stage resolves the same
+ * way on every read, and a stage is re-decided only when a NEW name appears for
+ * it (a rename is a different statement by the customer). `model` and `run_id`
+ * are the provenance of the decision. There is no string matching in code: this
+ * table is the only source of a stage's meaning.
+ */
+export const ghlStageMeanings = pgTable(
+  "ghl_stage_meanings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => ghlConnections.id, { onDelete: "cascade" }),
+
+    pipelineExternalId: text("pipeline_external_id"),
+    pipelineName: text("pipeline_name"),
+    stageExternalId: text("stage_external_id").notNull(),
+    stageName: text("stage_name").notNull(),
+
+    // See STAGE_MEANINGS: meeting_booked | meeting_attended | meeting_not_held
+    // | sale | deal_lost | none
+    meaning: text("meaning").notNull(),
+
+    model: text("model").notNull(),
+    runId: text("run_id").notNull(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("ghl_stage_meanings_conn_stage_name_uq").on(
+      table.connectionId,
+      table.stageExternalId,
+      table.stageName,
+    ),
+    index("ghl_stage_meanings_org_brand_idx").on(table.orgId, table.brandId),
+  ],
+);
+
 export type ContactUpload = typeof contactUploads.$inferSelect;
 export type NewContactUpload = typeof contactUploads.$inferInsert;
 export type ContactRowRaw = typeof contactRowsRaw.$inferSelect;
@@ -642,3 +789,6 @@ export type GhlPipeline = typeof ghlPipelines.$inferSelect;
 export type NewGhlPipeline = typeof ghlPipelines.$inferInsert;
 export type GhlOpportunity = typeof ghlOpportunities.$inferSelect;
 export type NewGhlOpportunity = typeof ghlOpportunities.$inferInsert;
+export type GhlAppointment = typeof ghlAppointments.$inferSelect;
+export type GhlOpportunityHistoryRow = typeof ghlOpportunityHistory.$inferSelect;
+export type GhlStageMeaning = typeof ghlStageMeanings.$inferSelect;

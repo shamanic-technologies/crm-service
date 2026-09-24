@@ -9,8 +9,14 @@ import { createHash } from "crypto";
 
 export const GHL_SOURCE = "gohighlevel";
 
-/** The three record kinds mirrored into `ghl_raw_records`. */
-export const GHL_RECORD_KINDS = ["contact", "opportunity", "pipeline"] as const;
+/** The record kinds mirrored into `ghl_raw_records`. */
+export const GHL_RECORD_KINDS = [
+  "contact",
+  "opportunity",
+  "pipeline",
+  "calendar",
+  "appointment",
+] as const;
 export type GhlRecordKind = (typeof GHL_RECORD_KINDS)[number];
 
 /**
@@ -44,6 +50,18 @@ function date(value: unknown): Date | null {
   if (!raw) return null;
   const parsed = new Date(raw);
   return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+/**
+ * A timestamp that names its zone (`Z` or `±hh:mm`), else null. GoHighLevel
+ * serves some appointment reads as bare wall-clock times ("2026-04-03 12:30:00")
+ * whose zone is the calendar's, unstated — parsing one would silently place it
+ * in the SERVER's zone, i.e. a guessed date.
+ */
+function zonedDate(value: unknown): Date | null {
+  const raw = str(value);
+  if (!raw || !/(Z|[+-]\d{2}:?\d{2})$/.test(raw)) return null;
+  return date(raw);
 }
 
 export interface DerivedContact {
@@ -207,6 +225,10 @@ export interface DerivedOpportunity {
   externalContactId: string | null;
   ghlCreatedAt: Date | null;
   ghlUpdatedAt: Date | null;
+  /** GoHighLevel's `lastStageChangeAt` — when it entered its CURRENT stage. */
+  stageChangedAt: Date | null;
+  /** GoHighLevel's `lastStatusChangeAt` — when it took its CURRENT status. */
+  statusChangedAt: Date | null;
 }
 
 /**
@@ -240,5 +262,54 @@ export function deriveOpportunity(
     externalContactId: contactId,
     ghlCreatedAt: date(payload.createdAt),
     ghlUpdatedAt: date(payload.updatedAt),
+    stageChangedAt: date(payload.lastStageChangeAt),
+    statusChangedAt: date(payload.lastStatusChangeAt),
+  };
+}
+
+/** A calendar's name, for labelling its appointments. */
+export function deriveCalendarName(payload: Record<string, unknown>): {
+  externalId: string;
+  name: string | null;
+} | null {
+  const externalId = str(payload.id);
+  if (!externalId) return null;
+  return { externalId, name: str(payload.name) };
+}
+
+export interface DerivedAppointment {
+  externalId: string;
+  calendarExternalId: string | null;
+  title: string | null;
+  /** GoHighLevel's own appointment status, verbatim. */
+  status: string | null;
+  externalContactId: string | null;
+  bookedAt: Date | null;
+  startsAt: Date | null;
+  endsAt: Date | null;
+  ghlUpdatedAt: Date | null;
+}
+
+/**
+ * An appointment as GoHighLevel reports it.
+ *
+ * `bookedAt` is `dateAdded` — when the appointment was created, i.e. when the
+ * meeting was booked. The events API also sends the status under a misspelled
+ * twin key (`appoinmentStatus`); the correct spelling wins and the twin is read
+ * only when it is absent.
+ */
+export function deriveAppointment(payload: Record<string, unknown>): DerivedAppointment | null {
+  const externalId = str(payload.id);
+  if (!externalId) return null;
+  return {
+    externalId,
+    calendarExternalId: str(payload.calendarId),
+    title: str(payload.title),
+    status: str(payload.appointmentStatus) ?? str(payload.appoinmentStatus),
+    externalContactId: str(payload.contactId),
+    bookedAt: zonedDate(payload.dateAdded),
+    startsAt: zonedDate(payload.startTime),
+    endsAt: zonedDate(payload.endTime),
+    ghlUpdatedAt: zonedDate(payload.dateUpdated),
   };
 }

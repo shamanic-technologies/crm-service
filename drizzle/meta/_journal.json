@@ -43,6 +43,13 @@
       "when": 1790064498185,
       "tag": "0005_crm_contact_company_and_provenance",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1790235967387,
+      "tag": "0006_ghl_funnel_evidence",
+      "breakpoints": true
     }
   ]
 }

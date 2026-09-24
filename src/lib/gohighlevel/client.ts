@@ -59,7 +59,18 @@ function readVendorMessage(body: string): string {
   return body.trim() || "(no message)";
 }
 
-async function ghlGet<T>(token: string, path: string, params: Record<string, string>): Promise<T> {
+/**
+ * The calendars API is versioned separately: GoHighLevel documents every
+ * `/calendars/*` endpoint under `Version: 2021-04-15`.
+ */
+export const GHL_CALENDARS_API_VERSION = "2021-04-15";
+
+async function ghlGet<T>(
+  token: string,
+  path: string,
+  params: Record<string, string>,
+  version: string = GHL_API_VERSION,
+): Promise<T> {
   const url = `${GHL_API_BASE_URL}${path}?${new URLSearchParams(params).toString()}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -68,7 +79,7 @@ async function ghlGet<T>(token: string, path: string, params: Record<string, str
       method: "GET",
       headers: {
         Authorization: `Bearer ${token}`,
-        Version: GHL_API_VERSION,
+        Version: version,
         Accept: "application/json",
       },
       signal: controller.signal,
@@ -98,6 +109,17 @@ export interface GhlContact {
 }
 
 export interface GhlOpportunityRecord {
+  id: string;
+  [key: string]: unknown;
+}
+
+export interface GhlCalendarRecord {
+  id: string;
+  name?: string;
+  [key: string]: unknown;
+}
+
+export interface GhlAppointmentRecord {
   id: string;
   [key: string]: unknown;
 }
@@ -204,4 +226,67 @@ export async function listPipelines(
     { locationId },
   );
   return (body.pipelines ?? []).filter((p) => p && typeof p.id === "string");
+}
+
+/** The sub-account's calendars. One page, no cursor. */
+export async function listCalendars(
+  token: string,
+  locationId: string,
+): Promise<GhlCalendarRecord[]> {
+  const body = await ghlGet<{ calendars?: GhlCalendarRecord[] }>(
+    token,
+    "/calendars/",
+    { locationId },
+    GHL_CALENDARS_API_VERSION,
+  );
+  return (body.calendars ?? []).filter((c) => c && typeof c.id === "string");
+}
+
+/**
+ * Where the appointment read starts. GoHighLevel launched in 2018, so no
+ * sub-account holds an appointment scheduled before it.
+ */
+export const APPOINTMENTS_FROM = Date.parse("2018-01-01T00:00:00Z");
+
+/** How far past today the read reaches — meetings are booked ahead. */
+const APPOINTMENTS_AHEAD_MS = 400 * 86_400_000;
+
+/**
+ * The read is sliced into windows of this size. GoHighLevel documents no cap on
+ * one events answer, and none was observed (321 events in one answer on the
+ * first sub-account), but a window keeps any single answer bounded rather than
+ * trusting that an unbounded range returns everything.
+ */
+const APPOINTMENT_WINDOW_MS = 180 * 86_400_000;
+
+/**
+ * Every appointment of one calendar, scheduled between 2018 and ~13 months
+ * ahead, read window by window and de-duplicated on GoHighLevel's own id.
+ *
+ * `GET /calendars/events` is used rather than the per-contact appointments read
+ * because it answers with offset-qualified ISO timestamps; the per-contact read
+ * returns wall-clock times with no zone, which cannot be placed on a timeline
+ * without guessing one.
+ */
+export async function listCalendarAppointments(
+  token: string,
+  locationId: string,
+  calendarId: string,
+  now: number = Date.now(),
+): Promise<GhlAppointmentRecord[]> {
+  const end = now + APPOINTMENTS_AHEAD_MS;
+  const byId = new Map<string, GhlAppointmentRecord>();
+  for (let from = APPOINTMENTS_FROM; from < end; from += APPOINTMENT_WINDOW_MS) {
+    const to = Math.min(from + APPOINTMENT_WINDOW_MS, end);
+    const body = await ghlGet<{ events?: GhlAppointmentRecord[] }>(
+      token,
+      "/calendars/events",
+      { locationId, calendarId, startTime: String(from), endTime: String(to) },
+      GHL_CALENDARS_API_VERSION,
+    );
+    for (const event of body.events ?? []) {
+      if (event && typeof event.id === "string") byId.set(event.id, event);
+    }
+  }
+  return [...byId.values()];
 }

@@ -21,8 +21,10 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import {
   contacts,
+  ghlAppointments,
   ghlConnections,
   ghlOpportunities,
+  ghlOpportunityHistory,
   ghlPipelines,
   ghlRawRecords,
   type GhlConnection,
@@ -30,17 +32,27 @@ import {
 } from "../../db/schema.js";
 import { createRun, updateRun } from "../runs-client.js";
 import { SERVICE_NAME } from "../../middleware/auth.js";
-import { listContacts, listOpportunities, listPipelines } from "./client.js";
+import {
+  listCalendarAppointments,
+  listCalendars,
+  listContacts,
+  listOpportunities,
+  listPipelines,
+} from "./client.js";
 import { resolveGhlToken } from "./credentials.js";
 import {
   canonicalHash,
+  deriveAppointment,
+  deriveCalendarName,
   deriveContact,
   deriveOpportunity,
   derivePipeline,
   GHL_SOURCE,
+  type DerivedOpportunity,
   type DerivedPipeline,
   type GhlRecordKind,
 } from "./records.js";
+import { decideStageMeanings } from "./stage-meanings.js";
 
 export interface ConnectionSyncResult {
   connectionId: string;
@@ -52,9 +64,16 @@ export interface ConnectionSyncResult {
   opportunitiesChanged: number;
   pipelinesMirrored: number;
   pipelinesChanged: number;
+  appointmentsMirrored: number;
+  appointmentsChanged: number;
   contactsDerived: number;
   opportunitiesDerived: number;
   pipelinesDerived: number;
+  appointmentsDerived: number;
+  /** Stage / status observations appended to the opportunity history. */
+  historyAppended: number;
+  /** Stages given a recorded meaning this pass (0 once every stage is decided). */
+  stageMeaningsDecided: number;
 }
 
 /**
@@ -117,6 +136,8 @@ async function mirrorAll(
     contact: { mirrored: 0, changed: [] },
     opportunity: { mirrored: 0, changed: [] },
     pipeline: { mirrored: 0, changed: [] },
+    calendar: { mirrored: 0, changed: [] },
+    appointment: { mirrored: 0, changed: [] },
   };
 
   const pipelines = await listPipelines(token, conn.locationId);
@@ -131,6 +152,16 @@ async function mirrorAll(
   for await (const page of listOpportunities(token, conn.locationId)) {
     out.opportunity.mirrored += page.length;
     out.opportunity.changed.push(...(await mirrorBatch(conn, "opportunity", page)));
+  }
+
+  const calendars = await listCalendars(token, conn.locationId);
+  out.calendar.mirrored = calendars.length;
+  out.calendar.changed = await mirrorBatch(conn, "calendar", calendars);
+
+  for (const calendar of calendars) {
+    const appointments = await listCalendarAppointments(token, conn.locationId, calendar.id);
+    out.appointment.mirrored += appointments.length;
+    out.appointment.changed.push(...(await mirrorBatch(conn, "appointment", appointments)));
   }
 
   return out;
@@ -269,6 +300,173 @@ async function deriveContacts(conn: GhlConnection, externalIds?: string[]): Prom
   return derived;
 }
 
+/** Silver contact ids of the connection, keyed on GoHighLevel's contact id. */
+async function contactIdsByExternalId(conn: GhlConnection): Promise<Map<string, string>> {
+  const rows = await db
+    .select({ id: contacts.id, externalId: contacts.externalId })
+    .from(contacts)
+    .where(and(eq(contacts.sourceConnectionId, conn.id), eq(contacts.source, GHL_SOURCE)));
+  const byExternalId = new Map<string, string>();
+  for (const row of rows) {
+    if (row.externalId) byExternalId.set(row.externalId, row.id);
+  }
+  return byExternalId;
+}
+
+interface HistoryHead {
+  value: string | null;
+  changedAt: Date | null;
+}
+
+/**
+ * The LATEST history row of each (opportunity, kind) of the connection, keyed
+ * `<opportunity id>\u0000<kind>`. What a new observation is compared against.
+ */
+async function latestHistory(conn: GhlConnection): Promise<Map<string, HistoryHead>> {
+  const rows = await db.execute<{
+    opportunity_external_id: string;
+    kind: string;
+    value: string | null;
+    changed_at: string | Date | null;
+  }>(sql`
+    SELECT DISTINCT ON (opportunity_external_id, kind)
+      opportunity_external_id, kind, value, changed_at
+    FROM ghl_opportunity_history
+    WHERE connection_id = ${conn.id}
+    ORDER BY opportunity_external_id, kind, observed_at DESC, id DESC
+  `);
+  const heads = new Map<string, HistoryHead>();
+  for (const row of rows) {
+    heads.set(`${row.opportunity_external_id}\u0000${row.kind}`, {
+      value: row.value,
+      changedAt: row.changed_at === null ? null : new Date(row.changed_at),
+    });
+  }
+  return heads;
+}
+
+function sameInstant(a: Date | null, b: Date | null): boolean {
+  if (a === null || b === null) return a === b;
+  return a.getTime() === b.getTime();
+}
+
+/**
+ * APPEND-ONLY history — record the opportunity's stage and status when either
+ * differs from the latest recorded observation (value OR GoHighLevel's own
+ * change date), so a stage left and re-entered between two syncs is still seen.
+ *
+ * The date is GoHighLevel's (`lastStageChangeAt` / `lastStatusChangeAt`) or
+ * null. It is never the observation time: when GoHighLevel gives no date, the
+ * row says the date is unknown.
+ */
+async function appendHistory(
+  conn: GhlConnection,
+  opportunity: DerivedOpportunity,
+  resolved: { pipelineName: string | null; stageName: string | null },
+  latest: Map<string, HistoryHead>,
+  now: Date,
+): Promise<number> {
+  const observations = [
+    {
+      kind: "stage" as const,
+      value: opportunity.stageExternalId,
+      changedAt: opportunity.stageChangedAt,
+    },
+    {
+      kind: "status" as const,
+      value: opportunity.status,
+      changedAt: opportunity.statusChangedAt,
+    },
+  ];
+
+  let appended = 0;
+  for (const observation of observations) {
+    if (observation.value === null) continue;
+    const key = `${opportunity.externalId}\u0000${observation.kind}`;
+    const head = latest.get(key);
+    if (head && head.value === observation.value && sameInstant(head.changedAt, observation.changedAt)) {
+      continue;
+    }
+    await db.insert(ghlOpportunityHistory).values({
+      orgId: conn.orgId,
+      brandId: conn.brandId,
+      connectionId: conn.id,
+      opportunityExternalId: opportunity.externalId,
+      externalContactId: opportunity.externalContactId,
+      kind: observation.kind,
+      value: observation.value,
+      pipelineExternalId: opportunity.pipelineExternalId,
+      pipelineName: resolved.pipelineName,
+      stageName: resolved.stageName,
+      changedAt: observation.changedAt,
+      observedAt: now,
+    });
+    latest.set(key, { value: observation.value, changedAt: observation.changedAt });
+    appended += 1;
+  }
+  return appended;
+}
+
+/**
+ * SILVER — calendar appointments, with the calendar NAME resolved from the
+ * mirrored calendars and the contact linked when we have mirrored it.
+ */
+async function deriveAppointments(
+  conn: GhlConnection,
+  externalIds?: string[],
+): Promise<number> {
+  const payloads = await readBronze(conn, "appointment", externalIds);
+  if (payloads.length === 0) return 0;
+
+  const calendarNames = new Map<string, string | null>();
+  for (const payload of await readBronze(conn, "calendar")) {
+    const calendar = deriveCalendarName(payload);
+    if (calendar) calendarNames.set(calendar.externalId, calendar.name);
+  }
+  const contactByExternalId = await contactIdsByExternalId(conn);
+
+  const now = new Date();
+  let derived = 0;
+  for (const payload of payloads) {
+    const appointment = deriveAppointment(payload);
+    if (!appointment) continue;
+
+    const values = {
+      calendarExternalId: appointment.calendarExternalId,
+      calendarName: appointment.calendarExternalId
+        ? (calendarNames.get(appointment.calendarExternalId) ?? null)
+        : null,
+      title: appointment.title,
+      status: appointment.status,
+      externalContactId: appointment.externalContactId,
+      contactId: appointment.externalContactId
+        ? (contactByExternalId.get(appointment.externalContactId) ?? null)
+        : null,
+      bookedAt: appointment.bookedAt,
+      startsAt: appointment.startsAt,
+      endsAt: appointment.endsAt,
+      ghlUpdatedAt: appointment.ghlUpdatedAt,
+      lastRebuiltAt: now,
+    };
+
+    await db
+      .insert(ghlAppointments)
+      .values({
+        orgId: conn.orgId,
+        brandId: conn.brandId,
+        connectionId: conn.id,
+        externalId: appointment.externalId,
+        ...values,
+      })
+      .onConflictDoUpdate({
+        target: [ghlAppointments.connectionId, ghlAppointments.externalId],
+        set: values,
+      });
+    derived += 1;
+  }
+  return derived;
+}
+
 /**
  * SILVER — opportunities, with pipeline and stage NAMES resolved against the
  * silver pipelines so the read can group them the way GoHighLevel does.
@@ -276,9 +474,9 @@ async function deriveContacts(conn: GhlConnection, externalIds?: string[]): Prom
 async function deriveOpportunities(
   conn: GhlConnection,
   externalIds?: string[],
-): Promise<number> {
+): Promise<{ derived: number; appended: number }> {
   const payloads = await readBronze(conn, "opportunity", externalIds);
-  if (payloads.length === 0) return 0;
+  if (payloads.length === 0) return { derived: 0, appended: 0 };
 
   const pipelineRows = await db
     .select()
@@ -292,17 +490,12 @@ async function deriveOpportunities(
     });
   }
 
-  const contactRows = await db
-    .select({ id: contacts.id, externalId: contacts.externalId })
-    .from(contacts)
-    .where(and(eq(contacts.sourceConnectionId, conn.id), eq(contacts.source, GHL_SOURCE)));
-  const contactByExternalId = new Map<string, string>();
-  for (const row of contactRows) {
-    if (row.externalId) contactByExternalId.set(row.externalId, row.id);
-  }
+  const contactByExternalId = await contactIdsByExternalId(conn);
+  const latest = await latestHistory(conn);
 
   const now = new Date();
   let derived = 0;
+  let appended = 0;
 
   for (const payload of payloads) {
     const opportunity = deriveOpportunity(payload);
@@ -347,8 +540,10 @@ async function deriveOpportunities(
         set: values,
       });
     derived += 1;
+
+    appended += await appendHistory(conn, opportunity, values, latest, now);
   }
-  return derived;
+  return { derived, appended };
 }
 
 /**
@@ -362,10 +557,18 @@ async function deriveOpportunities(
  * opportunity changing, and every opportunity carries its pipeline and stage
  * name — so a pipeline change re-derives every opportunity of the connection.
  */
+export interface DerivedCounts {
+  contacts: number;
+  opportunities: number;
+  pipelines: number;
+  appointments: number;
+  historyAppended: number;
+}
+
 async function deriveSilver(
   conn: GhlConnection,
   changed?: Record<GhlRecordKind, string[]>,
-): Promise<{ contacts: number; opportunities: number; pipelines: number }> {
+): Promise<DerivedCounts> {
   const pipelines = await derivePipelines(conn, changed?.pipeline);
   const contactCount = await deriveContacts(conn, changed?.contact);
 
@@ -373,7 +576,18 @@ async function deriveSilver(
   const opportunityIds = changed && !pipelinesMoved ? changed.opportunity : undefined;
   const opportunities = await deriveOpportunities(conn, opportunityIds);
 
-  return { contacts: contactCount, opportunities, pipelines };
+  // Same coupling for calendars: a renamed calendar re-labels all its appointments.
+  const calendarsMoved = changed ? changed.calendar.length > 0 : true;
+  const appointmentIds = changed && !calendarsMoved ? changed.appointment : undefined;
+  const appointments = await deriveAppointments(conn, appointmentIds);
+
+  return {
+    contacts: contactCount,
+    opportunities: opportunities.derived,
+    pipelines,
+    appointments,
+    historyAppended: opportunities.appended,
+  };
 }
 
 /**
@@ -407,7 +621,10 @@ export async function syncConnection(conn: GhlConnection): Promise<ConnectionSyn
       contact: mirrored.contact.changed,
       opportunity: mirrored.opportunity.changed,
       pipeline: mirrored.pipeline.changed,
+      calendar: mirrored.calendar.changed,
+      appointment: mirrored.appointment.changed,
     });
+    const stageMeaningsDecided = await decideStageMeanings(conn, run.id);
 
     await db
       .update(ghlConnections)
@@ -430,9 +647,14 @@ export async function syncConnection(conn: GhlConnection): Promise<ConnectionSyn
       opportunitiesChanged: mirrored.opportunity.changed.length,
       pipelinesMirrored: mirrored.pipeline.mirrored,
       pipelinesChanged: mirrored.pipeline.changed.length,
+      appointmentsMirrored: mirrored.appointment.mirrored,
+      appointmentsChanged: mirrored.appointment.changed.length,
       contactsDerived: derived.contacts,
       opportunitiesDerived: derived.opportunities,
       pipelinesDerived: derived.pipelines,
+      appointmentsDerived: derived.appointments,
+      historyAppended: derived.historyAppended,
+      stageMeaningsDecided,
     };
   } catch (err) {
     const message = (err as Error).message;
@@ -495,7 +717,7 @@ export async function runSyncPass(connectionId?: string): Promise<SyncPassResult
  */
 export async function rebuildFromBronze(
   conn: GhlConnection,
-): Promise<{ contacts: number; opportunities: number; pipelines: number }> {
+): Promise<DerivedCounts & { stageMeaningsDecided: number }> {
   const run = await createRun({
     orgId: conn.orgId,
     userId: conn.createdByUserId,
@@ -513,8 +735,9 @@ export async function rebuildFromBronze(
 
   try {
     const derived = await deriveSilver(conn);
+    const stageMeaningsDecided = await decideStageMeanings(conn, run.id);
     await updateRun(run.id, "completed", identity);
-    return derived;
+    return { ...derived, stageMeaningsDecided };
   } catch (err) {
     await updateRun(run.id, "failed", identity).catch((e) =>
       console.error("[crm-service][ghl] failed to close run:", e),
