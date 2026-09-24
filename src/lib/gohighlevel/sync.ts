@@ -408,6 +408,51 @@ async function appendHistory(
 }
 
 /**
+ * APPEND-ONLY history — observe EVERY mirrored opportunity on every pass, not
+ * only the ones whose bronze row just moved.
+ *
+ * Tying the history to the changed-records derivation would never observe an
+ * opportunity mirrored before this table existed (or before a wipe of it): its
+ * bronze row does not move, so it would never be seen. Comparing every
+ * opportunity against the latest history row is cheap (one read of bronze and
+ * silver) and appends only what differs, so a quiet pass still appends nothing.
+ */
+async function recordHistory(conn: GhlConnection): Promise<number> {
+  const rows = await db
+    .select({
+      payload: ghlRawRecords.payload,
+      pipelineName: ghlOpportunities.pipelineName,
+      stageName: ghlOpportunities.stageName,
+    })
+    .from(ghlRawRecords)
+    .innerJoin(
+      ghlOpportunities,
+      and(
+        eq(ghlOpportunities.connectionId, ghlRawRecords.connectionId),
+        eq(ghlOpportunities.externalId, ghlRawRecords.externalId),
+      ),
+    )
+    .where(and(eq(ghlRawRecords.connectionId, conn.id), eq(ghlRawRecords.kind, "opportunity")));
+  if (rows.length === 0) return 0;
+
+  const latest = await latestHistory(conn);
+  const now = new Date();
+  let appended = 0;
+  for (const row of rows) {
+    const opportunity = deriveOpportunity(row.payload as Record<string, unknown>);
+    if (!opportunity) continue;
+    appended += await appendHistory(
+      conn,
+      opportunity,
+      { pipelineName: row.pipelineName, stageName: row.stageName },
+      latest,
+      now,
+    );
+  }
+  return appended;
+}
+
+/**
  * SILVER — calendar appointments, with the calendar NAME resolved from the
  * mirrored calendars and the contact linked when we have mirrored it.
  */
@@ -474,9 +519,9 @@ async function deriveAppointments(
 async function deriveOpportunities(
   conn: GhlConnection,
   externalIds?: string[],
-): Promise<{ derived: number; appended: number }> {
+): Promise<number> {
   const payloads = await readBronze(conn, "opportunity", externalIds);
-  if (payloads.length === 0) return { derived: 0, appended: 0 };
+  if (payloads.length === 0) return 0;
 
   const pipelineRows = await db
     .select()
@@ -491,11 +536,9 @@ async function deriveOpportunities(
   }
 
   const contactByExternalId = await contactIdsByExternalId(conn);
-  const latest = await latestHistory(conn);
 
   const now = new Date();
   let derived = 0;
-  let appended = 0;
 
   for (const payload of payloads) {
     const opportunity = deriveOpportunity(payload);
@@ -540,10 +583,8 @@ async function deriveOpportunities(
         set: values,
       });
     derived += 1;
-
-    appended += await appendHistory(conn, opportunity, values, latest, now);
   }
-  return { derived, appended };
+  return derived;
 }
 
 /**
@@ -575,6 +616,7 @@ async function deriveSilver(
   const pipelinesMoved = changed ? changed.pipeline.length > 0 : true;
   const opportunityIds = changed && !pipelinesMoved ? changed.opportunity : undefined;
   const opportunities = await deriveOpportunities(conn, opportunityIds);
+  const historyAppended = await recordHistory(conn);
 
   // Same coupling for calendars: a renamed calendar re-labels all its appointments.
   const calendarsMoved = changed ? changed.calendar.length > 0 : true;
@@ -583,10 +625,10 @@ async function deriveSilver(
 
   return {
     contacts: contactCount,
-    opportunities: opportunities.derived,
+    opportunities,
     pipelines,
     appointments,
-    historyAppended: opportunities.appended,
+    historyAppended,
   };
 }
 
