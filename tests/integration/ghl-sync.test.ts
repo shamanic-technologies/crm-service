@@ -330,6 +330,76 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
     expect(bob.companyName).toBe("Durand SARL");
   });
 
+  it("breaks the brand's contacts down by where they came from, reconciling to the total", async () => {
+    await seedConnection();
+    await runSyncPass();
+    // A CSV contact of the same brand is not part of the GoHighLevel population.
+    await seedCsvContact("csv-origins@example.com");
+
+    const res = await request(app())
+      .get(`/orgs/gohighlevel/contacts/origins?brandId=${BRAND}`)
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", ORG)
+      .set("x-user-id", USER);
+
+    expect(res.status).toBe(200);
+    expect(res.body.totalContacts).toBe(3);
+    // The customer's own words, and the contacts carrying none as their own bucket.
+    expect(res.body.leadSource).toEqual([
+      { value: null, count: 2 },
+      { value: "Salon des Mariages", count: 1 },
+    ]);
+    expect(res.body.originMedium).toEqual([
+      { value: null, count: 2 },
+      { value: "order_form", count: 1 },
+    ]);
+    expect(res.body.contactType).toEqual([
+      { value: null, count: 2 },
+      { value: "customer", count: 1 },
+    ]);
+    // Tags overlap, so they reconcile through tagged + untagged instead.
+    expect(res.body.tags).toEqual({
+      tagged: 1,
+      untagged: 2,
+      labels: [
+        { value: "vip", count: 1 },
+        { value: "wedding", count: 1 },
+      ],
+    });
+
+    for (const key of ["leadSource", "originMedium", "contactType"]) {
+      const sum = (res.body[key] as { count: number }[]).reduce((a, b) => a + b.count, 0);
+      expect(sum).toBe(res.body.totalContacts);
+    }
+  });
+
+  it("states the none bucket even when every contact carries a value, and scopes to the org", async () => {
+    const empty = await request(app())
+      .get(`/orgs/gohighlevel/contacts/origins?brandId=${BRAND}`)
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", ORG);
+    expect(empty.status).toBe(200);
+    expect(empty.body).toMatchObject({
+      totalContacts: 0,
+      leadSource: [{ value: null, count: 0 }],
+      tags: { tagged: 0, untagged: 0, labels: [] },
+    });
+
+    await seedConnection();
+    await runSyncPass();
+    const otherOrg = await request(app())
+      .get(`/orgs/gohighlevel/contacts/origins?brandId=${BRAND}`)
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", "bbbbbbbb-1111-4111-8111-00000000000f");
+    expect(otherOrg.body.totalContacts).toBe(0);
+
+    const bad = await request(app())
+      .get(`/orgs/gohighlevel/contacts/origins?brandId=not-a-uuid`)
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", ORG);
+    expect(bad.status).toBe(400);
+  });
+
   it("serves the company and the provenance on the brand's contacts read", async () => {
     await seedConnection();
     await runSyncPass();

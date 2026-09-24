@@ -457,6 +457,15 @@ swallowed, and one broken connection does not stop the others.
   name. Backfilling the columns onto contacts mirrored before they existed needs
   no vendor call — `POST /internal/gohighlevel/rebuild` re-derives silver from
   the mirror alone.
+- `GET /orgs/gohighlevel/contacts/origins?brandId=` — where the brand's
+  contacts came from, counted in SQL over the WHOLE population (so no caller
+  pages every contact into a browser to count): `leadSource`, `originMedium`,
+  `contactType` as `[{ value, count }]`, plus `tags`. Values are verbatim — no
+  mapping, no case folding (`form 13` and `Form 13` are two buckets in prod
+  because the customer typed two things). Contacts carrying no value are the
+  `value: null` bucket, ALWAYS present (count 0 included), so each single-valued
+  breakdown sums to `totalContacts`. Tags are multi-valued, so label counts
+  overlap; they reconcile through `tagged + untagged = totalContacts` instead.
 - `GET /orgs/gohighlevel/opportunities?brandId=` — the pipeline, grouped by
   pipeline then stage. Opportunities in a pipeline we have not mirrored come back
   under `ungrouped` rather than being dropped, so the counts add up to what the

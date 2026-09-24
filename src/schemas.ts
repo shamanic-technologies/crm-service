@@ -716,6 +716,42 @@ export const GhlContactsListResponseSchema = registry.register(
   z.object({ contacts: z.array(GhlContactSchema) }).openapi("GhlContactsListResponse"),
 );
 
+const GhlOriginBucketSchema = z.object({
+  value: z
+    .string()
+    .nullable()
+    .describe("The customer's own value, verbatim and unmapped. null = the contacts carrying none."),
+  count: z.number().int(),
+});
+
+export const GhlContactOriginsResponseSchema = registry.register(
+  "GhlContactOriginsResponse",
+  z
+    .object({
+      brandId: z.string().uuid(),
+      totalContacts: z.number().int().describe("The brand's mirrored GoHighLevel contacts, at read time."),
+      leadSource: z
+        .array(GhlOriginBucketSchema)
+        .describe("By GoHighLevel's `source` field. Buckets (including the null one) sum to totalContacts."),
+      originMedium: z
+        .array(GhlOriginBucketSchema)
+        .describe("By first-touch attribution medium. Buckets sum to totalContacts."),
+      contactType: z
+        .array(GhlOriginBucketSchema)
+        .describe("By GoHighLevel's contact `type`. Buckets sum to totalContacts."),
+      tags: z
+        .object({
+          tagged: z.number().int(),
+          untagged: z.number().int(),
+          labels: z
+            .array(z.object({ value: z.string(), count: z.number().int() }))
+            .describe("Contacts per label. OVERLAPPING — a contact counts under each of its tags."),
+        })
+        .describe("tagged + untagged = totalContacts; label counts do not sum to anything."),
+    })
+    .openapi("GhlContactOriginsResponse"),
+);
+
 export const GhlOpportunitySchema = registry.register(
   "GhlOpportunity",
   z
@@ -913,6 +949,24 @@ registry.registerPath({
     200: {
       description: "Contacts",
       content: { "application/json": { schema: GhlContactsListResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/gohighlevel/contacts/origins",
+  summary: "Where a brand's GoHighLevel contacts came from, counted over the whole population",
+  description:
+    "Breaks the brand's mirrored contacts down by lead source, first-touch origin medium, contact " +
+    "type and tag, each value in the customer's own words (no mapping, no case folding). Contacts " +
+    "carrying no value are their own `null` bucket, always present, so each single-valued " +
+    "breakdown sums to totalContacts.",
+  request: { query: z.object({ brandId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Origins breakdown",
+      content: { "application/json": { schema: GhlContactOriginsResponseSchema } },
     },
   },
 });
