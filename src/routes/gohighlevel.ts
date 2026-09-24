@@ -14,6 +14,7 @@ import { GoHighLevelError, verifyAccess } from "../lib/gohighlevel/client.js";
 import { CredentialError, resolveGhlToken } from "../lib/gohighlevel/credentials.js";
 import { GHL_SOURCE } from "../lib/gohighlevel/records.js";
 import { rebuildFromBronze, runSyncPass } from "../lib/gohighlevel/sync.js";
+import { readContactOrigins } from "../lib/gohighlevel/origins.js";
 import { readPipelineView } from "../lib/gohighlevel/view.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 
@@ -321,6 +322,28 @@ router.get(
         },
       })),
     });
+  },
+);
+
+// ─── GET /orgs/gohighlevel/contacts/origins?brandId= ─────────────────────────
+
+/**
+ * Where the brand's GoHighLevel contacts came from — lead source, first-touch
+ * medium, contact type and tags — counted over the whole mirrored population.
+ * Values are the customer's own words; contacts carrying none are their own
+ * bucket, so each single-valued breakdown sums to the contact count.
+ */
+router.get(
+  "/orgs/gohighlevel/contacts/origins",
+  apiKeyAuth,
+  requireOrg("gohighlevel.contacts.origins"),
+  async (req: AuthenticatedRequest, res) => {
+    const brandParse = brandIdSchema.safeParse(req.query.brandId);
+    if (!brandParse.success) {
+      return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
+    }
+
+    res.json(await readContactOrigins(req.orgId!, brandParse.data));
   },
 );
 
