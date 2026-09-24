@@ -499,6 +499,14 @@ customer's vocabulary.
   GoHighLevel's date or NULL, never our observation time. It cannot be rebuilt
   from bronze (bronze keeps the latest payload only): it is a record, like
   bronze. The past before the first sync is lost and is NOT reconstructed.
+  ⚠️ It is observed over EVERY mirrored opportunity on every pass
+  (`recordHistory`), never inside the changed-only derivation. v0.5.0 appended
+  it while re-deriving CHANGED opportunities, so the 460 opportunities already
+  mirrored in prod (bronze unchanged) were never observed and the first pass
+  appended 0 rows. v0.5.1 fixed it. The rule applies to any NEW derived record
+  added on top of a changed-only pass: rows that existed before it never move,
+  so they never reach it. Test it with the prod shape: bronze full, nothing
+  changed, new table empty.
 - **Stage meanings** — `ghl_stage_meanings`, keyed (connection, stage id, stage
   NAME). An LLM decides (chat-service, `CRM_STAGE_MEANING_CHAT_CONFIG`) which of
   `meeting_booked | meeting_attended | meeting_not_held | sale | deal_lost |
