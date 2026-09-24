@@ -1,9 +1,10 @@
 /**
  * HTTP client for chat-service LLM completion (POST /complete).
  *
- * crm-service uses exactly ONE chat-service call per upload: the column-typing
- * classification. The upload route requires org + user + run identity, so this
- * always hits the org-scoped, run-attributed /complete endpoint.
+ * crm-service uses it for ONE thing: reading a Matrix thread into a lead, which
+ * writes free text (a next step, a summary). Every CLASSIFICATION (column typing,
+ * stage meanings) goes through the judgments client instead — cheaper, and it
+ * reports its own confidence.
  *
  * chat-service owns the LLM cost: it self-declares the spend against the run id
  * crm-service forwards (x-run-id = this service's own run). crm-service imports
@@ -56,14 +57,8 @@ function baseUrl(): string {
 }
 
 /**
- * Hard ceiling on the /complete round-trip. The column-typing call is on the
- * SYNCHRONOUS upload response path, which itself sits behind the api-service
- * gateway and Cloudflare's ~100s edge timeout. Without a bound, a stalled
- * chat-service (or a slow downstream of it) hangs the whole upload past that
- * edge limit → the client sees a Cloudflare 502 and NOTHING is written. The
- * caller (classifyColumns) catches the resulting abort and falls back to a
- * deterministic mapping, so the upload always completes. Override via
- * CHAT_SERVICE_TIMEOUT_MS.
+ * Hard ceiling on the /complete round-trip, so a stalled chat-service can never
+ * hold a sync pass open indefinitely. Override via CHAT_SERVICE_TIMEOUT_MS.
  */
 const COMPLETE_TIMEOUT_MS = Number(process.env.CHAT_SERVICE_TIMEOUT_MS) || 25_000;
 

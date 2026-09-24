@@ -6,6 +6,7 @@ import {
   integer,
   jsonb,
   numeric,
+  doublePrecision,
   boolean,
   uniqueIndex,
   index,
@@ -724,7 +725,8 @@ export const ghlOpportunityHistory = pgTable(
 
 /**
  * What each of a customer's free-text pipeline stages MEANS in our funnel
- * vocabulary — decided ONCE by an LLM (through chat-service) and recorded.
+ * vocabulary — decided ONCE by a judgment model (Jev, through chat-service
+ * /orgs/judgments) and recorded with its confidence.
  *
  * Keyed on (connection, stage id, stage NAME): the same stage resolves the same
  * way on every read, and a stage is re-decided only when a NEW name appears for
@@ -750,6 +752,11 @@ export const ghlStageMeanings = pgTable(
     // See STAGE_MEANINGS: meeting_booked | meeting_attended | meeting_not_held
     // | sale | deal_lost | none
     meaning: text("meaning").notNull(),
+    // The judgment model's confidence in `meaning` (0..1) and its full
+    // distribution over the vocabulary. Below STAGE_MEANING_MIN_CONFIDENCE the
+    // meaning is recorded but not served as evidence.
+    confidence: doublePrecision("confidence").notNull(),
+    probabilities: jsonb("probabilities").notNull(),
 
     model: text("model").notNull(),
     runId: text("run_id").notNull(),

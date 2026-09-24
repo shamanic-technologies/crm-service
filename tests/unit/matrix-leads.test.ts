@@ -20,7 +20,7 @@ function reply(json: Record<string, unknown>) {
 describe("readThread", () => {
   beforeEach(() => {
     chatComplete.mockReset();
-    process.env.CRM_LEAD_READING_CHAT_CONFIG = "anthropic/haiku";
+    process.env.CRM_LEAD_READING_CHAT_CONFIG = "google/flash";
   });
 
   it("returns the reading and uses the configured provider/model", async () => {
@@ -43,8 +43,8 @@ describe("readThread", () => {
     });
 
     const [params, tracking] = chatComplete.mock.calls[0];
-    expect(params.provider).toBe("anthropic");
-    expect(params.model).toBe("haiku");
+    expect(params.provider).toBe("google");
+    expect(params.model).toBe("flash");
     expect(tracking).toEqual(TRACKING);
   });
 

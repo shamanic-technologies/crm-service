@@ -175,7 +175,7 @@ describe.skipIf(!RUN)("matrix ingestion", () => {
     process.env.MATRIX_HOMESERVER_URL = "http://homeserver.test";
     process.env.MATRIX_ACCESS_TOKEN = "test-token";
     process.env.MATRIX_INGESTION_FLOOR = FLOOR;
-    process.env.CRM_LEAD_READING_CHAT_CONFIG = "anthropic/haiku";
+    process.env.CRM_LEAD_READING_CHAT_CONFIG = "google/flash";
     installFetchStub();
   });
 

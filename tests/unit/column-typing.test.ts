@@ -1,6 +1,7 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   buildColumnProfiles,
+  classifyColumns,
   heuristicMapping,
   normalizeMapping,
 } from "../../src/lib/column-typing.js";
@@ -62,5 +63,58 @@ describe("heuristicMapping (chat-service fallback)", () => {
     const m = heuristicMapping(["Name", "First Name"]);
     expect(m["Name"]).toBe("full_name");
     expect(m["First Name"]).toBe("first_name");
+  });
+});
+
+describe("classifyColumns (Jev judgments)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("asks one choice per column and types a hesitant column as other", async () => {
+    let sent: { url: string; body: { state: unknown; questions: Record<string, unknown> } } | null = null;
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      sent = { url: String(url), body: JSON.parse(String(init.body)) };
+      const answer = (choice: string, confidence: number) => ({
+        type: "choice",
+        choice,
+        confidence,
+        probabilities: { [choice]: confidence },
+      });
+      return new Response(
+        JSON.stringify({
+          model: "jev-1.13.0",
+          answers: { c0: answer("email", 1), c1: answer("full_name", 0.3) },
+          usage: { inputTokens: 1, outputTokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const mapping = await classifyColumns(
+      [
+        { header: "Mail", samples: ["a@b.com"] },
+        { header: "Ref", samples: ["X-12"] },
+      ],
+      { orgId: "o", userId: "u", runId: "r" },
+    );
+
+    expect(mapping).toEqual({ Mail: "email", Ref: "other" });
+    expect(sent!.url).toMatch(/\/orgs\/judgments$/);
+    expect(Object.keys(sent!.body.questions)).toEqual(["c0", "c1"]);
+  });
+
+  it("fails loud on a field outside the list, so the upload falls back to the heuristic", async () => {
+    vi.stubGlobal("fetch", async () =>
+      new Response(
+        JSON.stringify({
+          model: "jev-1.13.0",
+          answers: { c0: { type: "choice", choice: "company", confidence: 1, probabilities: {} } },
+          usage: { inputTokens: 1, outputTokens: 1 },
+        }),
+        { status: 200 },
+      ),
+    );
+    await expect(
+      classifyColumns([{ header: "Co", samples: [] }], { orgId: "o", userId: "u", runId: "r" }),
+    ).rejects.toThrow(/unknown field/);
   });
 });
