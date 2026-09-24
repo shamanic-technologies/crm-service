@@ -2,7 +2,7 @@ import { Router } from "express";
 import { and, asc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../db/index.js";
-import { contacts, ghlConnections } from "../db/schema.js";
+import { contacts, ghlConnections, ghlStageMeanings } from "../db/schema.js";
 import {
   apiKeyAuth,
   requireOrg,
@@ -16,6 +16,7 @@ import { GHL_SOURCE } from "../lib/gohighlevel/records.js";
 import { rebuildFromBronze, runSyncPass } from "../lib/gohighlevel/sync.js";
 import { readContactOrigins } from "../lib/gohighlevel/origins.js";
 import { readPipelineView } from "../lib/gohighlevel/view.js";
+import { readFunnelEvents } from "../lib/gohighlevel/funnel-events.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 
 const router = Router();
@@ -373,6 +374,89 @@ router.get(
 
     const view = await readPipelineView(req.orgId!, brandParse.data);
     res.json(view);
+  },
+);
+
+// ─── GET /orgs/gohighlevel/funnel-events?brandId= ────────────────────────────
+
+/**
+ * The DATED funnel events the brand's CRM evidences, grouped per CRM contact —
+ * which step, when it happened (null when GoHighLevel did not say), and where
+ * the evidence came from. Readable in bulk (paged over contacts) or for one
+ * contact with `contactId`.
+ */
+router.get(
+  "/orgs/gohighlevel/funnel-events",
+  apiKeyAuth,
+  requireOrg("gohighlevel.funnel-events.list"),
+  async (req: AuthenticatedRequest, res) => {
+    const brandParse = brandIdSchema.safeParse(req.query.brandId);
+    if (!brandParse.success) {
+      return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
+    }
+    let contactId: string | null = null;
+    if (req.query.contactId !== undefined) {
+      const contactParse = z.string().uuid().safeParse(req.query.contactId);
+      if (!contactParse.success) {
+        return res.status(400).json({ type: "validation", error: "contactId must be a uuid" });
+      }
+      contactId = contactParse.data;
+    }
+    const limit = Math.min(Math.max(Number(req.query.limit) || 500, 1), 1000);
+    const offset = Math.max(Number(req.query.offset) || 0, 0);
+
+    res.json(
+      await readFunnelEvents({
+        orgId: req.orgId!,
+        brandId: brandParse.data,
+        contactId,
+        limit,
+        offset,
+      }),
+    );
+  },
+);
+
+// ─── GET /orgs/gohighlevel/stage-meanings?brandId= ───────────────────────────
+
+/**
+ * What each of the brand's pipeline stages was decided to mean, with the model
+ * that decided it. The record every funnel-event read is resolved against.
+ */
+router.get(
+  "/orgs/gohighlevel/stage-meanings",
+  apiKeyAuth,
+  requireOrg("gohighlevel.stage-meanings.list"),
+  async (req: AuthenticatedRequest, res) => {
+    const brandParse = brandIdSchema.safeParse(req.query.brandId);
+    if (!brandParse.success) {
+      return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
+    }
+
+    const rows = await db
+      .select()
+      .from(ghlStageMeanings)
+      .where(
+        and(eq(ghlStageMeanings.orgId, req.orgId!), eq(ghlStageMeanings.brandId, brandParse.data)),
+      )
+      .orderBy(
+        asc(ghlStageMeanings.pipelineName),
+        asc(ghlStageMeanings.stageName),
+        asc(ghlStageMeanings.id),
+      );
+
+    res.json({
+      stageMeanings: rows.map((row) => ({
+        pipelineId: row.pipelineExternalId,
+        pipelineName: row.pipelineName,
+        stageId: row.stageExternalId,
+        stageName: row.stageName,
+        meaning: row.meaning,
+        model: row.model,
+        runId: row.runId,
+        decidedAt: row.decidedAt,
+      })),
+    });
   },
 );
 

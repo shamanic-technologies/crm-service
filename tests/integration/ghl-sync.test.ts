@@ -5,10 +5,13 @@ import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
 import {
   contacts,
+  ghlAppointments,
   ghlConnections,
   ghlOpportunities,
+  ghlOpportunityHistory,
   ghlPipelines,
   ghlRawRecords,
+  ghlStageMeanings,
 } from "../../src/db/schema.js";
 import { rebuildFromBronze, runSyncPass } from "../../src/lib/gohighlevel/sync.js";
 import { readPipelineView } from "../../src/lib/gohighlevel/view.js";
@@ -94,27 +97,69 @@ const CONTACTS: Record<string, unknown>[] = [
   { id: "c3", firstName: "Carol", lastName: "Nguyen", phone: "0612345678", dnd: false },
 ];
 
-const OPPORTUNITIES = [
+const OPPORTUNITIES: Record<string, unknown>[] = [
+  // o1 carries no stage / status change dates at all: its stage entry is undated.
   { id: "o1", name: "Alice — June wedding", monetaryValue: 2500.5, pipelineId: "p1", pipelineStageId: "s2", status: "open", contactId: "c1", createdAt: "2026-08-03T04:55:17.355Z", updatedAt: "2026-08-04T04:55:17.355Z" },
-  { id: "o2", name: "Bob — corporate", monetaryValue: 1000, pipelineId: "p1", pipelineStageId: "s3", status: "won", contactId: "c2", createdAt: "2026-08-05T04:55:17.355Z", updatedAt: "2026-08-06T04:55:17.355Z" },
+  { id: "o2", name: "Bob — corporate", monetaryValue: 1000, pipelineId: "p1", pipelineStageId: "s3", status: "won", contactId: "c2", createdAt: "2026-08-05T04:55:17.355Z", updatedAt: "2026-08-06T04:55:17.355Z", lastStageChangeAt: "2026-08-06T04:00:00.000Z", lastStatusChangeAt: "2026-08-06T04:00:05.000Z" },
   { id: "o3", name: "Orphan deal", monetaryValue: 250, pipelineId: "p-unknown", pipelineStageId: "sx", status: "open", contactId: "c9", createdAt: "2026-08-07T04:55:17.355Z", updatedAt: "2026-08-07T04:55:17.355Z" },
 ];
+
+const CALENDARS = [{ id: "cal1", name: "Discovery call" }];
+
+const APPOINTMENTS: Record<string, unknown>[] = [
+  // Booked, not yet held: evidences the booking only.
+  { id: "ap1", calendarId: "cal1", contactId: "c1", appointmentStatus: "confirmed", appoinmentStatus: "confirmed", title: "Alice", dateAdded: "2026-08-10T10:00:00.000Z", dateUpdated: "2026-08-10T10:00:10.000Z", startTime: "2026-08-12T10:00:00-04:00", endTime: "2026-08-12T10:30:00-04:00" },
+  // Held: booked AND attended.
+  { id: "ap2", calendarId: "cal1", contactId: "c2", appointmentStatus: "showed", title: "Bob", dateAdded: "2026-08-01T09:00:00.000Z", dateUpdated: "2026-08-02T14:00:00.000Z", startTime: "2026-08-02T15:00:00+02:00", endTime: "2026-08-02T15:30:00+02:00" },
+  // No-show: booked AND not held.
+  { id: "ap3", calendarId: "cal1", contactId: "c3", appointmentStatus: "noshow", title: "Carol", dateAdded: "2026-08-03T09:00:00.000Z", dateUpdated: "2026-08-05T09:00:00.000Z", startTime: "2026-08-04T09:00:00Z", endTime: "2026-08-04T09:30:00Z" },
+  // Invalid: mirrored, evidences nothing.
+  { id: "ap4", calendarId: "cal1", contactId: "c1", appointmentStatus: "invalid", title: "Alice dup", dateAdded: "2026-08-11T10:00:00.000Z", dateUpdated: "2026-08-11T10:00:00.000Z", startTime: "2026-08-13T10:00:00Z", endTime: "2026-08-13T10:30:00Z" },
+];
+
+/** What the stubbed model answers per stage name. */
+const STAGE_ANSWERS: Record<string, string> = {
+  "New lead": "none",
+  "Quote sent": "meeting_booked",
+  Won: "sale",
+  "Deal signed": "sale",
+};
 
 // ─── fetch stub ──────────────────────────────────────────────────────────────
 
 let vendorCalls = 0;
+let chatCalls = 0;
+let chatStageNames: string[][] = [];
 let keyServiceStatus = 200;
 let contactsProbeStatus = 200;
 let contactsProbeBody = "";
 
 function installFetchStub() {
   vendorCalls = 0;
+  chatCalls = 0;
+  chatStageNames = [];
   keyServiceStatus = 200;
   contactsProbeStatus = 200;
   contactsProbeBody = "";
 
-  vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
+
+    if (url.endsWith("/complete")) {
+      chatCalls += 1;
+      const body = JSON.parse(String(init?.body)) as { message: string };
+      const asked = [...body.message.matchAll(/key=(\d+) \| pipeline: "[^"]*" \| stage: "([^"]*)"/g)];
+      chatStageNames.push(asked.map((m) => m[2]));
+      return json({
+        content: "",
+        json: {
+          stages: asked.map((m) => ({ key: m[1], meaning: STAGE_ANSWERS[m[2]] ?? "none" })),
+        },
+        tokensInput: 10,
+        tokensOutput: 10,
+        model: "claude-haiku-test",
+      });
+    }
 
     if (url.includes("/keys/brands/")) {
       if (keyServiceStatus !== 200) {
@@ -136,6 +181,12 @@ function installFetchStub() {
           status: contactsProbeStatus,
           headers: { "content-type": "application/json" },
         });
+      }
+      if (url.includes("/calendars/events")) {
+        return json({ events: APPOINTMENTS });
+      }
+      if (url.includes("/calendars/")) {
+        return json({ calendars: CALENDARS });
       }
       if (url.includes("/opportunities/pipelines")) {
         return json({ pipelines: PIPELINES });
@@ -189,6 +240,9 @@ function app() {
 }
 
 async function wipe() {
+  await db.delete(ghlStageMeanings);
+  await db.delete(ghlOpportunityHistory);
+  await db.delete(ghlAppointments);
   await db.delete(ghlOpportunities);
   await db.delete(ghlPipelines);
   await db.delete(ghlRawRecords);
@@ -233,6 +287,7 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
   beforeAll(() => {
     process.env.KEY_SERVICE_URL = "http://key-service.test";
     process.env.KEY_SERVICE_API_KEY = "test-key-service-key";
+    process.env.CRM_STAGE_MEANING_CHAT_CONFIG = "anthropic/haiku";
   });
 
   beforeEach(async () => {
@@ -252,7 +307,8 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
     });
 
     const bronze = await db.select().from(ghlRawRecords);
-    expect(bronze).toHaveLength(7);
+    // 3 contacts + 3 opportunities + 1 pipeline + 1 calendar + 4 appointments.
+    expect(bronze).toHaveLength(12);
 
     const silverContacts = await db
       .select()
@@ -543,7 +599,15 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
     const rebuilt = await rebuildFromBronze(conn);
 
     expect(vendorCalls).toBe(callsBeforeRebuild);
-    expect(rebuilt).toEqual({ contacts: 3, opportunities: 3, pipelines: 1 });
+    expect(rebuilt).toEqual({
+      contacts: 3,
+      opportunities: 3,
+      pipelines: 1,
+      appointments: 4,
+      // The history already holds every observation: a rebuild appends nothing.
+      historyAppended: 0,
+      stageMeaningsDecided: 0,
+    });
 
     const after = {
       contacts: await db.select().from(contacts).orderBy(contacts.externalId),
@@ -780,5 +844,218 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.contacts).toHaveLength(0);
+  });
+
+  // ─── funnel evidence: appointments, stage history, stage meanings ─────────
+
+  async function funnelEvents(query = "") {
+    const res = await request(app())
+      .get(`/orgs/gohighlevel/funnel-events?brandId=${BRAND}${query}`)
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", ORG);
+    expect(res.status).toBe(200);
+    return res.body as {
+      contacts: {
+        contactId: string;
+        externalContactId: string;
+        events: {
+          step: string;
+          occurredAt: string | null;
+          dateBasis: string;
+          source: string;
+          sourceId: string;
+          detail: Record<string, unknown>;
+        }[];
+      }[];
+      totalContacts: number;
+      nextOffset: number | null;
+      undecidedStages: number;
+    };
+  }
+
+  it("mirrors the calendar appointments with the dates that matter", async () => {
+    await seedConnection();
+    const pass = await runSyncPass();
+    expect(pass.results[0]).toMatchObject({ appointmentsMirrored: 4, appointmentsDerived: 4 });
+
+    const rows = await db.select().from(ghlAppointments).orderBy(ghlAppointments.externalId);
+    expect(rows.map((r) => r.externalId)).toEqual(["ap1", "ap2", "ap3", "ap4"]);
+    const [ap1, ap2] = rows;
+    expect(ap1).toMatchObject({ calendarName: "Discovery call", status: "confirmed", externalContactId: "c1" });
+    expect(ap1.contactId).not.toBeNull();
+    expect(ap1.bookedAt?.toISOString()).toBe("2026-08-10T10:00:00.000Z");
+    // The offset in GoHighLevel's answer is honoured, never replaced by ours.
+    expect(ap1.startsAt?.toISOString()).toBe("2026-08-12T14:00:00.000Z");
+    expect(ap2.status).toBe("showed");
+    expect(ap2.startsAt?.toISOString()).toBe("2026-08-02T13:00:00.000Z");
+  });
+
+  it("appends the stage and status history once, and again only when it moves", async () => {
+    const connectionId = await seedConnection();
+    const first = await runSyncPass(connectionId);
+    // Three opportunities, each observed in one stage and one status.
+    expect(first.results[0].historyAppended).toBe(6);
+
+    const second = await runSyncPass(connectionId);
+    expect(second.results[0].historyAppended).toBe(0);
+    expect(await db.select().from(ghlOpportunityHistory)).toHaveLength(6);
+
+    const [o2Stage] = await db
+      .select()
+      .from(ghlOpportunityHistory)
+      .where(and(eq(ghlOpportunityHistory.opportunityExternalId, "o2"), eq(ghlOpportunityHistory.kind, "stage")));
+    expect(o2Stage).toMatchObject({ value: "s3", stageName: "Won", pipelineName: "Sales" });
+    expect(o2Stage.changedAt?.toISOString()).toBe("2026-08-06T04:00:00.000Z");
+
+    // o1 has no dates in GoHighLevel: the row says so rather than borrowing ours.
+    const [o1Stage] = await db
+      .select()
+      .from(ghlOpportunityHistory)
+      .where(and(eq(ghlOpportunityHistory.opportunityExternalId, "o1"), eq(ghlOpportunityHistory.kind, "stage")));
+    expect(o1Stage.changedAt).toBeNull();
+
+    // o1 moves on: the old row stays, the new stage is appended with GoHighLevel's date.
+    const original = { ...OPPORTUNITIES[0] };
+    Object.assign(OPPORTUNITIES[0], {
+      pipelineStageId: "s3",
+      status: "won",
+      lastStageChangeAt: "2026-08-20T08:00:00.000Z",
+      lastStatusChangeAt: "2026-08-20T08:00:01.000Z",
+    });
+    try {
+      const third = await runSyncPass(connectionId);
+      expect(third.results[0].historyAppended).toBe(2);
+      const o1 = await db
+        .select()
+        .from(ghlOpportunityHistory)
+        .where(eq(ghlOpportunityHistory.opportunityExternalId, "o1"))
+        .orderBy(ghlOpportunityHistory.observedAt, ghlOpportunityHistory.kind);
+      expect(o1.map((r) => `${r.kind}:${r.value}`)).toEqual([
+        "stage:s2",
+        "status:open",
+        "stage:s3",
+        "status:won",
+      ]);
+    } finally {
+      for (const key of Object.keys(OPPORTUNITIES[0])) delete OPPORTUNITIES[0][key];
+      Object.assign(OPPORTUNITIES[0], original);
+    }
+  });
+
+  it("decides each stage's meaning once, records the model, and never re-asks", async () => {
+    const connectionId = await seedConnection();
+    const first = await runSyncPass(connectionId);
+    expect(first.results[0].stageMeaningsDecided).toBe(3);
+    expect(chatCalls).toBe(1);
+    expect(chatStageNames[0].sort()).toEqual(["New lead", "Quote sent", "Won"]);
+
+    const second = await runSyncPass(connectionId);
+    expect(second.results[0].stageMeaningsDecided).toBe(0);
+    expect(chatCalls).toBe(1);
+
+    const res = await request(app())
+      .get(`/orgs/gohighlevel/stage-meanings?brandId=${BRAND}`)
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", ORG);
+    expect(res.status).toBe(200);
+    const byName = Object.fromEntries(
+      res.body.stageMeanings.map((m: { stageName: string; meaning: string; model: string }) => [
+        m.stageName,
+        `${m.meaning}@${m.model}`,
+      ]),
+    );
+    expect(byName).toEqual({
+      "New lead": "none@claude-haiku-test",
+      "Quote sent": "meeting_booked@claude-haiku-test",
+      Won: "sale@claude-haiku-test",
+    });
+
+    // A NEW stage name is the only thing sent to the model again.
+    PIPELINES[0].stages[2].name = "Deal signed";
+    try {
+      const third = await runSyncPass(connectionId);
+      expect(third.results[0].stageMeaningsDecided).toBe(1);
+      expect(chatCalls).toBe(2);
+      expect(chatStageNames[1]).toEqual(["Deal signed"]);
+    } finally {
+      PIPELINES[0].stages[2].name = "Won";
+    }
+  });
+
+  it("serves each contact's dated funnel events, with where each came from", async () => {
+    await seedConnection();
+    await runSyncPass();
+
+    const body = await funnelEvents();
+    expect(body.totalContacts).toBe(3);
+    expect(body.undecidedStages).toBe(0);
+    const byExternal = Object.fromEntries(body.contacts.map((c) => [c.externalContactId, c.events]));
+
+    // Alice: booked through the calendar (dated), and her opportunity sits in a
+    // stage that means booked — with no date, because GoHighLevel gave none.
+    // Her `invalid` appointment evidences nothing.
+    expect(byExternal.c1.map((e) => [e.step, e.source, e.occurredAt, e.dateBasis])).toEqual([
+      ["meeting_booked", "appointment", "2026-08-10T10:00:00.000Z", "booked_at"],
+      ["meeting_booked", "stage_entry", null, "stage_entered_at"],
+    ]);
+    expect(byExternal.c1[0].detail).toMatchObject({ calendarName: "Discovery call", appointmentStatus: "confirmed" });
+
+    // Bob: booked, attended, and won — the won date is GoHighLevel's.
+    expect(byExternal.c2.map((e) => [e.step, e.source, e.occurredAt])).toEqual([
+      ["meeting_booked", "appointment", "2026-08-01T09:00:00.000Z"],
+      ["meeting_attended", "appointment", "2026-08-02T13:00:00.000Z"],
+      ["sale", "stage_entry", "2026-08-06T04:00:00.000Z"],
+      ["sale", "won_status", "2026-08-06T04:00:05.000Z"],
+    ]);
+    expect(byExternal.c2[2].detail).toMatchObject({ pipelineName: "Sales", stageName: "Won" });
+
+    // Carol: booked, then did not show.
+    expect(byExternal.c3.map((e) => [e.step, e.occurredAt])).toEqual([
+      ["meeting_booked", "2026-08-03T09:00:00.000Z"],
+      ["meeting_not_held", "2026-08-04T09:00:00.000Z"],
+    ]);
+
+    // The orphan deal's contact was never mirrored: nobody to attribute it to.
+    expect(Object.keys(byExternal).sort()).toEqual(["c1", "c2", "c3"]);
+  });
+
+  it("pages the funnel events over contacts, each visited once, and reads one contact", async () => {
+    await seedConnection();
+    await runSyncPass();
+
+    const seen: string[] = [];
+    for (let offset = 0; ; ) {
+      const page = await funnelEvents(`&limit=1&offset=${offset}`);
+      seen.push(...page.contacts.map((c) => c.externalContactId));
+      if (page.nextOffset === null) break;
+      offset = page.nextOffset;
+    }
+    expect(seen.sort()).toEqual(["c1", "c2", "c3"]);
+
+    const all = await funnelEvents();
+    const bob = all.contacts.find((c) => c.externalContactId === "c2")!;
+    const one = await funnelEvents(`&contactId=${bob.contactId}`);
+    expect(one.totalContacts).toBe(1);
+    expect(one.contacts[0].events).toEqual(bob.events);
+
+    const otherOrg = await request(app())
+      .get(`/orgs/gohighlevel/funnel-events?brandId=${BRAND}`)
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", "bbbbbbbb-1111-4111-8111-00000000000f");
+    expect(otherOrg.body.totalContacts).toBe(0);
+  });
+
+  it("disconnecting drops the appointments, the history and the stage meanings", async () => {
+    const connectionId = await seedConnection();
+    await runSyncPass(connectionId);
+
+    await request(app())
+      .delete(`/orgs/gohighlevel/connections/${connectionId}`)
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", ORG);
+
+    expect(await db.select().from(ghlAppointments)).toHaveLength(0);
+    expect(await db.select().from(ghlOpportunityHistory)).toHaveLength(0);
+    expect(await db.select().from(ghlStageMeanings)).toHaveLength(0);
   });
 });
