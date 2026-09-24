@@ -28,16 +28,26 @@ As a CSV lead-provider it is a sibling of `apollo-service` / `apify-service`.
 
 ## Cost
 
-crm-service declares **NO cost of its own**. Every external/metered call is an LLM
-completion routed through chat-service `POST /complete`, which self-declares its
-LLM cost against the run id crm-service forwards. crm-service imports no LLM SDK
-and holds no provider key, so no costs-service catalog row is needed.
+crm-service declares **NO cost of its own**. Every external/metered call is a
+model call routed through chat-service, which self-declares its cost against the
+run id crm-service forwards. crm-service imports no LLM SDK and holds no provider
+key, so no costs-service catalog row is needed.
+
+**A CLASSIFICATION goes to Jev, never to a completion model.** chat-service
+`POST /orgs/judgments` (TypeSafe Jev) answers a typed `choice` question with the
+model's own CONFIDENCE, bills input tokens only ($0.21/M org price, output free —
+haiku was $5/$25) and answered 8 stage questions in 1.1s. **Do not use
+`anthropic/haiku` for anything** (owner, 2026-09-24: "very bad and expensive").
+A completion (`/complete`) is only for work that WRITES text.
 
 There are exactly THREE such calls, all once-per-artifact, never per row:
-1. column typing, one per CSV upload;
-2. thread reading, one per CHANGED Matrix conversation (watermark-gated);
-3. stage meaning, one per GoHighLevel sync that finds a pipeline stage NAME
-   never decided before (recorded, so every later sync makes zero calls).
+1. column typing, one Jev call per CSV upload (`src/lib/column-typing.ts`);
+   a column Jev types below 0.5 confidence becomes `other`;
+2. thread reading, one `/complete` per CHANGED Matrix conversation
+   (watermark-gated) — it writes a next step and a summary, so it is the one
+   completion; its config is `CRM_LEAD_READING_CHAT_CONFIG` (`google/flash`);
+3. stage meaning, one Jev call per GoHighLevel sync that finds a pipeline stage
+   NAME never decided before (recorded, so every later sync makes zero calls).
 
 Everything else GoHighLevel sends arrives already structured, so deriving it is
 pure code — no model, no metered call, no catalogue row.
@@ -81,7 +91,7 @@ each nullable; exactly one side is populated.
 CSV specifics:
 
 - Deterministically derived from bronze via `promoteUpload()` — **zero per-row
-  LLM**. The column mapping (one LLM call at upload time) is applied in code.
+  LLM**. The column mapping (one Jev call at upload time) is applied in code.
 - **Natural key = `(org_id, brand_id, lower(primary_email))`** (expression unique
   index, hand-written migration). Last-write-wins per field. Null-email rows are
   kept but not email-deduped; they are re-derived per upload (delete-by
@@ -189,8 +199,9 @@ chat-service `/complete` call per upload:
 
 - `columnMapping` override present → use it (provenance `override`), skip the LLM.
 - else build a per-header profile (header name + up to 5 non-null samples) and make
-  ONE `/complete` call (anthropic/haiku, strict `responseSchema`), org-billed via
-  the forwarded `x-org-id` + `x-user-id` + `x-run-id`. Provenance `llm`.
+  ONE chat-service `/orgs/judgments` call (Jev, one `choice` question per
+  column), org-billed via the forwarded `x-org-id` + `x-user-id` + `x-run-id`.
+  Provenance `llm` (the stored value predates Jev and is kept for shape).
 - Rows are then parsed DETERMINISTICALLY against the stored mapping — no per-row LLM.
 - **The classify call is on the SYNCHRONOUS upload response path, behind the
   api-service gateway + Cloudflare's ~100s edge timeout.** So `chatComplete` is
@@ -508,13 +519,18 @@ customer's vocabulary.
   so they never reach it. Test it with the prod shape: bronze full, nothing
   changed, new table empty.
 - **Stage meanings** — `ghl_stage_meanings`, keyed (connection, stage id, stage
-  NAME). An LLM decides (chat-service, `CRM_STAGE_MEANING_CHAT_CONFIG`) which of
-  `meeting_booked | meeting_attended | meeting_not_held | sale | deal_lost |
-  none` a stage means, and the decision is recorded with its model and run.
+  NAME). Jev decides (chat-service `/orgs/judgments`, one `choice` question per
+  stage, every pipeline as the shared state) which of `meeting_booked |
+  meeting_attended | meeting_not_held | sale | deal_lost | none` a stage means,
+  and the decision is recorded with its CONFIDENCE, full distribution, model and
+  run. A meaning below `STAGE_MEANING_MIN_CONFIDENCE` (0.5) is recorded but
+  never served as evidence (`hesitantStages` on the read): on the first
+  customer, clear names answered at 1.0 and "Showed?" / "Onboarding Call" /
+  "Free Trail client" at 0.33-0.42.
   **No stage name is ever mapped in code** — no string matching, no keyword
   list; the recorded decision is the only source. Re-decided only when a NEW
   name appears (a rename is a new statement by the customer). An answer that
-  skips, duplicates or invents a meaning fails the sync loud.
+  skips a stage, invents a meaning or omits its confidence fails the sync loud.
 - **The events** (`src/lib/gohighlevel/funnel-events.ts`), computed on read:
   appointment → `meeting_booked` at `booked_at`; appointment `showed` →
   `meeting_attended`, `noshow`/`cancelled` → `meeting_not_held`, both at the
@@ -615,10 +631,8 @@ run separately. Do not read the chained failure as a signal about your change.
 `CRM_SERVICE_DATABASE_URL`, `CRM_SERVICE_API_KEY`, `RUNS_SERVICE_URL`, `RUNS_SERVICE_API_KEY`,
 `CHAT_SERVICE_URL`, `CHAT_SERVICE_API_KEY`, `MATRIX_HOMESERVER_URL`,
 `MATRIX_ACCESS_TOKEN`, `MATRIX_INGESTION_FLOOR`, `CRM_LEAD_READING_CHAT_CONFIG`,
-`CRM_STAGE_MEANING_CHAT_CONFIG`, `KEY_SERVICE_URL`, `KEY_SERVICE_API_KEY`.
+`KEY_SERVICE_URL`, `KEY_SERVICE_API_KEY`.
 See `.env.example`. The four Matrix ones are REQUIRED for the sync to run at all —
 without them `/internal/matrix/sync` fails loud instead of silently no-op-ing.
 The two `KEY_SERVICE_*` ones are REQUIRED for GoHighLevel — they are how the
 brand's credential is resolved, and crm-service holds no copy of it.
-`CRM_STAGE_MEANING_CHAT_CONFIG` is REQUIRED for a GoHighLevel sync that meets an
-undecided stage — unset, that sync fails loud rather than picking a model.

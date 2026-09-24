@@ -17,6 +17,7 @@ import { rebuildFromBronze, runSyncPass } from "../lib/gohighlevel/sync.js";
 import { readContactOrigins } from "../lib/gohighlevel/origins.js";
 import { readPipelineView } from "../lib/gohighlevel/view.js";
 import { readFunnelEvents } from "../lib/gohighlevel/funnel-events.js";
+import { STAGE_MEANING_MIN_CONFIDENCE } from "../lib/gohighlevel/stage-meanings.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 
 const router = Router();
@@ -420,8 +421,9 @@ router.get(
 // ─── GET /orgs/gohighlevel/stage-meanings?brandId= ───────────────────────────
 
 /**
- * What each of the brand's pipeline stages was decided to mean, with the model
- * that decided it. The record every funnel-event read is resolved against.
+ * What each of the brand's pipeline stages was decided to mean, with the
+ * model's confidence and distribution and the model that decided it. The record
+ * every funnel-event read is resolved against.
  */
 router.get(
   "/orgs/gohighlevel/stage-meanings",
@@ -452,6 +454,10 @@ router.get(
         stageId: row.stageExternalId,
         stageName: row.stageName,
         meaning: row.meaning,
+        confidence: row.confidence,
+        probabilities: row.probabilities,
+        /** False below the confidence floor: recorded, never served as evidence. */
+        servedAsEvidence: row.confidence >= STAGE_MEANING_MIN_CONFIDENCE,
         model: row.model,
         runId: row.runId,
         decidedAt: row.decidedAt,

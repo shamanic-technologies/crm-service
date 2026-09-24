@@ -889,6 +889,11 @@ export const GhlFunnelEventSchema = registry.register(
         observedAt: z.string().nullable().openapi({
           description: "When crm-service observed the stage / status (opportunity evidence only).",
         }),
+        meaningConfidence: z.number().nullable().openapi({
+          description:
+            "The judgment model's confidence (0..1) in what the stage means (stage entries only). " +
+            "Stages below 0.5 are never served as evidence.",
+        }),
       }),
     })
     .openapi("GhlFunnelEvent"),
@@ -923,6 +928,11 @@ export const GhlFunnelEventsResponseSchema = registry.register(
           "Stage names observed but not yet given a meaning; their entries appear once decided " +
           "(the next sync decides them).",
       }),
+      hesitantStages: z.number().int().openapi({
+        description:
+          "Stages whose recorded meaning fell below the 0.5 confidence floor. Their entries are " +
+          "never served: the stage name does not say what it means.",
+      }),
     })
     .openapi("GhlFunnelEventsResponse"),
 );
@@ -938,6 +948,13 @@ export const GhlStageMeaningsResponseSchema = registry.register(
           stageId: z.string(),
           stageName: z.string(),
           meaning: z.enum([...FUNNEL_STEP_VALUES, "none"]),
+          confidence: z.number().openapi({ description: "The judgment model's confidence, 0..1." }),
+          probabilities: z.record(z.string(), z.number()).openapi({
+            description: "The model's distribution over every meaning.",
+          }),
+          servedAsEvidence: z.boolean().openapi({
+            description: "False below the 0.5 confidence floor: recorded, never served as evidence.",
+          }),
           model: z.string().openapi({ description: "The model that decided it." }),
           runId: z.string(),
           decidedAt: z.string(),
@@ -1124,8 +1141,9 @@ registry.registerPath({
   path: "/orgs/gohighlevel/stage-meanings",
   summary: "What each of a brand's GoHighLevel pipeline stages was decided to mean",
   description:
-    "Decided once per stage name by an LLM (through chat-service) and recorded with the model " +
-    "that produced it; re-decided only when a new stage name appears.",
+    "Decided once per stage name by a judgment model (TypeSafe Jev, through chat-service " +
+    "/orgs/judgments) and recorded with its confidence, distribution and model; re-decided only " +
+    "when a new stage name appears.",
   request: { query: z.object({ brandId: z.string().uuid() }) },
   responses: {
     200: {

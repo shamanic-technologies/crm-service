@@ -117,12 +117,12 @@ const APPOINTMENTS: Record<string, unknown>[] = [
   { id: "ap4", calendarId: "cal1", contactId: "c1", appointmentStatus: "invalid", title: "Alice dup", dateAdded: "2026-08-11T10:00:00.000Z", dateUpdated: "2026-08-11T10:00:00.000Z", startTime: "2026-08-13T10:00:00Z", endTime: "2026-08-13T10:30:00Z" },
 ];
 
-/** What the stubbed model answers per stage name. */
-const STAGE_ANSWERS: Record<string, string> = {
-  "New lead": "none",
-  "Quote sent": "meeting_booked",
-  Won: "sale",
-  "Deal signed": "sale",
+/** What the stubbed judgment model answers per stage name: [meaning, confidence]. */
+const STAGE_ANSWERS: Record<string, [string, number]> = {
+  "New lead": ["none", 1],
+  "Quote sent": ["meeting_booked", 1],
+  Won: ["sale", 1],
+  "Deal signed": ["sale", 1],
 };
 
 // ─── fetch stub ──────────────────────────────────────────────────────────────
@@ -145,20 +145,21 @@ function installFetchStub() {
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
 
-    if (url.endsWith("/complete")) {
+    if (url.endsWith("/orgs/judgments")) {
       chatCalls += 1;
-      const body = JSON.parse(String(init?.body)) as { message: string };
-      const asked = [...body.message.matchAll(/key=(\d+) \| pipeline: "[^"]*" \| stage: "([^"]*)"/g)];
-      chatStageNames.push(asked.map((m) => m[2]));
-      return json({
-        content: "",
-        json: {
-          stages: asked.map((m) => ({ key: m[1], meaning: STAGE_ANSWERS[m[2]] ?? "none" })),
-        },
-        tokensInput: 10,
-        tokensOutput: 10,
-        model: "claude-haiku-test",
-      });
+      const body = JSON.parse(String(init?.body)) as {
+        questions: Record<string, { instructions: string }>;
+      };
+      const names: string[] = [];
+      const answers: Record<string, unknown> = {};
+      for (const [key, question] of Object.entries(body.questions)) {
+        const name = /the stage "([^"]*)"/.exec(question.instructions)![1];
+        names.push(name);
+        const [meaning, confidence] = STAGE_ANSWERS[name] ?? ["none", 1];
+        answers[key] = { type: "choice", choice: meaning, confidence, probabilities: { [meaning]: confidence } };
+      }
+      chatStageNames.push(names);
+      return json({ model: "jev-1.13.0", answers, usage: { inputTokens: 10, outputTokens: 5 } });
     }
 
     if (url.includes("/keys/brands/")) {
@@ -287,7 +288,6 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
   beforeAll(() => {
     process.env.KEY_SERVICE_URL = "http://key-service.test";
     process.env.KEY_SERVICE_API_KEY = "test-key-service-key";
-    process.env.CRM_STAGE_MEANING_CHAT_CONFIG = "anthropic/haiku";
   });
 
   beforeEach(async () => {
@@ -980,9 +980,9 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
       ]),
     );
     expect(byName).toEqual({
-      "New lead": "none@claude-haiku-test",
-      "Quote sent": "meeting_booked@claude-haiku-test",
-      Won: "sale@claude-haiku-test",
+      "New lead": "none@jev-1.13.0",
+      "Quote sent": "meeting_booked@jev-1.13.0",
+      Won: "sale@jev-1.13.0",
     });
 
     // A NEW stage name is the only thing sent to the model again.
@@ -1032,6 +1032,29 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
 
     // The orphan deal's contact was never mirrored: nobody to attribute it to.
     expect(Object.keys(byExternal).sort()).toEqual(["c1", "c2", "c3"]);
+  });
+
+  it("never serves a stage the judgment model hesitated on", async () => {
+    STAGE_ANSWERS["Quote sent"] = ["meeting_booked", 0.4];
+    try {
+      await seedConnection();
+      await runSyncPass();
+
+      const body = await funnelEvents();
+      expect(body.hesitantStages).toBe(1);
+      const alice = body.contacts.find((c) => c.externalContactId === "c1")!;
+      // The calendar booking still stands; the hesitant stage entry does not.
+      expect(alice.events.map((e) => e.source)).toEqual(["appointment"]);
+
+      const res = await request(app())
+        .get(`/orgs/gohighlevel/stage-meanings?brandId=${BRAND}`)
+        .set("x-api-key", API_KEY)
+        .set("x-org-id", ORG);
+      const quote = res.body.stageMeanings.find((m: { stageName: string }) => m.stageName === "Quote sent");
+      expect(quote).toMatchObject({ meaning: "meeting_booked", confidence: 0.4, servedAsEvidence: false });
+    } finally {
+      STAGE_ANSWERS["Quote sent"] = ["meeting_booked", 1];
+    }
   });
 
   it("pages the funnel events over contacts, each visited once, and reads one contact", async () => {

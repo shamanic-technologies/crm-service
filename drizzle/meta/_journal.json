@@ -50,6 +50,13 @@
       "when": 1790235967387,
       "tag": "0006_ghl_funnel_evidence",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1790251178758,
+      "tag": "0007_ghl_stage_meanings_jev",
+      "breakpoints": true
     }
   ]
 }

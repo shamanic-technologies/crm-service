@@ -10,8 +10,9 @@
  *    `meeting_not_held`; both dated by the meeting's scheduled start.
  *    `invalid` appointments evidence nothing.
  *  - `stage_entry` — the opportunity was observed entering a pipeline stage whose
- *    RECORDED meaning (see stage-meanings.ts) is a funnel step. Dated by
- *    GoHighLevel's `lastStageChangeAt`, or null when it gave none.
+ *    RECORDED meaning (see stage-meanings.ts) is a funnel step, decided with at
+ *    least STAGE_MEANING_MIN_CONFIDENCE. Dated by GoHighLevel's
+ *    `lastStageChangeAt`, or null when it gave none.
  *  - `won_status` / `lost_status` — the opportunity's status became `won` /
  *    `lost`, GoHighLevel's fixed vocabulary: `sale` / `deal_lost`, dated by
  *    `lastStatusChangeAt`, or null when it gave none.
@@ -25,6 +26,7 @@
 import { sql, type SQL } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { GHL_SOURCE } from "./records.js";
+import { STAGE_MEANING_MIN_CONFIDENCE } from "./stage-meanings.js";
 
 export const FUNNEL_EVENT_SOURCES = [
   "appointment",
@@ -56,6 +58,8 @@ export interface FunnelEvent {
     stageName: string | null;
     /** When we observed the stage / status (history rows only). */
     observedAt: string | null;
+    /** The judgment model's confidence in the stage's meaning (stage entries only). */
+    meaningConfidence: number | null;
   };
 }
 
@@ -77,6 +81,8 @@ export interface FunnelEventsResult {
   nextOffset: number | null;
   /** Stage names seen but not yet given a meaning — their entries are not served yet. */
   undecidedStages: number;
+  /** Stages whose recorded meaning is below the confidence floor — never served as evidence. */
+  hesitantStages: number;
 }
 
 /** Every event row of the brand, joined to its silver contact. */
@@ -89,7 +95,7 @@ function eventsQuery(orgId: string, brandId: string, contactId: string | null): 
              'appointment' AS source, a.external_id AS source_id,
              a.calendar_name, a.status AS appointment_status, a.starts_at,
              NULL::text AS pipeline_name, NULL::text AS stage_name,
-             NULL::timestamptz AS observed_at
+             NULL::timestamptz AS observed_at, NULL::float8 AS meaning_confidence
       FROM ghl_appointments a
       WHERE a.org_id = ${orgId} AND a.brand_id = ${brandId}
         AND a.status IS DISTINCT FROM 'invalid'
@@ -99,7 +105,7 @@ function eventsQuery(orgId: string, brandId: string, contactId: string | null): 
              a.starts_at, 'scheduled_start',
              'appointment', a.external_id,
              a.calendar_name, a.status, a.starts_at,
-             NULL, NULL, NULL
+             NULL, NULL, NULL, NULL
       FROM ghl_appointments a
       WHERE a.org_id = ${orgId} AND a.brand_id = ${brandId}
         AND a.status IN ('showed', 'noshow', 'cancelled')
@@ -108,7 +114,7 @@ function eventsQuery(orgId: string, brandId: string, contactId: string | null): 
              h.changed_at, 'stage_entered_at',
              'stage_entry', h.opportunity_external_id,
              NULL, NULL, NULL,
-             h.pipeline_name, h.stage_name, h.observed_at
+             h.pipeline_name, h.stage_name, h.observed_at, m.confidence
       FROM ghl_opportunity_history h
       JOIN ghl_stage_meanings m
         ON m.connection_id = h.connection_id
@@ -116,6 +122,7 @@ function eventsQuery(orgId: string, brandId: string, contactId: string | null): 
        AND m.stage_name = h.stage_name
       WHERE h.org_id = ${orgId} AND h.brand_id = ${brandId}
         AND h.kind = 'stage' AND m.meaning <> 'none'
+        AND m.confidence >= ${STAGE_MEANING_MIN_CONFIDENCE}
       UNION ALL
       SELECT h.external_contact_id,
              CASE h.value WHEN 'won' THEN 'sale' ELSE 'deal_lost' END,
@@ -123,7 +130,7 @@ function eventsQuery(orgId: string, brandId: string, contactId: string | null): 
              CASE h.value WHEN 'won' THEN 'won_status' ELSE 'lost_status' END,
              h.opportunity_external_id,
              NULL, NULL, NULL,
-             h.pipeline_name, h.stage_name, h.observed_at
+             h.pipeline_name, h.stage_name, h.observed_at, NULL
       FROM ghl_opportunity_history h
       WHERE h.org_id = ${orgId} AND h.brand_id = ${brandId}
         AND h.kind = 'status' AND h.value IN ('won', 'lost')
@@ -154,6 +161,7 @@ interface EventRow {
   pipeline_name: string | null;
   stage_name: string | null;
   observed_at: string | Date | null;
+  meaning_confidence: number | null;
 }
 
 function iso(value: string | Date | null): string | null {
@@ -218,6 +226,7 @@ export async function readFunnelEvents(args: {
         pipelineName: row.pipeline_name,
         stageName: row.stage_name,
         observedAt: iso(row.observed_at),
+        meaningConfidence: row.meaning_confidence === null ? null : Number(row.meaning_confidence),
       },
     });
   }
@@ -236,6 +245,12 @@ export async function readFunnelEvents(args: {
     ) u
   `)) as unknown as { undecided: number }[];
 
+  const [{ hesitant }] = (await db.execute(sql`
+    SELECT count(*)::int AS hesitant FROM ghl_stage_meanings
+    WHERE org_id = ${orgId} AND brand_id = ${brandId}
+      AND confidence < ${STAGE_MEANING_MIN_CONFIDENCE}
+  `)) as unknown as { hesitant: number }[];
+
   const served = byContact.size;
   return {
     brandId,
@@ -245,5 +260,6 @@ export async function readFunnelEvents(args: {
     offset,
     nextOffset: offset + served < total ? offset + served : null,
     undecidedStages: undecided,
+    hesitantStages: hesitant,
   };
 }

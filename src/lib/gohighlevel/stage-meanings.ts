@@ -5,11 +5,14 @@
  * Stage names are the customer's own words ("Appointment Booked", "Showed Up -
  * Interested", "No-Show for Appointment", "Closed Client"...), different for
  * every customer. Nothing in code maps them — no string matching, no keyword
- * list. An LLM decides, through chat-service `POST /complete` (which declares
- * the LLM cost against the run id we forward), and the decision is RECORDED in
- * `ghl_stage_meanings` with the model that produced it. Reads only ever consult
- * the record, so the same stage resolves the same way every time, and a stage is
- * sent to the model again only when a NEW name appears for it.
+ * list. A judgment model decides: TypeSafe's Jev through chat-service
+ * `POST /orgs/judgments` (which declares the cost against the run id we
+ * forward), one `choice` question per stage. It answers with the model's own
+ * CONFIDENCE, which is recorded beside the meaning with the full distribution
+ * and the model. Reads only ever consult the record, so the same stage resolves
+ * the same way every time, and a stage is sent again only when a NEW name
+ * appears for it. A stage decided with low confidence is recorded but not
+ * served as evidence (see STAGE_MEANING_MIN_CONFIDENCE).
  */
 
 import { and, eq, sql } from "drizzle-orm";
@@ -20,8 +23,8 @@ import {
   ghlStageMeanings,
   type GhlConnection,
 } from "../../db/schema.js";
-import { chatComplete, type ChatTrackingHeaders } from "../chat-client.js";
-import { stageMeaningChatConfig } from "../chat-config.js";
+import type { ChatTrackingHeaders } from "../chat-client.js";
+import { judgeChoices, type ChoiceQuestion } from "../judgments-client.js";
 import type { DerivedStage } from "./records.js";
 
 /**
@@ -46,40 +49,35 @@ export interface StageToDecide {
   stageName: string;
 }
 
-/** Stages sent per call — keeps one answer well inside the output budget. */
-const STAGES_PER_CALL = 60;
+/** Stages sent per judgments call — keeps one request well inside Jev's token budget. */
+const STAGES_PER_CALL = 40;
 
-const SYSTEM_PROMPT = [
-  "You classify the stages of a business's sales pipelines, as named by the business itself in its CRM.",
-  "For each stage, say which single funnel fact an opportunity ENTERING that stage establishes about the person:",
-  "- meeting_booked: a meeting / call / appointment with the person has been scheduled.",
-  "- meeting_attended: the person showed up to the meeting.",
-  "- meeting_not_held: a scheduled meeting did not take place (no-show, cancelled, needs rescheduling).",
-  "- sale: the person became a paying customer (deal won, signed, closed, active client).",
-  "- deal_lost: the deal is over without a sale (lost, disqualified, not interested).",
-  "- none: the stage establishes none of these (a lead not yet contacted, a form fill, nurturing, onboarding steps, anything else).",
-  "Judge from the stage name, read in the context of its pipeline and the order of the stages. When a stage does not clearly establish one of the facts, answer none.",
-].join("\n");
+/**
+ * Below this confidence a recorded meaning is NOT served as funnel evidence.
+ * Jev's confidence measures how concentrated its distribution is: a stage it
+ * hesitates on ("Showed?", "Onboarding Call") is one whose name does not say.
+ * Measured on the first customer: unambiguous stages answer at 1.0, ambiguous
+ * ones at 0.33-0.42.
+ */
+export const STAGE_MEANING_MIN_CONFIDENCE = 0.5;
 
-const RESPONSE_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    stages: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          key: { type: "string" },
-          meaning: { type: "string", enum: [...STAGE_MEANINGS] },
-        },
-        required: ["key", "meaning"],
-      },
-    },
-  },
-  required: ["stages"],
+/** The options every stage is judged against. */
+const MEANING_CRITERIA: Record<StageMeaning, string> = {
+  meeting_booked: "a meeting, call or appointment with the person has been scheduled",
+  meeting_attended: "the person showed up to the meeting",
+  meeting_not_held:
+    "a scheduled meeting did not take place: no-show, cancelled, or needs rescheduling",
+  sale: "the person became a paying customer: deal won, signed, closed, active client",
+  deal_lost: "the deal is over without a sale: lost, disqualified, not interested",
+  none:
+    "none of these: a lead not yet contacted, a form fill, nurturing, onboarding steps, anything else",
 };
+
+export interface StageDecision {
+  meaning: StageMeaning;
+  confidence: number;
+  probabilities: Record<string, number>;
+}
 
 /**
  * Every (stage id, stage name) the connection has — in its pipelines today, and
@@ -152,65 +150,50 @@ export async function findUndecidedStages(conn: GhlConnection): Promise<StageToD
 }
 
 /**
- * One chat-service call for a batch of stages. Fails loud: every stage asked
- * about must come back exactly once with a meaning from the vocabulary, or
- * nothing is recorded.
+ * One judgments call for a batch of stages: one `choice` question per stage,
+ * all read against the same state — every pipeline of the connection with its
+ * stages in order, so each stage is judged in context. Fails loud: every stage
+ * asked about must come back with a meaning from the vocabulary and its
+ * confidence, or nothing is recorded.
  */
 export async function classifyStages(
   stages: StageToDecide[],
+  pipelines: Record<string, string[]>,
   tracking: ChatTrackingHeaders,
-): Promise<{ meanings: StageMeaning[]; model: string }> {
-  const config = stageMeaningChatConfig();
-
-  // Each pipeline listed in full, in its own order, so a stage is read in context.
-  const lines: string[] = [];
+): Promise<{ decisions: StageDecision[]; model: string }> {
+  const questions: Record<string, ChoiceQuestion> = {};
   stages.forEach((stage, index) => {
-    lines.push(
-      `key=${index} | pipeline: "${stage.pipelineName ?? "(unnamed pipeline)"}" | stage: "${stage.stageName}"`,
-    );
+    questions[`s${index}`] = {
+      type: "choice",
+      instructions:
+        `An opportunity enters the stage "${stage.stageName}" of the pipeline ` +
+        `"${stage.pipelineName ?? "(unnamed pipeline)"}". Which single funnel fact does ` +
+        "entering this stage establish about the person?",
+      criteria: MEANING_CRITERIA,
+    };
   });
 
-  const result = await chatComplete(
-    {
-      message: `Classify each stage. Answer one entry per key.\n\n${lines.join("\n")}`,
-      systemPrompt: SYSTEM_PROMPT,
-      provider: config.provider,
-      model: config.model,
-      responseFormat: "json",
-      responseSchema: RESPONSE_SCHEMA,
-      temperature: 0,
-      maxTokens: 4096,
-      disableThinking: true,
-    },
-    tracking,
-  );
+  const result = await judgeChoices({ pipelines }, questions, tracking);
 
-  const json = result.json as { stages?: unknown } | undefined;
-  if (!json || !Array.isArray(json.stages)) {
-    throw new Error("[crm-service][ghl] stage meanings: chat-service returned no stages array");
-  }
+  const decisions = stages.map((_, index): StageDecision => {
+    const answer = result.answers?.[`s${index}`];
+    if (!answer) {
+      throw new Error(`[crm-service][ghl] stage meanings: no answer for stage s${index}`);
+    }
+    if (!(STAGE_MEANINGS as readonly string[]).includes(answer.choice)) {
+      throw new Error(`[crm-service][ghl] stage meanings: unknown meaning "${answer.choice}"`);
+    }
+    if (typeof answer.confidence !== "number" || !Number.isFinite(answer.confidence)) {
+      throw new Error(`[crm-service][ghl] stage meanings: s${index} came back without a confidence`);
+    }
+    return {
+      meaning: answer.choice as StageMeaning,
+      confidence: answer.confidence,
+      probabilities: answer.probabilities ?? {},
+    };
+  });
 
-  const meanings: (StageMeaning | undefined)[] = new Array(stages.length);
-  for (const entry of json.stages as { key?: unknown; meaning?: unknown }[]) {
-    const index = Number(entry?.key);
-    if (!Number.isInteger(index) || index < 0 || index >= stages.length) {
-      throw new Error(`[crm-service][ghl] stage meanings: unknown key "${String(entry?.key)}"`);
-    }
-    const meaning = String(entry.meaning ?? "");
-    if (!(STAGE_MEANINGS as readonly string[]).includes(meaning)) {
-      throw new Error(`[crm-service][ghl] stage meanings: unknown meaning "${meaning}"`);
-    }
-    if (meanings[index] !== undefined) {
-      throw new Error(`[crm-service][ghl] stage meanings: key ${index} answered twice`);
-    }
-    meanings[index] = meaning as StageMeaning;
-  }
-  const missing = meanings.findIndex((m) => m === undefined);
-  if (missing !== -1 || meanings.length !== stages.length) {
-    throw new Error(`[crm-service][ghl] stage meanings: no answer for key ${missing}`);
-  }
-
-  return { meanings: meanings as StageMeaning[], model: result.model };
+  return { decisions, model: result.model };
 }
 
 /**
@@ -232,10 +215,22 @@ export async function decideStageMeanings(
     brandIds: [conn.brandId],
   };
 
+  // The state every question is read against: each pipeline, stages in order.
+  const pipelineRows = await db
+    .select({ name: ghlPipelines.name, stages: ghlPipelines.stages })
+    .from(ghlPipelines)
+    .where(eq(ghlPipelines.connectionId, conn.id));
+  const pipelines: Record<string, string[]> = {};
+  for (const row of pipelineRows) {
+    pipelines[row.name] = ((row.stages as DerivedStage[]) ?? [])
+      .map((stage) => stage.name)
+      .filter((name): name is string => !!name);
+  }
+
   let recorded = 0;
   for (let i = 0; i < undecided.length; i += STAGES_PER_CALL) {
     const batch = undecided.slice(i, i + STAGES_PER_CALL);
-    const { meanings, model } = await classifyStages(batch, tracking);
+    const { decisions, model } = await classifyStages(batch, pipelines, tracking);
     const rows = await db
       .insert(ghlStageMeanings)
       .values(
@@ -247,7 +242,9 @@ export async function decideStageMeanings(
           pipelineName: stage.pipelineName,
           stageExternalId: stage.stageExternalId,
           stageName: stage.stageName,
-          meaning: meanings[index],
+          meaning: decisions[index].meaning,
+          confidence: decisions[index].confidence,
+          probabilities: decisions[index].probabilities,
           model,
           runId,
         })),

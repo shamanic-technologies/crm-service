@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { deriveAppointment, deriveOpportunity } from "../../src/lib/gohighlevel/records.js";
 import { classifyStages } from "../../src/lib/gohighlevel/stage-meanings.js";
 
@@ -58,47 +58,60 @@ describe("classifyStages", () => {
     { pipelineExternalId: "p", pipelineName: "Sales", stageExternalId: "s1", stageName: "Appointment Booked" },
     { pipelineExternalId: "p", pipelineName: "Sales", stageExternalId: "s2", stageName: "Closed Client" },
   ];
+  const pipelines = { Sales: ["Appointment Booked", "Closed Client"] };
   const tracking = { orgId: "o", userId: "u", runId: "r" };
+  let sent: { url: string; body: Record<string, unknown> } | null = null;
 
-  function answer(json: unknown) {
-    vi.stubGlobal("fetch", async () =>
-      new Response(
-        JSON.stringify({ content: "", json, tokensInput: 1, tokensOutput: 1, model: "claude-haiku-x" }),
+  function answer(answers: Record<string, unknown>) {
+    vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
+      sent = { url: String(url), body: JSON.parse(String(init.body)) };
+      return new Response(
+        JSON.stringify({ model: "jev-1.13.0", answers, usage: { inputTokens: 1, outputTokens: 1 } }),
         { status: 200, headers: { "content-type": "application/json" } },
-      ),
-    );
+      );
+    });
   }
-
-  beforeEach(() => {
-    process.env.CRM_STAGE_MEANING_CHAT_CONFIG = "anthropic/haiku";
+  const choice = (meaning: string, confidence = 1) => ({
+    type: "choice",
+    choice: meaning,
+    confidence,
+    probabilities: { [meaning]: confidence },
   });
+
   afterEach(() => vi.unstubAllGlobals());
 
-  it("returns one meaning per stage, in order, with the model", async () => {
-    answer({ stages: [{ key: "1", meaning: "sale" }, { key: "0", meaning: "meeting_booked" }] });
-    await expect(classifyStages(stages, tracking)).resolves.toEqual({
-      meanings: ["meeting_booked", "sale"],
-      model: "claude-haiku-x",
+  it("asks one choice question per stage, against every pipeline, through /orgs/judgments", async () => {
+    answer({ s0: choice("meeting_booked"), s1: choice("sale", 0.9) });
+    const result = await classifyStages(stages, pipelines, tracking);
+    expect(result).toEqual({
+      model: "jev-1.13.0",
+      decisions: [
+        { meaning: "meeting_booked", confidence: 1, probabilities: { meeting_booked: 1 } },
+        { meaning: "sale", confidence: 0.9, probabilities: { sale: 0.9 } },
+      ],
     });
+    expect(sent!.url).toMatch(/\/orgs\/judgments$/);
+    expect(sent!.body.state).toEqual({ pipelines });
+    const questions = sent!.body.questions as Record<string, { type: string; criteria: object }>;
+    expect(Object.keys(questions)).toEqual(["s0", "s1"]);
+    expect(questions.s0.type).toBe("choice");
+    expect(Object.keys(questions.s0.criteria).sort()).toEqual(
+      ["deal_lost", "meeting_attended", "meeting_booked", "meeting_not_held", "none", "sale"],
+    );
   });
 
   it("refuses a meaning outside the vocabulary", async () => {
-    answer({ stages: [{ key: "0", meaning: "booked" }, { key: "1", meaning: "sale" }] });
-    await expect(classifyStages(stages, tracking)).rejects.toThrow(/unknown meaning/);
+    answer({ s0: choice("booked"), s1: choice("sale") });
+    await expect(classifyStages(stages, pipelines, tracking)).rejects.toThrow(/unknown meaning/);
   });
 
   it("refuses an answer that skips a stage", async () => {
-    answer({ stages: [{ key: "0", meaning: "meeting_booked" }] });
-    await expect(classifyStages(stages, tracking)).rejects.toThrow(/no answer for key 1/);
+    answer({ s0: choice("meeting_booked") });
+    await expect(classifyStages(stages, pipelines, tracking)).rejects.toThrow(/no answer for stage s1/);
   });
 
-  it("refuses an answer that decides a stage twice", async () => {
-    answer({ stages: [{ key: "0", meaning: "none" }, { key: "0", meaning: "sale" }, { key: "1", meaning: "sale" }] });
-    await expect(classifyStages(stages, tracking)).rejects.toThrow(/answered twice/);
-  });
-
-  it("has no model to fall back on when the config is unset", async () => {
-    delete process.env.CRM_STAGE_MEANING_CHAT_CONFIG;
-    await expect(classifyStages(stages, tracking)).rejects.toThrow(/CRM_STAGE_MEANING_CHAT_CONFIG is required/);
+  it("refuses an answer whose confidence went missing", async () => {
+    answer({ s0: { type: "choice", choice: "sale", probabilities: {} }, s1: choice("sale") });
+    await expect(classifyStages(stages, pipelines, tracking)).rejects.toThrow(/without a confidence/);
   });
 });
