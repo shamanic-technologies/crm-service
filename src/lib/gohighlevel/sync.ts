@@ -2,7 +2,8 @@
  * The GoHighLevel ingestion pass: bronze → silver, for one connection.
  *
  * Layering, mirroring the CSV and Matrix paths:
- *  - BRONZE  mirror every contact, opportunity and pipeline verbatim into
+ *  - BRONZE  mirror every contact, opportunity, pipeline, calendar, appointment,
+ *            form and form submission verbatim into
  *            `ghl_raw_records`, keyed on GoHighLevel's own record id. The upsert
  *            writes ONLY when the content hash moved, so a re-sync of an
  *            unchanged record touches nothing at all.
@@ -23,6 +24,7 @@ import {
   contacts,
   ghlAppointments,
   ghlConnections,
+  ghlFormSubmissions,
   ghlOpportunities,
   ghlOpportunityHistory,
   ghlPipelines,
@@ -36,6 +38,8 @@ import {
   listCalendarAppointments,
   listCalendars,
   listContacts,
+  listFormSubmissions,
+  listForms,
   listOpportunities,
   listPipelines,
 } from "./client.js";
@@ -45,6 +49,8 @@ import {
   deriveAppointment,
   deriveCalendarName,
   deriveContact,
+  deriveFormName,
+  deriveFormSubmission,
   deriveOpportunity,
   derivePipeline,
   GHL_SOURCE,
@@ -66,10 +72,13 @@ export interface ConnectionSyncResult {
   pipelinesChanged: number;
   appointmentsMirrored: number;
   appointmentsChanged: number;
+  formSubmissionsMirrored: number;
+  formSubmissionsChanged: number;
   contactsDerived: number;
   opportunitiesDerived: number;
   pipelinesDerived: number;
   appointmentsDerived: number;
+  formSubmissionsDerived: number;
   /** Stage / status observations appended to the opportunity history. */
   historyAppended: number;
   /** Stages given a recorded meaning this pass (0 once every stage is decided). */
@@ -138,6 +147,8 @@ async function mirrorAll(
     pipeline: { mirrored: 0, changed: [] },
     calendar: { mirrored: 0, changed: [] },
     appointment: { mirrored: 0, changed: [] },
+    form: { mirrored: 0, changed: [] },
+    form_submission: { mirrored: 0, changed: [] },
   };
 
   const pipelines = await listPipelines(token, conn.locationId);
@@ -162,6 +173,15 @@ async function mirrorAll(
     const appointments = await listCalendarAppointments(token, conn.locationId, calendar.id);
     out.appointment.mirrored += appointments.length;
     out.appointment.changed.push(...(await mirrorBatch(conn, "appointment", appointments)));
+  }
+
+  const forms = await listForms(token, conn.locationId);
+  out.form.mirrored = forms.length;
+  out.form.changed = await mirrorBatch(conn, "form", forms);
+
+  for await (const page of listFormSubmissions(token, conn.locationId)) {
+    out.form_submission.mirrored += page.length;
+    out.form_submission.changed.push(...(await mirrorBatch(conn, "form_submission", page)));
   }
 
   return out;
@@ -513,6 +533,61 @@ async function deriveAppointments(
 }
 
 /**
+ * SILVER — form submissions, with the form NAME resolved from the mirrored forms
+ * and the contact linked when we have mirrored it.
+ */
+async function deriveFormSubmissions(
+  conn: GhlConnection,
+  externalIds?: string[],
+): Promise<number> {
+  const payloads = await readBronze(conn, "form_submission", externalIds);
+  if (payloads.length === 0) return 0;
+
+  const formNames = new Map<string, string | null>();
+  for (const payload of await readBronze(conn, "form")) {
+    const form = deriveFormName(payload);
+    if (form) formNames.set(form.externalId, form.name);
+  }
+  const contactByExternalId = await contactIdsByExternalId(conn);
+
+  const now = new Date();
+  let derived = 0;
+  for (const payload of payloads) {
+    const submission = deriveFormSubmission(payload);
+    if (!submission) continue;
+
+    const values = {
+      formExternalId: submission.formExternalId,
+      formName: submission.formExternalId
+        ? (formNames.get(submission.formExternalId) ?? null)
+        : null,
+      externalContactId: submission.externalContactId,
+      contactId: submission.externalContactId
+        ? (contactByExternalId.get(submission.externalContactId) ?? null)
+        : null,
+      submittedAt: submission.submittedAt,
+      lastRebuiltAt: now,
+    };
+
+    await db
+      .insert(ghlFormSubmissions)
+      .values({
+        orgId: conn.orgId,
+        brandId: conn.brandId,
+        connectionId: conn.id,
+        externalId: submission.externalId,
+        ...values,
+      })
+      .onConflictDoUpdate({
+        target: [ghlFormSubmissions.connectionId, ghlFormSubmissions.externalId],
+        set: values,
+      });
+    derived += 1;
+  }
+  return derived;
+}
+
+/**
  * SILVER — opportunities, with pipeline and stage NAMES resolved against the
  * silver pipelines so the read can group them the way GoHighLevel does.
  */
@@ -603,6 +678,7 @@ export interface DerivedCounts {
   opportunities: number;
   pipelines: number;
   appointments: number;
+  formSubmissions: number;
   historyAppended: number;
 }
 
@@ -623,11 +699,17 @@ async function deriveSilver(
   const appointmentIds = changed && !calendarsMoved ? changed.appointment : undefined;
   const appointments = await deriveAppointments(conn, appointmentIds);
 
+  // And for forms: a renamed form re-labels all its submissions.
+  const formsMoved = changed ? changed.form.length > 0 : true;
+  const submissionIds = changed && !formsMoved ? changed.form_submission : undefined;
+  const formSubmissions = await deriveFormSubmissions(conn, submissionIds);
+
   return {
     contacts: contactCount,
     opportunities,
     pipelines,
     appointments,
+    formSubmissions,
     historyAppended,
   };
 }
@@ -665,6 +747,8 @@ export async function syncConnection(conn: GhlConnection): Promise<ConnectionSyn
       pipeline: mirrored.pipeline.changed,
       calendar: mirrored.calendar.changed,
       appointment: mirrored.appointment.changed,
+      form: mirrored.form.changed,
+      form_submission: mirrored.form_submission.changed,
     });
     const stageMeaningsDecided = await decideStageMeanings(conn, run.id);
 
@@ -691,10 +775,13 @@ export async function syncConnection(conn: GhlConnection): Promise<ConnectionSyn
       pipelinesChanged: mirrored.pipeline.changed.length,
       appointmentsMirrored: mirrored.appointment.mirrored,
       appointmentsChanged: mirrored.appointment.changed.length,
+      formSubmissionsMirrored: mirrored.form_submission.mirrored,
+      formSubmissionsChanged: mirrored.form_submission.changed.length,
       contactsDerived: derived.contacts,
       opportunitiesDerived: derived.opportunities,
       pipelinesDerived: derived.pipelines,
       appointmentsDerived: derived.appointments,
+      formSubmissionsDerived: derived.formSubmissions,
       historyAppended: derived.historyAppended,
       stageMeaningsDecided,
     };

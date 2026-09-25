@@ -16,6 +16,25 @@
  *  - `won_status` / `lost_status` — the opportunity's status became `won` /
  *    `lost`, GoHighLevel's fixed vocabulary: `sale` / `deal_lost`, dated by
  *    `lastStatusChangeAt`, or null when it gave none.
+ *  - `form_submission` — GoHighLevel recorded a submission of one of the
+ *    customer's forms (a funnel opt-in, a Meta Ads lead form relayed into
+ *    GoHighLevel, a booking form): `form_submitted`, dated by the submission's
+ *    own `createdAt`. One event per submission — a person who submitted twice
+ *    has two.
+ *  - `form_origin` — GoHighLevel's first-touch attribution says the contact
+ *    CAME IN through a form (`medium` `form` or `survey`, GoHighLevel's fixed
+ *    attribution vocabulary): `form_submitted`, dated by when GoHighLevel
+ *    created the contact. That is the submission moment — the form is what
+ *    created the contact (measured on the first customer: 289 of 289 such
+ *    contacts were created 0.1–4 s after their first submission). It covers the
+ *    contacts whose submission record GoHighLevel no longer serves; when both
+ *    exist, both are served, like any fact evidenced twice.
+ *
+ * What evidences a form fill is read from GoHighLevel's STRUCTURED records only.
+ * The customer's free text (tags such as "funnel form submitted", the contact
+ * `source` "Meta Ads", a stage named "Form Filled") is never string-matched: on
+ * the first customer it added no contact the structured records did not
+ * already cover (0 of 151 tagged contacts), so there was nothing to judge.
  *
  * Nothing here infers a date. An opportunity sitting in "Closed Client" says when
  * it entered that stage and nothing about when it was booked; the history table
@@ -33,6 +52,8 @@ export const FUNNEL_EVENT_SOURCES = [
   "stage_entry",
   "won_status",
   "lost_status",
+  "form_submission",
+  "form_origin",
 ] as const;
 export type FunnelEventSource = (typeof FUNNEL_EVENT_SOURCES)[number];
 
@@ -41,14 +62,23 @@ export type FunnelEventDateBasis =
   | "booked_at"
   | "scheduled_start"
   | "stage_entered_at"
-  | "status_changed_at";
+  | "status_changed_at"
+  | "submitted_at"
+  | "contact_created_at";
+
+/**
+ * GoHighLevel's first-touch attribution mediums that ARE a form fill. Its fixed
+ * vocabulary, not the customer's words (`order_form` is a checkout, not a lead
+ * form, and is left out).
+ */
+export const FORM_ORIGIN_MEDIUMS = ["form", "survey"] as const;
 
 export interface FunnelEvent {
   step: string;
   occurredAt: string | null;
   dateBasis: FunnelEventDateBasis;
   source: FunnelEventSource;
-  /** GoHighLevel's id of the appointment or opportunity the evidence is. */
+  /** GoHighLevel's id of the appointment, opportunity, form submission or contact the evidence is. */
   sourceId: string;
   detail: {
     calendarName: string | null;
@@ -60,6 +90,12 @@ export interface FunnelEvent {
     observedAt: string | null;
     /** The judgment model's confidence in the stage's meaning (stage entries only). */
     meaningConfidence: number | null;
+    /** GoHighLevel's id of the form submitted (form submissions only). */
+    formId: string | null;
+    /** The customer's own name for that form, verbatim (form submissions only). */
+    formName: string | null;
+    /** GoHighLevel's first-touch attribution medium (form origins only). */
+    attributionMedium: string | null;
   };
 }
 
@@ -95,7 +131,8 @@ function eventsQuery(orgId: string, brandId: string, contactId: string | null): 
              'appointment' AS source, a.external_id AS source_id,
              a.calendar_name, a.status AS appointment_status, a.starts_at,
              NULL::text AS pipeline_name, NULL::text AS stage_name,
-             NULL::timestamptz AS observed_at, NULL::float8 AS meaning_confidence
+             NULL::timestamptz AS observed_at, NULL::float8 AS meaning_confidence,
+             NULL::text AS form_id, NULL::text AS form_name, NULL::text AS attribution_medium
       FROM ghl_appointments a
       WHERE a.org_id = ${orgId} AND a.brand_id = ${brandId}
         AND a.status IS DISTINCT FROM 'invalid'
@@ -105,7 +142,7 @@ function eventsQuery(orgId: string, brandId: string, contactId: string | null): 
              a.starts_at, 'scheduled_start',
              'appointment', a.external_id,
              a.calendar_name, a.status, a.starts_at,
-             NULL, NULL, NULL, NULL
+             NULL, NULL, NULL, NULL, NULL, NULL, NULL
       FROM ghl_appointments a
       WHERE a.org_id = ${orgId} AND a.brand_id = ${brandId}
         AND a.status IN ('showed', 'noshow', 'cancelled')
@@ -114,7 +151,8 @@ function eventsQuery(orgId: string, brandId: string, contactId: string | null): 
              h.changed_at, 'stage_entered_at',
              'stage_entry', h.opportunity_external_id,
              NULL, NULL, NULL,
-             h.pipeline_name, h.stage_name, h.observed_at, m.confidence
+             h.pipeline_name, h.stage_name, h.observed_at, m.confidence,
+             NULL, NULL, NULL
       FROM ghl_opportunity_history h
       JOIN ghl_stage_meanings m
         ON m.connection_id = h.connection_id
@@ -130,10 +168,32 @@ function eventsQuery(orgId: string, brandId: string, contactId: string | null): 
              CASE h.value WHEN 'won' THEN 'won_status' ELSE 'lost_status' END,
              h.opportunity_external_id,
              NULL, NULL, NULL,
-             h.pipeline_name, h.stage_name, h.observed_at, NULL
+             h.pipeline_name, h.stage_name, h.observed_at, NULL,
+             NULL, NULL, NULL
       FROM ghl_opportunity_history h
       WHERE h.org_id = ${orgId} AND h.brand_id = ${brandId}
         AND h.kind = 'status' AND h.value IN ('won', 'lost')
+      UNION ALL
+      SELECT f.external_contact_id, 'form_submitted',
+             f.submitted_at, 'submitted_at',
+             'form_submission', f.external_id,
+             NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+             f.form_external_id, f.form_name, NULL
+      FROM ghl_form_submissions f
+      WHERE f.org_id = ${orgId} AND f.brand_id = ${brandId}
+      UNION ALL
+      SELECT o.external_id, 'form_submitted',
+             o.source_created_at, 'contact_created_at',
+             'form_origin', o.external_id,
+             NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+             NULL, NULL, o.origin_medium
+      FROM contacts o
+      WHERE o.org_id = ${orgId} AND o.brand_id = ${brandId}
+        AND o.source = ${GHL_SOURCE}
+        AND o.origin_medium IN (${sql.join(
+          FORM_ORIGIN_MEDIUMS.map((m) => sql`${m}`),
+          sql`, `,
+        )})
     )
     SELECT c.id AS contact_id, c.external_id AS external_contact_id,
            c.primary_email, c.full_name, ev.*
@@ -162,6 +222,9 @@ interface EventRow {
   stage_name: string | null;
   observed_at: string | Date | null;
   meaning_confidence: number | null;
+  form_id: string | null;
+  form_name: string | null;
+  attribution_medium: string | null;
 }
 
 function iso(value: string | Date | null): string | null {
@@ -227,6 +290,9 @@ export async function readFunnelEvents(args: {
         stageName: row.stage_name,
         observedAt: iso(row.observed_at),
         meaningConfidence: row.meaning_confidence === null ? null : Number(row.meaning_confidence),
+        formId: row.form_id,
+        formName: row.form_name,
+        attributionMedium: row.attribution_medium,
       },
     });
   }

@@ -7,6 +7,7 @@ import {
   contacts,
   ghlAppointments,
   ghlConnections,
+  ghlFormSubmissions,
   ghlOpportunities,
   ghlOpportunityHistory,
   ghlPipelines,
@@ -117,6 +118,19 @@ const APPOINTMENTS: Record<string, unknown>[] = [
   { id: "ap4", calendarId: "cal1", contactId: "c1", appointmentStatus: "invalid", title: "Alice dup", dateAdded: "2026-08-11T10:00:00.000Z", dateUpdated: "2026-08-11T10:00:00.000Z", startTime: "2026-08-13T10:00:00Z", endTime: "2026-08-13T10:30:00Z" },
 ];
 
+const FORMS = [{ id: "f1", locationId: LOCATION, name: "Meta Ads" }];
+
+const FORM_SUBMISSIONS: Record<string, unknown>[] = [
+  // Carol filled the Meta Ads lead form: dated by GoHighLevel's own createdAt.
+  { id: "fs1", contactId: "c3", formId: "f1", name: "Carol Nguyen", createdAt: "2026-08-20T11:00:59.547Z", external: false, others: { ip: "1.2.3.4", phone: "0612345678" } },
+  // A zone-less timestamp is NOT placed on a timeline: the event is served undated.
+  { id: "fs2", contactId: "c3", formId: "f1", name: "Carol Nguyen", createdAt: "2026-08-21 10:00:00" },
+  // A form GoHighLevel does not list (its relayed Facebook lead forms): no name, never guessed.
+  { id: "fs3", contactId: "c3", formId: "fb-location", createdAt: "2026-08-22T09:00:00.000Z" },
+  // Submitted by a contact we never mirrored: nobody to attribute it to.
+  { id: "fs4", contactId: "c9", formId: "f1", createdAt: "2026-08-23T09:00:00.000Z" },
+];
+
 /** What the stubbed judgment model answers per stage name: [meaning, confidence]. */
 const STAGE_ANSWERS: Record<string, [string, number]> = {
   "New lead": ["none", 1],
@@ -183,6 +197,17 @@ function installFetchStub() {
           headers: { "content-type": "application/json" },
         });
       }
+      if (url.includes("/forms/submissions")) {
+        const params = new URL(url).searchParams;
+        // Without an explicit window GoHighLevel answers the last 30 days only.
+        if (params.get("limit") !== "1" && (!params.get("startAt") || !params.get("endAt"))) {
+          throw new Error("form submissions read without an explicit startAt/endAt window");
+        }
+        return json({ submissions: FORM_SUBMISSIONS, meta: { total: FORM_SUBMISSIONS.length, nextPage: null } });
+      }
+      if (url.includes("/forms/")) {
+        return json({ forms: FORMS, total: FORMS.length });
+      }
       if (url.includes("/calendars/events")) {
         return json({ events: APPOINTMENTS });
       }
@@ -244,6 +269,7 @@ async function wipe() {
   await db.delete(ghlStageMeanings);
   await db.delete(ghlOpportunityHistory);
   await db.delete(ghlAppointments);
+  await db.delete(ghlFormSubmissions);
   await db.delete(ghlOpportunities);
   await db.delete(ghlPipelines);
   await db.delete(ghlRawRecords);
@@ -304,11 +330,14 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
       contactsMirrored: 3,
       opportunitiesMirrored: 3,
       pipelinesMirrored: 1,
+      formSubmissionsMirrored: 4,
+      formSubmissionsDerived: 4,
     });
 
     const bronze = await db.select().from(ghlRawRecords);
-    // 3 contacts + 3 opportunities + 1 pipeline + 1 calendar + 4 appointments.
-    expect(bronze).toHaveLength(12);
+    // 3 contacts + 3 opportunities + 1 pipeline + 1 calendar + 4 appointments
+    // + 1 form + 4 form submissions.
+    expect(bronze).toHaveLength(17);
 
     const silverContacts = await db
       .select()
@@ -533,6 +562,7 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
       contacts: await db.select().from(contacts).orderBy(contacts.externalId),
       opportunities: await db.select().from(ghlOpportunities).orderBy(ghlOpportunities.externalId),
       pipelines: await db.select().from(ghlPipelines).orderBy(ghlPipelines.externalId),
+      formSubmissions: await db.select().from(ghlFormSubmissions).orderBy(ghlFormSubmissions.externalId),
     };
 
     const second = await runSyncPass(connectionId);
@@ -545,6 +575,8 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
       contactsDerived: 0,
       opportunitiesDerived: 0,
       pipelinesDerived: 0,
+      formSubmissionsChanged: 0,
+      formSubmissionsDerived: 0,
     });
 
     const after = {
@@ -552,6 +584,7 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
       contacts: await db.select().from(contacts).orderBy(contacts.externalId),
       opportunities: await db.select().from(ghlOpportunities).orderBy(ghlOpportunities.externalId),
       pipelines: await db.select().from(ghlPipelines).orderBy(ghlPipelines.externalId),
+      formSubmissions: await db.select().from(ghlFormSubmissions).orderBy(ghlFormSubmissions.externalId),
     };
 
     // Row-for-row identical, timestamps included: no duplication AND no churn.
@@ -559,6 +592,7 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
     expect(after.contacts).toEqual(before.contacts);
     expect(after.opportunities).toEqual(before.opportunities);
     expect(after.pipelines).toEqual(before.pipelines);
+    expect(after.formSubmissions).toEqual(before.formSubmissions);
   });
 
   it("re-derives a record whose content actually moved", async () => {
@@ -604,6 +638,7 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
       opportunities: 3,
       pipelines: 1,
       appointments: 4,
+      formSubmissions: 4,
       // The history already holds every observation: a rebuild appends nothing.
       historyAppended: 0,
       stageMeaningsDecided: 0,
@@ -1024,14 +1059,76 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
     ]);
     expect(byExternal.c2[2].detail).toMatchObject({ pipelineName: "Sales", stageName: "Won" });
 
-    // Carol: booked, then did not show.
-    expect(byExternal.c3.map((e) => [e.step, e.occurredAt])).toEqual([
-      ["meeting_booked", "2026-08-03T09:00:00.000Z"],
-      ["meeting_not_held", "2026-08-04T09:00:00.000Z"],
+    // Carol: booked, did not show, then filled the Meta Ads lead form (twice,
+    // plus once through a form GoHighLevel does not list).
+    expect(byExternal.c3.map((e) => [e.step, e.source, e.occurredAt, e.dateBasis])).toEqual([
+      ["meeting_booked", "appointment", "2026-08-03T09:00:00.000Z", "booked_at"],
+      ["meeting_not_held", "appointment", "2026-08-04T09:00:00.000Z", "scheduled_start"],
+      ["form_submitted", "form_submission", "2026-08-20T11:00:59.547Z", "submitted_at"],
+      ["form_submitted", "form_submission", "2026-08-22T09:00:00.000Z", "submitted_at"],
+      // Zone-less createdAt: served, undated, never guessed.
+      ["form_submitted", "form_submission", null, "submitted_at"],
     ]);
+    expect(byExternal.c3[2]).toMatchObject({
+      sourceId: "fs1",
+      detail: { formId: "f1", formName: "Meta Ads", attributionMedium: null },
+    });
+    expect(byExternal.c3[3].detail).toMatchObject({ formId: "fb-location", formName: null });
+
+    // No form evidence, no form event: Alice came in through an order form
+    // (a checkout, not a lead form) and Bob carries no attribution at all.
+    expect(byExternal.c1.some((e) => e.step === "form_submitted")).toBe(false);
+    expect(byExternal.c2.some((e) => e.step === "form_submitted")).toBe(false);
 
     // The orphan deal's contact was never mirrored: nobody to attribute it to.
     expect(Object.keys(byExternal).sort()).toEqual(["c1", "c2", "c3"]);
+  });
+
+  it("a contact whose first touch is a form evidences a form fill, dated by its creation", async () => {
+    CONTACTS.push({
+      id: "c4",
+      email: "dora@example.com",
+      firstName: "Dora",
+      source: "Meta Ads",
+      tags: ["funnel form submitted"],
+      dateAdded: "2026-06-11T19:25:23.633Z",
+      attributions: [
+        { isFirst: true, medium: "form", mediumId: "f1", url: "https://example.com/optin" },
+        { isLast: true, medium: "calendar" },
+      ],
+    });
+    try {
+      await seedConnection();
+      await runSyncPass();
+
+      const body = await funnelEvents();
+      const dora = body.contacts.find((c) => c.externalContactId === "c4")!;
+      // GoHighLevel no longer serves Dora's submission record; its attribution
+      // still says the form is what created her.
+      expect(dora.events).toEqual([
+        {
+          step: "form_submitted",
+          occurredAt: "2026-06-11T19:25:23.633Z",
+          dateBasis: "contact_created_at",
+          source: "form_origin",
+          sourceId: "c4",
+          detail: {
+            calendarName: null,
+            appointmentStatus: null,
+            scheduledStart: null,
+            pipelineName: null,
+            stageName: null,
+            observedAt: null,
+            meaningConfidence: null,
+            formId: null,
+            formName: null,
+            attributionMedium: "form",
+          },
+        },
+      ]);
+    } finally {
+      CONTACTS.pop();
+    }
   });
 
   it("never serves a stage the judgment model hesitated on", async () => {
@@ -1095,5 +1192,6 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
     expect(await db.select().from(ghlAppointments)).toHaveLength(0);
     expect(await db.select().from(ghlOpportunityHistory)).toHaveLength(0);
     expect(await db.select().from(ghlStageMeanings)).toHaveLength(0);
+    expect(await db.select().from(ghlFormSubmissions)).toHaveLength(0);
   });
 });
