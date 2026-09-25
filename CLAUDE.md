@@ -646,6 +646,15 @@ So the local build gate is `npx tsc --noEmit` plus `npm run generate:openapi`,
 run separately. Do not read the chained failure as a signal about your change.
 (Set 2026-09-22.)
 
+## Release: there is no `staging` branch here
+
+crm-service ships straight to `main`: open a PR with `--base main`, merge it
+once CI is green, then tag the next version by hand at the merge commit
+(`gh release create vX.Y.0 --target <mergeCommit sha>`). `release.sh hotfix` /
+`promote` assume a `staging` branch to sync to, so do not use them here. The box deploys
+`main` within ~5 minutes. Verify against the SERVED `openapi.json` inside
+`distribute-crm-service-1`, not the clone.
+
 ## Env vars
 
 `CRM_SERVICE_DATABASE_URL`, `CRM_SERVICE_API_KEY`, `RUNS_SERVICE_URL`, `RUNS_SERVICE_API_KEY`,
