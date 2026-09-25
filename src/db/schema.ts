@@ -517,7 +517,7 @@ export const ghlRawRecords = pgTable(
       .notNull()
       .references(() => ghlConnections.id, { onDelete: "cascade" }),
 
-    // 'contact' | 'opportunity' | 'pipeline' | 'calendar' | 'appointment' — see GHL_RECORD_KINDS.
+    // 'contact' | 'opportunity' | 'pipeline' | 'calendar' | 'appointment' | 'form' | 'form_submission' — see GHL_RECORD_KINDS.
     kind: text("kind").notNull(),
     // GoHighLevel's own id for the record. The natural idempotency key.
     externalId: text("external_id").notNull(),
@@ -664,6 +664,48 @@ export const ghlAppointments = pgTable(
   (table) => [
     uniqueIndex("ghl_appointments_conn_external_uq").on(table.connectionId, table.externalId),
     index("ghl_appointments_org_brand_idx").on(table.orgId, table.brandId),
+  ],
+);
+
+/**
+ * SILVER — one row per GoHighLevel FORM SUBMISSION: a person submitted one of
+ * the customer's forms (a funnel opt-in, a Meta Ads lead form relayed into
+ * GoHighLevel, a booking form...).
+ *
+ * Deterministically derived from the mirrored `kind='form_submission'` records,
+ * with the form's NAME resolved from the mirrored `kind='form'` records.
+ * `submitted_at` is GoHighLevel's own timestamp for the submission, or NULL when
+ * it gave none with a zone. What the person typed stays in bronze.
+ *
+ * `contact_id` links to the silver contact when GoHighLevel named one we have
+ * mirrored; it stays null otherwise rather than inventing an attachment.
+ */
+export const ghlFormSubmissions = pgTable(
+  "ghl_form_submissions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => ghlConnections.id, { onDelete: "cascade" }),
+
+    externalId: text("external_id").notNull(),
+    formExternalId: text("form_external_id"),
+    // The customer's own name for the form, verbatim.
+    formName: text("form_name"),
+
+    // GoHighLevel's contact id, kept even when no silver contact matched.
+    externalContactId: text("external_contact_id"),
+    contactId: uuid("contact_id").references(() => contacts.id, { onDelete: "set null" }),
+
+    submittedAt: timestamp("submitted_at", { withTimezone: true }),
+
+    lastRebuiltAt: timestamp("last_rebuilt_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("ghl_form_submissions_conn_external_uq").on(table.connectionId, table.externalId),
+    index("ghl_form_submissions_org_brand_idx").on(table.orgId, table.brandId),
   ],
 );
 

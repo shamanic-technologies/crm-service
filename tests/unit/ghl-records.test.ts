@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   canonicalHash,
   deriveContact,
+  deriveFormName,
+  deriveFormSubmission,
   deriveOpportunity,
   derivePipeline,
 } from "../../src/lib/gohighlevel/records.js";
@@ -211,5 +213,42 @@ describe("deriveOpportunity", () => {
 
   it("leaves an unparseable timestamp null rather than inventing a date", () => {
     expect(deriveOpportunity({ id: "o1", createdAt: "not a date" })?.ghlCreatedAt).toBeNull();
+  });
+});
+
+describe("deriveFormSubmission", () => {
+  // Captured verbatim from GoHighLevel's /forms/submissions (Doc Dinners, 2026-09-25), trimmed.
+  const real = {
+    id: "6ab6546b879e3cd4e4510b77",
+    contactId: "YYp46bgLHtNZWLCKmdJ7",
+    formId: "rfJqRLuLSDXDxfbEcA1T",
+    name: "Kelly Robinson",
+    email: "kt8787@yahoo.com",
+    createdAt: "2026-09-25T11:00:59.547Z",
+    external: false,
+    others: { ip: "2600::1", phone: "+14049986757" },
+  };
+
+  it("lifts the submission, its form, its contact and GoHighLevel's own date", () => {
+    expect(deriveFormSubmission(real)).toEqual({
+      externalId: "6ab6546b879e3cd4e4510b77",
+      formExternalId: "rfJqRLuLSDXDxfbEcA1T",
+      externalContactId: "YYp46bgLHtNZWLCKmdJ7",
+      submittedAt: new Date("2026-09-25T11:00:59.547Z"),
+    });
+  });
+
+  it("never places a zone-less timestamp on a timeline", () => {
+    expect(deriveFormSubmission({ ...real, createdAt: "2026-09-25 11:00:59" })?.submittedAt).toBeNull();
+    expect(deriveFormSubmission({ ...real, createdAt: undefined })?.submittedAt).toBeNull();
+  });
+
+  it("skips a record without an id", () => {
+    expect(deriveFormSubmission({ ...real, id: undefined })).toBeNull();
+  });
+
+  it("reads a form's name verbatim", () => {
+    expect(deriveFormName({ id: "f1", name: "Meta Ads" })).toEqual({ externalId: "f1", name: "Meta Ads" });
+    expect(deriveFormName({ id: "f2" })).toEqual({ externalId: "f2", name: null });
   });
 });

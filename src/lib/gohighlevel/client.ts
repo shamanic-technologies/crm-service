@@ -146,6 +146,13 @@ export async function verifyAccess(token: string, locationId: string): Promise<v
     locationId,
     limit: "1",
   });
+  // The sync also reads form submissions (`forms.readonly`) — a token lacking
+  // that scope is refused here, with GoHighLevel's own reason, rather than
+  // accepted and then failing every sync.
+  await ghlGet<{ submissions?: unknown[] }>(token, "/forms/submissions", {
+    locationId,
+    limit: "1",
+  });
 }
 
 /**
@@ -240,6 +247,70 @@ export async function listCalendars(
     GHL_CALENDARS_API_VERSION,
   );
   return (body.calendars ?? []).filter((c) => c && typeof c.id === "string");
+}
+
+export interface GhlFormRecord {
+  id: string;
+  name?: string;
+  [key: string]: unknown;
+}
+
+export interface GhlFormSubmissionRecord {
+  id: string;
+  [key: string]: unknown;
+}
+
+/** GoHighLevel caps one forms page at 50. */
+const FORMS_PAGE_SIZE = 50;
+
+/** The sub-account's forms (id + the customer's name for each), paged by skip. */
+export async function listForms(token: string, locationId: string): Promise<GhlFormRecord[]> {
+  const forms: GhlFormRecord[] = [];
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const body = await ghlGet<{ forms?: GhlFormRecord[]; total?: number }>(token, "/forms/", {
+      locationId,
+      limit: String(FORMS_PAGE_SIZE),
+      skip: String(page * FORMS_PAGE_SIZE),
+    });
+    const batch = (body.forms ?? []).filter((f) => f && typeof f.id === "string");
+    forms.push(...batch);
+    if (batch.length < FORMS_PAGE_SIZE) break;
+    if (typeof body.total === "number" && forms.length >= body.total) break;
+  }
+  return forms;
+}
+
+/**
+ * Every form submission of a sub-account, oldest to newest.
+ *
+ * `startAt` / `endAt` are explicit: without them GoHighLevel answers the LAST
+ * 30 DAYS only (measured on the first sub-account: 37 submissions by default
+ * against 707 over its whole life), which would silently drop every older
+ * submission. The window runs from GoHighLevel's launch to tomorrow (UTC), so
+ * a submission made today is inside it whatever the sub-account's zone.
+ */
+export async function* listFormSubmissions(
+  token: string,
+  locationId: string,
+  now: number = Date.now(),
+): AsyncGenerator<GhlFormSubmissionRecord[]> {
+  const endAt = new Date(now + 86_400_000).toISOString().slice(0, 10);
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const body = await ghlGet<{
+      submissions?: GhlFormSubmissionRecord[];
+      meta?: { nextPage?: number | null };
+    }>(token, "/forms/submissions", {
+      locationId,
+      limit: String(PAGE_SIZE),
+      page: String(page),
+      startAt: "2018-01-01",
+      endAt,
+    });
+    const submissions = (body.submissions ?? []).filter((s) => s && typeof s.id === "string");
+    if (submissions.length === 0) return;
+    yield submissions;
+    if (!body.meta?.nextPage) return;
+  }
 }
 
 /**

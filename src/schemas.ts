@@ -847,6 +847,7 @@ const FUNNEL_STEP_VALUES = [
   "meeting_not_held",
   "sale",
   "deal_lost",
+  "form_submitted",
 ] as const;
 
 export const GhlFunnelEventSchema = registry.register(
@@ -856,7 +857,9 @@ export const GhlFunnelEventSchema = registry.register(
       step: z.enum(FUNNEL_STEP_VALUES).openapi({
         description:
           "The funnel step the CRM evidences. `meeting_not_held` = a scheduled meeting did not " +
-          "take place (no-show or cancelled).",
+          "take place (no-show or cancelled). `form_submitted` = the person submitted one of the " +
+          "customer's forms (a funnel opt-in, a Meta Ads lead form relayed into GoHighLevel, a " +
+          "booking form).",
       }),
       occurredAt: z.string().nullable().openapi({
         description:
@@ -864,18 +867,43 @@ export const GhlFunnelEventSchema = registry.register(
           "no date — never a guessed one.",
       }),
       dateBasis: z
-        .enum(["booked_at", "scheduled_start", "stage_entered_at", "status_changed_at"])
+        .enum([
+          "booked_at",
+          "scheduled_start",
+          "stage_entered_at",
+          "status_changed_at",
+          "submitted_at",
+          "contact_created_at",
+        ])
         .openapi({
           description:
             "Which GoHighLevel date `occurredAt` is: when the appointment was created, its " +
-            "scheduled start, when the opportunity entered the stage, or when its status changed.",
+            "scheduled start, when the opportunity entered the stage, when its status changed, " +
+            "when the form submission was recorded, or when the contact was created (a contact " +
+            "whose first touch is a form is created by that submission).",
         }),
-      source: z.enum(["appointment", "stage_entry", "won_status", "lost_status"]).openapi({
+      source: z
+        .enum([
+          "appointment",
+          "stage_entry",
+          "won_status",
+          "lost_status",
+          "form_submission",
+          "form_origin",
+        ])
+        .openapi({
+          description:
+            "Where the evidence came from: a calendar appointment, an opportunity entering a " +
+            "stage whose recorded meaning is this step, the opportunity's won / lost status, a " +
+            "form submission GoHighLevel recorded, or GoHighLevel's first-touch attribution " +
+            "saying the contact came in through a form (medium `form` or `survey`). The same " +
+            "form fill can be evidenced by both of the last two; both are served.",
+        }),
+      sourceId: z.string().openapi({
         description:
-          "Where the evidence came from: a calendar appointment, an opportunity entering a " +
-          "stage whose recorded meaning is this step, or the opportunity's won / lost status.",
+          "GoHighLevel's appointment, opportunity or form-submission id; for `form_origin`, its " +
+          "contact id.",
       }),
-      sourceId: z.string().openapi({ description: "GoHighLevel's appointment or opportunity id." }),
       detail: z.object({
         calendarName: z.string().nullable(),
         appointmentStatus: z.string().nullable().openapi({
@@ -893,6 +921,16 @@ export const GhlFunnelEventSchema = registry.register(
           description:
             "The judgment model's confidence (0..1) in what the stage means (stage entries only). " +
             "Stages below 0.5 are never served as evidence.",
+        }),
+        formId: z.string().nullable().openapi({
+          description: "GoHighLevel's id of the form submitted (form submissions only).",
+        }),
+        formName: z.string().nullable().openapi({
+          description: "The customer's own name for the form, verbatim (form submissions only).",
+        }),
+        attributionMedium: z.string().nullable().openapi({
+          description:
+            "GoHighLevel's first-touch attribution medium, verbatim (form origins only).",
         }),
       }),
     })
@@ -1116,7 +1154,8 @@ registry.registerPath({
   summary: "The dated funnel events a brand's GoHighLevel CRM evidences, per contact",
   description:
     "Booked / attended / not-held meetings from calendar appointments, stage entries whose " +
-    "recorded meaning is a funnel step, and won / lost statuses — each dated by GoHighLevel's own " +
+    "recorded meaning is a funnel step, won / lost statuses, and form submissions (a funnel " +
+    "opt-in, a Meta Ads lead form relayed into GoHighLevel) — each dated by GoHighLevel's own " +
     "timestamp (null when it gave none) and naming its source. Paged over contacts in a total " +
     "order; pass `contactId` for one contact. Stage history accumulates from the first sync " +
     "onwards: the past before it is not reconstructed.",

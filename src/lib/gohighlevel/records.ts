@@ -16,6 +16,8 @@ export const GHL_RECORD_KINDS = [
   "pipeline",
   "calendar",
   "appointment",
+  "form",
+  "form_submission",
 ] as const;
 export type GhlRecordKind = (typeof GHL_RECORD_KINDS)[number];
 
@@ -311,5 +313,44 @@ export function deriveAppointment(payload: Record<string, unknown>): DerivedAppo
     startsAt: zonedDate(payload.startTime),
     endsAt: zonedDate(payload.endTime),
     ghlUpdatedAt: zonedDate(payload.dateUpdated),
+  };
+}
+
+/** A form's display name — what the customer called it in GoHighLevel. */
+export function deriveFormName(
+  payload: Record<string, unknown>,
+): { externalId: string; name: string | null } | null {
+  const externalId = str(payload.id);
+  if (!externalId) return null;
+  return { externalId, name: str(payload.name) };
+}
+
+export interface DerivedFormSubmission {
+  externalId: string;
+  formExternalId: string | null;
+  externalContactId: string | null;
+  submittedAt: Date | null;
+}
+
+/**
+ * A form submission as GoHighLevel records it — one row per time a person
+ * submitted one of the customer's forms (a funnel opt-in, a Meta Ads lead form
+ * relayed into GoHighLevel, a booking form...).
+ *
+ * `submittedAt` is GoHighLevel's own `createdAt` for the submission, kept only
+ * when it names its zone; anything else is null rather than a guessed date. The
+ * submitted field VALUES (`others`: what the person typed, their IP, the page's
+ * UTM parameters) stay in bronze and are never lifted.
+ */
+export function deriveFormSubmission(
+  payload: Record<string, unknown>,
+): DerivedFormSubmission | null {
+  const externalId = str(payload.id);
+  if (!externalId) return null;
+  return {
+    externalId,
+    formExternalId: str(payload.formId),
+    externalContactId: str(payload.contactId),
+    submittedAt: zonedDate(payload.createdAt),
   };
 }

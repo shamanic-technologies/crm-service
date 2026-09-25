@@ -364,7 +364,8 @@ request from that header.
     not survive that async boundary — the row is the carrier.
 - `ghl_raw_records` — one row per record, `payload` = the record verbatim.
   - **Natural key = `UNIQUE(connection_id, kind, external_id)`**, `kind` one of
-    `contact` | `opportunity` | `pipeline`. GoHighLevel's own record id IS the
+    `contact` | `opportunity` | `pipeline` | `calendar` | `appointment` | `form` |
+    `form_submission`. GoHighLevel's own record id IS the
     idempotency key, so a re-run inserts nothing.
   - **`content_hash` is the NO-CHURN guard**, and it is a different property from
     idempotency. The upsert carries `setWhere content_hash <> excluded.content_hash`,
@@ -456,7 +457,8 @@ swallowed, and one broken connection does not stop the others.
   (`{ vendorStatus, vendorError }`). The probe is `GET /contacts/?limit=1`
   rather than `GET /locations/{id}` on purpose: it exercises the exact scope the
   sync needs, so a token that passes can actually do the job, and a token bound
-  to a different sub-account is refused by GoHighLevel itself.
+  to a different sub-account is refused by GoHighLevel itself. It also probes
+  `GET /forms/submissions?limit=1` (`forms.readonly`), which the sync reads too.
 - `PATCH /orgs/gohighlevel/connections/:id` — pause / resume.
 - `DELETE /orgs/gohighlevel/connections/:id` — disconnect. The row goes and, by
   cascade, everything derived from it; with no row there is nothing for a pass to
@@ -531,12 +533,30 @@ customer's vocabulary.
   list; the recorded decision is the only source. Re-decided only when a NEW
   name appears (a rename is a new statement by the customer). An answer that
   skips a stage, invents a meaning or omits its confidence fails the sync loud.
+- **Form submissions** — bronze `kind='form'` + `kind='form_submission'`,
+  silver `ghl_form_submissions` (form NAME resolved from the mirrored forms). Read
+  via `GET /forms/submissions` with an explicit `startAt=2018-01-01` /
+  `endAt=tomorrow`: ⚠️ WITHOUT that window GoHighLevel answers the last 30 days
+  only (37 vs 707 on Doc Dinners), silently. `submitted_at` = the submission's
+  `createdAt`, NULL when zone-less. A Meta Ads lead form relayed into GoHighLevel
+  lands here (130 of Doc Dinners' 132 `source: Meta Ads` contacts; Facebook's own
+  lead forms appear under formId `fb-<locationId>`, which `/forms/` does not list,
+  so their `formName` is null).
 - **The events** (`src/lib/gohighlevel/funnel-events.ts`), computed on read:
   appointment → `meeting_booked` at `booked_at`; appointment `showed` →
   `meeting_attended`, `noshow`/`cancelled` → `meeting_not_held`, both at the
   scheduled start; `invalid` → nothing. A history stage row whose meaning is not
   `none` → that step at `changed_at` (`stage_entry`). Status `won` / `lost` →
-  `sale` / `deal_lost` at the status change date. Mapping GoHighLevel's FIXED
+  `sale` / `deal_lost` at the status change date. A form submission →
+  `form_submitted` at `submitted_at` (`form_submission`). A contact whose
+  FIRST-touch attribution medium is `form` / `survey` → `form_submitted` at the
+  contact's `source_created_at` (`form_origin`, dateBasis `contact_created_at`):
+  the form is what created the contact — measured 289/289 created 0.1–4 s after
+  their first submission — and it covers submissions GoHighLevel no longer
+  serves. `order_form` is a checkout, not a lead form, and is excluded. Tags
+  ("funnel form submitted"), `source` ("Meta Ads") and a "Form Filled" stage are
+  the customer's free text and are NOT read for this: they added 0 contacts the
+  structured records did not already cover. Mapping GoHighLevel's FIXED
   status vocabularies in code is fine; mapping the customer's free-text stage
   names is not. Each event carries `occurredAt` (null when GoHighLevel gave no
   date), `dateBasis` naming which date it is, `source`, and GoHighLevel's id.
