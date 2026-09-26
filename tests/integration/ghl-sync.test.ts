@@ -1084,6 +1084,85 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
     expect(Object.keys(byExternal).sort()).toEqual(["c1", "c2", "c3"]);
   });
 
+  it("counts, over the whole CRM, the contacts that ever reached each step", async () => {
+    await seedConnection();
+    await runSyncPass();
+
+    const res = await request(app())
+      .get(`/orgs/gohighlevel/funnel-reach?brandId=${BRAND}`)
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", ORG);
+    expect(res.status).toBe(200);
+    expect(res.body.available).toBe(true);
+    const steps = Object.fromEntries(
+      (res.body.steps as { step: string; contacts: number; contactsAtOrBeyond: number }[]).map((s) => [
+        s.step,
+        [s.contacts, s.contactsAtOrBeyond],
+      ]),
+    );
+    // Alice booked; Bob booked, attended and won; Carol booked, no-showed, filled a form.
+    expect(steps).toEqual({
+      form_submitted: [1, 1],
+      meeting_booked: [3, 3],
+      meeting_attended: [1, 1],
+      meeting_not_held: [1, 1],
+      sale: [1, 1],
+      deal_lost: [0, 0],
+    });
+    const booked = res.body.steps.find((s: { step: string }) => s.step === "meeting_booked");
+    expect(booked.bySource).toEqual({ appointment: 3, stage_entry: 1 });
+    expect(res.body.coverage).toMatchObject({
+      connectionStatus: "active",
+      totalContacts: 3,
+      contactsWithEvidence: 3,
+      appointmentsSince: "2026-08-01T09:00:00.000Z",
+      undecidedStages: 0,
+    });
+    expect(res.body.coverage.stageHistorySince).not.toBeNull();
+
+    // The org-less twin answers the same, resolving the org from the connection.
+    const internal = await request(app())
+      .get(`/internal/gohighlevel/funnel-reach?brandId=${BRAND}`)
+      .set("x-api-key", API_KEY);
+    expect(internal.status).toBe(200);
+    expect(internal.body).toEqual(res.body);
+  });
+
+  it("says why reach is not available, distinctly from zeros", async () => {
+    const noConnection = await request(app())
+      .get(`/orgs/gohighlevel/funnel-reach?brandId=${BRAND}`)
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", ORG);
+    expect(noConnection.status).toBe(200);
+    expect(noConnection.body).toEqual({
+      brandId: BRAND,
+      available: false,
+      reason: "no_connection",
+      coverage: null,
+    });
+    const internal = await request(app())
+      .get(`/internal/gohighlevel/funnel-reach?brandId=${BRAND}`)
+      .set("x-api-key", API_KEY);
+    expect(internal.body).toMatchObject({ available: false, reason: "no_connection" });
+
+    await seedConnection();
+    const notSynced = await request(app())
+      .get(`/orgs/gohighlevel/funnel-reach?brandId=${BRAND}`)
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", ORG);
+    expect(notSynced.body).toMatchObject({ available: false, reason: "not_synced" });
+    expect(notSynced.body.steps).toBeUndefined();
+
+    await runSyncPass();
+    await db.delete(ghlStageMeanings);
+    const pending = await request(app())
+      .get(`/orgs/gohighlevel/funnel-reach?brandId=${BRAND}`)
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", ORG);
+    expect(pending.body).toMatchObject({ available: false, reason: "stage_meanings_pending" });
+    expect(pending.body.coverage.undecidedStages).toBeGreaterThan(0);
+  });
+
   it("a contact whose first touch is a form evidences a form fill, dated by its creation", async () => {
     CONTACTS.push({
       id: "c4",
