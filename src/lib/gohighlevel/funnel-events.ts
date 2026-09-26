@@ -121,8 +121,12 @@ export interface FunnelEventsResult {
   hesitantStages: number;
 }
 
-/** Every event row of the brand, joined to its silver contact. */
-function eventsQuery(orgId: string, brandId: string, contactId: string | null): SQL {
+/**
+ * Every event row of the brand, joined to its silver contact. Shared with the
+ * whole-CRM reach counts (funnel-reach.ts), so both reads stand on the SAME
+ * evidence.
+ */
+export function eventsQuery(orgId: string, brandId: string, contactId: string | null): SQL {
   const contactFilter = contactId ? sql`AND c.id = ${contactId}` : sql``;
   return sql`
     WITH ev AS (

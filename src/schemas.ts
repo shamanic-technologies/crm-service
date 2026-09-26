@@ -975,6 +975,86 @@ export const GhlFunnelEventsResponseSchema = registry.register(
     .openapi("GhlFunnelEventsResponse"),
 );
 
+const REACH_SOURCE_VALUES = [
+  "appointment",
+  "stage_entry",
+  "won_status",
+  "lost_status",
+  "form_submission",
+  "form_origin",
+] as const;
+
+const GhlFunnelReachCoverageSchema = z
+  .object({
+    connectionStatus: z.string().openapi({ description: "`active` | `paused` | `error`." }),
+    lastSyncedAt: z.string().nullable(),
+    totalContacts: z.number().int().openapi({
+      description: "GoHighLevel contacts mirrored for the brand: the whole CRM population.",
+    }),
+    contactsWithEvidence: z.number().int().openapi({
+      description: "Contacts carrying at least one funnel event.",
+    }),
+    appointmentsSince: z.string().nullable().openapi({
+      description: "Earliest calendar booking GoHighLevel holds. Appointments reach back years.",
+    }),
+    stageHistorySince: z.string().nullable().openapi({
+      description:
+        "When crm-service first observed the brand's pipeline. GoHighLevel keeps no stage " +
+        "history: before this date an opportunity is known only by the stage it sat in then.",
+    }),
+    undecidedStages: z.number().int(),
+    hesitantStages: z.number().int().openapi({
+      description: "Stages whose meaning was decided below 0.5 confidence: never counted.",
+    }),
+  })
+  .openapi("GhlFunnelReachCoverage");
+
+export const GhlFunnelReachResponseSchema = registry.register(
+  "GhlFunnelReachResponse",
+  z
+    .object({
+      brandId: z.string().uuid(),
+      available: z.boolean().openapi({
+        description:
+          "False when the question cannot be answered yet; `reason` says why. Never zeros in " +
+          "disguise: `steps` is absent.",
+      }),
+      reason: z.enum(["no_connection", "not_synced", "stage_meanings_pending"]).optional().openapi({
+        description:
+          "Only when `available` is false. `no_connection`: the brand has no GoHighLevel " +
+          "connection. `not_synced`: connected, no sync completed yet. " +
+          "`stage_meanings_pending`: stage names observed but not decided yet (the next sync " +
+          "decides them).",
+      }),
+      steps: z
+        .array(
+          z.object({
+            step: z.enum(FUNNEL_STEP_VALUES),
+            contacts: z.number().int().openapi({
+              description: "Distinct CRM contacts with DIRECT evidence of the step.",
+            }),
+            contactsAtOrBeyond: z.number().int().openapi({
+              description:
+                "Distinct contacts with evidence of the step OR of a later step that implies it: " +
+                "`meeting_booked` ⇐ attended, not held, sale; `meeting_attended` ⇐ sale; every " +
+                "other step implies nothing. Monotone along booked → attended → sale, so a ratio " +
+                "of adjacent values never exceeds 1.",
+            }),
+            bySource: z.record(z.enum(REACH_SOURCE_VALUES), z.number().int()).openapi({
+              description:
+                "Distinct contacts per evidence source (a contact can appear under several).",
+            }),
+          }),
+        )
+        .optional()
+        .openapi({ description: "Every step, zeros included. Only when `available` is true." }),
+      coverage: GhlFunnelReachCoverageSchema.nullable().openapi({
+        description: "Null only for `no_connection`.",
+      }),
+    })
+    .openapi("GhlFunnelReachResponse"),
+);
+
 export const GhlStageMeaningsResponseSchema = registry.register(
   "GhlStageMeaningsResponse",
   z
@@ -1172,6 +1252,52 @@ registry.registerPath({
       description: "Funnel events",
       content: { "application/json": { schema: GhlFunnelEventsResponseSchema } },
     },
+  },
+});
+
+const FUNNEL_REACH_DESCRIPTION =
+  "Over the brand's WHOLE GoHighLevel history, how many distinct CRM contacts ever reached " +
+  "each funnel step, so a consumer can divide adjacent steps into a conversion rate. Counting " +
+  "rules: per CONTACT (never per opportunity or appointment); the evidence is exactly what " +
+  "/orgs/gohighlevel/funnel-events serves (calendar appointments, stage entries whose recorded " +
+  "meaning is a step, won / lost statuses, form submissions and form-origin contacts), dated or " +
+  "not; EVERY pipeline counts, because a stage's recorded meaning (not its pipeline) makes it a " +
+  "step; stages decided below 0.5 confidence are left out. Use `contactsAtOrBeyond` for a rate: " +
+  "GoHighLevel keeps no stage history, so a contact first seen in a sale stage carries no " +
+  "record of the meeting it went through. `available: false` with a `reason` is a distinct " +
+  "answer from zeros.";
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/gohighlevel/funnel-reach",
+  summary: "How many CRM contacts ever reached each funnel step, over the whole CRM",
+  description: FUNNEL_REACH_DESCRIPTION,
+  request: { query: z.object({ brandId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Reach counts, or why they are not available",
+      content: { "application/json": { schema: GhlFunnelReachResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/gohighlevel/funnel-reach",
+  summary: "Funnel reach counts for a server-to-server caller (no org identity)",
+  description:
+    FUNNEL_REACH_DESCRIPTION +
+    " Org-less: the org is resolved from the brand's GoHighLevel connection. Pass `orgId` only " +
+    "if two orgs connect the same brand (409 otherwise).",
+  request: {
+    query: z.object({ brandId: z.string().uuid(), orgId: z.string().uuid().optional() }),
+  },
+  responses: {
+    200: {
+      description: "Reach counts, or why they are not available",
+      content: { "application/json": { schema: GhlFunnelReachResponseSchema } },
+    },
+    409: { description: "Several orgs connect this brand; pass orgId" },
   },
 });
 

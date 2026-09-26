@@ -563,6 +563,27 @@ customer's vocabulary.
   The same fact can be evidenced twice (a calendar booking AND a "Booked" stage)
   — both are served, with their sources; the consumer picks.
 
+### Funnel reach — whole-CRM step counts (`src/lib/gohighlevel/funnel-reach.ts`)
+
+`GET /orgs/gohighlevel/funnel-reach?brandId=` and its org-less twin
+`GET /internal/gohighlevel/funnel-reach?brandId=[&orgId=]` (features-service
+prices a leg the customer's own sales team runs off it). Counts distinct CRM
+contacts that EVER reached each step over the whole CRM, not only the handful
+paired with our leads.
+
+- **Per contact**, never per opportunity / appointment.
+- **Same evidence as `funnel-events`** (it reuses `eventsQuery`), so the per-lead
+  and whole-CRM reads can never disagree on what counts. Every pipeline counts:
+  the stage's recorded meaning makes it a step, not its pipeline.
+- `contacts` = direct evidence; `contactsAtOrBeyond` adds contacts evidenced at
+  a later step (`REACH_IMPLIED_BY`: booked ⇐ attended / not held / sale,
+  attended ⇐ sale). Needed because GoHighLevel keeps no stage history: on Doc
+  Dinners the history is ONE snapshot (first observed 2026-09-24), so the 28
+  contacts parked in "Closed Client" carry no record of their meeting. A
+  consumer dividing adjacent steps must use `contactsAtOrBeyond`.
+- `available: false` + `reason` (`no_connection` | `not_synced` |
+  `stage_meanings_pending`) is distinct from zeros; `steps` is then absent.
+
 ## An org-scoped run must open even when the request carries NO brand
 
 Run tracking is mandatory here, and `attachRun` runs BEFORE every `/orgs/*`
