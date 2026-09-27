@@ -604,6 +604,12 @@ apiKeyAuth, response `{ updatedTables: [{ tableName, count }] }`
   `tests/unit/transfer-brand.test.ts` fails otherwise.
 - The GoHighLevel credential lives in key-service, which moves it in its own
   transfer; the sync resolves it under the connection's (new) org.
+- ⚠️ **Registering the route is not enough to be CALLED.** brand-service finds
+  participants through api-registry, which only indexes services listed in its
+  env (`CRM_SERVICE_URL`), and calls each with `CRM_SERVICE_API_KEY` from its
+  OWN env. crm-service was in neither until 2026-09-27, so the fan-out would
+  have skipped the CRM silently. Both now live in `env/api-registry-service.env`
+  and `env/brand-service.env` on the box.
 
 ## An org-scoped run must open even when the request carries NO brand
 
