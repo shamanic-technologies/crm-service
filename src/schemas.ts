@@ -338,6 +338,46 @@ registry.registerPath({
   },
 });
 
+// ─── Brand transfer (fleet contract) ─────────────────────────────────────────
+
+export const TransferBrandRequestSchema = z
+  .object({
+    sourceBrandId: z.string().uuid(),
+    sourceOrgId: z.string().uuid(),
+    targetOrgId: z.string().uuid(),
+    targetBrandId: z.string().uuid().optional(),
+  })
+  .openapi("TransferBrandRequest");
+
+const TransferBrandResponseSchema = z
+  .object({
+    updatedTables: z.array(z.object({ tableName: z.string(), count: z.number().int() })),
+  })
+  .openapi("TransferBrandResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/transfer-brand",
+  summary: "Move every CRM row of a brand from one org to another",
+  description:
+    "Moves the brand's whole CRM (CSV uploads and contacts, serves, GoHighLevel connection, mirror, pipelines, opportunities, appointments, form submissions, stage history and meanings, Matrix connection, events, conversations and leads) from sourceOrgId to targetOrgId, rewriting the brand id to targetBrandId when given. One transaction: all or nothing. Idempotent: a second call moves nothing. 409 when the target already holds conflicting CRM data (nothing moved).",
+  request: {
+    body: {
+      content: { "application/json": { schema: TransferBrandRequestSchema } },
+      required: true,
+    },
+  },
+  responses: {
+    200: {
+      description: "Rows moved per table",
+      content: { "application/json": { schema: TransferBrandResponseSchema } },
+    },
+    400: { description: "Validation error" },
+    409: { description: "Target already holds conflicting CRM data; nothing was moved" },
+    502: { description: "Run tracking unavailable" },
+  },
+});
+
 // ─── Matrix (direct-message ingestion) ───────────────────────────────────────
 
 export const MatrixChannelSchema = z.enum(MATRIX_CHANNELS);

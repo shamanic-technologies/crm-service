@@ -584,6 +584,27 @@ paired with our leads.
 - `available: false` + `reason` (`no_connection` | `not_synced` |
   `stage_meanings_pending`) is distinct from zeros; `steps` is then absent.
 
+## Brand transfer (`POST /internal/transfer-brand`, fleet contract)
+
+brand-service moves a brand to another org by calling this route on every
+service. Body `{sourceBrandId, sourceOrgId, targetOrgId, targetBrandId?}`,
+apiKeyAuth, response `{ updatedTables: [{ tableName, count }] }`
+(`src/lib/transfer-brand.ts`).
+
+- **Every table carrying `brand_id` moves** (all 16: CSV, serves, Matrix,
+  GoHighLevel incl. history + stage meanings). Only `org_id` / `brand_id` change;
+  FKs are on row ids so the graph stays wired. Provenance (`run_id`,
+  `created_by_user_id`) stays as recorded.
+- **ONE transaction** — all or nothing. A unique collision in the target (it
+  already has its own CRM for that brand) rolls back and answers 409.
+- **Idempotent**: a row already at (target org, final brand) is not matched, so a
+  re-run reports 0 everywhere; a half-move from an earlier call without
+  `targetBrandId` is finished.
+- ⚠️ **A new table with `brand_id` must be added to `TRANSFER_TABLES`** —
+  `tests/unit/transfer-brand.test.ts` fails otherwise.
+- The GoHighLevel credential lives in key-service, which moves it in its own
+  transfer; the sync resolves it under the connection's (new) org.
+
 ## An org-scoped run must open even when the request carries NO brand
 
 Run tracking is mandatory here, and `attachRun` runs BEFORE every `/orgs/*`
