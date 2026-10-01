@@ -11,6 +11,8 @@ feed the same registry, both layered bronze/silver/gold:
 | `csv`    | OUTBOUND | a client's own B2C CRM export, uploaded as a file | YES — feeds `serve-next` → human-service → cold email |
 | `matrix` | INBOUND  | direct messages the client RECEIVED on WhatsApp / Telegram / Discord, mirrored into Matrix | NEVER — these people wrote first and are already in conversation |
 | `gohighlevel` | MIRROR | the client's live GoHighLevel CRM: their contacts, sales pipeline and calendar appointments, read-only | NEVER — these are the client's own people, already theirs |
+| `posthog` | MIRROR | the brand's PostHog project: IDENTIFIED persons (email known), their visits and custom events, read-only | NEVER |
+| `stripe` | MIRROR | the brand's Stripe account (restricted key): customers, charges, refunds, subscriptions, read-only | NEVER |
 
 As a CSV lead-provider it is a sibling of `apollo-service` / `apify-service`.
 
@@ -642,6 +644,39 @@ owner had written to. A recorded fact, never an address-shape guess.
 - Gateway: api-service proxies `/v1/orgs/people*` (explicit routes; the crm
   proxy forwards per route, not by prefix).
 
+## PostHog + Stripe — what a person DID and what they PAID (`src/lib/posthog/`, `src/lib/stripe/`)
+
+Same contract as GoHighLevel: credential in key-service (provider `posthog` /
+`stripe`, brand-scoped, NO org fallback), connection written only once the key
+is PROVEN against the vendor, refusal = `{ type: "vendor", vendorStatus,
+vendorError }` in the vendor's words, no write path, bronze `*_raw_records`
+(vendor id + content-hash no-churn) → silver, one ORG run per connection, cron
+`*/15` on `/internal/{posthog,stripe}/sync`, `/internal/{posthog,stripe}/rebuild`
+re-derives silver with no vendor call. API reads are free → no cost declared.
+
+- **PostHog**: body `{brandId, projectId, region: us|eu}`; the host is derived
+  from `region`, never taken from the caller (no SSRF). Reads go through the
+  HogQL query API (a POST that only needs `query:read`). ⚠️ PostHog REFUSES
+  `OFFSET` on personal-API-key queries → keyset pagination only. Only
+  identified persons (`properties.email`) are read; anonymous visitors never
+  leave PostHog. Silver: `contacts` (source `posthog`) + `posthog_activities`
+  (`visit` = one session aggregated over ALL its pageviews, `event` = custom
+  non-`$` event). Window = `synced_through - 1h`; a capped stream resumes from
+  its last row.
+- **Stripe**: only a RESTRICTED key (`rk_live_`/`rk_test_`) is accepted; `sk_`
+  is refused before any call. Silver: `contacts` (source `stripe`) +
+  `stripe_transactions` (`payment` | `refund` | `subscription`, amount in MINOR
+  units verbatim + currency + Stripe status). Passes re-list the last 30 days;
+  a full re-list runs daily (`last_full_sync_at`).
+- **Person layer**: both are `PEOPLE_SOURCES`; a Stripe customer with email +
+  phone is merge evidence (`stripe_customer`). State precedence: lead_service >
+  **stripe** (`subscription_<active|trialing|past_due|unpaid>` > `paid` >
+  `refunded` > `subscription_canceled`) > gohighlevel > matrix > instantly.
+  A connection whose first sync has not succeeded reads `failed`, never 0.
+- **Dogfood**: Distribute.you's own Stripe is connected like any client
+  (restricted key in key-service under its brand), NOT read from
+  stripe-service: one path for every brand.
+
 ## Brand transfer (`POST /internal/transfer-brand`, fleet contract)
 
 brand-service moves a brand to another org by calling this route on every
@@ -649,8 +684,8 @@ service. Body `{sourceBrandId, sourceOrgId, targetOrgId, targetBrandId?}`,
 apiKeyAuth, response `{ updatedTables: [{ tableName, count }] }`
 (`src/lib/transfer-brand.ts`).
 
-- **Every table carrying `brand_id` moves** (all 19: CSV, serves, Matrix,
-  GoHighLevel incl. history + stage meanings). Only `org_id` / `brand_id` change;
+- **Every table carrying `brand_id` moves** (all 25: CSV, serves, Matrix,
+  GoHighLevel incl. history + stage meanings, PostHog, Stripe). Only `org_id` / `brand_id` change;
   FKs are on row ids so the graph stays wired. Provenance (`run_id`,
   `created_by_user_id`) stays as recorded.
 - **ONE transaction** — all or nothing. A unique collision in the target (it

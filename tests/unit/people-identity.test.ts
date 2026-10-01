@@ -102,7 +102,7 @@ describe("clusterPeople", () => {
 });
 
 describe("resolvePersonState precedence", () => {
-  const empty = { leadObservations: [], ghlDeals: [], matrixStatuses: [], instantly: null };
+  const empty = { leadObservations: [], ghlDeals: [], stripe: [], matrixStatuses: [], instantly: null };
 
   it("lead-service standing wins, verbatim", () => {
     const s = resolvePersonState({

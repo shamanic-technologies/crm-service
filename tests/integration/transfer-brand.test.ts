@@ -79,6 +79,25 @@ async function seedBrand(org: string, brand: string, tag: string) {
   await db.execute(sql`
     INSERT INTO lead_standing_observations (org_id, brand_id, email, found)
     VALUES (${org}, ${brand}, ${tag + "@x.com"}, false)`);
+
+  const [ph] = await db.execute<{ id: string }>(sql`
+    INSERT INTO posthog_connections (org_id, brand_id, project_id, region, created_by_user_id)
+    VALUES (${org}, ${brand}, '1', 'eu', 'user') RETURNING id`);
+  await db.execute(sql`
+    INSERT INTO posthog_raw_records (org_id, brand_id, connection_id, kind, external_id, content_hash, payload)
+    VALUES (${org}, ${brand}, ${ph.id}, 'person', 'p1', 'h', '{}')`);
+  await db.execute(sql`
+    INSERT INTO posthog_activities (org_id, brand_id, connection_id, kind, external_id, external_person_id, contact_id, occurred_at, name, detail)
+    VALUES (${org}, ${brand}, ${ph.id}, 'event', 'e1', 'p1', ${contact.id}, now(), 'signup', '{}')`);
+  const [st] = await db.execute<{ id: string }>(sql`
+    INSERT INTO stripe_connections (org_id, brand_id, key_mode, created_by_user_id)
+    VALUES (${org}, ${brand}, 'live', 'user') RETURNING id`);
+  await db.execute(sql`
+    INSERT INTO stripe_raw_records (org_id, brand_id, connection_id, kind, external_id, content_hash, payload)
+    VALUES (${org}, ${brand}, ${st.id}, 'charge', 'ch_1', 'h', '{}')`);
+  await db.execute(sql`
+    INSERT INTO stripe_transactions (org_id, brand_id, connection_id, kind, external_id, contact_id, occurred_at, amount_minor, currency, status, detail)
+    VALUES (${org}, ${brand}, ${st.id}, 'payment', 'ch_1', ${contact.id}, now(), 9900, 'usd', 'succeeded', '{}')`);
 }
 
 /** Rows per table for (org, brand). */
