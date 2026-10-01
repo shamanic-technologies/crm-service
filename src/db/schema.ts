@@ -814,6 +814,123 @@ export const ghlStageMeanings = pgTable(
   ],
 );
 
+/**
+ * GOLD — the merged PERSON layer: one person, every channel, one thread.
+ *
+ * A people scope is one (org, brand) whose people are indexed. It is the source
+ * artifact of the layer, like `ghl_connections` / `matrix_connections`, and it
+ * carries `created_by_user_id` ON PURPOSE: the rebuild runs from a cron with no
+ * inbound identity headers, and the org run + every sibling read it makes must
+ * still be attributed. A request-scoped header does not survive that boundary.
+ *
+ * `source_reads` records, per source, what the LAST build could read: whether
+ * the source is connected, how many people it yielded, what the source itself
+ * counts, and why a read failed. "not connected", "connected but nobody" and
+ * "failed to read" stay three different answers.
+ */
+export const peopleScopes = pgTable(
+  "people_scopes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    createdByUserId: text("created_by_user_id").notNull(),
+
+    // pending (never built) -> built | error
+    status: text("status").notNull().default("pending"),
+    sourceReads: jsonb("source_reads"),
+    lastError: text("last_error"),
+    lastBuiltAt: timestamp("last_built_at", { withTimezone: true }),
+    lastRunId: text("last_run_id"),
+
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("people_scopes_org_brand_uq").on(table.orgId, table.brandId)],
+);
+
+/**
+ * GOLD — one row per merged person of a scope, fully re-derived on every build
+ * from the sources' served reads (never their bronze).
+ *
+ * `person_key` is the public identity: the smallest email key of the person
+ * (else the smallest phone key, else the source-local key). It is stable for as
+ * long as the person keeps that address, so a consumer can hold it across
+ * rebuilds; `identity_keys` holds EVERY key of the person, so any one of them
+ * opens the same person.
+ *
+ * Merging happens only on positive evidence (a record holding two keys at
+ * once). There is no name matching anywhere.
+ */
+export const people = pgTable(
+  "people",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => peopleScopes.id, { onDelete: "cascade" }),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+
+    personKey: text("person_key").notNull(),
+    // Every identity key of the person: "email:a@b.com", "phone:+336...", or a
+    // source-local key ("matrix:<contactId>") for someone with neither.
+    identityKeys: jsonb("identity_keys").notNull(),
+    displayName: text("display_name"),
+    company: text("company"),
+    emails: jsonb("emails").notNull(),
+    phones: jsonb("phones").notNull(),
+    // The distinct sources the person appears on.
+    sources: jsonb("sources").notNull(),
+    // One entry per source record this person was merged from.
+    presences: jsonb("presences").notNull(),
+    // The evidence that merged two keys (a Google / GoHighLevel / CSV contact
+    // holding both, a lead-service "same person" ruling).
+    mergeEvidence: jsonb("merge_evidence").notNull(),
+
+    firstActivityAt: timestamp("first_activity_at", { withTimezone: true }),
+    lastActivityAt: timestamp("last_activity_at", { withTimezone: true }),
+
+    // The ONE state, decided by the source that states it (see people/state.ts).
+    state: text("state").notNull(),
+    stateSource: text("state_source").notNull(),
+    stateDetail: jsonb("state_detail"),
+
+    builtAt: timestamp("built_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("people_scope_person_key_uq").on(table.scopeId, table.personKey),
+    index("people_org_brand_activity_idx").on(table.orgId, table.brandId, table.lastActivityAt),
+  ],
+);
+
+/**
+ * What lead-service last said about one email of a brand: its standing (or that
+ * the address is not one of our leads). A cache of lead-service's answer, never
+ * a grade of ours, so a 5-minute rebuild does not ask lead-service about every
+ * person every time. Re-asked once it is older than the TTL or older than the
+ * person's last activity.
+ */
+export const leadStandingObservations = pgTable(
+  "lead_standing_observations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    email: text("email").notNull(),
+    found: boolean("found").notNull(),
+    // lead-service's answer, verbatim where it matters (standing, row ids).
+    payload: jsonb("payload"),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("lead_standing_observations_org_brand_email_uq").on(
+      table.orgId,
+      table.brandId,
+      table.email,
+    ),
+  ],
+);
+
 export type ContactUpload = typeof contactUploads.$inferSelect;
 export type NewContactUpload = typeof contactUploads.$inferInsert;
 export type ContactRowRaw = typeof contactRowsRaw.$inferSelect;
@@ -841,3 +958,6 @@ export type NewGhlOpportunity = typeof ghlOpportunities.$inferInsert;
 export type GhlAppointment = typeof ghlAppointments.$inferSelect;
 export type GhlOpportunityHistoryRow = typeof ghlOpportunityHistory.$inferSelect;
 export type GhlStageMeaning = typeof ghlStageMeanings.$inferSelect;
+export type PeopleScope = typeof peopleScopes.$inferSelect;
+export type Person = typeof people.$inferSelect;
+export type NewPerson = typeof people.$inferInsert;
