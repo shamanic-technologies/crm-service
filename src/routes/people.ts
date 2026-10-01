@@ -134,10 +134,12 @@ router.get(
             presences: read?.presences ?? 0,
             sourceCount: read?.sourceCount ?? null,
             sourceCountBasis: read?.sourceCountBasis ?? null,
+            excludedOwn: read?.excludedOwn ?? 0,
             error: read?.error ?? null,
           };
         }),
         mergeEvidence: reads?.evidence ?? [],
+        ownAddresses: reads?.ownAddresses ?? null,
         total,
         limit,
         offset,
