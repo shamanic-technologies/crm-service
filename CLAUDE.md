@@ -324,6 +324,53 @@ result — never swallowed, and one broken bridge does not stop the others.
 - `GET /orgs/matrix/leads?brandId=&status=&limit=&offset=` → the gold leads joined
   with contact identity + conversation counters.
 
+### Self-serve linking (`/orgs/matrix/links`, `src/lib/matrix/link.ts`)
+
+Connecting an account is a product feature, never a staff step (owner rule
+2026-10-01). A signed-in user links the brand's WhatsApp from the dashboard:
+
+- `POST /orgs/matrix/links {brandId, channel, method: qr|phone, phoneNumber?}`
+  → the first QR (`qr.data` + `qr.imageDataUrl`) or 8-char `pairingCode`.
+- `GET /orgs/matrix/links?brandId=` → every channel: `available`, `status`
+  (`not_linked|waiting|linked|failed`), the CURRENT code (WhatsApp refreshes the
+  QR at 60s then every 20s, then times out ~2m40s → `failed`, start again), the
+  bridge's own `error {code, message}`, and once linked `account` + live
+  `bridgeState` + `connection`. The dashboard polls this.
+- `DELETE /orgs/matrix/links/:channel?brandId=` → bridge logout, sync token
+  revoked, the link's connection + its raw events / conversations / leads AND its
+  Matrix contacts (no FK: deleted explicitly) dropped, people rebuild kicked. A
+  hand-registered connection (no link) is never touched by it.
+
+**Isolation = one dedicated Matrix account per (org, brand, channel)**,
+`@crm_<random>:matrix.distribute.you`, created through crm-service's own
+appservice (`id: crm`, exclusive `@crm_*` namespace, registration in
+`/root/distribute/matrix/crm/` on the box). The bridge keeps one login per
+Matrix account and invites only that account to its rooms; the connection syncs
+with that account's OWN token (`matrix_connections.access_token`, never served),
+so one brand's DMs cannot reach another's `/sync`. ⚠️ continuwuity refuses
+`/sync` to a masquerading appservice ("Appservices must masquerade"), so the
+account logs in via `m.login.application_service` once and the token is stored.
+
+**The bridge double-puppets with the same appservice token**
+(`double_puppet.secrets` in `matrix/whatsapp/config.yaml`). Without it the
+user's own phone messages arrive from their self-GHOST (`@whatsapp_<own id>`),
+which the counterpart resolution would mistake for a contact and the outbound
+count would miss; with it they arrive as the account (sender == account →
+outbound) and the bridge joins the account to its rooms itself.
+
+The bridge's provisioning API (`/_matrix/provision/v3`, shared secret +
+`?user_id=`) is driven by an in-process DRIVER that long-polls
+`display_and_wait`. Every driver write is conditioned on the row's
+`bridge_process_id`, so a superseded/unlinked link stops its driver. A `waiting`
+row with no live driver (service restarted) is turned `failed / INTERRUPTED` on
+the next read — never a stale QR posing as live.
+
+A channel is `available` only when `MATRIX_APPSERVICE_TOKEN` and its
+`MATRIX_<CHANNEL>_PROVISIONING_URL` + `_SECRET` are set. Telegram's bridge needs
+a platform Telegram app credential (api_id/api_hash) that is not provisioned:
+its env is absent and it answers `409 channel_unavailable` "not available yet".
+Discord's bridge (mautrix-discord) is not bridgev2, so it stays unavailable too.
+
 ## GoHighLevel ingestion (third source)
 
 A customer runs their business on GoHighLevel. They paste their credential once
@@ -803,7 +850,9 @@ once CI is green, then tag the next version by hand at the merge commit
 `MATRIX_ACCESS_TOKEN`, `MATRIX_INGESTION_FLOOR`, `CRM_LEAD_READING_CHAT_CONFIG`,
 `KEY_SERVICE_URL`, `KEY_SERVICE_API_KEY`, `GOOGLE_SERVICE_URL`, `GOOGLE_SERVICE_API_KEY`,
 `INSTANTLY_SERVICE_URL`, `INSTANTLY_SERVICE_API_KEY`, `LEAD_SERVICE_URL`, `LEAD_SERVICE_API_KEY`,
-`BRAND_SERVICE_URL`, `BRAND_SERVICE_API_KEY`.
+`BRAND_SERVICE_URL`, `BRAND_SERVICE_API_KEY`, `MATRIX_APPSERVICE_TOKEN`,
+`MATRIX_WHATSAPP_PROVISIONING_URL`, `MATRIX_WHATSAPP_PROVISIONING_SECRET`
+(+ `MATRIX_TELEGRAM_*` once its bridge runs).
 See `.env.example`. The four Matrix ones are REQUIRED for the sync to run at all —
 without them `/internal/matrix/sync` fails loud instead of silently no-op-ing.
 The two `KEY_SERVICE_*` ones are REQUIRED for GoHighLevel — they are how the

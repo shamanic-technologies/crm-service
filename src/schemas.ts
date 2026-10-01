@@ -609,6 +609,148 @@ registry.registerPath({
   },
 });
 
+// ─── Matrix self-serve linking (/orgs/matrix/links) ─────────────────────────
+
+const LinkMethodSchema = z.enum(["qr", "phone"]);
+
+export const MatrixLinkStartRequestSchema = registry.register(
+  "MatrixLinkStartRequest",
+  z
+    .object({
+      brandId: z.string().uuid(),
+      channel: MatrixChannelSchema,
+      method: LinkMethodSchema.openapi({
+        description:
+          "'qr' = scan a QR code in WhatsApp › Linked devices. 'phone' = get an 8-character pairing " +
+          "code to type under Linked devices › Link with phone number instead.",
+      }),
+      phoneNumber: z.string().optional().openapi({
+        description: "Required for 'phone'. International format.",
+        example: "+33612345678",
+      }),
+    })
+    .openapi("MatrixLinkStartRequest"),
+);
+
+export const MatrixLinkSchema = registry.register(
+  "MatrixLink",
+  z
+    .object({
+      channel: MatrixChannelSchema,
+      available: z.boolean().openapi({
+        description: "False while the channel's bridge is not running (Telegram today).",
+      }),
+      unavailableReason: z.string().nullable(),
+      methods: z.array(LinkMethodSchema),
+      status: z.enum(["not_linked", "waiting", "linked", "failed"]),
+      method: LinkMethodSchema.nullable(),
+      qr: z
+        .object({
+          data: z.string().openapi({ description: "The QR payload, to render as a QR code." }),
+          imageDataUrl: z.string().openapi({ description: "The same QR as a PNG data URL." }),
+        })
+        .nullable()
+        .openapi({ description: "Present while waiting on a QR scan. Refreshes every 20-60s: poll." }),
+      pairingCode: z
+        .string()
+        .nullable()
+        .openapi({ description: "Present while waiting on a pairing code entry.", example: "ABCD-EFGH" }),
+      instructions: z.string().nullable(),
+      codeIssuedAt: z.string().nullable(),
+      account: z
+        .object({ id: z.string(), name: z.string().nullable() })
+        .nullable()
+        .openapi({ description: "The linked account (WhatsApp: its phone number)." }),
+      bridgeState: z
+        .object({ state: z.string().nullable(), reason: z.string().nullable() })
+        .nullable()
+        .openapi({ description: "Linked only: the bridge's live state, e.g. CONNECTED or BAD_CREDENTIALS." }),
+      bridgeStateError: z.string().nullable(),
+      connection: z
+        .object({
+          id: z.string().uuid(),
+          status: z.string(),
+          synced: z.boolean(),
+          lastSyncedAt: z.string().nullable(),
+          lastError: z.string().nullable(),
+        })
+        .nullable(),
+      error: z
+        .object({ code: z.string(), message: z.string() })
+        .nullable()
+        .openapi({ description: "Failed only: the bridge's (or WhatsApp's) own code + message." }),
+      startedAt: z.string().nullable(),
+      linkedAt: z.string().nullable(),
+    })
+    .openapi("MatrixLink"),
+);
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/matrix/links",
+  summary: "Start linking a brand's WhatsApp (or Telegram) account, self-serve",
+  description:
+    "Creates the brand's dedicated bridge account and starts a login. Answers with the first QR code " +
+    "or pairing code; poll GET /orgs/matrix/links for refreshed codes and completion. Once linked, the " +
+    "brand's Matrix connection exists and syncs with no further step. Read-only: nothing is ever sent " +
+    "on the linked account. Needs x-user-id.",
+  request: { body: { content: { "application/json": { schema: MatrixLinkStartRequestSchema } } } },
+  responses: {
+    200: {
+      description: "Link started (or already linked)",
+      content: { "application/json": { schema: z.object({ link: MatrixLinkSchema }) } },
+    },
+    400: { description: "Bad request", content: { "application/json": { schema: ErrorResponseSchema } } },
+    409: {
+      description: "Channel not available yet",
+      content: {
+        "application/json": {
+          schema: z.object({ type: z.literal("channel_unavailable"), channel: MatrixChannelSchema, error: z.string() }),
+        },
+      },
+    },
+    422: { description: "The bridge (or WhatsApp) refused, in its own words; `link` shows the failed state" },
+    502: { description: "The bridge is unreachable or broke" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/matrix/links",
+  summary: "Every channel's link status for a brand, with the current code",
+  request: { query: z.object({ brandId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "One entry per channel",
+      content: { "application/json": { schema: z.object({ links: z.array(MatrixLinkSchema) }) } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/orgs/matrix/links/{channel}",
+  summary: "Unlink a channel: logout, stop syncing, drop what was mirrored",
+  request: { params: z.object({ channel: MatrixChannelSchema }), query: z.object({ brandId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Unlinked",
+      content: {
+        "application/json": {
+          schema: z.object({
+            unlinked: z.literal(true),
+            contactsRemoved: z.number().int(),
+            connectionRemoved: z.boolean(),
+            link: MatrixLinkSchema,
+          }),
+        },
+      },
+    },
+    404: { description: "No link", content: { "application/json": { schema: ErrorResponseSchema } } },
+    502: { description: "The bridge could not log the account out" },
+  },
+});
+
 // ─── GoHighLevel (third CRM source) ──────────────────────────────────────────
 
 export const GhlConnectionSchema = registry.register(

@@ -301,6 +301,12 @@ export const matrixConnections = pgTable(
     lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
     lastRunId: text("last_run_id"),
 
+    // Set ONLY on a connection opened by a self-serve link (`matrix_links`): the
+    // access token of the brand's OWN dedicated Matrix account, so its /sync sees
+    // that brand's rooms and nobody else's. NULL = a connection registered by hand
+    // against the platform account (`MATRIX_ACCESS_TOKEN`). Never served.
+    accessToken: text("access_token"),
+
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
@@ -310,6 +316,75 @@ export const matrixConnections = pgTable(
       table.channel,
     ),
     index("matrix_connections_status_idx").on(table.status),
+  ],
+);
+
+/**
+ * OPERATIONAL — one row per (org, brand, channel) self-serve link: a signed-in
+ * user linking their WhatsApp (or Telegram) account to the brand from the
+ * dashboard, with no staff step.
+ *
+ * Isolation: every link gets its OWN dedicated Matrix account
+ * (`@crm_<random>:<server>`), created through crm-service's appservice. The
+ * bridge keeps one login per Matrix account and puts that login's rooms in that
+ * account only, so one brand's WhatsApp can never reach another brand's /sync.
+ *
+ * The row carries what the dashboard polls while the user scans: the CURRENT
+ * QR payload or pairing code (it refreshes on WhatsApp's schedule), and the
+ * bridge's own error code + message when the link fails. Once linked, the
+ * brand's `matrix_connections` row exists and syncs like any other.
+ */
+export const matrixLinks = pgTable(
+  "matrix_links",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    // 'whatsapp' | 'telegram' | 'discord'
+    channel: text("channel").notNull(),
+    createdByUserId: text("created_by_user_id").notNull(),
+
+    // The brand's dedicated Matrix account. NULL after an unlink: the next link
+    // gets a fresh account, so nothing of the old login can resurface.
+    matrixUserId: text("matrix_user_id"),
+
+    // 'waiting' | 'linked' | 'failed' | 'unlinked'
+    status: text("status").notNull(),
+    // 'qr' | 'phone'
+    method: text("method").notNull(),
+
+    // The bridge's in-flight login process + the step it is on. Every write by
+    // the background driver is conditioned on `bridge_process_id`, so a restart
+    // or an unlink makes a stale driver stop instead of overwriting.
+    bridgeProcessId: text("bridge_process_id"),
+    bridgeStepId: text("bridge_step_id"),
+
+    // What the user must act on right now: 'qr' (render `display_data` as a QR
+    // code) or 'code' (type `display_data` into WhatsApp › Linked devices).
+    displayType: text("display_type"),
+    displayData: text("display_data"),
+    instructions: text("instructions"),
+    displayIssuedAt: timestamp("display_issued_at", { withTimezone: true }),
+
+    // The account that linked, as the bridge names it (a WhatsApp phone number).
+    remoteLoginId: text("remote_login_id"),
+    remoteName: text("remote_name"),
+
+    // The bridge's OWN error code + message, verbatim.
+    errorCode: text("error_code"),
+    errorMessage: text("error_message"),
+
+    connectionId: uuid("connection_id").references(() => matrixConnections.id, {
+      onDelete: "set null",
+    }),
+    runId: text("run_id"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    linkedAt: timestamp("linked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("matrix_links_org_brand_channel_uq").on(table.orgId, table.brandId, table.channel),
   ],
 );
 
@@ -1157,6 +1232,7 @@ export type ContactServe = typeof contactServes.$inferSelect;
 export type NewContactServe = typeof contactServes.$inferInsert;
 export type MatrixConnection = typeof matrixConnections.$inferSelect;
 export type NewMatrixConnection = typeof matrixConnections.$inferInsert;
+export type MatrixLink = typeof matrixLinks.$inferSelect;
 export type MatrixRawEvent = typeof matrixRawEvents.$inferSelect;
 export type NewMatrixRawEvent = typeof matrixRawEvents.$inferInsert;
 export type Conversation = typeof conversations.$inferSelect;

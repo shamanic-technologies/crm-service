@@ -14,6 +14,8 @@ import { MATRIX_CHANNELS } from "../lib/matrix/events.js";
 import { LEAD_STATUSES } from "../lib/matrix/leads.js";
 import { rebuildFromBronze, runSyncPass } from "../lib/matrix/sync.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
+import { BridgeError, LINK_METHODS } from "../lib/matrix/bridge.js";
+import { LinkUnavailableError, getLinkView, listLinks, startLink, unlink } from "../lib/matrix/link.js";
 
 const router = Router();
 
@@ -225,6 +227,126 @@ router.get(
       .offset(offset);
 
     res.json({ leads: rows });
+  },
+);
+
+// ─── Self-serve linking: /orgs/matrix/links ──────────────────────────────────
+
+const linkStartSchema = z.object({
+  brandId: z.string().uuid(),
+  channel: z.enum(MATRIX_CHANNELS),
+  method: z.enum(LINK_METHODS),
+  /** International format (+33612345678). Required for method 'phone'. */
+  phoneNumber: z.string().min(1).max(32).optional(),
+});
+
+/**
+ * Start linking a channel for a brand. Answers with the link once the bridge
+ * has produced its first code: a QR (method 'qr') or an 8-character pairing
+ * code (method 'phone'). The code refreshes on WhatsApp's schedule — poll
+ * `GET /orgs/matrix/links` for the current one and for completion.
+ */
+router.post(
+  "/orgs/matrix/links",
+  apiKeyAuth,
+  requireOrgAndUser("matrix.links.start"),
+  async (req: AuthenticatedRequest, res) => {
+    const parsed = linkStartSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        type: "validation",
+        error: `brandId (uuid), channel (${MATRIX_CHANNELS.join("|")}) and method (${LINK_METHODS.join("|")}) are required`,
+      });
+    }
+    const body = parsed.data;
+    if (body.method === "phone" && !body.phoneNumber) {
+      return res
+        .status(400)
+        .json({ type: "validation", error: "phoneNumber is required for method 'phone'" });
+    }
+    const scope = { orgId: req.orgId!, brandId: body.brandId, channel: body.channel };
+    try {
+      await startLink({
+        ...scope,
+        method: body.method,
+        phoneNumber: body.phoneNumber,
+        userId: req.userId!,
+        runId: req.runId ?? null,
+      });
+    } catch (err) {
+      if (err instanceof LinkUnavailableError) {
+        return res.status(409).json({
+          type: "channel_unavailable",
+          channel: err.channel,
+          error: err.reason,
+        });
+      }
+      if (err instanceof BridgeError) {
+        return res.status(err.isRefusal ? 422 : 502).json({
+          type: "bridge",
+          error: err.bridgeMessage,
+          bridgeStatus: err.status,
+          bridgeError: { code: err.code, message: err.bridgeMessage },
+          link: await getLinkView(scope),
+        });
+      }
+      throw err;
+    }
+    res.json({ link: await getLinkView(scope) });
+  },
+);
+
+/** Every channel of a brand: availability, link status, the CURRENT code. Poll this. */
+router.get(
+  "/orgs/matrix/links",
+  apiKeyAuth,
+  requireOrg("matrix.links.list"),
+  async (req: AuthenticatedRequest, res) => {
+    const brandParse = brandIdSchema.safeParse(req.query.brandId);
+    if (!brandParse.success) {
+      return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
+    }
+    res.json({ links: await listLinks(req.orgId!, brandParse.data) });
+  },
+);
+
+/**
+ * Unlink a channel: the bridge logs the account out, syncing stops, and
+ * everything mirrored for it is deleted. Its people leave the person layer on
+ * the next build (one is started right away).
+ */
+router.delete(
+  "/orgs/matrix/links/:channel",
+  apiKeyAuth,
+  requireOrg("matrix.links.unlink"),
+  async (req: AuthenticatedRequest, res) => {
+    const channelParse = z.enum(MATRIX_CHANNELS).safeParse(req.params.channel);
+    if (!channelParse.success) {
+      return res
+        .status(400)
+        .json({ type: "validation", error: `channel must be one of ${MATRIX_CHANNELS.join("|")}` });
+    }
+    const brandParse = brandIdSchema.safeParse(req.query.brandId);
+    if (!brandParse.success) {
+      return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
+    }
+    const scope = { orgId: req.orgId!, brandId: brandParse.data, channel: channelParse.data };
+    let result;
+    try {
+      result = await unlink(scope);
+    } catch (err) {
+      if (err instanceof BridgeError) {
+        return res.status(502).json({
+          type: "bridge",
+          error: err.bridgeMessage,
+          bridgeStatus: err.status,
+          bridgeError: { code: err.code, message: err.bridgeMessage },
+        });
+      }
+      throw err;
+    }
+    if (!result) return res.status(404).json({ type: "not_found", error: "no link for this brand and channel" });
+    res.json({ ...result, link: await getLinkView(scope) });
   },
 );
 

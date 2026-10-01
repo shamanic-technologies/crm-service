@@ -78,6 +78,13 @@
       "when": 1790844150311,
       "tag": "0010_posthog_stripe_sources",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1790855794891,
+      "tag": "0011_matrix_self_serve_links",
+      "breakpoints": true
     }
   ]
 }
