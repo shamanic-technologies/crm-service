@@ -584,6 +584,57 @@ paired with our leads.
 - `available: false` + `reason` (`no_connection` | `not_synced` |
   `stage_meanings_pending`) is distinct from zeros; `steps` is then absent.
 
+## People — one person, every channel, one thread (gold, `src/lib/people/`)
+
+The merged PERSON is crm-service's: for one (org, brand), everyone the brand is
+in conversation with, across sources, with ONE state. Sources stay where they
+are — crm-service READS the siblings' served routes, never their bronze, and
+never writes to them (no write path to any outside tool, by design).
+
+| Source | Who counts as "in conversation" | Read from |
+|--------|--------------------------------|-----------|
+| `gmail` | addresses the org's mailbox WROTE to (Gmail is per ORG) | google-service `GET /orgs/google/correspondents` |
+| `instantly` | replied (not to stop) or clicked our cold email | instantly-service `GET /orgs/engaged-leads?brand_id=` |
+| `matrix` | every Matrix conversation of the brand | own silver |
+| `gohighlevel` | every mirrored GoHighLevel contact | own silver |
+
+CSV contacts are NOT people (nobody talked to them yet); a CSV row holding an
+email and a phone is still merge evidence.
+
+- **Merge only on positive evidence.** Keys are `email:<lower>` and
+  `phone:+<digits>` (international only — a national number has no country and
+  is no key). Two keys merge only when ONE record states both: a GoHighLevel /
+  Google / CSV contact, or a lead-service ACCEPTED human ruling (an automatic
+  pairing is lead-service's inference, not a statement). No name matching, no
+  model. Union-find in `identity.ts`, deterministic.
+- **`person_key`** = smallest email key, else phone, else `<source>:<ref>`.
+  Any identity key opens the person (`people.identity_keys` GIN `@>`).
+- **ONE state, read not graded** (`state.ts`): lead-service standing verbatim
+  (first exact-address row of its own `sort=activity` search; a failed read is
+  `unavailable`, never a guess) > GoHighLevel deal status (fixed vocabulary,
+  `deal_*`) > Matrix thread reading > Instantly `replied|clicked` >
+  `in_conversation`. The browser renders `state` + `stateSource`.
+- **Materialized, rebuilt whole.** `people_scopes` (one per (org, brand),
+  carries `created_by_user_id` for the cron's org run) → `people` replaced in
+  ONE transaction per build. `source_reads` keeps per source `not_connected |
+  ok | failed`, presences read, and the source's OWN count for reconciliation.
+  A sibling failure marks that source `failed` and the build continues; only a
+  crm-service failure fails the build. lead-service answers are cached in
+  `lead_standing_observations` (1 h, or until the person's next activity).
+- **The first `GET /orgs/people` for a brand opens the scope** and kicks the
+  build in the background: it answers `scope.status = "building"`, never an
+  empty list posing as an answer. `POST /orgs/people/sync` forces a rebuild.
+- **The timeline is live** (`timeline.ts`): Gmail per-address conversation,
+  Instantly conversation per (campaign, address) — campaigns from the engaged
+  row AND from lead-service, so a person cold-emailed but not engaged still
+  shows the sends — Matrix raw events, GoHighLevel funnel events. Per source
+  `ok | empty | not_connected | failed` + what was `asked`.
+- Cron on the box, every 15 min: `/root/distribute/people-sync-cron.sh` →
+  `POST /internal/people/sync` (platform run = the trigger; one ORG run per
+  scope). Env: `GOOGLE_/INSTANTLY_/LEAD_SERVICE_URL` + `_API_KEY`.
+- Gateway: api-service proxies `/v1/orgs/people*` (explicit routes; the crm
+  proxy forwards per route, not by prefix).
+
 ## Brand transfer (`POST /internal/transfer-brand`, fleet contract)
 
 brand-service moves a brand to another org by calling this route on every
@@ -591,7 +642,7 @@ service. Body `{sourceBrandId, sourceOrgId, targetOrgId, targetBrandId?}`,
 apiKeyAuth, response `{ updatedTables: [{ tableName, count }] }`
 (`src/lib/transfer-brand.ts`).
 
-- **Every table carrying `brand_id` moves** (all 16: CSV, serves, Matrix,
+- **Every table carrying `brand_id` moves** (all 19: CSV, serves, Matrix,
   GoHighLevel incl. history + stage meanings). Only `org_id` / `brand_id` change;
   FKs are on row ids so the graph stays wired. Provenance (`run_id`,
   `created_by_user_id`) stays as recorded.
@@ -708,7 +759,8 @@ once CI is green, then tag the next version by hand at the merge commit
 `CRM_SERVICE_DATABASE_URL`, `CRM_SERVICE_API_KEY`, `RUNS_SERVICE_URL`, `RUNS_SERVICE_API_KEY`,
 `CHAT_SERVICE_URL`, `CHAT_SERVICE_API_KEY`, `MATRIX_HOMESERVER_URL`,
 `MATRIX_ACCESS_TOKEN`, `MATRIX_INGESTION_FLOOR`, `CRM_LEAD_READING_CHAT_CONFIG`,
-`KEY_SERVICE_URL`, `KEY_SERVICE_API_KEY`.
+`KEY_SERVICE_URL`, `KEY_SERVICE_API_KEY`, `GOOGLE_SERVICE_URL`, `GOOGLE_SERVICE_API_KEY`,
+`INSTANTLY_SERVICE_URL`, `INSTANTLY_SERVICE_API_KEY`, `LEAD_SERVICE_URL`, `LEAD_SERVICE_API_KEY`.
 See `.env.example`. The four Matrix ones are REQUIRED for the sync to run at all —
 without them `/internal/matrix/sync` fails loud instead of silently no-op-ing.
 The two `KEY_SERVICE_*` ones are REQUIRED for GoHighLevel — they are how the

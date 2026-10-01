@@ -3,6 +3,10 @@ import { extendZodWithOpenApi, OpenAPIRegistry } from "@asteasolutions/zod-to-op
 import { COLUMN_FIELDS } from "./lib/column-typing.js";
 import { MATRIX_CHANNELS } from "./lib/matrix/events.js";
 import { LEAD_STATUSES } from "./lib/matrix/leads.js";
+import { PEOPLE_SOURCES } from "./lib/people/identity.js";
+import { STATE_SOURCES } from "./lib/people/state.js";
+import { SOURCE_STATUSES } from "./lib/people/sources.js";
+import { TIMELINE_SOURCE_STATUSES } from "./lib/people/timeline.js";
 
 extendZodWithOpenApi(z);
 
@@ -1388,4 +1392,208 @@ registry.registerPath({
       content: { "application/json": { schema: GhlSyncAcceptedResponseSchema } },
     },
   },
+});
+
+// ─── People: one person, every channel, one thread (gold) ────────────────────
+
+const PeopleSourceSchema = z.enum(PEOPLE_SOURCES);
+
+const PersonPresenceSchema = z
+  .object({
+    source: PeopleSourceSchema,
+    sourceRef: z.string().openapi({ description: "The record's id in its source: an email (gmail, instantly) or a crm-service contact id (matrix, gohighlevel)." }),
+    displayName: z.string().nullable(),
+    emails: z.array(z.string()),
+    phones: z.array(z.string()),
+    firstActivityAt: z.string().nullable(),
+    lastActivityAt: z.string().nullable(),
+    messageCount: z.number().int().nullable().openapi({ description: "Null when the source does not count messages in its list read (instantly, gohighlevel)." }),
+    inboundCount: z.number().int().nullable(),
+    outboundCount: z.number().int().nullable(),
+    channel: z.string().openapi({ example: "whatsapp", description: "email | whatsapp | telegram | discord | crm" }),
+  })
+  .openapi("PersonPresence");
+
+const PersonSchema = registry.register(
+  "Person",
+  z
+    .object({
+      personKey: z.string().openapi({
+        example: "email:alice@acme.com",
+        description:
+          "The person's public id: their smallest email key, else smallest phone key, else a source-local key. Stable while they keep that address. Any of `identityKeys` opens the same person.",
+      }),
+      identityKeys: z.array(z.string()).openapi({ example: ["email:alice@acme.com", "phone:+33612345678"] }),
+      displayName: z.string().nullable(),
+      company: z.string().nullable(),
+      emails: z.array(z.string()),
+      phones: z.array(z.string()),
+      sources: z.array(PeopleSourceSchema),
+      firstActivityAt: z.string().nullable(),
+      lastActivityAt: z.string().nullable(),
+      state: z.string().openapi({
+        example: "sales_interest",
+        description:
+          "The ONE state, set by `stateSource` (first that applies): lead_service = lead-service's standing verbatim (unresolved | not_contacted | contacted | engaged | sales_interest | customer | disqualified | opted_out, or `unavailable` when lead-service could not be asked); gohighlevel = deal_won | deal_open | deal_lost | deal_abandoned; matrix = new | qualifying | negotiating | won | lost | unresponsive; instantly = replied | clicked; none = in_conversation. Render it; never recompute it.",
+      }),
+      stateSource: z.enum(STATE_SOURCES),
+      stateDetail: z.record(z.string(), z.unknown()).nullable(),
+      presences: z.array(PersonPresenceSchema),
+      mergeEvidence: z.array(z.unknown()).openapi({
+        description: "The records that tied two keys of this person together (a Google / GoHighLevel / CSV contact holding both, a lead-service accepted ruling). Empty when the person rests on a single key.",
+      }),
+    })
+    .openapi("Person"),
+);
+
+const PeopleSourceReadSchema = z
+  .object({
+    source: PeopleSourceSchema,
+    status: z.enum(SOURCE_STATUSES).nullable().openapi({
+      description: "not_connected = the brand (org, for gmail) has no such source; ok = read (people may be 0); failed = could not be read (see error). Null before the first build.",
+    }),
+    scope: z.enum(["org", "brand"]).openapi({ description: "Gmail is connected per org, so every brand of the org shares it." }),
+    people: z.number().int().openapi({ description: "Merged people carrying this source." }),
+    presences: z.number().int().openapi({ description: "Source records read (one per address / contact). people <= presences when two records of one source are the same person." }),
+    sourceCount: z.number().int().nullable().openapi({ description: "What the source itself counts, for reconciliation." }),
+    sourceCountBasis: z.string().nullable(),
+    error: z.string().nullable(),
+  })
+  .openapi("PeopleSourceRead");
+
+const PeopleListResponseSchema = registry.register(
+  "PeopleListResponse",
+  z
+    .object({
+      brandId: z.string().uuid(),
+      scope: z.object({
+        status: z.enum(["building", "pending", "built", "error"]).openapi({
+          description: "building = the first build is running (people is not an answer yet); built = served from the last build; error = the last build failed (lastError), people are from the build before.",
+        }),
+        lastBuiltAt: z.string().nullable(),
+        lastError: z.string().nullable(),
+      }),
+      sources: z.array(PeopleSourceReadSchema),
+      mergeEvidence: z.array(z.unknown()),
+      total: z.number().int(),
+      limit: z.number().int(),
+      offset: z.number().int(),
+      nextOffset: z.number().int().nullable(),
+      people: z.array(PersonSchema),
+    })
+    .openapi("PeopleListResponse"),
+);
+
+const TimelineItemSchema = z
+  .object({
+    at: z.string().nullable().openapi({ description: "When it was sent / happened. Null = the source gave no date; undated items sort last." }),
+    source: PeopleSourceSchema,
+    channel: z.string().openapi({ example: "email" }),
+    kind: z.enum(["message", "event"]),
+    direction: z.enum(["inbound", "outbound", "other"]).nullable().openapi({ description: "inbound = the person wrote; outbound = the brand did; null on an event." }),
+    subject: z.string().nullable(),
+    text: z.string().nullable(),
+    from: z.string().nullable(),
+    to: z.array(z.string()),
+    ref: z.record(z.string(), z.string().nullable()),
+    event: z
+      .object({ step: z.string(), dateBasis: z.string(), detail: z.record(z.string(), z.unknown()) })
+      .nullable(),
+  })
+  .openapi("PersonTimelineItem");
+
+const PersonTimelineResponseSchema = registry.register(
+  "PersonTimelineResponse",
+  z
+    .object({
+      brandId: z.string().uuid(),
+      person: PersonSchema,
+      builtAt: z.string(),
+      sources: z.array(
+        z.object({
+          source: PeopleSourceSchema,
+          status: z.enum(TIMELINE_SOURCE_STATUSES).openapi({
+            description: "ok = items served; empty = connected, nothing with this person; not_connected; failed = could not be read (error).",
+          }),
+          items: z.number().int(),
+          error: z.string().nullable(),
+          asked: z.array(z.string()).openapi({ description: "What was asked (addresses, campaign:address pairs, conversations, contacts), so an empty answer is auditable." }),
+        }),
+      ),
+      itemCount: z.number().int(),
+      items: z.array(TimelineItemSchema),
+    })
+    .openapi("PersonTimelineResponse"),
+);
+
+const IDENTITY_HEADERS = z.object({ "x-org-id": z.string(), "x-user-id": z.string() });
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/people",
+  summary: "Every person the brand is in conversation with, merged across channels, with one state",
+  description:
+    "Gold person layer over Gmail (google-service correspondents: addresses the org's mailbox wrote to), " +
+    "cold email (instantly-service engaged leads: replied or clicked), WhatsApp / Telegram / Discord (Matrix) " +
+    "and GoHighLevel. People are merged on email / phone only on positive evidence (a record holding both, " +
+    "or a lead-service accepted ruling); never on a name. Most recent activity first. Served from the last " +
+    "build (rebuilt by cron every 15 minutes); the FIRST read for a brand opens its scope, starts the build " +
+    "and answers scope.status=building. Per source: not_connected / ok / failed, people vs the source's own count.",
+  request: {
+    headers: IDENTITY_HEADERS,
+    query: z.object({
+      brandId: z.string().uuid(),
+      limit: z.coerce.number().int().min(1).max(500).optional().openapi({ description: "Default 100." }),
+      offset: z.coerce.number().int().min(0).optional(),
+      source: PeopleSourceSchema.optional().openapi({ description: "Only people present on this source." }),
+    }),
+  },
+  responses: {
+    200: { description: "People page", content: { "application/json": { schema: PeopleListResponseSchema } } },
+    400: { description: "Invalid query", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/people/timeline",
+  summary: "One person's whole exchange, every channel merged into one thread, oldest first",
+  description:
+    "Read live from where each exchange lives: Gmail (google-service per-address conversation), cold email " +
+    "(instantly-service conversation per campaign the address is a lead on), Matrix DMs and GoHighLevel " +
+    "funnel events (appointments, stage entries, won/lost, form submissions). Each source answers ok / empty " +
+    "/ not_connected / failed. `personKey` may be any of the person's identity keys.",
+  request: {
+    headers: IDENTITY_HEADERS,
+    query: z.object({
+      brandId: z.string().uuid(),
+      personKey: z.string().openapi({ example: "email:alice@acme.com" }),
+    }),
+  },
+  responses: {
+    200: { description: "The merged thread", content: { "application/json": { schema: PersonTimelineResponseSchema } } },
+    404: { description: "reason=person_not_found: no person of this brand holds that key" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/people/sync",
+  summary: "Rebuild the brand's people now (async)",
+  request: {
+    headers: IDENTITY_HEADERS,
+    body: { content: { "application/json": { schema: z.object({ brandId: z.string().uuid() }) } } },
+  },
+  responses: { 202: { description: "Build started; read GET /orgs/people for the result" } },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/people/sync",
+  summary: "Rebuild every people scope (cron)",
+  description: "Driven by a cron on the box every 15 minutes. Each scope's build opens its own ORG run, attributed to the user who opened the scope.",
+  request: {
+    body: { content: { "application/json": { schema: z.object({ scopeId: z.string().uuid().optional() }) } } },
+  },
+  responses: { 202: { description: "Pass started" } },
 });

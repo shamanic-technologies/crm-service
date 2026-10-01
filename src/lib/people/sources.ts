@@ -1,0 +1,535 @@
+/**
+ * Reading each source's people for one (org, brand) — from the source's own
+ * served read (siblings) or crm-service's own silver (Matrix, GoHighLevel, CSV).
+ * No sibling bronze is ever copied: what is kept is who the person is and how
+ * much was exchanged, not the messages.
+ *
+ * Every reader answers a `SourceRead` whose `status` keeps the three cases a
+ * consumer must not confuse:
+ *  - `not_connected` — the brand/org has no such source at all;
+ *  - `ok`            — connected; `presences` may legitimately be empty;
+ *  - `failed`        — connected (or unknown) but could not be read: `error`.
+ */
+
+import { and, eq, sql } from "drizzle-orm";
+import { db } from "../../db/index.js";
+import { contacts, ghlConnections, matrixConnections } from "../../db/schema.js";
+import { GHL_SOURCE } from "../gohighlevel/records.js";
+import {
+  normalizeEmail,
+  type Evidence,
+  type PeopleSource,
+  type Presence,
+} from "./identity.js";
+import { siblingGet, siblingGetOk, type SiblingIdentity } from "./siblings.js";
+import type { GhlDeal } from "./state.js";
+
+export const SOURCE_STATUSES = ["not_connected", "ok", "failed"] as const;
+export type SourceStatus = (typeof SOURCE_STATUSES)[number];
+
+export interface SourceRead {
+  source: PeopleSource;
+  status: SourceStatus;
+  presences: Presence[];
+  /** What the SOURCE itself counts, for reconciliation (null when not read). */
+  sourceCount: number | null;
+  /** What `sourceCount` counts, in words. */
+  sourceCountBasis: string;
+  error: string | null;
+  /** Scope of the source: Gmail is connected per ORG, the rest per brand. */
+  scope: "org" | "brand";
+}
+
+export interface EvidenceRead {
+  kind: Evidence["kind"];
+  status: SourceStatus;
+  evidence: Evidence[];
+  error: string | null;
+}
+
+const iso = (v: string | Date | null | undefined): string | null =>
+  v === null || v === undefined ? null : new Date(v).toISOString();
+
+const maxIso = (values: (string | null | undefined)[]): string | null => {
+  const present = values.filter((v): v is string => typeof v === "string" && v.length > 0);
+  if (present.length === 0) return null;
+  return present.reduce((a, b) => (new Date(a) > new Date(b) ? a : b));
+};
+const minIso = (values: (string | null | undefined)[]): string | null => {
+  const present = values.filter((v): v is string => typeof v === "string" && v.length > 0);
+  if (present.length === 0) return null;
+  return present.reduce((a, b) => (new Date(a) < new Date(b) ? a : b));
+};
+
+// ─── instantly-service: the people who engaged with our cold email ──────────
+
+interface EngagedLead {
+  campaignId: string | null;
+  instantlyCampaignId: string;
+  leadEmail: string;
+  engagedAt: string;
+  replied: boolean;
+  clicked: boolean;
+  firstRepliedAt: string | null;
+  firstClickedAt: string | null;
+  replyClassification: string | null;
+  replyKind: string | null;
+  disqualified: boolean;
+}
+
+/**
+ * instantly-service `GET /orgs/engaged-leads?brand_id=` — everyone who replied
+ * (without asking to stop) or clicked a link we sent. Those are the cold-email
+ * people "in conversation"; someone merely written to is not. One presence per
+ * address; `sourceCount` is instantly's own row count (one per campaign × lead).
+ */
+export async function readInstantly(identity: SiblingIdentity): Promise<SourceRead> {
+  const base = {
+    source: "instantly" as const,
+    scope: "brand" as const,
+    sourceCountBasis: "instantly-service engaged-leads rows (one per campaign × lead)",
+  };
+  try {
+    const body = await siblingGetOk<{ count: number; leads: EngagedLead[] }>(
+      "instantly",
+      `/orgs/engaged-leads?brand_id=${encodeURIComponent(identity.brandId)}`,
+      identity,
+    );
+    const byEmail = new Map<string, EngagedLead[]>();
+    for (const lead of body.leads) {
+      const email = normalizeEmail(lead.leadEmail);
+      if (!email) continue;
+      const list = byEmail.get(email) ?? [];
+      list.push(lead);
+      byEmail.set(email, list);
+    }
+    const presences: Presence[] = [...byEmail.entries()].map(([email, rows]) => {
+      const latestReply = rows
+        .filter((r) => r.firstRepliedAt)
+        .sort((a, b) => (a.firstRepliedAt! < b.firstRepliedAt! ? 1 : -1))[0];
+      return {
+        source: "instantly",
+        sourceRef: email,
+        displayName: null,
+        company: null,
+        emails: [email],
+        phones: [],
+        firstActivityAt: minIso(rows.map((r) => r.engagedAt)),
+        lastActivityAt: maxIso(rows.flatMap((r) => [r.engagedAt, r.firstRepliedAt, r.firstClickedAt])),
+        messageCount: null,
+        inboundCount: null,
+        outboundCount: null,
+        detail: {
+          campaignIds: [...new Set(rows.map((r) => r.campaignId).filter((c): c is string => !!c))],
+          platformSends: rows.filter((r) => !r.campaignId).length,
+          replied: rows.some((r) => r.replied),
+          clicked: rows.some((r) => r.clicked),
+          replyClassification: latestReply?.replyClassification ?? null,
+          replyKind: latestReply?.replyKind ?? null,
+          disqualified: rows.some((r) => r.disqualified),
+        },
+      };
+    });
+    return { ...base, status: "ok", presences, sourceCount: body.count, error: null };
+  } catch (err) {
+    return { ...base, status: "failed", presences: [], sourceCount: null, error: (err as Error).message };
+  }
+}
+
+// ─── google-service: the people the org's mailbox exchanged mail with ───────
+
+interface Correspondent {
+  email: string;
+  name: string | null;
+  outboundMessages: number;
+  inboundMessages: number;
+  twoWay: boolean;
+  firstMessageAt: string | null;
+  lastMessageAt: string | null;
+}
+
+interface CorrespondentsPage {
+  ownerAddresses: string[];
+  total: number;
+  twoWayTotal: number;
+  limit: number;
+  offset: number;
+  correspondents: Correspondent[];
+}
+
+const CORRESPONDENTS_PAGE = 1000;
+
+/**
+ * google-service `GET /orgs/google/correspondents` — every address the
+ * connected mailbox has been IN CONVERSATION with (the owner wrote to them);
+ * pure inbound noise is excluded there. Its documented 404
+ * `no_google_account_connected` is "not connected", not an empty mailbox.
+ *
+ * Gmail is connected per ORG (google-service scopes the mailbox to the org, not
+ * to a brand), so every brand of the org shares its mailbox's people.
+ */
+export async function readGmail(identity: SiblingIdentity): Promise<SourceRead> {
+  const base = {
+    source: "gmail" as const,
+    scope: "org" as const,
+    sourceCountBasis: "google-service correspondents total (addresses the mailbox wrote to)",
+  };
+  try {
+    const presences: Presence[] = [];
+    let total = 0;
+    for (let offset = 0; ; offset += CORRESPONDENTS_PAGE) {
+      const r = await siblingGet(
+        "google",
+        `/orgs/google/correspondents?limit=${CORRESPONDENTS_PAGE}&offset=${offset}`,
+        identity,
+      );
+      if (r.status === 404 && (r.body as { reason?: string } | null)?.reason === "no_google_account_connected") {
+        return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
+      }
+      if (r.status !== 200) {
+        throw new Error(
+          `google-service GET /orgs/google/correspondents returned ${r.status}: ${JSON.stringify(r.body).slice(0, 300)}`,
+        );
+      }
+      const page = r.body as CorrespondentsPage;
+      total = page.total;
+      for (const c of page.correspondents) {
+        const email = normalizeEmail(c.email);
+        if (!email) continue;
+        presences.push({
+          source: "gmail",
+          sourceRef: email,
+          displayName: c.name,
+          company: null,
+          emails: [email],
+          phones: [],
+          firstActivityAt: c.firstMessageAt,
+          lastActivityAt: c.lastMessageAt,
+          messageCount: c.outboundMessages + c.inboundMessages,
+          inboundCount: c.inboundMessages,
+          outboundCount: c.outboundMessages,
+          detail: { twoWay: c.twoWay },
+        });
+      }
+      if (page.correspondents.length < CORRESPONDENTS_PAGE || offset + CORRESPONDENTS_PAGE >= page.total) break;
+    }
+    return { ...base, status: "ok", presences, sourceCount: total, error: null };
+  } catch (err) {
+    return { ...base, status: "failed", presences: [], sourceCount: null, error: (err as Error).message };
+  }
+}
+
+// ─── crm-service silver: Matrix DMs ─────────────────────────────────────────
+
+export async function readMatrix(orgId: string, brandId: string): Promise<SourceRead> {
+  const base = {
+    source: "matrix" as const,
+    scope: "brand" as const,
+    sourceCountBasis: "crm-service Matrix conversations",
+  };
+  const connections = await db
+    .select({ id: matrixConnections.id })
+    .from(matrixConnections)
+    .where(and(eq(matrixConnections.orgId, orgId), eq(matrixConnections.brandId, brandId)));
+  if (connections.length === 0) {
+    return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
+  }
+  const rows = (await db.execute(sql`
+    SELECT c.id AS contact_id, c.full_name, c.phone_e164, c.channel, c.channel_handle,
+           v.id AS conversation_id, v.first_message_at, v.last_message_at,
+           v.message_count, v.inbound_count, v.outbound_count,
+           l.status AS lead_status
+    FROM conversations v
+    JOIN contacts c ON c.id = v.contact_id
+    LEFT JOIN matrix_leads l ON l.conversation_id = v.id
+    WHERE v.org_id = ${orgId} AND v.brand_id = ${brandId}
+    ORDER BY v.last_message_at DESC, v.id
+  `)) as unknown as {
+    contact_id: string;
+    full_name: string | null;
+    phone_e164: string | null;
+    channel: string;
+    channel_handle: string | null;
+    conversation_id: string;
+    first_message_at: string | Date;
+    last_message_at: string | Date;
+    message_count: number;
+    inbound_count: number;
+    outbound_count: number;
+    lead_status: string | null;
+  }[];
+  const presences: Presence[] = rows.map((r) => ({
+    source: "matrix",
+    sourceRef: r.contact_id,
+    displayName: r.full_name,
+    company: null,
+    emails: [],
+    phones: r.phone_e164 ? [r.phone_e164] : [],
+    firstActivityAt: iso(r.first_message_at),
+    lastActivityAt: iso(r.last_message_at),
+    messageCount: Number(r.message_count),
+    inboundCount: Number(r.inbound_count),
+    outboundCount: Number(r.outbound_count),
+    detail: {
+      contactId: r.contact_id,
+      conversationId: r.conversation_id,
+      channel: r.channel,
+      channelHandle: r.channel_handle,
+      leadStatus: r.lead_status,
+    },
+  }));
+  return { ...base, status: "ok", presences, sourceCount: rows.length, error: null };
+}
+
+// ─── crm-service silver: GoHighLevel contacts ───────────────────────────────
+
+export async function readGoHighLevel(orgId: string, brandId: string): Promise<SourceRead> {
+  const base = {
+    source: "gohighlevel" as const,
+    scope: "brand" as const,
+    sourceCountBasis: "crm-service mirrored GoHighLevel contacts",
+  };
+  const connections = await db
+    .select({ id: ghlConnections.id })
+    .from(ghlConnections)
+    .where(and(eq(ghlConnections.orgId, orgId), eq(ghlConnections.brandId, brandId)));
+  if (connections.length === 0) {
+    return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
+  }
+  const rows = (await db.execute(sql`
+    SELECT c.id, c.external_id, c.full_name, c.first_name, c.last_name, c.primary_email,
+           c.phone_e164, c.company_name, c.source_created_at, c.source_updated_at,
+           COALESCE((
+             SELECT json_agg(json_build_object(
+               'status', o.status, 'pipelineName', o.pipeline_name,
+               'stageName', o.stage_name, 'updatedAt', o.ghl_updated_at
+             ) ORDER BY o.ghl_updated_at DESC NULLS LAST, o.id)
+             FROM ghl_opportunities o WHERE o.contact_id = c.id
+           ), '[]'::json) AS deals,
+           (SELECT max(a.booked_at) FROM ghl_appointments a WHERE a.contact_id = c.id) AS last_booked_at,
+           (SELECT max(f.submitted_at) FROM ghl_form_submissions f WHERE f.contact_id = c.id) AS last_form_at
+    FROM contacts c
+    WHERE c.org_id = ${orgId} AND c.brand_id = ${brandId} AND c.source = ${GHL_SOURCE}
+    ORDER BY c.external_id, c.id
+  `)) as unknown as {
+    id: string;
+    external_id: string;
+    full_name: string | null;
+    first_name: string | null;
+    last_name: string | null;
+    primary_email: string | null;
+    phone_e164: string | null;
+    company_name: string | null;
+    source_created_at: string | Date | null;
+    source_updated_at: string | Date | null;
+    deals: GhlDeal[];
+    last_booked_at: string | Date | null;
+    last_form_at: string | Date | null;
+  }[];
+  const presences: Presence[] = rows.map((r) => {
+    const name = r.full_name ?? ([r.first_name, r.last_name].filter(Boolean).join(" ") || null);
+    return {
+      source: "gohighlevel",
+      sourceRef: r.id,
+      displayName: name,
+      company: r.company_name,
+      emails: r.primary_email ? [r.primary_email] : [],
+      phones: r.phone_e164 ? [r.phone_e164] : [],
+      firstActivityAt: iso(r.source_created_at),
+      lastActivityAt: maxIso([
+        iso(r.source_updated_at),
+        iso(r.source_created_at),
+        iso(r.last_booked_at),
+        iso(r.last_form_at),
+        ...r.deals.map((d) => (d.updatedAt ? iso(d.updatedAt) : null)),
+      ]),
+      messageCount: null,
+      inboundCount: null,
+      outboundCount: null,
+      detail: { contactId: r.id, externalId: r.external_id, deals: r.deals },
+    };
+  });
+  return { ...base, status: "ok", presences, sourceCount: rows.length, error: null };
+}
+
+// ─── merge evidence ─────────────────────────────────────────────────────────
+
+/** CSV rows carrying an email AND a phone tie the two together. */
+export async function readCsvEvidence(orgId: string, brandId: string): Promise<EvidenceRead> {
+  const rows = await db
+    .select({
+      id: contacts.id,
+      email: contacts.primaryEmail,
+      phone: contacts.phoneE164,
+      fullName: contacts.fullName,
+    })
+    .from(contacts)
+    .where(
+      and(
+        eq(contacts.orgId, orgId),
+        eq(contacts.brandId, brandId),
+        eq(contacts.source, "csv"),
+        sql`${contacts.primaryEmail} IS NOT NULL AND ${contacts.phoneE164} IS NOT NULL`,
+      ),
+    );
+  return {
+    kind: "csv_contact",
+    status: "ok",
+    error: null,
+    evidence: rows.map((r) => ({
+      kind: "csv_contact",
+      ref: r.id,
+      displayName: r.fullName,
+      company: null,
+      emails: [r.email!],
+      phones: [r.phone!],
+    })),
+  };
+}
+
+interface GoogleContactsPage {
+  items: {
+    id: string;
+    displayName: string | null;
+    emails: string[];
+    phones: string[];
+    organization: string | null;
+    deleted: boolean;
+  }[];
+  nextCursor: string | null;
+}
+
+/** Google contacts (People API mirror): one contact holding several keys ties them. */
+export async function readGoogleContactEvidence(identity: SiblingIdentity): Promise<EvidenceRead> {
+  try {
+    const evidence: Evidence[] = [];
+    let cursor: string | null = null;
+    do {
+      const qs: string = cursor ? `?limit=200&cursor=${encodeURIComponent(cursor)}` : "?limit=200";
+      const page: GoogleContactsPage = await siblingGetOk<GoogleContactsPage>(
+        "google",
+        `/orgs/google/contacts${qs}`,
+        identity,
+      );
+      for (const c of page.items) {
+        if (c.deleted) continue;
+        if (c.emails.length + c.phones.length === 0) continue;
+        evidence.push({
+          kind: "google_contact",
+          ref: c.id,
+          displayName: c.displayName,
+          company: c.organization,
+          emails: c.emails,
+          phones: c.phones,
+        });
+      }
+      cursor = page.nextCursor;
+    } while (cursor);
+    return { kind: "google_contact", status: "ok", evidence, error: null };
+  } catch (err) {
+    return { kind: "google_contact", status: "failed", evidence: [], error: (err as Error).message };
+  }
+}
+
+interface PairingsPage {
+  crmConnected: boolean;
+  pairings: {
+    crmContact: { id: string; email: string | null; phone: string | null; fullName: string | null; company: string | null };
+    pairing: {
+      lead: { email: string | null; fullName: string | null; company: string | null } | null;
+      ruling: { ruling: "accepted" | "rejected" } | null;
+    };
+  }[];
+  nextOffset: number | null;
+}
+
+/**
+ * lead-service rulings: a PERSON stated that a CRM contact and one of our leads
+ * are the same human. Only an accepted human ruling counts — an automatic
+ * pairing (signal or judgment) is lead-service's inference, not a statement.
+ */
+export async function readLeadRulingEvidence(identity: SiblingIdentity): Promise<EvidenceRead> {
+  try {
+    const evidence: Evidence[] = [];
+    let offset: number | null = 0;
+    while (offset !== null) {
+      const page: PairingsPage = await siblingGetOk<PairingsPage>(
+        "lead",
+        `/orgs/leads/crm-pairings?brandId=${encodeURIComponent(identity.brandId)}&state=paired&limit=200&offset=${offset}`,
+        identity,
+      );
+      if (!page.crmConnected) break;
+      for (const p of page.pairings) {
+        if (p.pairing.ruling?.ruling !== "accepted" || !p.pairing.lead) continue;
+        evidence.push({
+          kind: "lead_ruling",
+          ref: p.crmContact.id,
+          displayName: p.crmContact.fullName ?? p.pairing.lead.fullName,
+          company: p.crmContact.company ?? p.pairing.lead.company,
+          emails: [p.crmContact.email, p.pairing.lead.email].filter((e): e is string => !!e),
+          phones: p.crmContact.phone ? [p.crmContact.phone] : [],
+        });
+      }
+      offset = page.nextOffset;
+    }
+    return { kind: "lead_ruling", status: "ok", evidence, error: null };
+  } catch (err) {
+    return { kind: "lead_ruling", status: "failed", evidence: [], error: (err as Error).message };
+  }
+}
+
+// ─── lead-service: one address's standing ───────────────────────────────────
+
+interface LeadRow {
+  id: string;
+  leadId: string | null;
+  email: string;
+  campaignId: string | null;
+  standing: (Record<string, unknown> & { state: string }) | null;
+}
+
+/**
+ * What lead-service says about one address for the brand. Its own search, in
+ * its own `sort=activity` order (newest proving evidence first), filtered to
+ * the EXACT address (the search is a substring match). The first row's standing
+ * is the person's; we never pick a "better" one.
+ */
+export async function lookupLeadStanding(
+  identity: SiblingIdentity,
+  email: string,
+): Promise<
+  | { found: false }
+  | {
+      found: true;
+      standing: Record<string, unknown> & { state: string };
+      leadCampaignId: string;
+      leadId: string | null;
+      campaignId: string | null;
+      campaignIds: string[];
+    }
+> {
+  const r = await siblingGet(
+    "lead",
+    `/orgs/leads?brandId=${encodeURIComponent(identity.brandId)}&q=${encodeURIComponent(email)}&view=basic&sort=activity&status=all&limit=50`,
+    identity,
+  );
+  if (r.status < 200 || r.status >= 300) {
+    throw new Error(`lead-service GET /orgs/leads returned ${r.status}: ${JSON.stringify(r.body).slice(0, 300)}`);
+  }
+  const rows = ((r.body as { leads: LeadRow[] }).leads ?? []).filter(
+    (row) => normalizeEmail(row.email) === email,
+  );
+  if (rows.length === 0) return { found: false };
+  const first = rows[0];
+  if (!first.standing || typeof first.standing.state !== "string") {
+    throw new Error(`lead-service row ${first.id} carries no standing`);
+  }
+  return {
+    found: true,
+    standing: first.standing,
+    leadCampaignId: first.id,
+    leadId: first.leadId,
+    campaignId: first.campaignId,
+    campaignIds: [...new Set(rows.map((x) => x.campaignId).filter((c): c is string => !!c))],
+  };
+}

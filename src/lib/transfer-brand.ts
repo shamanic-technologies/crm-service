@@ -38,6 +38,9 @@ import {
   ghlFormSubmissions,
   ghlOpportunityHistory,
   ghlStageMeanings,
+  peopleScopes,
+  people,
+  leadStandingObservations,
 } from "../db/schema.js";
 
 export const TRANSFER_TABLES: PgTable[] = [
@@ -57,6 +60,9 @@ export const TRANSFER_TABLES: PgTable[] = [
   ghlFormSubmissions,
   ghlOpportunityHistory,
   ghlStageMeanings,
+  peopleScopes,
+  people,
+  leadStandingObservations,
 ];
 
 export interface TransferBrandInput {
