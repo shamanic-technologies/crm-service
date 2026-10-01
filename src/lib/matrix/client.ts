@@ -7,6 +7,8 @@
  * is what makes the Discord channel read-only.
  *
  * The only call is `GET /_matrix/client/v3/sync` with a `since` cursor.
+ * Account creation for self-serve links lives in `account.ts`; it creates and
+ * logs in accounts, and it sends nothing either.
  */
 
 export interface MatrixEvent {
@@ -34,13 +36,13 @@ const SYNC_TIMEOUT_MS = Number(process.env.MATRIX_SYNC_TIMEOUT_MS) || 30_000;
 /** How many timeline events a single /sync page may carry. */
 export const SYNC_TIMELINE_LIMIT = 200;
 
-function homeserverUrl(): string {
+export function homeserverUrl(): string {
   const url = process.env.MATRIX_HOMESERVER_URL;
   if (!url) throw new Error("[crm-service] MATRIX_HOMESERVER_URL is required");
   return url.replace(/\/+$/, "");
 }
 
-function accessToken(): string {
+export function platformAccessToken(): string {
   const token = process.env.MATRIX_ACCESS_TOKEN;
   if (!token) throw new Error("[crm-service] MATRIX_ACCESS_TOKEN is required");
   return token;
@@ -66,9 +68,13 @@ const SYNC_FILTER = JSON.stringify({
  * One `/sync` page. `since` omitted = initial sync (full room state).
  * `timeout=0` — this is a polling consumer driven by a cron, never a long-poll.
  *
+ * `token` = the access token to sync AS. A self-serve connection passes its own
+ * dedicated account's token; a hand-registered one passes the platform account's
+ * (`platformAccessToken()`). The caller decides, explicitly — no default.
+ *
  * Fails loud: any non-2xx or transport error throws.
  */
-export async function sync(since: string | null): Promise<MatrixSyncResponse> {
+export async function sync(since: string | null, token: string): Promise<MatrixSyncResponse> {
   const params = new URLSearchParams({ timeout: "0", filter: SYNC_FILTER });
   if (since) params.set("since", since);
 
@@ -77,7 +83,7 @@ export async function sync(since: string | null): Promise<MatrixSyncResponse> {
   try {
     const res = await fetch(`${homeserverUrl()}/_matrix/client/v3/sync?${params.toString()}`, {
       method: "GET",
-      headers: { Authorization: `Bearer ${accessToken()}` },
+      headers: { Authorization: `Bearer ${token}` },
       signal: controller.signal,
     });
     if (!res.ok) {

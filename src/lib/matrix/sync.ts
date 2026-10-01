@@ -28,7 +28,7 @@ import {
 } from "../../db/schema.js";
 import { createRun, updateRun } from "../runs-client.js";
 import { SERVICE_NAME } from "../../middleware/auth.js";
-import { sync, type MatrixEvent } from "./client.js";
+import { platformAccessToken, sync, type MatrixEvent } from "./client.js";
 import {
   aggregateMessages,
   ingestionFloor,
@@ -87,8 +87,12 @@ async function ingestBronze(
   let pages = 0;
   let eventsIngested = 0;
 
+  // A self-serve connection syncs as its brand's own dedicated account; a
+  // hand-registered one as the platform account. Two kinds of row, not a fallback.
+  const token = conn.accessToken ?? platformAccessToken();
+
   for (let page = 0; page < MAX_PAGES; page++) {
-    const response = await sync(cursor);
+    const response = await sync(cursor, token);
     pages += 1;
 
     const joined = response.rooms?.join ?? {};
