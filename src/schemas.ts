@@ -1457,6 +1457,7 @@ const PeopleSourceReadSchema = z
     presences: z.number().int().openapi({ description: "Source records read (one per address / contact). people <= presences when two records of one source are the same person." }),
     sourceCount: z.number().int().nullable().openapi({ description: "What the source itself counts, for reconciliation." }),
     sourceCountBasis: z.string().nullable(),
+    excludedOwn: z.number().int().openapi({ description: "Source records dropped because they are the brand itself: one of our sending mailboxes (instantly-service accounts) or an address on the brand's own domain (brand-service). presences + excludedOwn reconciles with sourceCount." }),
     error: z.string().nullable(),
   })
   .openapi("PeopleSourceRead");
@@ -1475,6 +1476,10 @@ const PeopleListResponseSchema = registry.register(
       }),
       sources: z.array(PeopleSourceReadSchema),
       mergeEvidence: z.array(z.unknown()),
+      ownAddresses: z
+        .object({ status: z.enum(["ok", "failed"]), addresses: z.number().int(), domain: z.string().nullable(), error: z.string().nullable() })
+        .nullable()
+        .openapi({ description: "What the build knew of the brand's own addresses. status=failed means nothing was excluded on this build (see error)." }),
       total: z.number().int(),
       limit: z.number().int(),
       offset: z.number().int(),

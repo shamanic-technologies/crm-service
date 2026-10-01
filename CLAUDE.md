@@ -603,6 +603,13 @@ never writes to them (no write path to any outside tool, by design).
 CSV contacts are NOT people (nobody talked to them yet); a CSV row holding an
 email and a phone is still merge evidence.
 
+**The brand's own addresses are nobody.** Every mailbox we send from
+(instantly-service `/internal/accounts`) and every address on the brand's
+domain (brand-service `/internal/brands/{id}`) is dropped before merging,
+counted per source as `excludedOwn`. Measured on the first build for
+Distribute.you: 75 of 656 "people" were our own warm-up / sending mailboxes the
+owner had written to. A recorded fact, never an address-shape guess.
+
 - **Merge only on positive evidence.** Keys are `email:<lower>` and
   `phone:+<digits>` (international only — a national number has no country and
   is no key). Two keys merge only when ONE record states both: a GoHighLevel /
@@ -633,7 +640,7 @@ email and a phone is still merge evidence.
   `ok | empty | not_connected | failed` + what was `asked`.
 - Cron on the box, every 15 min: `/root/distribute/people-sync-cron.sh` →
   `POST /internal/people/sync` (platform run = the trigger; one ORG run per
-  scope). Env: `GOOGLE_/INSTANTLY_/LEAD_SERVICE_URL` + `_API_KEY`.
+  scope). Env: `GOOGLE_/INSTANTLY_/LEAD_/BRAND_SERVICE_URL` + `_API_KEY`.
 - Gateway: api-service proxies `/v1/orgs/people*` (explicit routes; the crm
   proxy forwards per route, not by prefix).
 
@@ -795,7 +802,8 @@ once CI is green, then tag the next version by hand at the merge commit
 `CHAT_SERVICE_URL`, `CHAT_SERVICE_API_KEY`, `MATRIX_HOMESERVER_URL`,
 `MATRIX_ACCESS_TOKEN`, `MATRIX_INGESTION_FLOOR`, `CRM_LEAD_READING_CHAT_CONFIG`,
 `KEY_SERVICE_URL`, `KEY_SERVICE_API_KEY`, `GOOGLE_SERVICE_URL`, `GOOGLE_SERVICE_API_KEY`,
-`INSTANTLY_SERVICE_URL`, `INSTANTLY_SERVICE_API_KEY`, `LEAD_SERVICE_URL`, `LEAD_SERVICE_API_KEY`.
+`INSTANTLY_SERVICE_URL`, `INSTANTLY_SERVICE_API_KEY`, `LEAD_SERVICE_URL`, `LEAD_SERVICE_API_KEY`,
+`BRAND_SERVICE_URL`, `BRAND_SERVICE_API_KEY`.
 See `.env.example`. The four Matrix ones are REQUIRED for the sync to run at all —
 without them `/internal/matrix/sync` fails loud instead of silently no-op-ing.
 The two `KEY_SERVICE_*` ones are REQUIRED for GoHighLevel — they are how the

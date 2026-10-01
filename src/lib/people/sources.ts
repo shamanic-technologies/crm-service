@@ -693,3 +693,76 @@ export async function lookupLeadStanding(
     campaignIds: [...new Set(rows.map((x) => x.campaignId).filter((c): c is string => !!c))],
   };
 }
+
+// ─── the brand's OWN addresses: never a person it is in conversation with ───
+
+export interface OwnAddresses {
+  status: "ok" | "failed";
+  /** Our own sending mailboxes (instantly-service accounts: address + mailbox login). */
+  addresses: Set<string>;
+  /** The brand's own domain (brand-service), so a colleague is not a prospect. */
+  domain: string | null;
+  error: string | null;
+}
+
+/**
+ * Who the brand itself is, from the services that record it: every mailbox we
+ * send from (instantly-service) and the brand's domain (brand-service). Those
+ * addresses show up in a mailbox's sent mail (warm-up tests, forwards between
+ * one's own inboxes) and are not people. A recorded fact, never a guess from
+ * the address's shape.
+ */
+export async function readOwnAddresses(identity: SiblingIdentity): Promise<OwnAddresses> {
+  try {
+    const [accounts, brand] = await Promise.all([
+      siblingGetOk<{ accounts: { email: string | null; mailboxLogin: string | null }[] }>(
+        "instantly",
+        "/internal/accounts",
+        identity,
+      ),
+      siblingGetOk<{ brand: { domain: string | null } }>(
+        "brand",
+        `/internal/brands/${encodeURIComponent(identity.brandId)}`,
+        identity,
+      ),
+    ]);
+    const addresses = new Set<string>();
+    for (const a of accounts.accounts) {
+      for (const raw of [a.email, a.mailboxLogin]) {
+        const e = normalizeEmail(raw);
+        if (e) addresses.add(e);
+      }
+    }
+    const domain = brand.brand.domain ? brand.brand.domain.trim().toLowerCase().replace(/^www\./, "") : null;
+    return { status: "ok", addresses, domain, error: null };
+  } catch (err) {
+    return { status: "failed", addresses: new Set(), domain: null, error: (err as Error).message };
+  }
+}
+
+export function isOwnAddress(email: string, own: OwnAddresses): boolean {
+  if (own.addresses.has(email)) return true;
+  return own.domain !== null && email.endsWith(`@${own.domain}`);
+}
+
+/**
+ * Drop presences that are only the brand itself: every email is an own address
+ * and there is no phone. A record mixing an own address with someone else's
+ * keeps the other keys and loses the own one.
+ */
+export function withoutOwnAddresses(read: SourceRead, own: OwnAddresses): { read: SourceRead; excluded: number } {
+  let excluded = 0;
+  const presences: Presence[] = [];
+  for (const p of read.presences) {
+    const emails = p.emails.filter((e) => {
+      const n = normalizeEmail(e);
+      return !(n && isOwnAddress(n, own));
+    });
+    if (emails.length === 0 && p.phones.length === 0 && p.emails.length > 0) {
+      excluded++;
+      continue;
+    }
+    presences.push(emails.length === p.emails.length ? p : { ...p, emails });
+  }
+  return { read: { ...read, presences }, excluded };
+}

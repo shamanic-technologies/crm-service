@@ -35,6 +35,8 @@ process.env.INSTANTLY_SERVICE_URL = "http://instantly.test";
 process.env.INSTANTLY_SERVICE_API_KEY = "i";
 process.env.LEAD_SERVICE_URL = "http://lead.test";
 process.env.LEAD_SERVICE_API_KEY = "l";
+process.env.BRAND_SERVICE_URL = "http://brand.test";
+process.env.BRAND_SERVICE_API_KEY = "b";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -87,12 +89,15 @@ function installFetchStub() {
         if (!gmailConnected) return json({ error: "none", reason: "no_google_account_connected" }, 404);
         return json({
           ownerAddresses: ["me@brand.com"],
-          total: 2,
+          total: 4,
           twoWayTotal: 1,
           limit: 1000,
           offset: 0,
           correspondents: [
             { email: "Alice@x.com", name: "Alice M.", nameSource: "message", outboundMessages: 1, inboundMessages: 1, twoWay: true, firstMessageAt: "2026-09-01T09:00:00.000Z", lastMessageAt: "2026-09-03T09:00:00.000Z", lastOutboundAt: null, lastInboundAt: null },
+            // Our own sending mailbox and a colleague on the brand's domain: the brand itself, not people.
+            { email: "kevin@send.com", name: "Kevin", nameSource: "message", outboundMessages: 3, inboundMessages: 0, twoWay: false, firstMessageAt: "2026-08-01T09:00:00.000Z", lastMessageAt: "2026-08-02T09:00:00.000Z", lastOutboundAt: null, lastInboundAt: null },
+            { email: "colleague@brand.com", name: null, nameSource: null, outboundMessages: 1, inboundMessages: 1, twoWay: true, firstMessageAt: "2026-08-01T09:00:00.000Z", lastMessageAt: "2026-08-02T09:00:00.000Z", lastOutboundAt: null, lastInboundAt: null },
             { email: "carol@z.com", name: null, nameSource: null, outboundMessages: 1, inboundMessages: 0, twoWay: false, firstMessageAt: "2026-08-01T09:00:00.000Z", lastMessageAt: "2026-08-01T09:00:00.000Z", lastOutboundAt: null, lastInboundAt: null },
           ],
         });
@@ -143,7 +148,13 @@ function installFetchStub() {
         });
       }
     }
+    if (url.host === "brand.test") {
+      return json({ brand: { id: BRAND, domain: "brand.com" } });
+    }
     if (url.host === "instantly.test") {
+      if (url.pathname === "/internal/accounts") {
+        return json({ accounts: [{ email: "Kevin@send.com", mailboxLogin: "kevin@send.com" }] });
+      }
       if (url.pathname === "/orgs/engaged-leads") return json({ success: true, count: ENGAGED.length, leads: ENGAGED });
       if (url.pathname === "/orgs/conversations") {
         const email = url.searchParams.get("email");
@@ -322,7 +333,7 @@ describe.skipIf(!RUN)("person layer", () => {
     expect(res.status).toBe(200);
     expect(res.body.person.personKey).toBe("email:alice@x.com");
     expect(res.body.person.sources).toEqual(["gmail", "instantly", "matrix", "gohighlevel"]);
-    // Gmail-only carol is a person of her own; alice is not duplicated.
+    // Gmail-only carol is a person of her own; alice is not duplicated; the brand's own addresses are nobody.
     expect((await db.select().from(people)).map((p) => p.personKey).sort()).toEqual([
       "email:alice@x.com",
       "email:bob@y.com",
@@ -339,6 +350,9 @@ describe.skipIf(!RUN)("person layer", () => {
     const sources = Object.fromEntries(res.body.sources.map((s: { source: string }) => [s.source, s]));
     expect(sources.gmail.status).toBe("ok");
     expect(sources.instantly.status).toBe("ok");
+    const [scope] = await db.select().from(peopleScopes);
+    const gmailRead = (scope.sourceReads as { sources: { source: string; presences: number; excludedOwn: number; sourceCount: number }[] }).sources.find((s) => s.source === "gmail")!;
+    expect(gmailRead).toMatchObject({ presences: 2, excludedOwn: 2, sourceCount: 4 });
     expect(sources.matrix.status).toBe("ok");
     // The won deal carries no dated history row here, so GoHighLevel has nothing to put in the thread.
     expect(sources.gohighlevel.status).toBe("empty");

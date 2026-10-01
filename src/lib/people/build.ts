@@ -31,8 +31,10 @@ import {
   readInstantly,
   readLeadRulingEvidence,
   readMatrix,
+  readOwnAddresses,
   readPosthog,
   readStripe,
+  withoutOwnAddresses,
   type EvidenceRead,
   type StripeStanding,
   type SourceRead,
@@ -67,6 +69,8 @@ export interface SourceReadSummary {
   /** What the source itself counts. */
   sourceCount: number | null;
   sourceCountBasis: string;
+  /** Records dropped because they are the brand's own address (a sending mailbox, its domain). */
+  excludedOwn: number;
   error: string | null;
 }
 
@@ -75,6 +79,7 @@ export interface BuildSummary {
   sources: SourceReadSummary[];
   evidence: { kind: string; status: string; records: number; error: string | null }[];
   standing: { asked: number; reused: number; failed: number };
+  ownAddresses: { status: "ok" | "failed"; addresses: number; domain: string | null; error: string | null };
 }
 
 function firstNonNull(
@@ -167,15 +172,18 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     brandId: scope.brandId,
   };
 
-  const [gmail, instantly, matrix, gohighlevel, posthog, stripe] = await Promise.all([
+  const [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, own] = await Promise.all([
     readGmail(identity),
     readInstantly(identity),
     readMatrix(scope.orgId, scope.brandId),
     readGoHighLevel(scope.orgId, scope.brandId),
     readPosthog(scope.orgId, scope.brandId),
     readStripe(scope.orgId, scope.brandId),
+    readOwnAddresses(identity),
   ]);
-  const reads: SourceRead[] = [gmail, instantly, matrix, gohighlevel, posthog, stripe];
+  const filtered = [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe].map((r) => withoutOwnAddresses(r, own));
+  const reads: SourceRead[] = filtered.map((f) => f.read);
+  const [gmail, , , gohighlevel, , stripe] = reads;
 
   const evidenceReads: EvidenceRead[] = [await readCsvEvidence(scope.orgId, scope.brandId)];
   if (gmail.status !== "not_connected") evidenceReads.push(await readGoogleContactEvidence(identity));
@@ -278,6 +286,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       presences: r.presences.length,
       sourceCount: r.sourceCount,
       sourceCountBasis: r.sourceCountBasis,
+      excludedOwn: filtered.find((f) => f.read.source === r.source)!.excluded,
       error: r.error,
     })),
     evidence: evidenceReads.map((e) => ({
@@ -287,6 +296,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       error: e.error,
     })),
     standing: { asked: standings.asked, reused: standings.reused, failed: standings.failed },
+    ownAddresses: { status: own.status, addresses: own.addresses.size, domain: own.domain, error: own.error },
   };
 
   await db.transaction(async (tx) => {
