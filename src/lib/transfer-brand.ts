@@ -41,6 +41,12 @@ import {
   peopleScopes,
   people,
   leadStandingObservations,
+  posthogConnections,
+  posthogRawRecords,
+  posthogActivities,
+  stripeConnections,
+  stripeRawRecords,
+  stripeTransactions,
 } from "../db/schema.js";
 
 export const TRANSFER_TABLES: PgTable[] = [
@@ -63,6 +69,12 @@ export const TRANSFER_TABLES: PgTable[] = [
   peopleScopes,
   people,
   leadStandingObservations,
+  posthogConnections,
+  posthogRawRecords,
+  posthogActivities,
+  stripeConnections,
+  stripeRawRecords,
+  stripeTransactions,
 ];
 
 export interface TransferBrandInput {

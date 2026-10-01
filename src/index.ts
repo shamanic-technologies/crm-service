@@ -13,6 +13,7 @@ import internalRoutes from "./routes/internal.js";
 import matrixRoutes from "./routes/matrix.js";
 import gohighlevelRoutes from "./routes/gohighlevel.js";
 import peopleRoutes from "./routes/people.js";
+import posthogStripeRoutes from "./routes/posthog-stripe.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -43,6 +44,7 @@ app.use(internalRoutes);
 app.use(matrixRoutes);
 app.use(gohighlevelRoutes);
 app.use(peopleRoutes);
+app.use(posthogStripeRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ type: "not_found", error: "Not found" });

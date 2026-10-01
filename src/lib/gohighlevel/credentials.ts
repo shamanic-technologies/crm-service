@@ -61,7 +61,21 @@ export async function resolveGhlToken(
   brandId: string,
   identity: CredentialIdentity,
 ): Promise<string> {
-  const path = `/keys/brands/${encodeURIComponent(brandId)}/${GHL_PROVIDER}/decrypt`;
+  return resolveBrandCredential(GHL_PROVIDER, "GoHighLevel", brandId, identity);
+}
+
+/**
+ * Any brand-scoped credential, by key-service provider name (`gohighlevel`,
+ * `posthog`, `stripe`). Same no-fallback contract for every provider: a 404 is
+ * a refusal, never the org-wide key.
+ */
+export async function resolveBrandCredential(
+  provider: string,
+  label: string,
+  brandId: string,
+  identity: CredentialIdentity,
+): Promise<string> {
+  const path = `/keys/brands/${encodeURIComponent(brandId)}/${provider}/decrypt`;
 
   let res: Response;
   try {
@@ -92,7 +106,7 @@ export async function resolveGhlToken(
     throw new CredentialError(
       "missing",
       400,
-      `no GoHighLevel credential stored for brand ${brandId} — store it in key-service first`,
+      `no ${label} credential stored for brand ${brandId} — store it in key-service first`,
     );
   }
   if (!res.ok) {

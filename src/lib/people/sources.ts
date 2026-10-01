@@ -13,8 +13,10 @@
 
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { contacts, ghlConnections, matrixConnections } from "../../db/schema.js";
+import { contacts, ghlConnections, matrixConnections, posthogConnections, stripeConnections } from "../../db/schema.js";
 import { GHL_SOURCE } from "../gohighlevel/records.js";
+import { POSTHOG_SOURCE } from "../posthog/records.js";
+import { STRIPE_SOURCE } from "../stripe/records.js";
 import {
   normalizeEmail,
   type Evidence,
@@ -350,6 +352,164 @@ export async function readGoHighLevel(orgId: string, brandId: string): Promise<S
     };
   });
   return { ...base, status: "ok", presences, sourceCount: rows.length, error: null };
+}
+
+// ─── connection health, shared by PostHog and Stripe ─────────────────────────
+
+/**
+ * A connection whose sync has never succeeded has nothing to read: `failed`
+ * with its error. One that synced before and failed since is still read (its
+ * mirror is real, only stale): `ok`, with the last error carried beside it.
+ */
+function connectionHealth(conns: { status: string; lastError: string | null; lastSyncedAt: Date | null }[]):
+  | { status: "not_connected" }
+  | { status: "failed"; error: string }
+  | { status: "ok"; error: string | null } {
+  if (conns.length === 0) return { status: "not_connected" };
+  const c = conns[0];
+  if (c.lastSyncedAt === null) {
+    if (c.status === "error") return { status: "failed", error: c.lastError ?? "first sync failed" };
+    return { status: "failed", error: "connected, first sync not finished yet" };
+  }
+  return { status: "ok", error: c.status === "error" ? c.lastError : null };
+}
+
+// ─── crm-service silver: PostHog identified persons ─────────────────────────
+
+/**
+ * Every identified PostHog person (one PostHog holds an email for) — someone
+ * who signed up or otherwise told the brand who they are. Their visits and key
+ * events are the activity span; anonymous visitors are never mirrored.
+ */
+export async function readPosthog(orgId: string, brandId: string): Promise<SourceRead> {
+  const base = {
+    source: "posthog" as const,
+    scope: "brand" as const,
+    sourceCountBasis: "crm-service mirrored PostHog identified persons (PostHog holds their email)",
+  };
+  const conns = await db
+    .select({ status: posthogConnections.status, lastError: posthogConnections.lastError, lastSyncedAt: posthogConnections.lastSyncedAt })
+    .from(posthogConnections)
+    .where(and(eq(posthogConnections.orgId, orgId), eq(posthogConnections.brandId, brandId)));
+  const health = connectionHealth(conns);
+  if (health.status === "not_connected") return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
+  if (health.status === "failed") return { ...base, status: "failed", presences: [], sourceCount: null, error: health.error };
+  const rows = (await db.execute(sql`
+    SELECT c.id, c.external_id, c.full_name, c.primary_email, c.source_created_at,
+           min(a.occurred_at) AS first_at, max(coalesce(a.ended_at, a.occurred_at)) AS last_at,
+           count(a.id) FILTER (WHERE a.kind = 'visit')::int AS visits,
+           count(a.id) FILTER (WHERE a.kind = 'event')::int AS events
+    FROM contacts c
+    LEFT JOIN posthog_activities a ON a.contact_id = c.id
+    WHERE c.org_id = ${orgId} AND c.brand_id = ${brandId} AND c.source = ${POSTHOG_SOURCE}
+    GROUP BY c.id
+    ORDER BY c.external_id, c.id
+  `)) as unknown as {
+    id: string;
+    external_id: string;
+    full_name: string | null;
+    primary_email: string | null;
+    source_created_at: string | Date | null;
+    first_at: string | Date | null;
+    last_at: string | Date | null;
+    visits: number;
+    events: number;
+  }[];
+  const presences: Presence[] = rows.map((r) => ({
+    source: "posthog",
+    sourceRef: r.id,
+    displayName: r.full_name,
+    company: null,
+    emails: r.primary_email ? [r.primary_email] : [],
+    phones: [],
+    firstActivityAt: minIso([iso(r.first_at), iso(r.source_created_at)]),
+    lastActivityAt: maxIso([iso(r.last_at), iso(r.source_created_at)]),
+    messageCount: null,
+    inboundCount: null,
+    outboundCount: null,
+    detail: { contactId: r.id, externalId: r.external_id, visits: Number(r.visits), events: Number(r.events) },
+  }));
+  return { ...base, status: "ok", presences, sourceCount: rows.length, error: health.error };
+}
+
+// ─── crm-service silver: Stripe customers ───────────────────────────────────
+
+/** What a customer's Stripe record states about their money, for the person's state. */
+export interface StripeStanding {
+  subscriptionStatuses: string[];
+  /** Succeeded charges not fully refunded. */
+  paidCharges: number;
+  /** Succeeded charges fully refunded. */
+  refundedCharges: number;
+  /** Net collected per currency, minor units (succeeded charges minus refunded amounts). */
+  netPaidMinor: Record<string, number>;
+}
+
+export async function readStripe(orgId: string, brandId: string): Promise<SourceRead> {
+  const base = {
+    source: "stripe" as const,
+    scope: "brand" as const,
+    sourceCountBasis: "crm-service mirrored Stripe customers",
+  };
+  const conns = await db
+    .select({ status: stripeConnections.status, lastError: stripeConnections.lastError, lastSyncedAt: stripeConnections.lastSyncedAt })
+    .from(stripeConnections)
+    .where(and(eq(stripeConnections.orgId, orgId), eq(stripeConnections.brandId, brandId)));
+  const health = connectionHealth(conns);
+  if (health.status === "not_connected") return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
+  if (health.status === "failed") return { ...base, status: "failed", presences: [], sourceCount: null, error: health.error };
+  const rows = (await db.execute(sql`
+    SELECT c.id, c.external_id, c.full_name, c.primary_email, c.phone_e164, c.source_created_at,
+           min(t.occurred_at) AS first_at, max(t.occurred_at) AS last_at,
+           COALESCE(json_agg(json_build_object(
+             'kind', t.kind, 'status', t.status, 'amountMinor', t.amount_minor, 'currency', t.currency,
+             'amountRefunded', t.detail->'amountRefunded', 'refunded', t.detail->'refunded'
+           )) FILTER (WHERE t.id IS NOT NULL), '[]'::json) AS txs
+    FROM contacts c
+    LEFT JOIN stripe_transactions t ON t.contact_id = c.id
+    WHERE c.org_id = ${orgId} AND c.brand_id = ${brandId} AND c.source = ${STRIPE_SOURCE}
+    GROUP BY c.id
+    ORDER BY c.external_id, c.id
+  `)) as unknown as {
+    id: string;
+    external_id: string;
+    full_name: string | null;
+    primary_email: string | null;
+    phone_e164: string | null;
+    source_created_at: string | Date | null;
+    first_at: string | Date | null;
+    last_at: string | Date | null;
+    txs: { kind: string; status: string | null; amountMinor: number | null; currency: string | null; amountRefunded: number | null; refunded: boolean | null }[];
+  }[];
+  const presences: Presence[] = rows.map((r) => {
+    const charges = r.txs.filter((t) => t.kind === "payment" && t.status === "succeeded");
+    const netPaidMinor: Record<string, number> = {};
+    for (const t of charges) {
+      if (!t.currency || t.amountMinor === null) continue;
+      netPaidMinor[t.currency] = (netPaidMinor[t.currency] ?? 0) + Number(t.amountMinor) - Number(t.amountRefunded ?? 0);
+    }
+    const standing: StripeStanding = {
+      subscriptionStatuses: r.txs.filter((t) => t.kind === "subscription" && t.status).map((t) => t.status!),
+      paidCharges: charges.filter((t) => t.refunded !== true).length,
+      refundedCharges: charges.filter((t) => t.refunded === true).length,
+      netPaidMinor,
+    };
+    return {
+      source: "stripe",
+      sourceRef: r.id,
+      displayName: r.full_name,
+      company: null,
+      emails: r.primary_email ? [r.primary_email] : [],
+      phones: r.phone_e164 ? [r.phone_e164] : [],
+      firstActivityAt: minIso([iso(r.first_at), iso(r.source_created_at)]),
+      lastActivityAt: maxIso([iso(r.last_at), iso(r.source_created_at)]),
+      messageCount: null,
+      inboundCount: null,
+      outboundCount: null,
+      detail: { contactId: r.id, externalId: r.external_id, stripe: standing },
+    };
+  });
+  return { ...base, status: "ok", presences, sourceCount: rows.length, error: health.error };
 }
 
 // ─── merge evidence ─────────────────────────────────────────────────────────

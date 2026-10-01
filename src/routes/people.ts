@@ -24,6 +24,12 @@ const listQuerySchema = z.object({
   source: z.enum(PEOPLE_SOURCES).optional(),
 });
 
+const PRESENCE_CHANNEL: Partial<Record<Presence["source"], string>> = {
+  gohighlevel: "crm",
+  posthog: "web",
+  stripe: "payment",
+};
+
 /** What a consumer needs of one source record, without the source's raw detail. */
 function presenceView(p: Presence) {
   return {
@@ -37,7 +43,7 @@ function presenceView(p: Presence) {
     messageCount: p.messageCount,
     inboundCount: p.inboundCount,
     outboundCount: p.outboundCount,
-    channel: typeof p.detail.channel === "string" ? p.detail.channel : p.source === "gohighlevel" ? "crm" : "email",
+    channel: typeof p.detail.channel === "string" ? p.detail.channel : PRESENCE_CHANNEL[p.source] ?? "email",
   };
 }
 

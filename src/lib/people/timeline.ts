@@ -8,6 +8,10 @@
  *  - matrix      crm-service's own mirror of the WhatsApp / Telegram / Discord DMs
  *  - gohighlevel crm-service's GoHighLevel funnel evidence (appointments, stage
  *                entries, won/lost, form submissions)
+ *  - posthog     crm-service's PostHog mirror: website visits (entry page,
+ *                pageviews) and key events, by name
+ *  - stripe      crm-service's Stripe mirror: payments, refunds, subscriptions,
+ *                with amount (minor unit, verbatim), currency and status
  *
  * Nothing is copied: the messages stay in their source and are fetched for the
  * person being read. Each source answers a status, so "not connected",
@@ -17,7 +21,16 @@
 
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { conversations, matrixConnections, matrixRawEvents, people, type Person } from "../../db/schema.js";
+import {
+  conversations,
+  matrixConnections,
+  matrixRawEvents,
+  people,
+  posthogActivities,
+  stripeTransactions,
+  type Person,
+} from "../../db/schema.js";
+import { majorAmount } from "../stripe/records.js";
 import { readFunnelEvents, type FunnelEvent } from "../gohighlevel/funnel-events.js";
 import type { BuildSummary } from "./build.js";
 import { PEOPLE_SOURCES, type PeopleSource, type Presence } from "./identity.js";
@@ -31,7 +44,7 @@ export interface TimelineItem {
   /** ISO time the message was sent / the event happened; null when the source gave none. */
   at: string | null;
   source: PeopleSource;
-  /** email | whatsapp | telegram | discord | crm */
+  /** email | whatsapp | telegram | discord | crm | web | payment */
   channel: string;
   kind: "message" | "event";
   /** inbound = the person wrote; outbound = the brand did; null for an event. */
@@ -42,8 +55,13 @@ export interface TimelineItem {
   to: string[];
   /** The source's own ids for this item (thread, message, campaign, contact...). */
   ref: Record<string, string | null>;
-  /** Events only: the funnel step and its evidence, as the source states it. */
-  event: { step: string; dateBasis: string; detail: FunnelEvent["detail"] } | null;
+  /**
+   * Events only: the step and its evidence, as the source states it. GoHighLevel
+   * carries its funnel-event detail; PostHog `visit` / `event` and Stripe
+   * `payment` / `refund` / `subscription_started` / `subscription_canceled`
+   * carry their own (page, pageviews; amount, currency, status).
+   */
+  event: { step: string; dateBasis: string; detail: FunnelEvent["detail"] | Record<string, unknown> } | null;
 }
 
 export interface TimelineSource {
@@ -260,6 +278,84 @@ async function ghlItems(person: Person, presences: Presence[]): Promise<SourceRe
   return { status: items.length ? "ok" : "empty", items, error: null, asked: contactIds };
 }
 
+// ─── posthog ────────────────────────────────────────────────────────────────
+
+async function posthogItems(presences: Presence[]): Promise<SourceResult> {
+  const contactIds = presences.map((p) => p.sourceRef);
+  if (contactIds.length === 0) return { status: "empty", items: [], error: null, asked: [] };
+  const rows = await db.select().from(posthogActivities).where(inArray(posthogActivities.contactId, contactIds));
+  const items: TimelineItem[] = rows.map((a) => ({
+    at: a.occurredAt.toISOString(),
+    source: "posthog",
+    channel: "web",
+    kind: "event",
+    direction: null,
+    subject: null,
+    text: a.name,
+    from: null,
+    to: [],
+    ref: { contactId: a.contactId, externalId: a.externalId, externalPersonId: a.externalPersonId },
+    event: {
+      step: a.kind,
+      dateBasis: a.kind === "visit" ? "visit_started_at" : "event_timestamp",
+      detail: {
+        name: a.name,
+        url: a.url,
+        pageviews: a.pageviews,
+        endedAt: a.endedAt?.toISOString() ?? null,
+        ...(a.detail as Record<string, unknown>),
+      },
+    },
+  }));
+  return { status: items.length ? "ok" : "empty", items, error: null, asked: contactIds };
+}
+
+// ─── stripe ─────────────────────────────────────────────────────────────────
+
+const STRIPE_STEP: Record<string, string> = { payment: "payment", refund: "refund", subscription: "subscription_started" };
+
+async function stripeItems(presences: Presence[]): Promise<SourceResult> {
+  const contactIds = presences.map((p) => p.sourceRef);
+  if (contactIds.length === 0) return { status: "empty", items: [], error: null, asked: [] };
+  const rows = await db.select().from(stripeTransactions).where(inArray(stripeTransactions.contactId, contactIds));
+  const items: TimelineItem[] = [];
+  for (const t of rows) {
+    const detail = t.detail as Record<string, unknown>;
+    const money = {
+      amountMinor: t.amountMinor,
+      amount: majorAmount(t.amountMinor, t.currency),
+      currency: t.currency,
+      status: t.status,
+      description: t.description,
+    };
+    const base = {
+      source: "stripe" as const,
+      channel: "payment",
+      kind: "event" as const,
+      direction: null,
+      subject: null,
+      from: null,
+      to: [],
+      ref: { contactId: t.contactId, externalId: t.externalId, externalCustomerId: t.externalCustomerId },
+    };
+    items.push({
+      ...base,
+      at: t.occurredAt.toISOString(),
+      text: t.description,
+      event: { step: STRIPE_STEP[t.kind], dateBasis: t.kind === "subscription" ? "start_date" : "created", detail: { ...money, ...detail } },
+    });
+    if (t.kind === "subscription" && typeof detail.canceledAt === "string") {
+      items.push({
+        ...base,
+        at: detail.canceledAt,
+        text: t.description,
+        event: { step: "subscription_canceled", dateBasis: "canceled_at", detail: { ...money, ...detail } },
+      });
+    }
+  }
+  return { status: items.length ? "ok" : "empty", items, error: null, asked: contactIds };
+}
+
 // ─── the merged thread ──────────────────────────────────────────────────────
 
 /** The person holding `key` (any of their identity keys) in the (org, brand) index. */
@@ -309,7 +405,7 @@ export async function readTimeline(
     return [...pairs.values()];
   };
 
-  const [gmail, instantly, matrix, gohighlevel] = await Promise.all([
+  const [gmail, instantly, matrix, gohighlevel, posthog, stripe] = await Promise.all([
     connected("gmail") ? gmailItems(identity, emails).catch((e) => toFailed(e, emails)) : Promise.resolve(notConnected()),
     instantlyPairs()
       .then((pairs) => instantlyItems(identity, pairs))
@@ -318,8 +414,10 @@ export async function readTimeline(
     connected("gohighlevel")
       ? ghlItems(person, of("gohighlevel")).catch((e) => toFailed(e))
       : Promise.resolve(notConnected()),
+    connected("posthog") ? posthogItems(of("posthog")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
+    connected("stripe") ? stripeItems(of("stripe")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
   ]);
-  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel };
+  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe };
 
   const items = PEOPLE_SOURCES.flatMap((s) => bySource[s].items).sort((a, b) => {
     if (a.at === null && b.at === null) return 0;

@@ -71,6 +71,13 @@
       "when": 1790842888654,
       "tag": "0009_people",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1790844150311,
+      "tag": "0010_posthog_stripe_sources",
+      "breakpoints": true
     }
   ]
 }

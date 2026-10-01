@@ -31,10 +31,13 @@ import {
   readInstantly,
   readLeadRulingEvidence,
   readMatrix,
+  readPosthog,
+  readStripe,
   type EvidenceRead,
+  type StripeStanding,
   type SourceRead,
 } from "./sources.js";
-import { resolvePersonState, type GhlDeal, type LeadObservation } from "./state.js";
+import { resolvePersonState, type GhlDeal, type LeadObservation, type StripeStandingInput } from "./state.js";
 
 /** How long lead-service's answer about an address is reused. */
 export const STANDING_TTL_MS = 60 * 60 * 1000;
@@ -46,9 +49,12 @@ const NAME_PRECEDENCE: (PeopleSource | Evidence["kind"])[] = [
   "gohighlevel_contact",
   "lead_ruling",
   "google_contact",
+  "stripe",
+  "stripe_customer",
   "matrix",
   "gmail",
   "csv_contact",
+  "posthog",
   "instantly",
 ];
 
@@ -161,13 +167,15 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     brandId: scope.brandId,
   };
 
-  const [gmail, instantly, matrix, gohighlevel] = await Promise.all([
+  const [gmail, instantly, matrix, gohighlevel, posthog, stripe] = await Promise.all([
     readGmail(identity),
     readInstantly(identity),
     readMatrix(scope.orgId, scope.brandId),
     readGoHighLevel(scope.orgId, scope.brandId),
+    readPosthog(scope.orgId, scope.brandId),
+    readStripe(scope.orgId, scope.brandId),
   ]);
-  const reads: SourceRead[] = [gmail, instantly, matrix, gohighlevel];
+  const reads: SourceRead[] = [gmail, instantly, matrix, gohighlevel, posthog, stripe];
 
   const evidenceReads: EvidenceRead[] = [await readCsvEvidence(scope.orgId, scope.brandId)];
   if (gmail.status !== "not_connected") evidenceReads.push(await readGoogleContactEvidence(identity));
@@ -184,9 +192,21 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       phones: p.phones,
     }));
 
+  // Likewise a Stripe customer holding an email and a phone.
+  const stripeEvidence: Evidence[] = stripe.presences
+    .filter((p) => p.emails.length + p.phones.length > 1)
+    .map((p) => ({
+      kind: "stripe_customer",
+      ref: p.sourceRef,
+      displayName: p.displayName,
+      company: p.company,
+      emails: p.emails,
+      phones: p.phones,
+    }));
+
   const clusters = clusterPeople(
     reads.flatMap((r) => r.presences),
-    [...ghlEvidence, ...evidenceReads.flatMap((e) => e.evidence)],
+    [...ghlEvidence, ...stripeEvidence, ...evidenceReads.flatMap((e) => e.evidence)],
   );
 
   // lead-service is asked about every address of every person.
@@ -206,9 +226,13 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       .sort((a, b) => ((a.lastActivityAt ?? "") < (b.lastActivityAt ?? "") ? 1 : -1))
       .map((p) => p.detail.leadStatus as string);
     const inst = c.presences.filter((p) => p.source === "instantly");
+    const stripeStandings: StripeStandingInput[] = c.presences
+      .filter((p) => p.source === "stripe")
+      .map((p) => ({ customerId: p.detail.externalId as string, ...(p.detail.stripe as StripeStanding) }));
     const state = resolvePersonState({
       leadObservations: c.emails.map((e) => standings.observations.get(e)!).filter(Boolean),
       ghlDeals,
+      stripe: stripeStandings,
       matrixStatuses,
       instantly: inst.length
         ? {

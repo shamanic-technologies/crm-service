@@ -2,8 +2,8 @@
  * Who is the same person — decided on POSITIVE EVIDENCE only.
  *
  * A person is keyed on their email addresses and phone numbers. Two keys belong
- * to the same person only when one record states both at once: a GoHighLevel or
- * Google contact holding an email AND a phone, a CSV row carrying both, or a
+ * to the same person only when one record states both at once: a GoHighLevel,
+ * Google or Stripe contact holding an email AND a phone, a CSV row carrying both, or a
  * lead-service "same person" ruling. Two records sharing a key are the same
  * person (that key IS the identity). Nothing else merges: no name matching, no
  * domain matching, no model. Unmerged stays two people.
@@ -15,7 +15,7 @@
  *    no country, so it cannot be compared with anything and is not a key.
  */
 
-export const PEOPLE_SOURCES = ["gmail", "instantly", "matrix", "gohighlevel"] as const;
+export const PEOPLE_SOURCES = ["gmail", "instantly", "matrix", "gohighlevel", "posthog", "stripe"] as const;
 export type PeopleSource = (typeof PEOPLE_SOURCES)[number];
 
 export function normalizeEmail(raw: string | null | undefined): string | null {
@@ -59,6 +59,7 @@ export const EVIDENCE_KINDS = [
   "gohighlevel_contact",
   "csv_contact",
   "lead_ruling",
+  "stripe_customer",
 ] as const;
 export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
 

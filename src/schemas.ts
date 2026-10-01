@@ -1434,13 +1434,13 @@ const PersonSchema = registry.register(
       state: z.string().openapi({
         example: "sales_interest",
         description:
-          "The ONE state, set by `stateSource` (first that applies): lead_service = lead-service's standing verbatim (unresolved | not_contacted | contacted | engaged | sales_interest | customer | disqualified | opted_out, or `unavailable` when lead-service could not be asked); gohighlevel = deal_won | deal_open | deal_lost | deal_abandoned; matrix = new | qualifying | negotiating | won | lost | unresponsive; instantly = replied | clicked; none = in_conversation. Render it; never recompute it.",
+          "The ONE state, set by `stateSource` (first that applies): lead_service = lead-service's standing verbatim (unresolved | not_contacted | contacted | engaged | sales_interest | customer | disqualified | opted_out, or `unavailable` when lead-service could not be asked); stripe = subscription_active | subscription_trialing | subscription_past_due | subscription_unpaid | paid | refunded | subscription_canceled; gohighlevel = deal_won | deal_open | deal_lost | deal_abandoned; matrix = new | qualifying | negotiating | won | lost | unresponsive; instantly = replied | clicked; none = in_conversation. Render it; never recompute it.",
       }),
       stateSource: z.enum(STATE_SOURCES),
       stateDetail: z.record(z.string(), z.unknown()).nullable(),
       presences: z.array(PersonPresenceSchema),
       mergeEvidence: z.array(z.unknown()).openapi({
-        description: "The records that tied two keys of this person together (a Google / GoHighLevel / CSV contact holding both, a lead-service accepted ruling). Empty when the person rests on a single key.",
+        description: "The records that tied two keys of this person together (a Google / GoHighLevel / Stripe / CSV contact holding both, a lead-service accepted ruling). Empty when the person rests on a single key.",
       }),
     })
     .openapi("Person"),
@@ -1597,3 +1597,136 @@ registry.registerPath({
   },
   responses: { 202: { description: "Pass started" } },
 });
+
+// ─── PostHog + Stripe (read-only sources of the person thread) ───────────────
+
+const VendorConnectionStatus = z.enum(["active", "paused", "error"]);
+
+export const PosthogConnectionSchema = registry.register(
+  "PosthogConnection",
+  z
+    .object({
+      id: z.string().uuid(),
+      brandId: z.string().uuid(),
+      projectId: z.string().openapi({ description: "PostHog's numeric project id." }),
+      region: z.enum(["us", "eu"]).openapi({ description: "PostHog Cloud region (us.posthog.com / eu.posthog.com)." }),
+      status: VendorConnectionStatus,
+      synced: z.boolean().openapi({ description: "True once a sync has completed." }),
+      lastSyncedAt: z.string().nullable(),
+      syncedThrough: z.string().nullable().openapi({ description: "Start of the last successful pass; the next one re-reads activity from one hour before it." }),
+      lastError: z.string().nullable().openapi({ description: "Why the last sync failed, verbatim. Null when healthy." }),
+      lastRunId: z.string().nullable(),
+      createdAt: z.string(),
+    })
+    .openapi("PosthogConnection"),
+);
+
+export const StripeConnectionSchema = registry.register(
+  "StripeConnection",
+  z
+    .object({
+      id: z.string().uuid(),
+      brandId: z.string().uuid(),
+      keyMode: z.enum(["live", "test"]).openapi({ description: "Read off the restricted key's own prefix (rk_live_ / rk_test_)." }),
+      status: VendorConnectionStatus,
+      synced: z.boolean(),
+      lastSyncedAt: z.string().nullable(),
+      lastFullSyncAt: z.string().nullable().openapi({ description: "Last pass that re-listed every object (daily); other passes re-list the last 30 days." }),
+      lastError: z.string().nullable(),
+      lastRunId: z.string().nullable(),
+      createdAt: z.string(),
+    })
+    .openapi("StripeConnection"),
+);
+
+const VendorDisconnectSchema = z.object({ disconnected: z.literal(true), connectionId: z.string().uuid() });
+const vendorPatchBody = { content: { "application/json": { schema: z.object({ status: z.enum(["active", "paused"]) }) } } };
+
+for (const v of [
+  {
+    slug: "posthog",
+    label: "PostHog",
+    schema: PosthogConnectionSchema,
+    body: z.object({
+      brandId: z.string().uuid(),
+      projectId: z.string().openapi({ example: "171095" }),
+      region: z.enum(["us", "eu"]),
+    }),
+    extra: { identifiedPersons: z.number().int().openapi({ description: "PostHog's own count of identified persons (email known) in the project, at connect time." }) },
+    description:
+      "Resolves the brand's PostHog personal API key from key-service (provider `posthog`, brand-scoped, no org fallback; only the `query:read` scope is needed), then PROVES it by counting the project's identified persons through PostHog's query API. A key PostHog refuses (invalid, missing scope, wrong project or region) comes back 400 with PostHog's own status and message. Read-only: nothing is ever written to PostHog. Requires x-api-key, x-org-id, x-user-id.",
+  },
+  {
+    slug: "stripe",
+    label: "Stripe",
+    schema: StripeConnectionSchema,
+    body: z.object({ brandId: z.string().uuid() }),
+    extra: {},
+    description:
+      "Resolves the brand's Stripe key from key-service (provider `stripe`, brand-scoped, no org fallback). Only a RESTRICTED key (rk_live_… / rk_test_…) with READ permission on Customers, Charges, Refunds and Subscriptions is accepted: a secret key can move money and is refused before any call. The key is proven by one read of each resource; a missing permission comes back 400 with Stripe's own status and message. Read-only: nothing is ever written to Stripe. Requires x-api-key, x-org-id, x-user-id.",
+  },
+] as const) {
+  registry.registerPath({
+    method: "post",
+    path: `/orgs/${v.slug}/connections`,
+    summary: `Connect a brand to ${v.label} (read-only)`,
+    description: v.description,
+    request: { headers: IDENTITY_HEADERS, body: { content: { "application/json": { schema: v.body } } } },
+    responses: {
+      200: {
+        description: "Connection",
+        content: { "application/json": { schema: z.object({ connection: v.schema, ...v.extra }) } },
+      },
+      400: {
+        description: `Refused — no credential stored, not a read-only key, or ${v.label} rejected it (vendorStatus, vendorError)`,
+        content: { "application/json": { schema: GhlVendorErrorSchema } },
+      },
+    },
+  });
+  registry.registerPath({
+    method: "get",
+    path: `/orgs/${v.slug}/connections`,
+    summary: `${v.label} connection health for a brand`,
+    request: { query: z.object({ brandId: z.string().uuid() }) },
+    responses: {
+      200: { description: "Connections", content: { "application/json": { schema: z.object({ connections: z.array(v.schema) }) } } },
+    },
+  });
+  registry.registerPath({
+    method: "patch",
+    path: `/orgs/${v.slug}/connections/{id}`,
+    summary: `Pause or resume a ${v.label} connection`,
+    request: { params: z.object({ id: z.string().uuid() }), body: vendorPatchBody },
+    responses: {
+      200: { description: "Connection", content: { "application/json": { schema: z.object({ connection: v.schema }) } } },
+      404: { description: "Not found", content: { "application/json": { schema: ErrorResponseSchema } } },
+    },
+  });
+  registry.registerPath({
+    method: "delete",
+    path: `/orgs/${v.slug}/connections/{id}`,
+    summary: `Disconnect ${v.label} from a brand`,
+    description: "Removes the connection, its mirror and the contacts/activity derived from it; the syncing stops.",
+    request: { params: z.object({ id: z.string().uuid() }) },
+    responses: {
+      200: { description: "Disconnected", content: { "application/json": { schema: VendorDisconnectSchema } } },
+      404: { description: "Not found", content: { "application/json": { schema: ErrorResponseSchema } } },
+    },
+  });
+  registry.registerPath({
+    method: "post",
+    path: `/internal/${v.slug}/sync`,
+    summary: `Run a ${v.label} sync pass (cron)`,
+    description: `Driven by a cron on the box every 15 minutes. Opens one ORG run per connection. Read-only toward ${v.label}; API reads are free, so no cost is declared.`,
+    request: { body: { content: { "application/json": { schema: z.object({ connectionId: z.string().uuid().optional() }) } } } },
+    responses: { 202: { description: "Pass started" } },
+  });
+  registry.registerPath({
+    method: "post",
+    path: `/internal/${v.slug}/rebuild`,
+    summary: `Re-derive ${v.label} silver from the mirror alone`,
+    description: `No call to ${v.label}, no credential.`,
+    request: { body: { content: { "application/json": { schema: z.object({ connectionId: z.string().uuid().optional() }) } } } },
+    responses: { 200: { description: "Rebuilt" } },
+  });
+}

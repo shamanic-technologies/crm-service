@@ -8,6 +8,7 @@ import {
   numeric,
   doublePrecision,
   boolean,
+  bigint,
   uniqueIndex,
   index,
 } from "drizzle-orm/pg-core";
@@ -931,6 +932,221 @@ export const leadStandingObservations = pgTable(
   ],
 );
 
+/**
+ * BRONZE — the source artifact for a brand's PostHog project, mirrored
+ * READ-ONLY. One row per (org, brand).
+ *
+ * Exactly like `ghl_connections`, there is NO credential column: the brand's
+ * PostHog personal API key lives in key-service, scoped to (org, brand), and
+ * every sync resolves it at call time. `project_id` and `region` say WHICH
+ * project to read; a personal API key may reach several projects, so the id
+ * cannot be derived from the key.
+ *
+ * `region` is `us` | `eu` (PostHog Cloud). The host is derived from it in code,
+ * never taken from the caller, so a connection can never point this service at
+ * an arbitrary URL.
+ *
+ * `synced_through` is the window cursor: the next pass re-reads activity from a
+ * little before it (see posthog/sync.ts) so late-ingested events are not lost.
+ */
+export const posthogConnections = pgTable(
+  "posthog_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    projectId: text("project_id").notNull(),
+    region: text("region").notNull(),
+    createdByUserId: text("created_by_user_id").notNull(),
+    // 'active' | 'paused' | 'error'
+    status: text("status").notNull().default("active"),
+    lastError: text("last_error"),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    syncedThrough: timestamp("synced_through", { withTimezone: true }),
+    lastRunId: text("last_run_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("posthog_connections_org_brand_uq").on(table.orgId, table.brandId),
+    index("posthog_connections_status_idx").on(table.status),
+  ],
+);
+
+/**
+ * BRONZE — PostHog records verbatim, one row per (connection, kind, id).
+ * `kind` is `person` (an IDENTIFIED person: PostHog knows their email), `visit`
+ * (one session of an identified person, aggregated by PostHog's own query
+ * engine) or `event` (one custom event of an identified person). PostHog's own
+ * id (person id, session id, event uuid) is the idempotency key and
+ * `content_hash` the no-churn guard, as for GoHighLevel.
+ */
+export const posthogRawRecords = pgTable(
+  "posthog_raw_records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => posthogConnections.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    externalId: text("external_id").notNull(),
+    contentHash: text("content_hash").notNull(),
+    payload: jsonb("payload").notNull(),
+    mirroredAt: timestamp("mirrored_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("posthog_raw_records_conn_kind_external_uq").on(
+      table.connectionId,
+      table.kind,
+      table.externalId,
+    ),
+    index("posthog_raw_records_org_brand_kind_idx").on(table.orgId, table.brandId, table.kind),
+  ],
+);
+
+/**
+ * SILVER — one dated website activity of an identified PostHog person: a
+ * `visit` (session: start, end, entry page, pageviews) or an `event` (a custom
+ * event, by its own name). Deterministic from bronze, zero LLM. `contact_id`
+ * is the silver contact (source `posthog`) of the person; null rather than
+ * guessed when the person was not mirrored.
+ */
+export const posthogActivities = pgTable(
+  "posthog_activities",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => posthogConnections.id, { onDelete: "cascade" }),
+    // 'visit' | 'event'
+    kind: text("kind").notNull(),
+    externalId: text("external_id").notNull(),
+    externalPersonId: text("external_person_id").notNull(),
+    contactId: uuid("contact_id").references(() => contacts.id, { onDelete: "set null" }),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    endedAt: timestamp("ended_at", { withTimezone: true }),
+    // visit: the entry page path; event: the event name, verbatim.
+    name: text("name").notNull(),
+    url: text("url"),
+    pageviews: integer("pageviews"),
+    detail: jsonb("detail").notNull(),
+    lastRebuiltAt: timestamp("last_rebuilt_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("posthog_activities_conn_kind_external_uq").on(
+      table.connectionId,
+      table.kind,
+      table.externalId,
+    ),
+    index("posthog_activities_contact_idx").on(table.contactId),
+  ],
+);
+
+/**
+ * BRONZE — the source artifact for a brand's Stripe account, mirrored
+ * READ-ONLY. One row per (org, brand). No credential column: the brand's Stripe
+ * RESTRICTED key lives in key-service. `key_mode` (`live` | `test`) is read off
+ * the key's own prefix at connect time so a test-mode account is never mistaken
+ * for revenue.
+ *
+ * `last_full_sync_at`: most passes re-list only recently created objects; a full
+ * re-list runs once a day so a change on an old object (an email edited on a
+ * year-old customer) still lands.
+ */
+export const stripeConnections = pgTable(
+  "stripe_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    keyMode: text("key_mode").notNull(),
+    createdByUserId: text("created_by_user_id").notNull(),
+    // 'active' | 'paused' | 'error'
+    status: text("status").notNull().default("active"),
+    lastError: text("last_error"),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    lastFullSyncAt: timestamp("last_full_sync_at", { withTimezone: true }),
+    lastRunId: text("last_run_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("stripe_connections_org_brand_uq").on(table.orgId, table.brandId),
+    index("stripe_connections_status_idx").on(table.status),
+  ],
+);
+
+/**
+ * BRONZE — Stripe objects verbatim: `customer` | `charge` | `refund` |
+ * `subscription`. Stripe's own object id is the idempotency key, `content_hash`
+ * the no-churn guard.
+ */
+export const stripeRawRecords = pgTable(
+  "stripe_raw_records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => stripeConnections.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    externalId: text("external_id").notNull(),
+    contentHash: text("content_hash").notNull(),
+    payload: jsonb("payload").notNull(),
+    mirroredAt: timestamp("mirrored_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("stripe_raw_records_conn_kind_external_uq").on(
+      table.connectionId,
+      table.kind,
+      table.externalId,
+    ),
+    index("stripe_raw_records_org_brand_kind_idx").on(table.orgId, table.brandId, table.kind),
+  ],
+);
+
+/**
+ * SILVER — one money movement or subscription of a Stripe customer:
+ * `payment` (a charge), `refund`, `subscription`. Amount in the currency's
+ * MINOR unit exactly as Stripe states it, currency and status verbatim (Stripe's
+ * fixed vocabularies). `contact_id` is the silver contact (source `stripe`) of
+ * the customer; null when the object names no customer we mirrored.
+ */
+export const stripeTransactions = pgTable(
+  "stripe_transactions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => stripeConnections.id, { onDelete: "cascade" }),
+    // 'payment' | 'refund' | 'subscription'
+    kind: text("kind").notNull(),
+    externalId: text("external_id").notNull(),
+    externalCustomerId: text("external_customer_id"),
+    contactId: uuid("contact_id").references(() => contacts.id, { onDelete: "set null" }),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    amountMinor: bigint("amount_minor", { mode: "number" }),
+    currency: text("currency"),
+    status: text("status"),
+    description: text("description"),
+    detail: jsonb("detail").notNull(),
+    lastRebuiltAt: timestamp("last_rebuilt_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("stripe_transactions_conn_kind_external_uq").on(
+      table.connectionId,
+      table.kind,
+      table.externalId,
+    ),
+    index("stripe_transactions_contact_idx").on(table.contactId),
+  ],
+);
+
 export type ContactUpload = typeof contactUploads.$inferSelect;
 export type NewContactUpload = typeof contactUploads.$inferInsert;
 export type ContactRowRaw = typeof contactRowsRaw.$inferSelect;
@@ -961,3 +1177,7 @@ export type GhlStageMeaning = typeof ghlStageMeanings.$inferSelect;
 export type PeopleScope = typeof peopleScopes.$inferSelect;
 export type Person = typeof people.$inferSelect;
 export type NewPerson = typeof people.$inferInsert;
+export type PosthogConnection = typeof posthogConnections.$inferSelect;
+export type PosthogActivity = typeof posthogActivities.$inferSelect;
+export type StripeConnection = typeof stripeConnections.$inferSelect;
+export type StripeTransaction = typeof stripeTransactions.$inferSelect;

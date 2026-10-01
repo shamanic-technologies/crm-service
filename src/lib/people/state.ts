@@ -8,21 +8,31 @@
  *     sales_interest | customer | disqualified | opted_out`). When lead-service
  *     could not be asked, the state is `unavailable` with the error — never a
  *     guess from the other sources.
- *  2. `gohighlevel` — the customer's own CRM holds a deal for them. GoHighLevel's
+ *  2. `stripe` — the brand's own Stripe account holds money from them. Stripe's
+ *     FIXED subscription status vocabulary, prefixed: `subscription_active`,
+ *     else `subscription_trialing`, else `subscription_past_due`, else
+ *     `subscription_unpaid`; else `paid` (a succeeded charge not fully
+ *     refunded); else `refunded` (every succeeded charge refunded in full); else
+ *     `subscription_canceled` (a subscription that ended, no payment kept). A
+ *     customer record with none of these states nothing and falls through.
+ *     Money received is the strongest fact the brand's own systems hold, so it
+ *     outranks a CRM deal stage; lead-service still comes first because it is
+ *     verbatim about OUR leads.
+ *  3. `gohighlevel` — the customer's own CRM holds a deal for them. GoHighLevel's
  *     FIXED opportunity status vocabulary, prefixed: `deal_won`, else
  *     `deal_open`, else `deal_lost`, else `deal_abandoned` (a person with
  *     several deals is at their most advanced). Stage names are the customer's
  *     free text and are carried in the detail verbatim, never mapped.
- *  3. `matrix` — the reading of their WhatsApp / Telegram / Discord thread
+ *  4. `matrix` — the reading of their WhatsApp / Telegram / Discord thread
  *     (`new | qualifying | negotiating | won | lost | unresponsive`).
- *  4. `instantly` — they engaged with our cold email but are not one of our
+ *  5. `instantly` — they engaged with our cold email but are not one of our
  *     leads (a platform send): `replied`, else `clicked`.
- *  5. `none` — nothing states anything: `in_conversation`.
+ *  6. `none` — nothing states anything: `in_conversation`.
  *
  * The browser renders `state` + `stateSource`; it never computes either.
  */
 
-export const STATE_SOURCES = ["lead_service", "gohighlevel", "matrix", "instantly", "none"] as const;
+export const STATE_SOURCES = ["lead_service", "stripe", "gohighlevel", "matrix", "instantly", "none"] as const;
 export type StateSource = (typeof STATE_SOURCES)[number];
 
 export const LEAD_STANDING_STATES = [
@@ -37,6 +47,24 @@ export const LEAD_STANDING_STATES = [
 ] as const;
 
 export const DEAL_STATES = ["deal_won", "deal_open", "deal_lost", "deal_abandoned"] as const;
+export const STRIPE_STATES = [
+  "subscription_active",
+  "subscription_trialing",
+  "subscription_past_due",
+  "subscription_unpaid",
+  "paid",
+  "refunded",
+  "subscription_canceled",
+] as const;
+
+/** What one Stripe customer record states (see sources.ts `StripeStanding`). */
+export interface StripeStandingInput {
+  customerId: string;
+  subscriptionStatuses: string[];
+  paidCharges: number;
+  refundedCharges: number;
+  netPaidMinor: Record<string, number>;
+}
 export const INSTANTLY_STATES = ["replied", "clicked"] as const;
 
 /** What lead-service said about one address. */
@@ -67,6 +95,8 @@ export interface StateInputs {
   /** One observation per email of the person, in email order. */
   leadObservations: LeadObservation[];
   ghlDeals: GhlDeal[];
+  /** One per Stripe customer record of the person. */
+  stripe: StripeStandingInput[];
   /** matrix_leads.status per conversation, most recent conversation first. */
   matrixStatuses: string[];
   instantly: { replied: boolean; clicked: boolean; replyClassification: string | null } | null;
@@ -105,6 +135,11 @@ export function resolvePersonState(input: StateInputs): PersonState {
     return { state: "unavailable", stateSource: "lead_service", stateDetail: { error: failed.error } };
   }
 
+  const stripeState = resolveStripeState(input.stripe);
+  if (stripeState) {
+    return { state: stripeState, stateSource: "stripe", stateDetail: { customers: input.stripe } };
+  }
+
   for (const status of ["won", "open", "lost", "abandoned"]) {
     const deals = input.ghlDeals.filter((d) => d.status === status);
     if (deals.length > 0) {
@@ -133,4 +168,19 @@ export function resolvePersonState(input: StateInputs): PersonState {
   }
 
   return { state: "in_conversation", stateSource: "none", stateDetail: null };
+}
+
+const LIVE_SUBSCRIPTION = ["active", "trialing", "past_due", "unpaid"] as const;
+
+/** The person's Stripe state, or null when their Stripe record states nothing. */
+export function resolveStripeState(customers: StripeStandingInput[]): (typeof STRIPE_STATES)[number] | null {
+  if (customers.length === 0) return null;
+  const statuses = customers.flatMap((c) => c.subscriptionStatuses);
+  for (const s of LIVE_SUBSCRIPTION) {
+    if (statuses.includes(s)) return `subscription_${s}`;
+  }
+  if (customers.some((c) => c.paidCharges > 0)) return "paid";
+  if (customers.some((c) => c.refundedCharges > 0)) return "refunded";
+  if (statuses.includes("canceled")) return "subscription_canceled";
+  return null;
 }
