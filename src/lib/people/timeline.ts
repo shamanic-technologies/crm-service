@@ -56,12 +56,37 @@ export interface TimelineItem {
   /** The source's own ids for this item (thread, message, campaign, contact...). */
   ref: Record<string, string | null>;
   /**
+   * Gmail messages only (null elsewhere): how `text` was derived by google-service,
+   * which owns the cleaning. `cleaned` is true only when `text` is the sender's own
+   * lines (status `cleaned`); any other status means `text` is NOT the cleaned
+   * version (original served, structural clean only, or the snippet) and the reader
+   * must be told. `original` is the full original body, verbatim.
+   */
+  textClean: TextClean | null;
+  /**
    * Events only: the step and its evidence, as the source states it. GoHighLevel
    * carries its funnel-event detail; PostHog `visit` / `event` and Stripe
    * `payment` / `refund` / `subscription_started` / `subscription_canceled`
    * carry their own (page, pageviews; amount, currency, status).
    */
   event: { step: string; dateBasis: string; detail: FunnelEvent["detail"] | Record<string, unknown> } | null;
+}
+
+/** google-service's `bodyCleanStatus`, verbatim. */
+export const TEXT_CLEAN_STATUSES = [
+  "cleaned",
+  "nothing_kept",
+  "pending",
+  "judge_failed",
+  "not_applicable",
+  "not_cleaned",
+] as const;
+export type TextCleanStatus = (typeof TEXT_CLEAN_STATUSES)[number];
+
+export interface TextClean {
+  status: TextCleanStatus;
+  cleaned: boolean;
+  original: string | null;
 }
 
 export interface TimelineSource {
@@ -97,7 +122,9 @@ interface GmailConversation {
       snippet: string | null;
       sentAt: string | null;
       bodyText: string | null;
+      bodyTextOriginal: string | null;
       bodyStatus: string;
+      bodyCleanStatus: TextCleanStatus;
     }[];
   }[];
 }
@@ -134,6 +161,11 @@ async function gmailItems(identity: SiblingIdentity, emails: string[]): Promise<
           from: m.fromEmail,
           to: m.to,
           ref: { gmailMessageId: m.gmailMessageId, threadId: m.threadId, bodyStatus: m.bodyStatus },
+          textClean: {
+            status: m.bodyCleanStatus,
+            cleaned: m.bodyStatus === "ok" && m.bodyCleanStatus === "cleaned",
+            original: m.bodyTextOriginal,
+          },
           event: null,
         });
       }
@@ -192,6 +224,7 @@ async function instantlyItems(identity: SiblingIdentity, pairs: { email: string;
         from: m.from,
         to: m.to ? [m.to] : [],
         ref: { campaignId: m.campaignId, instantlyCampaignId: m.instantlyCampaignId },
+        textClean: null,
         event: null,
       });
     }
@@ -242,6 +275,7 @@ async function matrixItems(presences: Presence[]): Promise<SourceResult> {
         from: e.sender,
         to: [],
         ref: { eventId: e.eventId, roomId: e.roomId, conversationId: c.id },
+        textClean: null,
         event: null,
       });
     }
@@ -270,6 +304,7 @@ async function ghlItems(person: Person, presences: Presence[]): Promise<SourceRe
           from: null,
           to: [],
           ref: { contactId: c.contactId, externalContactId: c.externalContactId, sourceId: ev.sourceId, evidence: ev.source },
+          textClean: null,
           event: { step: ev.step, dateBasis: ev.dateBasis, detail: ev.detail },
         });
       }
@@ -295,6 +330,7 @@ async function posthogItems(presences: Presence[]): Promise<SourceResult> {
     from: null,
     to: [],
     ref: { contactId: a.contactId, externalId: a.externalId, externalPersonId: a.externalPersonId },
+    textClean: null,
     event: {
       step: a.kind,
       dateBasis: a.kind === "visit" ? "visit_started_at" : "event_timestamp",
@@ -329,6 +365,7 @@ async function stripeItems(presences: Presence[]): Promise<SourceResult> {
       description: t.description,
     };
     const base = {
+      textClean: null,
       source: "stripe" as const,
       channel: "payment",
       kind: "event" as const,

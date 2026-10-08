@@ -142,7 +142,7 @@ function installFetchStub() {
               {
                 threadId: "td",
                 messages: [
-                  { gmailMessageId: "d1", threadId: "td", direction: "inbound", fromEmail: DIGEST, to: ["me@brand.com"], subject: "Marwene just messaged you", snippet: "You have 1 new message", sentAt: "2026-07-10T09:00:00.000Z", bodyText: null, bodyStatus: "ok" },
+                  { gmailMessageId: "d1", threadId: "td", direction: "inbound", fromEmail: DIGEST, to: ["me@brand.com"], subject: "Marwene just messaged you", snippet: "You have 1 new message", sentAt: "2026-07-10T09:00:00.000Z", bodyText: null, bodyTextOriginal: null, bodyStatus: "ok", bodyCleanStatus: "not_applicable" },
                 ],
               },
             ],
@@ -169,7 +169,9 @@ function installFetchStub() {
                   snippet: "hi",
                   sentAt: "2026-09-01T09:00:00.000Z",
                   bodyText: "Hi Alice",
+                  bodyTextOriginal: "Hi Alice\n\n--\nKevin, Brand\nUnsubscribe: https://brand.com/u",
                   bodyStatus: "ok",
+                  bodyCleanStatus: "cleaned",
                 },
                 {
                   gmailMessageId: "g2",
@@ -181,7 +183,9 @@ function installFetchStub() {
                   snippet: "sure",
                   sentAt: "2026-09-03T09:00:00.000Z",
                   bodyText: "Sure, call me",
+                  bodyTextOriginal: "Sure, call me",
                   bodyStatus: "ok",
+                  bodyCleanStatus: "nothing_kept",
                 },
               ],
             },
@@ -391,6 +395,18 @@ describe.skipIf(!RUN)("person layer", () => {
       ["matrix", "Hello on WhatsApp"],
       ["matrix", "Hi Alice"],
     ]);
+    // google-service's clean flag and the full original reach the reader per Gmail message;
+    // an uncleaned fallback (nothing_kept) is never silent. Other sources carry null.
+    const textClean = (s: string, text: string) =>
+      res.body.items.find((i: { source: string; text: string }) => i.source === s && i.text === text).textClean;
+    expect(textClean("gmail", "Hi Alice")).toEqual({
+      status: "cleaned",
+      cleaned: true,
+      original: "Hi Alice\n\n--\nKevin, Brand\nUnsubscribe: https://brand.com/u",
+    });
+    expect(textClean("gmail", "Sure, call me")).toEqual({ status: "nothing_kept", cleaned: false, original: "Sure, call me" });
+    expect(textClean("instantly", "Interested")).toBeNull();
+    expect(textClean("matrix", "Hello on WhatsApp")).toBeNull();
     const sources = Object.fromEntries(res.body.sources.map((s: { source: string }) => [s.source, s]));
     expect(sources.gmail.status).toBe("ok");
     expect(sources.instantly.status).toBe("ok");

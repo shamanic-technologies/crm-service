@@ -6,7 +6,7 @@ import { LEAD_STATUSES } from "./lib/matrix/leads.js";
 import { PEOPLE_SOURCES } from "./lib/people/identity.js";
 import { STATE_SOURCES } from "./lib/people/state.js";
 import { SOURCE_STATUSES } from "./lib/people/sources.js";
-import { TIMELINE_SOURCE_STATUSES } from "./lib/people/timeline.js";
+import { TEXT_CLEAN_STATUSES, TIMELINE_SOURCE_STATUSES } from "./lib/people/timeline.js";
 
 extendZodWithOpenApi(z);
 
@@ -1666,6 +1666,19 @@ const TimelineItemSchema = z
     event: z
       .object({ step: z.string(), dateBasis: z.string(), detail: z.record(z.string(), z.unknown()) })
       .nullable(),
+    textClean: z
+      .object({
+        status: z.enum(TEXT_CLEAN_STATUSES).openapi({
+          description:
+            "google-service bodyCleanStatus, verbatim. cleaned = only the sender's own lines; nothing_kept = no line was judged the sender's words, text is the ORIGINAL; pending / judge_failed = structural clean only (judged on a later read); not_applicable = no readable body (text is the snippet); not_cleaned = never cleaned.",
+        }),
+        cleaned: z.boolean().openapi({
+          description: "True only when text is the cleaned version (status cleaned). False = show the reader that this message is not cleaned.",
+        }),
+        original: z.string().nullable().openapi({ description: "The full original body, verbatim (null when the message has no readable body)." }),
+      })
+      .nullable()
+      .openapi({ description: "Gmail messages only; null for every other source. How `text` was derived, and the full original." }),
   })
   .openapi("PersonTimelineItem");
 

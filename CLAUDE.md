@@ -698,7 +698,11 @@ owner had written to. A recorded fact, never an address-shape guess.
   Instantly conversation per (campaign, address) — campaigns from the engaged
   row AND from lead-service, so a person cold-emailed but not engaged still
   shows the sends — Matrix raw events, GoHighLevel funnel events. Per source
-  `ok | empty | not_connected | failed` + what was `asked`.
+  `ok | empty | not_connected | failed` + what was `asked`. A Gmail item carries
+  `textClean {status, cleaned, original}` (null for other sources):
+  google-service's `bodyCleanStatus` verbatim, `cleaned` true only for `cleaned`,
+  `original` = `bodyTextOriginal`. google-service owns the cleaning; this only
+  forwards it, so an uncleaned fallback is never silent to the reader.
 - Cron on the box, every 15 min: `/root/distribute/people-sync-cron.sh` →
   `POST /internal/people/sync` (platform run = the trigger; one ORG run per
   scope). Env: `GOOGLE_/INSTANTLY_/LEAD_/BRAND_SERVICE_URL` + `_API_KEY`.
