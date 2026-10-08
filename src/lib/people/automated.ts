@@ -15,10 +15,19 @@
  * shown (`sender_verdicts`). Every later build reads the record: the cost is
  * one small judgment per NEW address, never one per page read or per rebuild.
  *
+ * WHO is judged: only a person known from Gmail ALONE, and only an address
+ * that actually SENT the mailbox something. Every other source is itself a
+ * recorded human relationship (a cold-email lead who replied or clicked, a
+ * signup, a paying customer, a CRM contact, a WhatsApp thread), and an address
+ * that never wrote is not a sender. Judged blind (no mail to read), Jev called
+ * real prospects automated at 0.5-0.8 on the first prod build — so they are
+ * not asked at all.
+ *
  * A person is hidden as automated only when Jev judged EVERY one of their
- * addresses automated with at least AUTOMATED_MIN_CONFIDENCE, and they carry no
- * phone. An address never judged (Jev failed, its sample could not be read) is
- * a human until judged — nobody disappears without Jev saying so.
+ * addresses automated with at least AUTOMATED_MIN_CONFIDENCE, they carry no
+ * phone, and Gmail is their only source. An address never judged (Jev failed,
+ * its sample could not be read) is a human until judged — nobody disappears
+ * without Jev saying so.
  */
 
 import { and, eq, inArray } from "drizzle-orm";
@@ -96,7 +105,7 @@ interface GmailConversation {
   }[];
 }
 
-/** The latest messages `email` sent to the org's mailbox, via google-service. */
+/** The latest messages `email` itself sent to the org's mailbox, via google-service. */
 async function gmailSample(identity: SiblingIdentity, email: string): Promise<SenderSample[]> {
   const r = await siblingGet("google", `/orgs/google/conversation?email=${encodeURIComponent(email)}&limit=20`, identity);
   const reason = (r.body as { reason?: string } | null)?.reason;
@@ -104,11 +113,11 @@ async function gmailSample(identity: SiblingIdentity, email: string): Promise<Se
   if (r.status !== 200) {
     throw new Error(`google-service conversation for ${email} returned ${r.status}: ${JSON.stringify(r.body).slice(0, 200)}`);
   }
-  const messages = (r.body as GmailConversation).threads.flatMap((t) => t.messages);
-  const sent = messages.filter((m) => m.direction === "inbound");
-  // Nothing inbound (the owner only wrote): show what was exchanged instead.
-  const pool = sent.length ? sent : messages;
-  return pool
+  // Only what the address wrote: a notification WE sent about them (a booking
+  // confirmation) says nothing about who they are.
+  return (r.body as GmailConversation).threads
+    .flatMap((t) => t.messages)
+    .filter((m) => m.direction === "inbound" && m.fromEmail?.toLowerCase() === email)
     .sort((a, b) => ((a.sentAt ?? "") < (b.sentAt ?? "") ? 1 : -1))
     .slice(0, SAMPLE_MESSAGES)
     .map((m) => ({
@@ -118,11 +127,22 @@ async function gmailSample(identity: SiblingIdentity, email: string): Promise<Se
     }));
 }
 
-/** What Jev is shown about each address of `clusters` (no sample fetched yet). */
+/** A person Jev may judge: known from Gmail alone (every other source is a recorded human relationship). */
+export function isGmailOnly(person: { presences: { source: string }[] }): boolean {
+  return person.presences.length > 0 && person.presences.every((p) => p.source === "gmail");
+}
+
+/**
+ * What Jev is shown about each address to judge (no sample fetched yet): the
+ * addresses of Gmail-only people that sent the mailbox at least one message.
+ */
 export function senderInputs(clusters: PersonCluster[]): Map<string, SenderInput> {
   const inputs = new Map<string, SenderInput>();
   for (const c of clusters) {
+    if (!isGmailOnly(c)) continue;
     for (const email of c.emails) {
+      const wrote = c.presences.some((p) => p.emails.includes(email) && (p.inboundCount ?? 0) > 0);
+      if (!wrote) continue;
       const input = inputs.get(email) ?? { email, names: [], appearsOn: [], recentMessages: [] };
       for (const p of c.presences) {
         if (!p.emails.includes(email)) continue;
@@ -206,13 +226,12 @@ export async function resolveSenderVerdicts(
   const ready: SenderInput[] = [];
   await mapLimit(toJudge, SAMPLE_CONCURRENCY, async (email) => {
     const input = inputs.get(email)!;
-    if (gmailReadable && input.appearsOn.some((a) => a.source === "gmail")) {
-      try {
-        input.recentMessages = await gmailSample(identity, email);
-      } catch (err) {
-        if (errors.length < 3) errors.push((err as Error).message);
-        return; // judged on a later build, once its mail can be read
-      }
+    if (!gmailReadable) return; // judged on a later build, once its mail can be read
+    try {
+      input.recentMessages = await gmailSample(identity, email);
+    } catch (err) {
+      if (errors.length < 3) errors.push((err as Error).message);
+      return;
     }
     ready.push(input);
   });
@@ -271,12 +290,12 @@ export async function resolveSenderVerdicts(
   };
 }
 
-/** True when Jev judged every address of the person automated, confidently, and no phone ties them to a human. */
+/** True when the person is Gmail-only, holds no phone, and Jev judged every address automated, confidently. */
 export function isAutomatedPerson(
-  person: { emails: string[]; phones: string[] },
+  person: { emails: string[]; phones: string[]; presences: { source: string }[] },
   verdicts: Map<string, RecordedVerdict>,
 ): boolean {
-  if (person.emails.length === 0 || person.phones.length > 0) return false;
+  if (person.emails.length === 0 || person.phones.length > 0 || !isGmailOnly(person)) return false;
   return person.emails.every((e) => {
     const v = verdicts.get(e);
     return v?.verdict === "automated" && v.confidence >= AUTOMATED_MIN_CONFIDENCE;

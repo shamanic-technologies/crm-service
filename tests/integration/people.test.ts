@@ -506,8 +506,9 @@ describe.skipIf(!RUN)("person layer", () => {
     it("hides a sender Jev judged automated, keeps the role address, and records each verdict once", async () => {
       const summary = await buildNow();
       expect(summary.senderVerdicts).toMatchObject({ status: "ok", reused: 0, pending: 0, automatedPeople: 1, model: "jev-test" });
-      // alice, bob, carol, the digest, sales@ — every address judged once.
-      expect(summary.senderVerdicts.judged).toBe(5);
+      // Only Gmail-only people who WROTE are asked: the digest and sales@. Never carol
+      // (the owner only wrote to her), never alice / bob (cold-email leads).
+      expect(summary.senderVerdicts.judged).toBe(2);
 
       // One judgments call, org-billed on the build's run, the digest's own mail as input.
       expect(jevRequests).toHaveLength(1);
@@ -540,6 +541,24 @@ describe.skipIf(!RUN)("person layer", () => {
       expect(jevRequests).toHaveLength(0);
       expect(again.senderVerdicts).toMatchObject({ judged: 0, pending: 0, automatedPeople: 1 });
       expect(await db.select().from(senderVerdicts).where(eq(senderVerdicts.email, DIGEST))).toHaveLength(1);
+    });
+
+    it("a person known from another source than Gmail is never asked about, nor hidden", async () => {
+      // Jev would call them automated if asked: bob replied to our cold email, carol never wrote.
+      automatedEmails = new Map([[DIGEST, 0.98], ["bob@y.com", 0.99], ["carol@z.com", 0.99]]);
+      await buildNow();
+      const asked = jevRequests.flatMap((r) => Object.values(r.body.state.senders).map((s) => s.email)).sort();
+      expect(asked).toEqual([DIGEST, "sales@prospect.com"]);
+      const keys = (await listPeople()).body.people.map((p: { personKey: string }) => p.personKey);
+      expect(keys).toEqual(expect.arrayContaining(["email:bob@y.com", "email:carol@z.com", "email:sales@prospect.com"]));
+
+      // Even a recorded 'automated' verdict does not hide a cold-email lead.
+      await db.insert(senderVerdicts).values({
+        orgId: ORG, email: "bob@y.com", verdict: "automated", confidence: 0.99, probabilities: {}, input: {}, model: "jev-test", runId: "r",
+      });
+      await buildNow();
+      const [bob] = await db.select().from(people).where(eq(people.personKey, "email:bob@y.com"));
+      expect(bob.automated).toBe(false);
     });
 
     it("a hesitant 'automated' verdict does not hide the person", async () => {
