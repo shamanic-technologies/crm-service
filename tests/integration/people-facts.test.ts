@@ -481,6 +481,48 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
     expect(stored.every((f) => f.live)).toBe(true);
   });
 
+  it("a reconnect re-mints contact rows: every fact naming the old row is withdrawn and re-stated with the new one", async () => {
+    const s = await seed();
+    await emitScopeFacts(s.scope);
+    const ghlBefore = (await allFacts()).filter((f) => f.source === "gohighlevel");
+    expect(new Set(ghlBefore.map((f) => f.crmContactId))).toEqual(new Set([s.aliceGhl]));
+    const cursor = await maxSeq();
+
+    // Disconnect (the connection and everything derived go), then reconnect: the
+    // first sync has mirrored the contact again under a NEW row id, nothing else yet.
+    await db.delete(contacts).where(and(eq(contacts.brandId, BRAND), eq(contacts.source, "gohighlevel")));
+    await db.delete(ghlConnections).where(eq(ghlConnections.id, s.ghlId));
+    const [ghl2] = await db.insert(ghlConnections).values({ orgId: ORG, brandId: BRAND, locationId: "loc", createdByUserId: USER }).returning();
+    const [alice2] = await db
+      .insert(contacts)
+      .values({ orgId: ORG, brandId: BRAND, source: "gohighlevel", externalId: "ghl-alice", primaryEmail: "alice@x.com", phoneE164: "+33612345678", fullName: "Alice Martin", rawAttributes: {}, originMedium: "form", leadSource: "Meta Ads", sourceCreatedAt: new Date("2026-08-01T10:00:00Z"), sourceConnectionId: ghl2.id })
+      .returning();
+    const [alice] = await db.select().from(people).where(eq(people.scopeId, s.scope.id));
+    await setPeople(s.scope, [
+      {
+        personKey: "email:alice@x.com",
+        emails: ["alice@x.com"],
+        phones: ["+33612345678"],
+        name: "Alice Martin",
+        presences: (alice.presences as Presence[]).map((p) => (p.source === "gohighlevel" ? { ...p, sourceRef: alice2.id, detail: { ...p.detail, contactId: alice2.id } } : p)),
+      },
+    ]);
+
+    const summary = await emitScopeFacts(s.scope);
+    // Not fully synced yet: nothing counts as gone; every GoHighLevel fact is re-stated once.
+    expect(summary).toMatchObject({ withdrawnGone: 0, corrected: 0, reminted: ghlBefore.length, emitted: ghlBefore.length });
+    const added = (await readFacts({ since: cursor, limit: 1000 })).facts;
+    const withdrawn = added.filter((f) => f.type === "withdrawn");
+    expect(withdrawn.map((w) => w.withdrawnOf).sort()).toEqual(ghlBefore.map((f) => f.factId).sort());
+    expect(withdrawn.every((w) => (w.payload as { reason: string }).reason === "crm_contact_reminted")).toBe(true);
+    const restated = added.filter((f) => f.type !== "withdrawn");
+    expect(restated.every((f) => f.crmContactId === alice2.id && f.sourceContactId === "ghl-alice")).toBe(true);
+    const same = (f: (typeof ghlBefore)[number]) => `${f.type}|${f.occurredAt}|${f.dateBasis}|${f.sourceRef}|${JSON.stringify(f.payload)}`;
+    expect(restated.map(same).sort()).toEqual(ghlBefore.map(same).sort());
+    expect(Math.min(...restated.map((f) => Number(f.seq)))).toBeGreaterThan(Math.max(...withdrawn.map((f) => Number(f.seq))));
+    expect((await emitScopeFacts(s.scope)).emitted).toBe(0);
+  });
+
   it("a person split partitions the old key's facts exactly; a merge names both keys", async () => {
     const s = await seed();
     await emitScopeFacts(s.scope);

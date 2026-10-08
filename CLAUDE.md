@@ -739,8 +739,12 @@ lead-service serves the overall tag, then go.
   emails, phones, fullName, sourceContactId, crmContactId, type, occurredAt,
   dateBasis, source, sourceRef, payload, withdrawnOf?`. `sourceContactId` = the
   vendor's contact id; `crmContactId` = OUR `contacts.id` (what funnel-events
-  serves as `contactId`, and what lead-service's pairings are keyed on), kept
-  out of the content hash so a reconnect's new row ids re-emit nothing.
+  serves as `contactId`, and what lead-service's pairings are keyed on). A
+  disconnect + reconnect re-mints row ids: every live fact whose vendor contact
+  now sits on a new row is `withdrawn` (`crm_contact_reminted`) and re-stated
+  with the new id, history facts included, so the id always names a row the
+  contacts reads still serve. A snapshot record counts as gone only once its
+  connection has finished a full sync (`last_synced_at`).
 - **Emitted after every people build** (`emitScopeFacts`, recorded as
   `sourceReads.facts`; a failure never undoes the build). Candidates are
   re-derived from silver + the Gmail store and DIFFED on a natural key (vendor
@@ -775,6 +779,11 @@ lead-service serves the overall tag, then go.
   → `person_merged`. Order inside a pass: splits, merges, withdrawals, new facts.
 - Bookkeeping columns (`live`, `owner_person_key`, `subject_*`, `natural_key`,
   `content_hash`) are never served; every served column is append-only.
+  ⚠️ **Never UPDATE a served column, not even in a migration that adds a new
+  served field**: lead-service's bronze copies each fact once and never re-reads
+  it. A new field reaches old facts as `withdrawn` + re-emit. (v0.18.0 backfilled
+  `crmContactId` in place before lead-service read the feed; lead-service had to
+  empty and re-pull. Allowed once, never again.)
 
 ## PostHog + Stripe — what a person DID and what they PAID (`src/lib/posthog/`, `src/lib/stripe/`)
 
