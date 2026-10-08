@@ -13,6 +13,14 @@ import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { ensureScope, runPeopleBuildPass, runScopeBuild, type BuildSummary } from "../lib/people/build.js";
 import { PEOPLE_SOURCES, type Presence } from "../lib/people/identity.js";
 import { findPerson, readTimeline } from "../lib/people/timeline.js";
+import {
+  matchesOf,
+  messageHitsFor,
+  messageIndexCoverage,
+  messageMatchKeys,
+  searchPredicate,
+  SEARCH_MAX_LENGTH,
+} from "../lib/people/search.js";
 
 const router = Router();
 
@@ -24,6 +32,9 @@ const listQuerySchema = z.object({
   source: z.enum(PEOPLE_SOURCES).optional(),
   // Automated senders (Jev-judged digests, notifications, no-replies) are hidden unless asked for.
   includeAutomated: z.enum(["true", "false"]).optional(),
+  // Search: name, any email / phone, company, and what was said in their messages.
+  // Blank (or absent) = the plain list, unchanged.
+  q: z.string().max(SEARCH_MAX_LENGTH).optional(),
 });
 
 const PRESENCE_CHANNEL: Partial<Record<Presence["source"], string>> = {
@@ -102,6 +113,7 @@ router.get(
     const includeAutomated = parsed.data.includeAutomated === "true";
     const limit = parsed.data.limit ?? 100;
     const offset = parsed.data.offset ?? 0;
+    const q = parsed.data.q?.trim() || null;
     try {
       const { scope, created } = await ensureScope(req.orgId!, brandId, req.userId!);
       const building = created || scope.status === "pending";
@@ -111,17 +123,27 @@ router.get(
         });
       }
 
+      const startedAt = Date.now();
+      const keys = q ? await messageMatchKeys(scope.id, req.orgId!, brandId, q) : null;
       const where = and(
         eq(people.scopeId, scope.id),
         source ? sql`${people.sources} @> ${JSON.stringify([source])}::jsonb` : sql`true`,
         includeAutomated ? sql`true` : eq(people.automated, false),
+        q && keys ? searchPredicate(q, keys) : sql`true`,
       );
       const [{ automatedHidden }] = includeAutomated
         ? [{ automatedHidden: 0 }]
         : await db
             .select({ automatedHidden: sql<number>`count(*)::int` })
             .from(people)
-            .where(and(eq(people.scopeId, scope.id), eq(people.automated, true)));
+            .where(
+              and(
+                eq(people.scopeId, scope.id),
+                eq(people.automated, true),
+                // Under a search: the automated people the search WOULD have returned.
+                q && keys ? searchPredicate(q, keys) : sql`true`,
+              ),
+            );
       const [{ total }] = await db.select({ total: sql<number>`count(*)::int` }).from(people).where(where);
       const rows = await db
         .select()
@@ -138,6 +160,32 @@ router.get(
         GROUP BY s
       `)) as unknown as { source: string; people: number }[];
       const reads = scope.sourceReads as BuildSummary | null;
+
+      let search: { q: string; messageIndex: Awaited<ReturnType<typeof messageIndexCoverage>>; tookMs: number } | null = null;
+      let matches: ReturnType<typeof matchesOf>[] = [];
+      if (q && keys) {
+        const pageEmails = rows.flatMap((r) => r.emails as string[]).filter((e) => keys.addresses.includes(e));
+        const pageConvs = rows
+          .flatMap((r) => r.presences as Presence[])
+          .filter((p) => p.source === "matrix" && typeof p.detail.conversationId === "string")
+          .map((p) => p.detail.conversationId as string)
+          .filter((c) => keys.conversationIds.includes(c));
+        const hits = await messageHitsFor(scope.id, q, pageEmails, pageConvs);
+        matches = rows.map((r) =>
+          matchesOf(
+            {
+              displayName: r.displayName,
+              company: r.company,
+              emails: r.emails as string[],
+              phones: r.phones as string[],
+              presences: r.presences as Presence[],
+            },
+            q,
+            hits,
+          ),
+        );
+        search = { q, messageIndex: await messageIndexCoverage(scope.id), tookMs: Date.now() - startedAt };
+      }
 
       res.json({
         brandId,
@@ -164,7 +212,8 @@ router.get(
         limit,
         offset,
         nextOffset: offset + rows.length < total ? offset + rows.length : null,
-        people: rows.map(personView),
+        ...(search ? { search } : {}),
+        people: search ? rows.map((r, i) => ({ ...personView(r), ...matches[i] })) : rows.map(personView),
       });
     } catch (err) {
       next(err);

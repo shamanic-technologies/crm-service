@@ -46,6 +46,7 @@ import {
   type SenderVerdictSummary,
 } from "./automated.js";
 import { resolvePersonState, type GhlDeal, type LeadObservation, type StripeStandingInput } from "./state.js";
+import { indexScopeMessages, type MessageIndexSummary } from "./search.js";
 
 /** How long lead-service's answer about an address is reused. */
 export const STANDING_TTL_MS = 60 * 60 * 1000;
@@ -88,6 +89,8 @@ export interface BuildSummary {
   ownAddresses: { status: "ok" | "failed"; addresses: number; domain: string | null; error: string | null };
   /** Jev's human-vs-automated verdicts: how many reused, judged now, still pending; people hidden. */
   senderVerdicts: SenderVerdictSummary;
+  /** The message search index refresh that followed the build (absent until it ran). */
+  messageIndex?: ({ status: "ok" } & MessageIndexSummary) | { status: "failed"; error: string };
 }
 
 function firstNonNull(
@@ -323,6 +326,17 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       .set({ status: "built", sourceReads: summary, lastError: null, lastBuiltAt: new Date(), lastRunId: runId })
       .where(eq(peopleScopes.id, scope.id));
   });
+
+  // The people are live; now bring the message search index up to date with them.
+  // Its failure does not undo the build: it is recorded beside it and retried next pass.
+  try {
+    const indexed = await indexScopeMessages(scope, rows, identity, gmail.status === "ok");
+    summary.messageIndex = { status: "ok", ...indexed };
+  } catch (err) {
+    console.error(`[crm-service] people message index failed scope=${scope.id}:`, err);
+    summary.messageIndex = { status: "failed", error: (err as Error).message };
+  }
+  await db.update(peopleScopes).set({ sourceReads: summary }).where(eq(peopleScopes.id, scope.id));
 
   return summary;
 }

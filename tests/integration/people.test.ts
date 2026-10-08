@@ -44,6 +44,7 @@ const json = (body: unknown, status = 200) =>
 
 let gmailConnected = false;
 let leadServiceDown = false;
+let gmailConversationDown = false;
 const calls: string[] = [];
 
 /** Jev's stub: these addresses are automated, at this confidence; every other address is human. */
@@ -133,6 +134,7 @@ function installFetchStub() {
         return json({ items: [], nextCursor: null });
       }
       if (url.pathname === "/orgs/google/conversation") {
+        if (gmailConversationDown) return json({ error: "boom" }, 500);
         if (!gmailConnected) return json({ reason: "no_google_account_connected" }, 404);
         if (url.searchParams.get("email") === DIGEST) {
           return json({
@@ -335,6 +337,7 @@ describe.skipIf(!RUN)("person layer", () => {
   beforeEach(async () => {
     gmailConnected = false;
     leadServiceDown = false;
+    gmailConversationDown = false;
     automatedEmails = new Map();
     jevDown = false;
     extraCorrespondents = [];
@@ -600,6 +603,133 @@ describe.skipIf(!RUN)("person layer", () => {
       const up = await buildNow();
       expect(up.senderVerdicts).toMatchObject({ status: "ok", pending: 0, automatedPeople: 1 });
       expect((await listPeople()).body.automatedHidden).toBe(1);
+    });
+  });
+
+  describe("search", () => {
+    const search = (q: string, extra = "") =>
+      request(app())
+        .get(`/orgs/people?brandId=${BRAND}&q=${encodeURIComponent(q)}${extra}`)
+        .set("x-api-key", API_KEY)
+        .set("x-org-id", ORG)
+        .set("x-user-id", USER);
+    const keysOf = (res: { body: { people: { personKey: string }[] } }) => res.body.people.map((p) => p.personKey);
+
+    beforeEach(async () => {
+      gmailConnected = true;
+      await seedLocalSources();
+      await buildNow();
+    });
+
+    it("finds a person by first name, email domain, company and phone, saying which field matched", async () => {
+      const name = await search("alice");
+      expect(name.status).toBe(200);
+      expect(keysOf(name)).toEqual(["email:alice@x.com"]);
+      expect(name.body.people[0].matches).toEqual(
+        expect.arrayContaining([
+          { field: "name", value: "Alice Martin" },
+          { field: "email", value: "alice@x.com" },
+        ]),
+      );
+
+      const domain = await search("Y.COM");
+      expect(keysOf(domain)).toEqual(["email:bob@y.com"]);
+      expect(domain.body.people[0].matches).toEqual([{ field: "email", value: "bob@y.com" }]);
+
+      const company = await search("acme");
+      expect(keysOf(company)).toEqual(["email:alice@x.com"]);
+      expect(company.body.people[0].matches[0]).toEqual({ field: "company", value: "Acme" });
+
+      const phone = await search("612 345");
+      expect(keysOf(phone)).toEqual(["email:alice@x.com"]);
+      expect(phone.body.people[0].matches[0]).toEqual({ field: "phone", value: "+33612345678" });
+    });
+
+    it("finds a person by a word only present in one of their messages, on every channel, with an excerpt", async () => {
+      const gmail = await search("call me");
+      expect(keysOf(gmail)).toEqual(["email:alice@x.com"]);
+      expect(gmail.body.people[0].matches).toEqual([
+        {
+          field: "message",
+          source: "gmail",
+          at: "2026-09-03T09:00:00.000Z",
+          direction: "inbound",
+          subject: "Re: Intro",
+          excerpt: "Sure, call me",
+          ref: { gmailMessageId: "g2" },
+        },
+      ]);
+      expect(gmail.body.people[0].messageMatches).toBe(1);
+
+      const cold = await search("interested");
+      expect(keysOf(cold)).toEqual(["email:alice@x.com"]);
+      expect(cold.body.people[0].matches[0]).toMatchObject({ field: "message", source: "instantly", excerpt: "Interested", ref: { campaignId: "camp-1" } });
+
+      const wa = await search("on whatsapp");
+      expect(keysOf(wa)).toEqual(["email:alice@x.com"]);
+      expect(wa.body.people[0].matches[0]).toMatchObject({ field: "message", source: "matrix", direction: "inbound", excerpt: "Hello on WhatsApp" });
+
+      expect(wa.body.search).toMatchObject({ q: "on whatsapp", messageIndex: { failed: 0 } });
+      expect(wa.body.search.messageIndex.messages).toBeGreaterThan(0);
+    });
+
+    it("a search that matches nobody is an empty page, and LIKE wildcards are literal", async () => {
+      for (const q of ["pricing", "%", "_"]) {
+        const res = await search(q);
+        expect(res.status).toBe(200);
+        expect(res.body).toMatchObject({ total: 0, nextOffset: null, people: [] });
+      }
+    });
+
+    it("an empty search is today's list, byte for byte", async () => {
+      const plain = await request(app()).get(`/orgs/people?brandId=${BRAND}`).set("x-api-key", API_KEY).set("x-org-id", ORG).set("x-user-id", USER);
+      for (const q of ["", "   "]) {
+        const res = await search(q);
+        expect(res.body).toEqual(plain.body);
+      }
+      expect(plain.body.search).toBeUndefined();
+      expect(plain.body.people[0].matches).toBeUndefined();
+    });
+
+    it("pages and counts the matches like the list", async () => {
+      const page1 = await search("@", "&limit=2");
+      expect(page1.body.total).toBe(3);
+      expect(page1.body.nextOffset).toBe(2);
+      const page2 = await search("@", "&limit=2&offset=2");
+      expect([...keysOf(page1), ...keysOf(page2)].sort()).toEqual(["email:alice@x.com", "email:bob@y.com", "email:carol@z.com"]);
+    });
+
+    it("automated senders stay hidden from a search unless asked for", async () => {
+      extraCorrespondents = [{ email: DIGEST, name: "LinkedIn" }];
+      automatedEmails = new Map([[DIGEST, 0.9]]);
+      await buildNow();
+      const hidden = await search("just messaged you");
+      expect(hidden.body).toMatchObject({ total: 0, automatedHidden: 1, people: [] });
+      const shown = await search("just messaged you", "&includeAutomated=true");
+      expect(keysOf(shown)).toEqual([`email:${DIGEST}`]);
+    });
+
+    it("a rebuild with no new activity re-reads no conversation; the index survives the rebuild", async () => {
+      calls.length = 0;
+      await buildNow();
+      expect(calls.filter((c) => c.endsWith("/orgs/google/conversation") || c.endsWith("/orgs/conversations"))).toEqual([]);
+      expect(keysOf(await search("call me"))).toEqual(["email:alice@x.com"]);
+    });
+
+    it("a failed conversation read is recorded and reported, its old text kept, and retried next build", async () => {
+      const [scope] = await db.select().from(peopleScopes);
+      // Force a re-read of every unit.
+      await db.execute(sql`UPDATE people_message_units SET indexed_at = now() - interval '2 days' WHERE scope_id = ${scope.id}`);
+      gmailConversationDown = true;
+      const s1 = await buildNow();
+      expect(s1.messageIndex).toMatchObject({ status: "ok", failed: 3 }); // the Gmail read of alice, bob and carol
+      const during = await search("call me");
+      expect(keysOf(during)).toEqual(["email:alice@x.com"]); // the last good read still answers
+      expect(during.body.search.messageIndex.failed).toBeGreaterThan(0);
+      gmailConversationDown = false;
+      const s2 = await buildNow();
+      expect(s2.messageIndex).toMatchObject({ status: "ok", failed: 0 });
+      expect((await search("call me")).body.search.messageIndex.failed).toBe(0);
     });
   });
 });

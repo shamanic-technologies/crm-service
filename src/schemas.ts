@@ -1611,6 +1611,21 @@ const PeopleSourceReadSchema = z
   })
   .openapi("PeopleSourceRead");
 
+const SearchMatchSchema = z
+  .object({
+    field: z.enum(["name", "company", "email", "phone", "message"]).openapi({
+      description: "Why the person matched. name / company / email / phone carry `value`; message carries the message fields.",
+    }),
+    value: z.string().optional().openapi({ description: "The identity value that holds the query (name, company, email, phone)." }),
+    source: z.enum(["gmail", "instantly", "matrix"]).optional(),
+    at: z.string().nullable().optional(),
+    direction: z.string().nullable().optional().openapi({ description: "inbound = the person wrote; outbound = the brand did." }),
+    subject: z.string().nullable().optional(),
+    excerpt: z.string().optional().openapi({ description: "~120 characters of the message around the first occurrence of the query." }),
+    ref: z.record(z.string(), z.string().nullable()).optional().openapi({ description: "The source's ids for the message (gmailMessageId; campaignId; eventId / roomId / conversationId)." }),
+  })
+  .openapi("PeopleSearchMatch");
+
 const PeopleListResponseSchema = registry.register(
   "PeopleListResponse",
   z
@@ -1646,7 +1661,30 @@ const PeopleListResponseSchema = registry.register(
       limit: z.number().int(),
       offset: z.number().int(),
       nextOffset: z.number().int().nullable(),
-      people: z.array(PersonSchema),
+      search: z
+        .object({
+          q: z.string(),
+          messageIndex: z
+            .object({
+              units: z.number().int().openapi({ description: "Conversations indexed for search (one per Gmail address, one per cold-email campaign x address)." }),
+              indexed: z.number().int(),
+              failed: z.number().int().openapi({ description: "Conversations whose last read failed: their newest messages may be missing from the search." }),
+              messages: z.number().int(),
+              lastIndexedAt: z.string().nullable(),
+            })
+            .openapi({ description: "Coverage of the Gmail + cold-email message index the search read (WhatsApp / Telegram / Discord text is searched in place, always complete)." }),
+          tookMs: z.number().int(),
+        })
+        .optional()
+        .openapi({ description: "Present only when `q` is set." }),
+      people: z.array(
+        PersonSchema.extend({
+          matches: z.array(SearchMatchSchema).optional().openapi({
+            description: "Search only: every identity field holding the query, then up to 3 newest matching messages.",
+          }),
+          messageMatches: z.number().int().optional().openapi({ description: "Search only: how many of the person's messages hold the query." }),
+        }),
+      ),
     })
     .openapi("PeopleListResponse"),
 );
@@ -1727,6 +1765,13 @@ registry.registerPath({
       offset: z.coerce.number().int().min(0).optional(),
       source: PeopleSourceSchema.optional().openapi({ description: "Only people present on this source." }),
       includeAutomated: z.enum(["true", "false"]).optional().openapi({ description: "Also return automated senders (person.automated = true). Default false: hidden." }),
+      q: z.string().max(200).optional().openapi({
+        description:
+          "Search (case-insensitive substring, whole query): the person's name, any email (a domain works), any phone (4+ digits), " +
+          "company, and the subject/body of their Gmail, cold-email and WhatsApp / Telegram / Discord messages. Same order, paging " +
+          "and filters as the list; total counts matches. Each person carries `matches` (why) and the response `search` (index coverage). " +
+          "Blank = the plain list.",
+      }),
     }),
   },
   responses: {
