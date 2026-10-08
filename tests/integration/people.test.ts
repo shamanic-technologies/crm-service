@@ -13,6 +13,7 @@ import {
   matrixRawEvents,
   people,
   peopleScopes,
+  senderVerdicts,
 } from "../../src/db/schema.js";
 import { ensureScope, runScopeBuild } from "../../src/lib/people/build.js";
 import peopleRoutes from "../../src/routes/people.js";
@@ -44,6 +45,16 @@ const json = (body: unknown, status = 200) =>
 let gmailConnected = false;
 let leadServiceDown = false;
 const calls: string[] = [];
+
+/** Jev's stub: these addresses are automated, at this confidence; every other address is human. */
+let automatedEmails = new Map<string, number>();
+let jevDown = false;
+const jevRequests: { headers: Record<string, string>; body: { state: { senders: Record<string, { email: string; recentMessages: { subject: string | null }[] }> }; questions: Record<string, unknown> } }[] = [];
+
+/** Extra Gmail correspondents a test adds (an automated digest, a role address). */
+let extraCorrespondents: { email: string; name: string | null }[] = [];
+
+const DIGEST = "messaging-digest-noreply@linkedin.com";
 
 const ENGAGED = [
   {
@@ -78,9 +89,24 @@ const ENGAGED = [
 
 function installFetchStub() {
   calls.length = 0;
-  vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+  jevRequests.length = 0;
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     calls.push(`${url.host}${url.pathname}`);
+    if (url.host === "localhost:9998" && url.pathname === "/orgs/judgments") {
+      if (jevDown) return json({ error: "jev down" }, 503);
+      const body = JSON.parse(String(init!.body));
+      jevRequests.push({ headers: init!.headers as Record<string, string>, body });
+      const answers: Record<string, unknown> = {};
+      for (const [key, sender] of Object.entries(body.state.senders as Record<string, { email: string }>)) {
+        const confidence = automatedEmails.get(sender.email);
+        answers[key] =
+          confidence === undefined
+            ? { type: "choice", choice: "human", confidence: 0.95, probabilities: { human: 0.97, automated: 0.03 } }
+            : { type: "choice", choice: "automated", confidence, probabilities: { human: 1 - confidence, automated: confidence } };
+      }
+      return json({ model: "jev-test", answers });
+    }
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
       return json({ id: "run-" + Math.random().toString(16).slice(2) });
     }
@@ -89,7 +115,7 @@ function installFetchStub() {
         if (!gmailConnected) return json({ error: "none", reason: "no_google_account_connected" }, 404);
         return json({
           ownerAddresses: ["me@brand.com"],
-          total: 4,
+          total: 4 + extraCorrespondents.length,
           twoWayTotal: 1,
           limit: 1000,
           offset: 0,
@@ -99,6 +125,7 @@ function installFetchStub() {
             { email: "kevin@send.com", name: "Kevin", nameSource: "message", outboundMessages: 3, inboundMessages: 0, twoWay: false, firstMessageAt: "2026-08-01T09:00:00.000Z", lastMessageAt: "2026-08-02T09:00:00.000Z", lastOutboundAt: null, lastInboundAt: null },
             { email: "colleague@brand.com", name: null, nameSource: null, outboundMessages: 1, inboundMessages: 1, twoWay: true, firstMessageAt: "2026-08-01T09:00:00.000Z", lastMessageAt: "2026-08-02T09:00:00.000Z", lastOutboundAt: null, lastInboundAt: null },
             { email: "carol@z.com", name: null, nameSource: null, outboundMessages: 1, inboundMessages: 0, twoWay: false, firstMessageAt: "2026-08-01T09:00:00.000Z", lastMessageAt: "2026-08-01T09:00:00.000Z", lastOutboundAt: null, lastInboundAt: null },
+            ...extraCorrespondents.map((c) => ({ ...c, nameSource: null, outboundMessages: 1, inboundMessages: 3, twoWay: true, firstMessageAt: "2026-07-01T09:00:00.000Z", lastMessageAt: "2026-07-10T09:00:00.000Z", lastOutboundAt: null, lastInboundAt: null })),
           ],
         });
       }
@@ -107,6 +134,20 @@ function installFetchStub() {
       }
       if (url.pathname === "/orgs/google/conversation") {
         if (!gmailConnected) return json({ reason: "no_google_account_connected" }, 404);
+        if (url.searchParams.get("email") === DIGEST) {
+          return json({
+            address: DIGEST,
+            status: "ok",
+            threads: [
+              {
+                threadId: "td",
+                messages: [
+                  { gmailMessageId: "d1", threadId: "td", direction: "inbound", fromEmail: DIGEST, to: ["me@brand.com"], subject: "Marwene just messaged you", snippet: "You have 1 new message", sentAt: "2026-07-10T09:00:00.000Z", bodyText: null, bodyStatus: "ok" },
+                ],
+              },
+            ],
+          });
+        }
         if (url.searchParams.get("email") !== "alice@x.com") return json({ reason: "no_messages" }, 404);
         return json({
           address: "alice@x.com",
@@ -197,7 +238,7 @@ function installFetchStub() {
 }
 
 async function wipe() {
-  await db.execute(sql`TRUNCATE people_scopes, people, lead_standing_observations, matrix_raw_events, conversations, matrix_leads, matrix_connections, ghl_opportunities, ghl_connections, contacts CASCADE`);
+  await db.execute(sql`TRUNCATE sender_verdicts, people_scopes, people, lead_standing_observations, matrix_raw_events, conversations, matrix_leads, matrix_connections, ghl_opportunities, ghl_connections, contacts CASCADE`);
 }
 
 /** Alice in GoHighLevel (email + phone, a won deal) and on WhatsApp (phone only). */
@@ -290,6 +331,9 @@ describe.skipIf(!RUN)("person layer", () => {
   beforeEach(async () => {
     gmailConnected = false;
     leadServiceDown = false;
+    automatedEmails = new Map();
+    jevDown = false;
+    extraCorrespondents = [];
     installFetchStub();
     await wipe();
   });
@@ -439,5 +483,86 @@ describe.skipIf(!RUN)("person layer", () => {
       .set("x-user-id", USER);
     expect(res.status).toBe(404);
     expect(res.body.reason).toBe("person_not_found");
+  });
+
+  describe("automated senders", () => {
+    const listPeople = (query = "") =>
+      request(app())
+        .get(`/orgs/people?brandId=${BRAND}${query}`)
+        .set("x-api-key", API_KEY)
+        .set("x-org-id", ORG)
+        .set("x-user-id", USER);
+
+    beforeEach(() => {
+      gmailConnected = true;
+      extraCorrespondents = [
+        { email: DIGEST, name: "Marwene Amor via LinkedIn" },
+        // A prospect writing from a role address: human unless Jev says otherwise.
+        { email: "sales@prospect.com", name: "Prospect Sales" },
+      ];
+      automatedEmails = new Map([[DIGEST, 0.98]]);
+    });
+
+    it("hides a sender Jev judged automated, keeps the role address, and records each verdict once", async () => {
+      const summary = await buildNow();
+      expect(summary.senderVerdicts).toMatchObject({ status: "ok", reused: 0, pending: 0, automatedPeople: 1, model: "jev-test" });
+      // alice, bob, carol, the digest, sales@ — every address judged once.
+      expect(summary.senderVerdicts.judged).toBe(5);
+
+      // One judgments call, org-billed on the build's run, the digest's own mail as input.
+      expect(jevRequests).toHaveLength(1);
+      expect(jevRequests[0].headers["x-org-id"]).toBe(ORG);
+      expect(jevRequests[0].headers["x-user-id"]).toBe(USER);
+      expect(jevRequests[0].headers["x-run-id"]).toMatch(/^run-/);
+      const digestInput = Object.values(jevRequests[0].body.state.senders).find((s) => s.email === DIGEST)!;
+      expect(digestInput.recentMessages[0].subject).toBe("Marwene just messaged you");
+
+      const list = await listPeople();
+      const keys = list.body.people.map((p: { personKey: string }) => p.personKey);
+      expect(keys).not.toContain(`email:${DIGEST}`);
+      expect(keys).toContain("email:sales@prospect.com");
+      expect(list.body.automatedHidden).toBe(1);
+      expect(list.body.total).toBe(keys.length);
+      expect(list.body.people.every((p: { automated: boolean }) => p.automated === false)).toBe(true);
+
+      const all = await listPeople("&includeAutomated=true");
+      expect(all.body.total).toBe(list.body.total + 1);
+      const digest = all.body.people.find((p: { personKey: string }) => p.personKey === `email:${DIGEST}`);
+      expect(digest).toMatchObject({ automated: true, automatedVerdict: [{ email: DIGEST, verdict: "automated", confidence: 0.98 }] });
+
+      // The source data stays whole: the digest is still counted as read from Gmail.
+      const gmail = list.body.sources.find((s: { source: string }) => s.source === "gmail");
+      expect(gmail.presences).toBe(4);
+
+      // A rebuild reads the record: no new judgment.
+      jevRequests.length = 0;
+      const again = await buildNow();
+      expect(jevRequests).toHaveLength(0);
+      expect(again.senderVerdicts).toMatchObject({ judged: 0, pending: 0, automatedPeople: 1 });
+      expect(await db.select().from(senderVerdicts).where(eq(senderVerdicts.email, DIGEST))).toHaveLength(1);
+    });
+
+    it("a hesitant 'automated' verdict does not hide the person", async () => {
+      automatedEmails = new Map([[DIGEST, 0.4]]);
+      const summary = await buildNow();
+      expect(summary.senderVerdicts.automatedPeople).toBe(0);
+      const list = await listPeople();
+      expect(list.body.people.map((p: { personKey: string }) => p.personKey)).toContain(`email:${DIGEST}`);
+    });
+
+    it("Jev down: nobody is hidden, the failure is reported, and the next build judges", async () => {
+      jevDown = true;
+      const down = await buildNow();
+      expect(down.senderVerdicts.status).toBe("failed");
+      expect(down.senderVerdicts.error).toMatch(/judgments/);
+      expect(down.senderVerdicts.pending).toBeGreaterThan(0);
+      expect(down.senderVerdicts.automatedPeople).toBe(0);
+      expect((await listPeople()).body.automatedHidden).toBe(0);
+
+      jevDown = false;
+      const up = await buildNow();
+      expect(up.senderVerdicts).toMatchObject({ status: "ok", pending: 0, automatedPeople: 1 });
+      expect((await listPeople()).body.automatedHidden).toBe(1);
+    });
   });
 });

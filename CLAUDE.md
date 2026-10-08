@@ -657,6 +657,17 @@ counted per source as `excludedOwn`. Measured on the first build for
 Distribute.you: 75 of 656 "people" were our own warm-up / sending mailboxes the
 owner had written to. A recorded fact, never an address-shape guess.
 
+- **Automated senders are nobody either — and Jev says who they are**
+  (`automated.ts`). A LinkedIn "X just messaged you" digest, a receipt, a
+  newsletter, a no-reply: one Jev `choice` (`human|automated`) per ADDRESS,
+  input = the address, its names, per-source counts and its 3 latest Gmail
+  subjects/snippets. No regex of ours. Recorded in `sender_verdicts` keyed
+  (org, email), so an address is judged ONCE (a rebuild makes zero calls).
+  A person is `automated` only when EVERY address is `automated` at
+  confidence >= 0.5 and they hold no phone; `GET /orgs/people` hides them
+  unless `includeAutomated=true` (`automatedHidden` counts them). Jev down =
+  nobody hidden, `senderVerdicts.status=failed`, retried next build. Source
+  data stays whole.
 - **Merge only on positive evidence.** Keys are `email:<lower>` and
   `phone:+<digits>` (international only — a national number has no country and
   is no key). Two keys merge only when ONE record states both: a GoHighLevel /

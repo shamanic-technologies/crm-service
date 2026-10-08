@@ -971,6 +971,13 @@ export const people = pgTable(
     stateSource: text("state_source").notNull(),
     stateDetail: jsonb("state_detail"),
 
+    // Jev said EVERY address of the person is an automated sender (a digest, a
+    // notification, a no-reply, a newsletter): hidden from the list by default.
+    // The verdicts that decided it ride in `automated_verdict` (see
+    // people/automated.ts). A person never judged is not automated.
+    automated: boolean("automated").notNull().default(false),
+    automatedVerdict: jsonb("automated_verdict"),
+
     builtAt: timestamp("built_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
@@ -1005,6 +1012,34 @@ export const leadStandingObservations = pgTable(
       table.email,
     ),
   ],
+);
+
+/**
+ * Whether one email address is a HUMAN or an AUTOMATED sender, as Jev judged it
+ * (chat-service `POST /orgs/judgments`, one `choice` question per address, the
+ * address and what the mail it sent carries as input). Never a regex of ours.
+ *
+ * Keyed per (org, email): an address does not change nature, so it is judged
+ * ONCE and every later build reads the record — no model call per page read or
+ * per rebuild. Gmail is connected per ORG, so the org is the scope. `confidence`
+ * and `probabilities` are Jev's own; `input` is exactly what Jev was shown.
+ */
+export const senderVerdicts = pgTable(
+  "sender_verdicts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    email: text("email").notNull(),
+    // human | automated
+    verdict: text("verdict").notNull(),
+    confidence: doublePrecision("confidence").notNull(),
+    probabilities: jsonb("probabilities").notNull(),
+    input: jsonb("input").notNull(),
+    model: text("model").notNull(),
+    runId: text("run_id").notNull(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("sender_verdicts_org_email_uq").on(table.orgId, table.email)],
 );
 
 /**

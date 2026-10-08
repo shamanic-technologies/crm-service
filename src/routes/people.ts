@@ -22,6 +22,8 @@ const listQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(500).optional(),
   offset: z.coerce.number().int().min(0).optional(),
   source: z.enum(PEOPLE_SOURCES).optional(),
+  // Automated senders (Jev-judged digests, notifications, no-replies) are hidden unless asked for.
+  includeAutomated: z.enum(["true", "false"]).optional(),
 });
 
 const PRESENCE_CHANNEL: Partial<Record<Presence["source"], string>> = {
@@ -63,6 +65,8 @@ function personView(row: typeof people.$inferSelect) {
     stateDetail: row.stateDetail as Record<string, unknown> | null,
     presences: (row.presences as Presence[]).map(presenceView),
     mergeEvidence: row.mergeEvidence as unknown[],
+    automated: row.automated,
+    automatedVerdict: row.automatedVerdict as { email: string; verdict: string | null; confidence: number | null }[] | null,
   };
 }
 
@@ -95,6 +99,7 @@ router.get(
       return res.status(400).json({ type: "validation", error: `invalid query: ${parsed.error.message}` });
     }
     const { brandId, source } = parsed.data;
+    const includeAutomated = parsed.data.includeAutomated === "true";
     const limit = parsed.data.limit ?? 100;
     const offset = parsed.data.offset ?? 0;
     try {
@@ -109,7 +114,14 @@ router.get(
       const where = and(
         eq(people.scopeId, scope.id),
         source ? sql`${people.sources} @> ${JSON.stringify([source])}::jsonb` : sql`true`,
+        includeAutomated ? sql`true` : eq(people.automated, false),
       );
+      const [{ automatedHidden }] = includeAutomated
+        ? [{ automatedHidden: 0 }]
+        : await db
+            .select({ automatedHidden: sql<number>`count(*)::int` })
+            .from(people)
+            .where(and(eq(people.scopeId, scope.id), eq(people.automated, true)));
       const [{ total }] = await db.select({ total: sql<number>`count(*)::int` }).from(people).where(where);
       const rows = await db
         .select()
@@ -122,7 +134,7 @@ router.get(
       const perSource = (await db.execute(sql`
         SELECT s AS source, count(*)::int AS people
         FROM people, jsonb_array_elements_text(people.sources) s
-        WHERE people.scope_id = ${scope.id}
+        WHERE people.scope_id = ${scope.id} ${includeAutomated ? sql`` : sql`AND people.automated = false`}
         GROUP BY s
       `)) as unknown as { source: string; people: number }[];
       const reads = scope.sourceReads as BuildSummary | null;
@@ -146,6 +158,8 @@ router.get(
         }),
         mergeEvidence: reads?.evidence ?? [],
         ownAddresses: reads?.ownAddresses ?? null,
+        senderVerdicts: reads?.senderVerdicts ?? null,
+        automatedHidden,
         total,
         limit,
         offset,
