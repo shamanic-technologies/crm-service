@@ -47,6 +47,7 @@ import {
 } from "./automated.js";
 import { resolvePersonState, type GhlDeal, type LeadObservation, type StripeStandingInput } from "./state.js";
 import { indexScopeMessages, type MessageIndexSummary } from "./search.js";
+import { emitScopeFacts, type FactEmissionSummary } from "./facts.js";
 
 /** How long lead-service's answer about an address is reused. */
 export const STANDING_TTL_MS = 60 * 60 * 1000;
@@ -91,6 +92,8 @@ export interface BuildSummary {
   senderVerdicts: SenderVerdictSummary;
   /** The message search index refresh that followed the build (absent until it ran). */
   messageIndex?: ({ status: "ok" } & MessageIndexSummary) | { status: "failed"; error: string };
+  /** The fact feed emission that followed (absent until it ran). */
+  facts?: ({ status: "ok" } & FactEmissionSummary) | { status: "failed"; error: string };
 }
 
 function firstNonNull(
@@ -338,6 +341,15 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     console.error(`[crm-service] people message index failed scope=${scope.id}:`, err);
     summary.messageIndex = { status: "failed", error: (err as Error).message };
   }
+
+  // Then append to the fact feed what this build changed (lead-service reads it).
+  // Same contract: a failure is recorded beside the build and retried next pass.
+  try {
+    summary.facts = { status: "ok", ...(await emitScopeFacts(scope)) };
+  } catch (err) {
+    console.error(`[crm-service] people fact emission failed scope=${scope.id}:`, err);
+    summary.facts = { status: "failed", error: (err as Error).message };
+  }
   await db.update(peopleScopes).set({ sourceReads: summary }).where(eq(peopleScopes.id, scope.id));
 
   return summary;
@@ -366,7 +378,7 @@ export async function runScopeBuild(scope: PeopleScope): Promise<{ scopeId: stri
     const summary = await buildScopePeople(scope, run.id);
     await updateRun(run.id, "completed", { orgId: scope.orgId, userId: scope.createdByUserId });
     console.log(
-      `[crm-service] people build scope=${scope.id} brand=${scope.brandId} people=${summary.people} automated=${summary.senderVerdicts.automatedPeople} judged=${summary.senderVerdicts.judged} pending=${summary.senderVerdicts.pending} sources=${summary.sources
+      `[crm-service] people build scope=${scope.id} brand=${scope.brandId} people=${summary.people} automated=${summary.senderVerdicts.automatedPeople} judged=${summary.senderVerdicts.judged} pending=${summary.senderVerdicts.pending} facts=${summary.facts?.status === "ok" ? `+${summary.facts.emitted}/-${summary.facts.corrected + summary.facts.withdrawnGone}` : summary.facts?.status} sources=${summary.sources
         .map((s) => `${s.source}:${s.status}:${s.presences}`)
         .join(",")}`,
     );

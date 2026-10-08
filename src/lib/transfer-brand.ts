@@ -48,6 +48,7 @@ import {
   stripeConnections,
   stripeRawRecords,
   stripeTransactions,
+  peopleFacts,
 } from "../db/schema.js";
 
 export const TRANSFER_TABLES: PgTable[] = [
@@ -77,6 +78,8 @@ export const TRANSFER_TABLES: PgTable[] = [
   stripeConnections,
   stripeRawRecords,
   stripeTransactions,
+  // The fact feed follows its brand (a fact keeps its id and seq; only org/brand change).
+  peopleFacts,
 ];
 
 export interface TransferBrandInput {

@@ -726,6 +726,53 @@ owner had written to. A recorded fact, never an address-shape guess.
 - Gateway: api-service proxies `/v1/orgs/people*` (explicit routes; the crm
   proxy forwards per route, not by prefix).
 
+## The people fact feed — what happened, untagged (`src/lib/people/facts.ts`, contract #61)
+
+lead-service owns the tags (one per timeline item + one overall per
+conversation); crm-service is the ONE door from the client's own accounts and
+serves it a dated, UNTAGGED fact feed. `people.state` / `state.ts` stay until
+lead-service serves the overall tag, then go.
+
+- `GET /internal/people/facts?since=&limit=&orgId=&brandId=` (apiKeyAuth,
+  platform run) → `{ facts, nextCursor, hasMore }`, total order on
+  `people_facts.feed_seq`. Fact = `factId, seq, orgId, brandId, personKey,
+  emails, phones, fullName, sourceContactId, type, occurredAt, dateBasis,
+  source, sourceRef, payload, withdrawnOf?`.
+- **Emitted after every people build** (`emitScopeFacts`, recorded as
+  `sourceReads.facts`; a failure never undoes the build). Candidates are
+  re-derived from silver + the Gmail store and DIFFED on a natural key (vendor
+  id + what about it) and a content hash: new key → fact; same hash → nothing (a
+  re-sync emits 0); changed hash → `withdrawn` + a new fact. The first pass is
+  the backfill. One global advisory lock per emission so seqs commit in order.
+- Types: GoHighLevel `added_to_crm` (contact, dated `created_at`), funnel facts
+  `form_submitted | meeting_booked | meeting_attended | meeting_not_held | sale
+  | deal_lost` built from `eventsQuery` (THE funnel-events evidence: payload
+  `via` = its `source`, `sourceRef` = its `sourceId`, same date + basis, so the
+  two cannot disagree), `deal_status_changed` (every history row); Matrix and
+  Gmail `message_in/out` (Gmail `other` = a third party, skipped); PostHog
+  `signup` (person created) + `website_visit`; Stripe `payment | refund`
+  (minor units verbatim) + `subscription_changed` (one per status observed);
+  CSV `added_to_crm` (once per email, dated `uploaded_at`); crm
+  `person_merged | person_split | withdrawn`. GoHighLevel `sale.amountMinor` =
+  deal value × 100 (GoHighLevel states no currency; `amountVerbatim` beside it).
+- OUT: our own outreach (Instantly, self-send) — lead-service reads it directly.
+- **`withdrawn` only when the vendor record changed or vanished**, and a
+  vanished record is withdrawn only in a SNAPSHOT family (GoHighLevel contacts
+  + funnel, PostHog, Stripe money) while that source is still connected.
+  **Disconnect stops the feed, never withdraws**: no FK to any connection, so
+  emitted facts survive a delete. History families (stage history, messages,
+  subscription statuses, CSV) never withdraw on absence.
+- `occurredAt` is the vendor's date or NULL; `dateBasis` names it. Never now().
+- A fact's subject is re-found by the vendor's id (`<source>:<externalId |
+  channelHandle | email>`), so a reconnect re-finds the person. A subject the
+  build holds as nobody (the brand's own address) is HELD: not emitted, not
+  withdrawn. After each build, every fact already emitted is re-owned: an old
+  key whose facts now sit under 2+ keys → `person_split` (every fact in exactly
+  one part; a fact nobody holds stays under the old key); all moved to one key
+  → `person_merged`. Order inside a pass: splits, merges, withdrawals, new facts.
+- Bookkeeping columns (`live`, `owner_person_key`, `subject_*`, `natural_key`,
+  `content_hash`) are never served; every served column is append-only.
+
 ## PostHog + Stripe — what a person DID and what they PAID (`src/lib/posthog/`, `src/lib/stripe/`)
 
 Same contract as GoHighLevel: credential in key-service (provider `posthog` /
@@ -766,8 +813,8 @@ service. Body `{sourceBrandId, sourceOrgId, targetOrgId, targetBrandId?}`,
 apiKeyAuth, response `{ updatedTables: [{ tableName, count }] }`
 (`src/lib/transfer-brand.ts`).
 
-- **Every table carrying `brand_id` moves** (all 25: CSV, serves, Matrix,
-  GoHighLevel incl. history + stage meanings, PostHog, Stripe). Only `org_id` / `brand_id` change;
+- **Every table carrying `brand_id` moves** (all 27: CSV, serves, Matrix,
+  GoHighLevel incl. history + stage meanings, PostHog, Stripe, the fact feed). Only `org_id` / `brand_id` change;
   FKs are on row ids so the graph stays wired. Provenance (`run_id`,
   `created_by_user_id`) stays as recorded.
 - **ONE transaction** — all or nothing. A unique collision in the target (it
