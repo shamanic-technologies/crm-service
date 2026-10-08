@@ -901,6 +901,13 @@ pass only because they never cross a zod boundary — do not copy them for a tes
 that calls a handler. (Set 2026-09-19, cost a debugging round on the GoHighLevel
 integration suite.)
 
+**Each integration file owns its OWN id prefix** (`grep -rhoE "[a-f]{8}-1111" tests`
+before picking one) and TRUNCATEs what it seeded in `afterAll`: the suites run
+serially on ONE database and each only wipes its own tables, so a second suite
+reusing a brand id inherits leftover connections (2026-10-08: the fact-feed
+suite reused `eeeeeeee-…` and posthog-stripe's timeline read GoHighLevel and
+Matrix as connected — green alone, red in CI).
+
 ## `npm run build` fails LOCALLY on the openapi step — the failure is `pnpm`, not your diff
 
 `build` is `tsc && pnpm generate:openapi`, and that second half dies on macOS
