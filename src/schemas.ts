@@ -1678,8 +1678,31 @@ const PeopleListResponseSchema = registry.register(
         })
         .optional()
         .openapi({ description: "Present only when `q` is set." }),
+      families: z
+        .object({
+          status: z.enum(["ok", "failed"]).openapi({ description: "failed = features-service could not be read: every person's family is null for THAT reason, never \"nobody has a family\" (see error)." }),
+          error: z.string().nullable(),
+          filter: z.enum(["won", "hot", "lost", "cold"]).nullable().openapi({ description: "The family this page is filtered on (null = All)." }),
+          counts: z
+            .object({ won: z.number().int(), hot: z.number().int(), lost: z.number().int(), cold: z.number().int() })
+            .nullable()
+            .openapi({ description: "People per family over THIS list's population (source / includeAutomated / q applied, family not): what each filter button returns. Sums to withFamily." }),
+          lostBreakdown: z.object({ wentCold: z.number().int(), ruledOut: z.number().int() }).nullable(),
+          withFamily: z.number().int().nullable(),
+          withoutFamily: z.number().int().nullable().openapi({ description: "People of the population who are not one of our leads (shown under All only)." }),
+          producerCounts: z
+            .object({ won: z.number().int(), hot: z.number().int(), lost: z.number().int(), cold: z.number().int() })
+            .nullable()
+            .openapi({ description: "features-service's own counts over ALL the brand's leads, most never in conversation with the brand (for reconciliation)." }),
+          readAt: z.string().nullable().openapi({ description: "When crm-service read features-service (a read is shared for up to 60s)." }),
+        })
+        .openapi({ description: "The Unibox family filters (Won clients, Hot leads, Lost leads, Cold leads)." }),
       people: z.array(
         PersonSchema.extend({
+          family: z.enum(["won", "hot", "lost", "cold"]).nullable().openapi({
+            description: "features-service's verdict on this person as our lead, verbatim; a person with several lead addresses takes the strongest (won > hot > lost > cold). Null = not one of our leads, or families.status = failed.",
+          }),
+          familyLostReason: z.enum(["went_cold", "ruled_out"]).nullable().openapi({ description: "lost only: went_cold or ruled_out (features-service's reason)." }),
           matches: z.array(SearchMatchSchema).optional().openapi({
             description: "Search only: every identity field holding the query, then up to 3 newest matching messages.",
           }),
@@ -1773,6 +1796,12 @@ registry.registerPath({
       offset: z.coerce.number().int().min(0).optional(),
       source: PeopleSourceSchema.optional().openapi({ description: "Only people present on this source." }),
       includeAutomated: z.enum(["true", "false"]).optional().openapi({ description: "Also return automated senders (person.automated = true). Default false: hidden." }),
+      family: z.enum(["won", "hot", "lost", "cold"]).optional().openapi({
+        description:
+          "Unibox family filter: only people whose family (features-service's verdict on our lead, read verbatim) is this one. " +
+          "won = client won; hot = interested, not won yet; lost = became interested then went cold, or ruled out; cold = contacted, never interested. " +
+          "Combines with q, source, includeAutomated and paging. 502 lead_families_unavailable when features-service cannot be read (never an empty list). Absent = All.",
+      }),
       q: z.string().max(200).optional().openapi({
         description:
           "Search (case-insensitive substring, whole query): the person's name, any email (a domain works), any phone (4+ digits), " +

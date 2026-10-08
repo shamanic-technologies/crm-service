@@ -16,6 +16,7 @@ import {
   senderVerdicts,
 } from "../../src/db/schema.js";
 import { ensureScope, runScopeBuild } from "../../src/lib/people/build.js";
+import { clearFamiliesCache } from "../../src/lib/people/families.js";
 import peopleRoutes from "../../src/routes/people.js";
 
 /**
@@ -38,11 +39,17 @@ process.env.LEAD_SERVICE_URL = "http://lead.test";
 process.env.LEAD_SERVICE_API_KEY = "l";
 process.env.BRAND_SERVICE_URL = "http://brand.test";
 process.env.BRAND_SERVICE_API_KEY = "b";
+process.env.FEATURES_SERVICE_URL = "http://features.test";
+process.env.FEATURES_SERVICE_API_KEY = "f";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 let gmailConnected = false;
+/** features-service's lead families (won / hot / lost / cold) for the brand. */
+let leadFamilies: { leadId: string; email: string; family: string; lostReason: string | null }[] = [];
+let featuresDown = false;
+const featuresRequests: Record<string, string>[] = [];
 let leadServiceDown = false;
 let gmailConversationDown = false;
 let aliceNewMessage = false;
@@ -199,6 +206,13 @@ function installFetchStub() {
         });
       }
     }
+    if (url.host === "features.test" && url.pathname === `/brands/${BRAND}/lead-families`) {
+      featuresRequests.push(init!.headers as Record<string, string>);
+      if (featuresDown) return json({ error: "Failed to compute brand lead families" }, 502);
+      const counts = { won: 0, hot: 0, lost: 0, cold: 0 } as Record<string, number>;
+      for (const p of leadFamilies) counts[p.family] += 1;
+      return json({ brandId: BRAND, counts, lostBreakdown: { wentCold: 0, ruledOut: 0 }, offers: [], people: leadFamilies.map((p) => ({ ...p, campaignLeadIds: [], offerId: "o1" })) });
+    }
     if (url.host === "brand.test") {
       return json({ brand: { id: BRAND, domain: "brand.com" } });
     }
@@ -346,6 +360,10 @@ describe.skipIf(!RUN)("person layer", () => {
     automatedEmails = new Map();
     jevDown = false;
     extraCorrespondents = [];
+    leadFamilies = [];
+    featuresDown = false;
+    featuresRequests.length = 0;
+    clearFamiliesCache();
     installFetchStub();
     await wipe();
   });
@@ -487,6 +505,95 @@ describe.skipIf(!RUN)("person layer", () => {
       .set("x-user-id", USER);
     expect(filtered.body.total).toBe(1);
     expect(filtered.body.people[0].personKey).toBe("email:alice@x.com");
+  });
+
+  describe("family filters (Won / Hot / Lost / Cold)", () => {
+    const listPeople = (query = "") =>
+      request(app())
+        .get(`/orgs/people?brandId=${BRAND}${query}`)
+        .set("x-api-key", API_KEY)
+        .set("x-org-id", ORG)
+        .set("x-user-id", USER);
+
+    beforeEach(() => {
+      gmailConnected = true;
+      leadFamilies = [
+        { leadId: "l-a", email: "alice@x.com", family: "won", lostReason: null },
+        { leadId: "l-b", email: "bob@y.com", family: "hot", lostReason: null },
+        // A lead who is not in the Unibox: counted by features, not by the list.
+        { leadId: "l-z", email: "zed@q.com", family: "hot", lostReason: null },
+        { leadId: "l-y", email: "yan@q.com", family: "cold", lostReason: null },
+      ];
+    });
+
+    it("each person carries features-service's family; counts cover the list; carol has none", async () => {
+      await seedLocalSources();
+      await buildNow();
+      const res = await listPeople();
+      expect(res.status).toBe(200);
+      expect(res.body.total).toBe(3);
+      const byKey = Object.fromEntries(res.body.people.map((p: { personKey: string; family: string | null }) => [p.personKey, p.family]));
+      expect(byKey).toEqual({ "email:alice@x.com": "won", "email:bob@y.com": "hot", "email:carol@z.com": null });
+      expect(res.body.families).toMatchObject({
+        status: "ok",
+        error: null,
+        filter: null,
+        counts: { won: 1, hot: 1, lost: 0, cold: 0 },
+        withFamily: 2,
+        withoutFamily: 1,
+        producerCounts: { won: 1, hot: 2, lost: 0, cold: 1 },
+      });
+      // Org-attributed read on this request's run.
+      expect(featuresRequests[0]).toMatchObject({ "x-api-key": "f", "x-org-id": ORG, "x-user-id": USER });
+      expect(featuresRequests[0]["x-run-id"]).toMatch(/^run-/);
+    });
+
+    it("family=hot returns only the hot people, pages them, and combines with search", async () => {
+      await seedLocalSources();
+      await buildNow();
+      const hot = await listPeople("&family=hot");
+      expect(hot.status).toBe(200);
+      expect(hot.body.total).toBe(1);
+      expect(hot.body.people.map((p: { personKey: string }) => p.personKey)).toEqual(["email:bob@y.com"]);
+      expect(hot.body.families.filter).toBe("hot");
+      // Counts stay the buttons' numbers, not the filtered page's.
+      expect(hot.body.families.counts).toEqual({ won: 1, hot: 1, lost: 0, cold: 0 });
+
+      const won = await listPeople("&family=won&limit=1");
+      expect(won.body.people.map((p: { personKey: string }) => p.personKey)).toEqual(["email:alice@x.com"]);
+
+      const none = await listPeople("&family=hot&q=alice");
+      expect(none.body.total).toBe(0);
+      expect(none.body.families.counts).toEqual({ won: 1, hot: 0, lost: 0, cold: 0 });
+      const both = await listPeople("&family=won&q=alice");
+      expect(both.body.total).toBe(1);
+      expect(both.body.people[0].matches.length).toBeGreaterThan(0);
+
+      // One shared read serves every list call.
+      expect(featuresRequests).toHaveLength(1);
+    });
+
+    it("a failed features read is stated: All still lists, a family filter is a 502", async () => {
+      featuresDown = true;
+      await seedLocalSources();
+      await buildNow();
+      const all = await listPeople();
+      expect(all.status).toBe(200);
+      expect(all.body.total).toBe(3);
+      expect(all.body.families).toMatchObject({ status: "failed", counts: null, withFamily: null });
+      expect(all.body.families.error).toContain("returned 502");
+      expect(all.body.people.every((p: { family: string | null }) => p.family === null)).toBe(true);
+
+      const hot = await listPeople("&family=hot");
+      expect(hot.status).toBe(502);
+      expect(hot.body.reason).toBe("lead_families_unavailable");
+
+      // A failure is not cached: the next read asks again.
+      featuresDown = false;
+      const again = await listPeople("&family=hot");
+      expect(again.status).toBe(200);
+      expect(again.body.total).toBe(1);
+    });
   });
 
   it("rebuilding replaces the gold rows; a cached standing is reused", async () => {

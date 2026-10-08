@@ -1,7 +1,8 @@
 /**
  * Reads of the sibling services the person layer stands on: google-service
  * (Gmail), instantly-service (cold email + our own sending mailboxes),
- * lead-service (our leads' standing) and brand-service (the brand's own domain).
+ * lead-service (our leads' standing), brand-service (the brand's own domain) and
+ * features-service (each of our leads' family: won / hot / lost / cold).
  *
  * READ-ONLY by construction: this module only issues GETs. The person layer
  * never writes to a sibling, and through it to no outside tool.
@@ -12,13 +13,14 @@
  * "failed" apart; nothing here turns a failure into an empty list.
  */
 
-export type Sibling = "google" | "instantly" | "lead" | "brand";
+export type Sibling = "google" | "instantly" | "lead" | "brand" | "features";
 
 const ENV: Record<Sibling, { url: string; key: string }> = {
   google: { url: "GOOGLE_SERVICE_URL", key: "GOOGLE_SERVICE_API_KEY" },
   instantly: { url: "INSTANTLY_SERVICE_URL", key: "INSTANTLY_SERVICE_API_KEY" },
   lead: { url: "LEAD_SERVICE_URL", key: "LEAD_SERVICE_API_KEY" },
   brand: { url: "BRAND_SERVICE_URL", key: "BRAND_SERVICE_API_KEY" },
+  features: { url: "FEATURES_SERVICE_URL", key: "FEATURES_SERVICE_API_KEY" },
 };
 
 export const SIBLING_TIMEOUT_MS = Number(process.env.PEOPLE_SIBLING_TIMEOUT_MS) || 30_000;

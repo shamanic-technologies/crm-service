@@ -720,6 +720,16 @@ owner had written to. A recorded fact, never an address-shape guess.
   (`PEOPLE_TIMELINE_REFRESH_MS`) is re-read in the background, so the NEXT read
   shows a new message; lead-service campaign discovery runs there too. Sources
   carry `servedFrom: store|mirror` + `readAt`.
+- **Family filters (Unibox Won / Hot / Lost / Cold, `families.ts`)**: `GET /orgs/people?family=won|hot|lost|cold`
+  (combines with `q`, `source`, paging). Each person carries `family` + `familyLostReason`
+  = features-service's verdict (`GET /brands/{brandId}/lead-families`, read verbatim, matched on
+  email; several lead addresses → strongest, features' own union rule). Null = not our lead.
+  `families.counts` = per family over the list's population with `family` NOT applied (the
+  buttons), sum = `withFamily`; `producerCounts` = features' own over ALL leads. One read
+  (~4 MB, ~1s warm / ~25s cold) shared 60s per (org, brand), failures not cached. Read fails →
+  `families.status=failed` + `error`, All still lists, `family=` answers 502
+  `lead_families_unavailable`. Env `FEATURES_SERVICE_URL` + `_API_KEY`. Moves with the list to
+  lead-service's conversation gold (#61).
 - Cron on the box, every 15 min: `/root/distribute/people-sync-cron.sh` →
   `POST /internal/people/sync` (platform run = the trigger; one ORG run per
   scope). Env: `GOOGLE_/INSTANTLY_/LEAD_/BRAND_SERVICE_URL` + `_API_KEY`.
@@ -950,7 +960,7 @@ once CI is green, then tag the next version by hand at the merge commit
 `MATRIX_ACCESS_TOKEN`, `MATRIX_INGESTION_FLOOR`, `CRM_LEAD_READING_CHAT_CONFIG`,
 `KEY_SERVICE_URL`, `KEY_SERVICE_API_KEY`, `GOOGLE_SERVICE_URL`, `GOOGLE_SERVICE_API_KEY`,
 `INSTANTLY_SERVICE_URL`, `INSTANTLY_SERVICE_API_KEY`, `LEAD_SERVICE_URL`, `LEAD_SERVICE_API_KEY`,
-`BRAND_SERVICE_URL`, `BRAND_SERVICE_API_KEY`, `MATRIX_APPSERVICE_TOKEN`,
+`BRAND_SERVICE_URL`, `BRAND_SERVICE_API_KEY`, `FEATURES_SERVICE_URL`, `FEATURES_SERVICE_API_KEY`, `MATRIX_APPSERVICE_TOKEN`,
 `MATRIX_WHATSAPP_PROVISIONING_URL`, `MATRIX_WHATSAPP_PROVISIONING_SECRET`
 (+ `MATRIX_TELEGRAM_*` once its bridge runs).
 See `.env.example`. The four Matrix ones are REQUIRED for the sync to run at all —

@@ -14,6 +14,7 @@ import { ensureScope, runPeopleBuildPass, runScopeBuild, type BuildSummary } fro
 import { PEOPLE_SOURCES, type Presence } from "../lib/people/identity.js";
 import { findPerson, readTimeline } from "../lib/people/timeline.js";
 import { readFacts } from "../lib/people/facts.js";
+import { familyOf, LEAD_FAMILIES, readBrandFamilies, type FamilyVerdict, type LeadFamily } from "../lib/people/families.js";
 import {
   matchesOf,
   messageHitsFor,
@@ -36,6 +37,8 @@ const listQuerySchema = z.object({
   // Search: name, any email / phone, company, and what was said in their messages.
   // Blank (or absent) = the plain list, unchanged.
   q: z.string().max(SEARCH_MAX_LENGTH).optional(),
+  // Unibox family filter (features-service's verdict on our lead). Absent = All.
+  family: z.enum(LEAD_FAMILIES).optional(),
 });
 
 const PRESENCE_CHANNEL: Partial<Record<Presence["source"], string>> = {
@@ -110,7 +113,7 @@ router.get(
     if (!parsed.success) {
       return res.status(400).json({ type: "validation", error: `invalid query: ${parsed.error.message}` });
     }
-    const { brandId, source } = parsed.data;
+    const { brandId, source, family } = parsed.data;
     const includeAutomated = parsed.data.includeAutomated === "true";
     const limit = parsed.data.limit ?? 100;
     const offset = parsed.data.offset ?? 0;
@@ -125,6 +128,10 @@ router.get(
       }
 
       const startedAt = Date.now();
+      const familiesRead = readBrandFamilies({ orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId }).then(
+        (f) => ({ ok: true as const, f }),
+        (err: Error) => ({ ok: false as const, error: err.message }),
+      );
       const keys = q ? await messageMatchKeys(scope.id, req.orgId!, brandId, q) : null;
       const where = and(
         eq(people.scopeId, scope.id),
@@ -145,11 +152,67 @@ router.get(
                 q && keys ? searchPredicate(q, keys) : sql`true`,
               ),
             );
-      const [{ total }] = await db.select({ total: sql<number>`count(*)::int` }).from(people).where(where);
+
+      // Families: counted over the list's own population (source / automated / search
+      // applied, family not), so each button shows what it would return.
+      const fam = await familiesRead;
+      if (family && !fam.ok) {
+        return res.status(502).json({
+          type: "upstream",
+          reason: "lead_families_unavailable",
+          error: `cannot filter on family "${family}": ${fam.error}`,
+        });
+      }
+      const verdicts = new Map<string, FamilyVerdict>();
+      const familyCounts = Object.fromEntries(LEAD_FAMILIES.map((f) => [f, 0])) as Record<LeadFamily, number>;
+      let population = 0;
+      if (fam.ok) {
+        const members = await db.select({ personKey: people.personKey, emails: people.emails }).from(people).where(where);
+        population = members.length;
+        for (const m of members) {
+          const v = familyOf(m.emails as string[], fam.f.byEmail);
+          if (!v) continue;
+          verdicts.set(m.personKey, v);
+          familyCounts[v.family] += 1;
+        }
+      }
+      const familyKeys = family ? [...verdicts].filter(([, v]) => v.family === family).map(([k]) => k) : null;
+      const listWhere = familyKeys
+        ? and(where, sql`${people.personKey} IN (SELECT jsonb_array_elements_text(${JSON.stringify(familyKeys)}::jsonb))`)
+        : where;
+      const withFamily = verdicts.size;
+      const families = fam.ok
+        ? {
+            status: "ok" as const,
+            error: null,
+            filter: family ?? null,
+            counts: familyCounts,
+            lostBreakdown: {
+              wentCold: [...verdicts.values()].filter((v) => v.lostReason === "went_cold").length,
+              ruledOut: [...verdicts.values()].filter((v) => v.lostReason === "ruled_out").length,
+            },
+            withFamily,
+            withoutFamily: population - withFamily,
+            producerCounts: fam.f.producerCounts,
+            readAt: fam.f.readAt,
+          }
+        : {
+            status: "failed" as const,
+            error: fam.error,
+            filter: null,
+            counts: null,
+            lostBreakdown: null,
+            withFamily: null,
+            withoutFamily: null,
+            producerCounts: null,
+            readAt: null,
+          };
+
+      const [{ total }] = await db.select({ total: sql<number>`count(*)::int` }).from(people).where(listWhere);
       const rows = await db
         .select()
         .from(people)
-        .where(where)
+        .where(listWhere)
         .orderBy(sql`${people.lastActivityAt} DESC NULLS LAST`, asc(people.personKey))
         .limit(limit)
         .offset(offset);
@@ -214,7 +277,14 @@ router.get(
         offset,
         nextOffset: offset + rows.length < total ? offset + rows.length : null,
         ...(search ? { search } : {}),
-        people: search ? rows.map((r, i) => ({ ...personView(r), ...matches[i] })) : rows.map(personView),
+        families,
+        people: rows.map((r, i) => ({
+          ...personView(r),
+          // null = not one of our leads, OR the family read failed (`families.status` says which).
+          family: verdicts.get(r.personKey)?.family ?? null,
+          familyLostReason: verdicts.get(r.personKey)?.lostReason ?? null,
+          ...(search ? matches[i] : {}),
+        })),
       });
     } catch (err) {
       next(err);
