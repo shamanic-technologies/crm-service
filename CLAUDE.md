@@ -667,7 +667,8 @@ owner had written to. A recorded fact, never an address-shape guess.
   leads and PostHog signups automated at 0.5-0.8 (v0.13.0 prod, 60+ real
   prospects hidden); any other source is a recorded human relationship.
   A person is `automated` only when Gmail-only, no phone, EVERY address
-  `automated` at confidence >= 0.5; `GET /orgs/people` hides them
+  `automated` at confidence >= 0.75 (real people sat at 0.52-0.74: an
+  out-of-office, a Google "Accepted:" notice; Jev judges the address OWNER); `GET /orgs/people` hides them
   unless `includeAutomated=true` (`automatedHidden` counts them). Jev down =
   nobody hidden, `senderVerdicts.status=failed`, retried next build. Source
   data stays whole.

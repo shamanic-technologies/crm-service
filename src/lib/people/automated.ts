@@ -43,9 +43,12 @@ export type SenderVerdict = (typeof SENDER_VERDICTS)[number];
 
 /**
  * Below this confidence an `automated` verdict is recorded but does NOT hide
- * the person: the no-go is hiding a real person Jev was unsure about.
+ * the person: the no-go is hiding a real person Jev was unsure about. On a
+ * two-option choice 0.5 is a coin flip. Measured on the first brand (216
+ * senders): the real people Jev leaned `automated` on (an out-of-office, a
+ * human support agent) sat at 0.52-0.74; bulk senders at 0.80-1.0.
  */
-export const AUTOMATED_MIN_CONFIDENCE = 0.5;
+export const AUTOMATED_MIN_CONFIDENCE = 0.75;
 
 /** Addresses per judgments call — keeps one request well inside Jev's token budget. */
 const ADDRESSES_PER_CALL = 40;
@@ -55,11 +58,13 @@ const SNIPPET_CHARS = 240;
 
 const CRITERIA: Record<SenderVerdict, string> = {
   human:
-    "a real person writing in their own name or for their company: a prospect, a client, a partner, " +
-    "a supplier's or vendor's staff member answering in person. A role address (sales@, info@, support@, " +
-    "hello@) is still human when a person writes the messages.",
+    "the address belongs to a real person writing in their own name or for their company: a prospect, a " +
+    "client, a partner, a supplier's or vendor's staff member answering in person. A role address (sales@, " +
+    "info@, support@, hello@) is still human when a person writes the messages. A personal address is " +
+    "human even when the only mail it sent was generated on the person's behalf: a calendar response " +
+    "(\"Accepted:\", \"Declined:\", \"Proposed new time:\"), an out-of-office or vacation auto-reply.",
   automated:
-    "a machine sending on its own, nobody to talk to: notification or digest emails (\"X just messaged you\", " +
+    "the address belongs to a machine sending on its own, with nobody behind it to talk to: notification or digest emails (\"X just messaged you\", " +
     "\"new comment\"), receipts and invoices, account and security alerts, calendar or booking notifications, " +
     "no-reply addresses, newsletters and marketing blasts, ticket-system auto-acknowledgements.",
 };
@@ -168,8 +173,8 @@ export async function judgeSenders(
       type: "choice",
       instructions:
         `Read senders.a${i} in the state: the address ${input.email}, the names it signs with, where it appears ` +
-        "and the latest messages it sent. Is it a real human the brand owner is in conversation with, or an " +
-        "automated sender?",
+        "and the latest messages it sent. Judge WHO OWNS the address, not the form of one message: is it a " +
+        "real human the brand owner is in conversation with, or an automated sender?",
       criteria: CRITERIA,
     };
   });

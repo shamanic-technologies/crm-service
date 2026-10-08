@@ -578,7 +578,7 @@ describe.skipIf(!RUN)("person layer", () => {
     });
 
     it("a hesitant 'automated' verdict does not hide the person", async () => {
-      automatedEmails = new Map([[DIGEST, 0.4]]);
+      automatedEmails = new Map([[DIGEST, 0.72]]);
       const summary = await buildNow();
       expect(summary.senderVerdicts.automatedPeople).toBe(0);
       const list = await listPeople();

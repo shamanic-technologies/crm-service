@@ -1585,7 +1585,7 @@ const PersonSchema = registry.register(
         description: "The records that tied two keys of this person together (a Google / GoHighLevel / Stripe / CSV contact holding both, a lead-service accepted ruling). Empty when the person rests on a single key.",
       }),
       automated: z.boolean().openapi({
-        description: "True when Jev (chat-service judgments) judged EVERY address of the person an automated sender (digest, notification, no-reply, newsletter) with confidence >= 0.5 and the person has no phone. Hidden from GET /orgs/people unless includeAutomated=true.",
+        description: "True when Jev (chat-service judgments) judged EVERY address of the person an automated sender (digest, notification, no-reply, newsletter) with confidence >= 0.75, the person has no phone and Gmail is their only source. Hidden from GET /orgs/people unless includeAutomated=true.",
       }),
       automatedVerdict: z
         .array(z.object({ email: z.string(), verdict: z.enum(["human", "automated"]).nullable(), confidence: z.number().nullable() }))
