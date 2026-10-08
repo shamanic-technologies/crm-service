@@ -16,6 +16,7 @@ import {
 } from "../../src/db/schema.js";
 import { rebuildFromBronze, runSyncPass } from "../../src/lib/gohighlevel/sync.js";
 import { readPipelineView } from "../../src/lib/gohighlevel/view.js";
+import { readFunnelEvents } from "../../src/lib/gohighlevel/funnel-events.js";
 import { serveNext } from "../../src/lib/serve.js";
 import gohighlevelRoutes from "../../src/routes/gohighlevel.js";
 
@@ -883,29 +884,17 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
 
   // ─── funnel evidence: appointments, stage history, stage meanings ─────────
 
-  async function funnelEvents(query = "") {
-    const res = await request(app())
-      .get(`/orgs/gohighlevel/funnel-events?brandId=${BRAND}${query}`)
-      .set("x-api-key", API_KEY)
-      .set("x-org-id", ORG);
-    expect(res.status).toBe(200);
-    return res.body as {
-      contacts: {
-        contactId: string;
-        externalContactId: string;
-        events: {
-          step: string;
-          occurredAt: string | null;
-          dateBasis: string;
-          source: string;
-          sourceId: string;
-          detail: Record<string, unknown>;
-        }[];
-      }[];
-      totalContacts: number;
-      nextOffset: number | null;
-      undecidedStages: number;
-    };
+  // The evidence reader the fact feed, funnel-reach and the person timeline share
+  // (the /orgs/gohighlevel/funnel-events route that served it is retired).
+  async function funnelEvents(query = "", orgId = ORG) {
+    const q = new URLSearchParams(query.replace(/^&/, ""));
+    return readFunnelEvents({
+      orgId,
+      brandId: BRAND,
+      contactId: q.get("contactId"),
+      limit: q.has("limit") ? Number(q.get("limit")) : 500,
+      offset: q.has("offset") ? Number(q.get("offset")) : 0,
+    });
   }
 
   it("mirrors the calendar appointments with the dates that matter", async () => {
@@ -1252,11 +1241,8 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
     expect(one.totalContacts).toBe(1);
     expect(one.contacts[0].events).toEqual(bob.events);
 
-    const otherOrg = await request(app())
-      .get(`/orgs/gohighlevel/funnel-events?brandId=${BRAND}`)
-      .set("x-api-key", API_KEY)
-      .set("x-org-id", "bbbbbbbb-1111-4111-8111-00000000000f");
-    expect(otherOrg.body.totalContacts).toBe(0);
+    const otherOrg = await funnelEvents("", "bbbbbbbb-1111-4111-8111-00000000000f");
+    expect(otherOrg.totalContacts).toBe(0);
   });
 
   it("disconnecting drops the appointments, the history and the stage meanings", async () => {

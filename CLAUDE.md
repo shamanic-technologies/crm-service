@@ -534,15 +534,18 @@ swallowed, and one broken connection does not stop the others.
   pipeline then stage. Opportunities in a pipeline we have not mirrored come back
   under `ungrouped` rather than being dropped, so the counts add up to what the
   customer sees in GoHighLevel.
-- `GET /orgs/gohighlevel/funnel-events?brandId=&contactId=&limit=&offset=` — the
-  DATED funnel events the CRM evidences, grouped per crm-service contact (the
-  `id` lead-service pairs on), paged over contacts in a total order. See below.
+- ~~`GET /orgs/gohighlevel/funnel-events`~~ RETIRED (2026-10-08): lead-service
+  v0.83.16 reads the same evidence off the people fact feed (funnel facts keyed
+  on `crmContactId`); no caller was left in the fleet. The reader
+  (`readFunnelEvents` / `eventsQuery`) stays: the feed, funnel-reach and the
+  person timeline stand on it.
 - `GET /orgs/gohighlevel/stage-meanings?brandId=` — the recorded stage decisions.
 
 ### Funnel evidence — appointments, stage history, stage meanings
 
 The CRM knows things our funnel does not (a meeting BOOKED, ATTENDED or not, a
-deal WON). This is where those facts become dated events lead-service can read.
+deal WON). This is where those facts become dated events; lead-service reads
+them as funnel facts on the people fact feed.
 lead-service never learns a GoHighLevel stage name; this service owns the
 customer's vocabulary.
 
