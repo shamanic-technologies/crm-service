@@ -405,13 +405,12 @@ export async function readStoredTimeline(
     .map((e) => instantlyUnit(e.unit.split(":")[0], e.address, null));
   const units = unitsOfPerson(person, gmailConnected, leadCampaigns, extra);
 
-  // First read of a Gmail address (or of an older stored format): read it now, once.
+  // A unit never attempted is read now, once. A failed or older-format unit is
+  // NOT: it is served as stored and re-read in the background, so one slow
+  // mailbox (a 30s timeout) never makes every click wait.
   const known = () => new Map(stored.map((e) => [`${e.source}|${e.unit}`, e]));
   const k0 = known();
-  const missing = units.filter((u) => {
-    const k = k0.get(`${u.source}|${u.unit}`);
-    return !k || k.format < STORE_FORMAT;
-  });
+  const missing = units.filter((u) => !k0.has(`${u.source}|${u.unit}`));
   if (missing.length) {
     await refreshUnits(scope.id, missing, identity);
     stored = await loadUnits();

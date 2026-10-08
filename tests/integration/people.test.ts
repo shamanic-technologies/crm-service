@@ -803,6 +803,21 @@ describe.skipIf(!RUN)("person layer", () => {
       const gmail = down.body.sources.find((x: { source: string }) => x.source === "gmail");
       expect(gmail).toMatchObject({ status: "failed", items: 0, readAt: null });
       expect(gmail.error).toContain("returned 500");
+
+      // Once failed, the next read does not wait on the source again: it answers and retries in the background.
+      calls.length = 0;
+      await timeline();
+      expect(calls.filter((c) => c.endsWith("/orgs/google/conversation")).length).toBeLessThanOrEqual(1);
+      gmailConversationDown = false;
+      await vi.waitFor(
+        async () => {
+          await timeline(); // each read retries the failed unit in the background
+          const [row] = (await db.execute(sql`SELECT status FROM people_message_units WHERE source = 'gmail' AND unit = 'alice@x.com'`)) as unknown as { status: string }[];
+          expect(row.status).toBe("ok");
+        },
+        { timeout: 5000, interval: 50 },
+      );
+      expect(texts(await timeline())).toContain("Sure, call me");
     });
   });
 });
