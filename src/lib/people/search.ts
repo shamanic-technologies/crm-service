@@ -25,7 +25,7 @@ import {
   type PeopleScope,
 } from "../../db/schema.js";
 import type { Presence } from "./identity.js";
-import type { TextCleanStatus, TimelineItem } from "./timeline.js";
+import type { OutreachFact, TextCleanStatus, TimelineItem } from "./timeline.js";
 import { mapLimit, siblingGet, type SiblingIdentity } from "./siblings.js";
 
 // ─── the store ──────────────────────────────────────────────────────────────
@@ -37,9 +37,10 @@ export const UNIT_REFRESH_MS = 24 * 60 * 60 * 1000;
 const BODY_MAX = 20_000;
 /**
  * The stored row shape. 1 = text only (v0.15.0); 2 = the full timeline item
- * rides in `item`. A unit stored in an older format is due for a re-read.
+ * rides in `item`; 3 = a cold email carries its `outreachFact`. A unit stored in
+ * an older format is due for a re-read.
  */
-export const STORE_FORMAT = 2;
+export const STORE_FORMAT = 3;
 
 export interface IndexPerson {
   emails: string[];
@@ -151,6 +152,8 @@ interface InstantlyConversation {
       text: string;
       campaignId: string;
       instantlyCampaignId: string;
+      /** The `email_sent` outreach fact this message IS; null inbound / unmatched. Absent from an instantly-service predating #1030. */
+      outreachFact?: OutreachFact | null;
     }[];
   };
 }
@@ -189,6 +192,7 @@ async function readUnit(identity: SiblingIdentity, u: Unit): Promise<StoredMessa
             cleaned: m.bodyStatus === "ok" && m.bodyCleanStatus === "cleaned",
             original: m.bodyTextOriginal,
           },
+          outreachFact: null,
           event: null,
         },
       })),
@@ -221,6 +225,7 @@ async function readUnit(identity: SiblingIdentity, u: Unit): Promise<StoredMessa
       to: m.to ? [m.to] : [],
       ref: { campaignId: m.campaignId, instantlyCampaignId: m.instantlyCampaignId },
       textClean: null,
+      outreachFact: m.outreachFact ?? null,
       event: null,
     },
   }));
@@ -436,7 +441,9 @@ export async function readStoredTimeline(
       const key = source === "gmail" ? r.messageKey : `${r.unit}|${r.messageKey}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      items.push(r.item as TimelineItem);
+      // A row stored before format 3 has no outreachFact yet (re-read in the background): served as null.
+      const item = r.item as TimelineItem;
+      items.push({ ...item, outreachFact: item.outreachFact ?? null });
     }
     const okStates = states.filter((s) => s.status === "ok");
     const failedStates = states.filter((s) => s.status !== "ok");

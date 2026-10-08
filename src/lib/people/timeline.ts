@@ -70,6 +70,15 @@ export interface TimelineItem {
    */
   textClean: TextClean | null;
   /**
+   * Instantly messages only (null elsewhere): the `email_sent` outreach fact this
+   * outbound email IS, as instantly-service states it, verbatim. `subjectKey` is
+   * the identity lead-service keeps as that fact's id / source ref, so a reader
+   * pairs the email with its fact by identity, never by comparing clocks (the two
+   * stamps of one send differ by up to a minute). Null on inbound mail and on a
+   * send instantly-service cannot tie to a fact (a manual reply).
+   */
+  outreachFact: OutreachFact | null;
+  /**
    * Events only: the step and its evidence, as the source states it. GoHighLevel
    * carries its funnel-event detail; PostHog `visit` / `event` and Stripe
    * `payment` / `refund` / `subscription_started` / `subscription_canceled`
@@ -88,6 +97,13 @@ export const TEXT_CLEAN_STATUSES = [
   "not_cleaned",
 ] as const;
 export type TextCleanStatus = (typeof TEXT_CLEAN_STATUSES)[number];
+
+/** instantly-service's `outreachFact` on a conversation message, verbatim. */
+export interface OutreachFact {
+  subjectKey: string;
+  step: number | null;
+  position: "first" | "followup";
+}
 
 export interface TextClean {
   status: TextCleanStatus;
@@ -162,6 +178,7 @@ async function matrixItems(presences: Presence[]): Promise<SourceResult> {
         to: [],
         ref: { eventId: e.eventId, roomId: e.roomId, conversationId: c.id },
         textClean: null,
+        outreachFact: null,
         event: null,
       });
     }
@@ -191,6 +208,7 @@ async function ghlItems(person: Person, presences: Presence[]): Promise<SourceRe
           to: [],
           ref: { contactId: c.contactId, externalContactId: c.externalContactId, sourceId: ev.sourceId, evidence: ev.source },
           textClean: null,
+          outreachFact: null,
           event: { step: ev.step, dateBasis: ev.dateBasis, detail: ev.detail },
         });
       }
@@ -217,6 +235,7 @@ async function posthogItems(presences: Presence[]): Promise<SourceResult> {
     to: [],
     ref: { contactId: a.contactId, externalId: a.externalId, externalPersonId: a.externalPersonId },
     textClean: null,
+    outreachFact: null,
     event: {
       step: a.kind,
       dateBasis: a.kind === "visit" ? "visit_started_at" : "event_timestamp",
@@ -252,6 +271,7 @@ async function stripeItems(presences: Presence[]): Promise<SourceResult> {
     };
     const base = {
       textClean: null,
+      outreachFact: null,
       source: "stripe" as const,
       channel: "payment",
       kind: "event" as const,
