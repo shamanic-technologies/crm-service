@@ -533,6 +533,8 @@ describe.skipIf(!RUN)("person layer", () => {
       expect(jevRequests[0].headers["x-run-id"]).toMatch(/^run-/);
       const digestInput = Object.values(jevRequests[0].body.state.senders).find((s) => s.email === DIGEST)!;
       expect(digestInput.recentMessages[0].subject).toBe("Marwene just messaged you");
+      // What the owner wrote to it is shown apart (here: nothing).
+      expect((digestInput as unknown as { messagesOwnerSent: unknown[] }).messagesOwnerSent).toEqual([]);
 
       const list = await listPeople();
       const keys = list.body.people.map((p: { personKey: string }) => p.personKey);
