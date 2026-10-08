@@ -106,6 +106,8 @@ export interface CandidateFact {
   source: FactSource;
   sourceRef: string;
   sourceContactId: string | null;
+  /** crm-service's own contact row id for that source (`contacts.id`); null when there is none (Gmail). */
+  crmContactId: string | null;
   occurredAt: string | null;
   dateBasis: string;
   payload: Record<string, unknown>;
@@ -203,6 +205,7 @@ async function ghlCandidates(orgId: string, brandId: string): Promise<CandidateF
 
   // added_to_crm — every mirrored GoHighLevel contact, dated by GoHighLevel's own creation date.
   const contactRows = await rows<{
+    id: string;
     external_id: string;
     full_name: string | null;
     source_created_at: string | Date | null;
@@ -210,7 +213,7 @@ async function ghlCandidates(orgId: string, brandId: string): Promise<CandidateF
     lead_source: string | null;
     contact_type: string | null;
   }>(sql`
-    SELECT external_id, full_name, source_created_at, origin_medium, lead_source, contact_type
+    SELECT id, external_id, full_name, source_created_at, origin_medium, lead_source, contact_type
     FROM contacts
     WHERE org_id = ${orgId} AND brand_id = ${brandId} AND source = ${GHL_SOURCE} AND external_id IS NOT NULL
   `);
@@ -222,6 +225,7 @@ async function ghlCandidates(orgId: string, brandId: string): Promise<CandidateF
       source: "gohighlevel",
       sourceRef: c.external_id,
       sourceContactId: c.external_id,
+      crmContactId: c.id,
       occurredAt: iso(c.source_created_at),
       dateBasis: "created_at",
       payload: {
@@ -241,6 +245,7 @@ async function ghlCandidates(orgId: string, brandId: string): Promise<CandidateF
   `);
   const valueOf = new Map(opps.map((o) => [o.external_id, o.monetary_value]));
   const events = await rows<{
+    contact_id: string;
     external_contact_id: string;
     full_name: string | null;
     step: string;
@@ -307,6 +312,7 @@ async function ghlCandidates(orgId: string, brandId: string): Promise<CandidateF
       source: "gohighlevel",
       sourceRef: e.source_id,
       sourceContactId: e.external_contact_id,
+      crmContactId: e.contact_id,
       occurredAt: at,
       dateBasis: e.date_basis,
       payload,
@@ -316,6 +322,7 @@ async function ghlCandidates(orgId: string, brandId: string): Promise<CandidateF
 
   // deal_status_changed — every stage / status an opportunity was observed in.
   const history = await rows<{
+    contact_id: string;
     opportunity_external_id: string;
     external_contact_id: string;
     full_name: string | null;
@@ -326,7 +333,7 @@ async function ghlCandidates(orgId: string, brandId: string): Promise<CandidateF
     changed_at: string | Date | null;
     observed_at: string | Date;
   }>(sql`
-    SELECT h.opportunity_external_id, h.external_contact_id, c.full_name, h.kind, h.value,
+    SELECT c.id AS contact_id, h.opportunity_external_id, h.external_contact_id, c.full_name, h.kind, h.value,
            h.pipeline_name, h.stage_name, h.changed_at, h.observed_at
     FROM ghl_opportunity_history h
     JOIN contacts c
@@ -344,6 +351,7 @@ async function ghlCandidates(orgId: string, brandId: string): Promise<CandidateF
       source: "gohighlevel",
       sourceRef: h.opportunity_external_id,
       sourceContactId: h.external_contact_id,
+      crmContactId: h.contact_id,
       occurredAt: at,
       dateBasis: h.kind === "stage" ? "stage_entered_at" : "status_changed_at",
       payload: {
@@ -362,6 +370,7 @@ async function ghlCandidates(orgId: string, brandId: string): Promise<CandidateF
 
 async function matrixCandidates(orgId: string, brandId: string): Promise<CandidateFact[]> {
   const events = await rows<{
+    contact_id: string;
     event_id: string;
     room_id: string;
     sender: string;
@@ -375,7 +384,7 @@ async function matrixCandidates(orgId: string, brandId: string): Promise<Candida
   }>(sql`
     SELECT e.event_id, e.room_id, e.sender, e.origin_server_ts,
            e.payload->'content'->>'body' AS body, e.payload->'content'->>'msgtype' AS msgtype,
-           v.channel, c.channel_handle, c.full_name, mc.matrix_user_id AS own_mxid
+           v.channel, c.id AS contact_id, c.channel_handle, c.full_name, mc.matrix_user_id AS own_mxid
     FROM matrix_raw_events e
     JOIN conversations v ON v.connection_id = e.connection_id AND v.room_id = e.room_id
     JOIN contacts c ON c.id = v.contact_id
@@ -389,6 +398,7 @@ async function matrixCandidates(orgId: string, brandId: string): Promise<Candida
     source: "matrix" as const,
     sourceRef: e.event_id,
     sourceContactId: e.channel_handle,
+    crmContactId: e.contact_id,
     occurredAt: iso(e.origin_server_ts),
     dateBasis: "sent_at",
     payload: { channel: e.channel, threadId: e.room_id, text: e.body, msgtype: e.msgtype },
@@ -427,6 +437,7 @@ async function gmailCandidates(scopeId: string): Promise<{ facts: CandidateFact[
       source: "gmail",
       sourceRef: s.message_key,
       sourceContactId: null,
+      crmContactId: null,
       occurredAt: iso(item.at),
       dateBasis: "sent_at",
       payload: {
@@ -446,8 +457,8 @@ async function gmailCandidates(scopeId: string): Promise<{ facts: CandidateFact[
 
 async function posthogCandidates(orgId: string, brandId: string): Promise<CandidateFact[]> {
   const out: CandidateFact[] = [];
-  const persons = await rows<{ external_id: string; full_name: string | null; source_created_at: string | Date | null }>(sql`
-    SELECT external_id, full_name, source_created_at FROM contacts
+  const persons = await rows<{ id: string; external_id: string; full_name: string | null; source_created_at: string | Date | null }>(sql`
+    SELECT id, external_id, full_name, source_created_at FROM contacts
     WHERE org_id = ${orgId} AND brand_id = ${brandId} AND source = ${POSTHOG_SOURCE} AND external_id IS NOT NULL
   `);
   for (const p of persons) {
@@ -458,6 +469,7 @@ async function posthogCandidates(orgId: string, brandId: string): Promise<Candid
       source: "posthog",
       sourceRef: p.external_id,
       sourceContactId: p.external_id,
+      crmContactId: p.id,
       occurredAt: iso(p.source_created_at),
       dateBasis: "person_created_at",
       payload: {},
@@ -465,6 +477,7 @@ async function posthogCandidates(orgId: string, brandId: string): Promise<Candid
     });
   }
   const visits = await rows<{
+    contact_id: string;
     external_id: string;
     person_id: string;
     full_name: string | null;
@@ -475,7 +488,7 @@ async function posthogCandidates(orgId: string, brandId: string): Promise<Candid
     pageviews: number | null;
     detail: { sessionId?: string; referrer?: string | null };
   }>(sql`
-    SELECT a.external_id, c.external_id AS person_id, c.full_name, a.occurred_at, a.ended_at,
+    SELECT c.id AS contact_id, a.external_id, c.external_id AS person_id, c.full_name, a.occurred_at, a.ended_at,
            a.name, a.url, a.pageviews, a.detail
     FROM posthog_activities a JOIN contacts c ON c.id = a.contact_id
     WHERE a.org_id = ${orgId} AND a.brand_id = ${brandId} AND a.kind = 'visit'
@@ -488,6 +501,7 @@ async function posthogCandidates(orgId: string, brandId: string): Promise<Candid
       source: "posthog",
       sourceRef: v.external_id,
       sourceContactId: v.person_id,
+      crmContactId: v.contact_id,
       occurredAt: iso(v.occurred_at),
       dateBasis: "visit_started_at",
       payload: {
@@ -515,6 +529,7 @@ function subscriptionDate(status: string | null, startedAt: string | null, detai
 async function stripeCandidates(orgId: string, brandId: string): Promise<CandidateFact[]> {
   const txs = await rows<{
     kind: "payment" | "refund" | "subscription";
+    contact_id: string;
     external_id: string;
     external_customer_id: string | null;
     customer_id: string;
@@ -526,7 +541,7 @@ async function stripeCandidates(orgId: string, brandId: string): Promise<Candida
     description: string | null;
     detail: Record<string, unknown>;
   }>(sql`
-    SELECT t.kind, t.external_id, t.external_customer_id, c.external_id AS customer_id, c.full_name,
+    SELECT t.kind, c.id AS contact_id, t.external_id, t.external_customer_id, c.external_id AS customer_id, c.full_name,
            t.occurred_at, t.amount_minor, t.currency, t.status, t.description, t.detail
     FROM stripe_transactions t JOIN contacts c ON c.id = t.contact_id
     WHERE t.org_id = ${orgId} AND t.brand_id = ${brandId} AND c.external_id IS NOT NULL
@@ -537,6 +552,7 @@ async function stripeCandidates(orgId: string, brandId: string): Promise<Candida
       source: "stripe" as const,
       sourceRef: t.external_id,
       sourceContactId: t.customer_id,
+      crmContactId: t.contact_id,
       subject: presenceSubject("stripe", t.customer_id, t.full_name),
     };
     if (t.kind === "subscription") {
@@ -581,6 +597,7 @@ async function stripeCandidates(orgId: string, brandId: string): Promise<Candida
 /** CSV contacts: one `added_to_crm` per person the client imported, emitted once. */
 async function csvCandidates(orgId: string, brandId: string): Promise<CandidateFact[]> {
   const csv = await rows<{
+    id: string;
     primary_email: string | null;
     phone_e164: string | null;
     full_name: string | null;
@@ -589,7 +606,7 @@ async function csvCandidates(orgId: string, brandId: string): Promise<CandidateF
     filename: string | null;
     uploaded_at: string | Date | null;
   }>(sql`
-    SELECT c.primary_email, c.phone_e164, c.full_name, c.source_row_id,
+    SELECT c.id, c.primary_email, c.phone_e164, c.full_name, c.source_row_id,
            u.id AS upload_id, u.filename, u.uploaded_at
     FROM contacts c LEFT JOIN contact_uploads u ON u.id = c.source_upload_id
     WHERE c.org_id = ${orgId} AND c.brand_id = ${brandId} AND c.source = 'csv'
@@ -607,6 +624,7 @@ async function csvCandidates(orgId: string, brandId: string): Promise<CandidateF
       source: "csv",
       sourceRef: ref,
       sourceContactId: null,
+      crmContactId: c.id,
       occurredAt: iso(c.uploaded_at),
       dateBasis: "uploaded_at",
       payload: { origin: "csv_import", uploadId: c.upload_id, filename: c.filename },
@@ -717,6 +735,7 @@ function factRow(
     phones: person.phones,
     fullName: person.fullName ?? c.subject.fullName,
     sourceContactId: c.sourceContactId,
+    crmContactId: c.crmContactId,
     type: c.type,
     occurredAt: c.occurredAt ? new Date(c.occurredAt) : null,
     dateBasis: c.dateBasis,
@@ -801,6 +820,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
         phones: [],
         fullName: null,
         sourceContactId: null,
+        crmContactId: null,
         type: "person_split",
         occurredAt: null,
         dateBasis: "none",
@@ -823,6 +843,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
         phones: into?.phones ?? [],
         fullName: into?.fullName ?? null,
         sourceContactId: null,
+        crmContactId: null,
         type: "person_merged",
         occurredAt: null,
         dateBasis: "none",
@@ -879,6 +900,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
         phones: person?.phones ?? (fact.phones as string[]),
         fullName: person?.fullName ?? fact.fullName,
         sourceContactId: fact.sourceContactId,
+        crmContactId: fact.crmContactId,
         type: "withdrawn",
         occurredAt: null,
         dateBasis: "none",
@@ -922,6 +944,7 @@ export interface Fact {
   phones: string[];
   fullName: string | null;
   sourceContactId: string | null;
+  crmContactId: string | null;
   type: FactType;
   occurredAt: string | null;
   dateBasis: string;
@@ -942,6 +965,7 @@ export function toFact(r: PeopleFact): Fact {
     phones: r.phones as string[],
     fullName: r.fullName,
     sourceContactId: r.sourceContactId,
+    crmContactId: r.crmContactId,
     type: r.type as FactType,
     occurredAt: r.occurredAt ? r.occurredAt.toISOString() : null,
     dateBasis: r.dateBasis,

@@ -306,6 +306,8 @@ async function seed(): Promise<Seeded> {
   return { scope, ghlId: ghl.id, aliceGhl: aliceGhl.id, aliceWa: aliceWa.id, posthogContact: phContact.id, stripeContact: stContact.id };
 }
 
+const csvRow = (facts: { source: string; crmContactId: string | null }[]) => facts.find((f) => f.source === "csv")!;
+
 async function allFacts() {
   const out = [];
   let since = 0;
@@ -373,6 +375,9 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
       expect(typeof f.dateBasis).toBe("string");
       expect(f.withdrawnOf).toBeUndefined();
     }
+    // Every fact backed by a contact row names it; lead-service pairs on that id.
+    expect(facts.filter((f) => f.source === "gohighlevel").every((f) => f.crmContactId === s.aliceGhl)).toBe(true);
+    expect(csvRow(facts).crmContactId).toMatch(/^[0-9a-f-]{36}$/);
     const alice = facts.filter((f) => f.source !== "csv");
     expect(new Set(alice.map((f) => f.personKey))).toEqual(new Set(["email:alice@x.com"]));
     expect(alice[0].emails).toEqual(["alice@x.com"]);
@@ -383,16 +388,16 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
     expect(csv).toMatchObject({ personKey: "email:carol@z.com", emails: ["carol@z.com"], fullName: "Carol", dateBasis: "uploaded_at", payload: { origin: "csv_import", filename: "crm.csv" } });
 
     const added = facts.find((f) => f.source === "gohighlevel" && f.type === "added_to_crm")!;
-    expect(added).toMatchObject({ sourceContactId: "ghl-alice", occurredAt: "2026-08-01T10:00:00.000Z", dateBasis: "created_at", payload: { origin: "form", leadSource: "Meta Ads" } });
+    expect(added).toMatchObject({ sourceContactId: "ghl-alice", crmContactId: s.aliceGhl, occurredAt: "2026-08-01T10:00:00.000Z", dateBasis: "created_at", payload: { origin: "form", leadSource: "Meta Ads" } });
     const sale = facts.find((f) => f.type === "sale")!;
     expect(sale).toMatchObject({ occurredAt: null, dateBasis: "status_changed_at", sourceRef: "opp-1", payload: { via: "won_status", amountMinor: 150050, amountVerbatim: "1500.50", currency: null } });
     const statusChange = facts.find((f) => f.type === "deal_status_changed" && (f.payload as { change: string }).change === "status")!;
     expect(statusChange.occurredAt).toBeNull();
-    expect(facts.find((f) => f.type === "payment")).toMatchObject({ sourceContactId: "cus_alice", occurredAt: "2026-08-10T10:00:00.000Z", payload: { amountMinor: 9900, currency: "usd", status: "succeeded" } });
+    expect(facts.find((f) => f.type === "payment")).toMatchObject({ sourceContactId: "cus_alice", crmContactId: s.stripeContact, occurredAt: "2026-08-10T10:00:00.000Z", payload: { amountMinor: 9900, currency: "usd", status: "succeeded" } });
     expect(facts.find((f) => f.type === "subscription_changed")).toMatchObject({ dateBasis: "start_date", payload: { status: "active" } });
-    expect(facts.find((f) => f.source === "matrix" && f.type === "message_in")).toMatchObject({ sourceContactId: "@whatsapp_33612345678:hs", occurredAt: "2026-09-04T12:00:00.000Z", payload: { channel: "whatsapp", text: "Hello on WhatsApp" } });
-    expect(facts.find((f) => f.source === "gmail" && f.type === "message_in")).toMatchObject({ sourceRef: "g2", sourceContactId: null, payload: { text: "Sure, call me", textClean: { status: "cleaned", cleaned: true } } });
-    expect(facts.find((f) => f.type === "website_visit")).toMatchObject({ sourceContactId: "ph-alice", payload: { pageviews: 3, firstUrl: "https://brand.com/pricing" } });
+    expect(facts.find((f) => f.source === "matrix" && f.type === "message_in")).toMatchObject({ sourceContactId: "@whatsapp_33612345678:hs", crmContactId: s.aliceWa, occurredAt: "2026-09-04T12:00:00.000Z", payload: { channel: "whatsapp", text: "Hello on WhatsApp" } });
+    expect(facts.find((f) => f.source === "gmail" && f.type === "message_in")).toMatchObject({ sourceRef: "g2", sourceContactId: null, crmContactId: null, payload: { text: "Sure, call me", textClean: { status: "cleaned", cleaned: true } } });
+    expect(facts.find((f) => f.type === "website_visit")).toMatchObject({ sourceContactId: "ph-alice", crmContactId: s.posthogContact, payload: { pageviews: 3, firstUrl: "https://brand.com/pricing" } });
     // Facts are served in feed order.
     expect(facts.map((f) => Number(f.seq))).toEqual([...facts.map((f) => Number(f.seq))].sort((a, b) => a - b));
   });
@@ -402,11 +407,11 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
     await emitScopeFacts(s.scope);
     const fromFeed = (await allFacts())
       .filter((f) => f.source === "gohighlevel" && !["added_to_crm", "deal_status_changed"].includes(f.type))
-      .map((f) => `${f.sourceContactId}|${f.type}|${f.occurredAt}|${f.dateBasis}|${(f.payload as { via: string }).via}|${f.sourceRef}`)
+      .map((f) => `${f.crmContactId}|${f.sourceContactId}|${f.type}|${f.occurredAt}|${f.dateBasis}|${(f.payload as { via: string }).via}|${f.sourceRef}`)
       .sort();
     const events = await readFunnelEvents({ orgId: ORG, brandId: BRAND, limit: 1000, offset: 0 });
     const fromEvents = events.contacts
-      .flatMap((c) => c.events.map((e) => `${c.externalContactId}|${e.step}|${e.occurredAt}|${e.dateBasis}|${e.source}|${e.sourceId}`))
+      .flatMap((c) => c.events.map((e) => `${c.contactId}|${c.externalContactId}|${e.step}|${e.occurredAt}|${e.dateBasis}|${e.source}|${e.sourceId}`))
       .sort();
     expect(fromEvents.length).toBe(6);
     expect(fromFeed).toEqual(fromEvents);
@@ -437,6 +442,7 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
     const added = (await readFacts({ since: Number(before[before.length - 1].seq), limit: 100 })).facts;
     const withdrawn = added.filter((f) => f.type === "withdrawn");
     expect(withdrawn.map((w) => w.withdrawnOf).sort()).toEqual([attended.factId, visit.factId].sort());
+    expect(withdrawn.find((w) => w.withdrawnOf === attended.factId)!.crmContactId).toBe(s.aliceGhl);
     expect(withdrawn.find((w) => w.withdrawnOf === attended.factId)!.payload).toEqual({ reason: "vendor_record_changed", withdrawnType: "meeting_attended" });
     expect(withdrawn.find((w) => w.withdrawnOf === visit.factId)!.payload).toEqual({ reason: "vendor_record_gone", withdrawnType: "website_visit" });
     expect(added.find((f) => f.type === "meeting_not_held")).toMatchObject({ sourceRef: "appt-1", occurredAt: "2026-08-05T14:00:00.000Z", payload: { reason: "noshow" } });

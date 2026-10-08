@@ -736,8 +736,11 @@ lead-service serves the overall tag, then go.
 - `GET /internal/people/facts?since=&limit=&orgId=&brandId=` (apiKeyAuth,
   platform run) → `{ facts, nextCursor, hasMore }`, total order on
   `people_facts.feed_seq`. Fact = `factId, seq, orgId, brandId, personKey,
-  emails, phones, fullName, sourceContactId, type, occurredAt, dateBasis,
-  source, sourceRef, payload, withdrawnOf?`.
+  emails, phones, fullName, sourceContactId, crmContactId, type, occurredAt,
+  dateBasis, source, sourceRef, payload, withdrawnOf?`. `sourceContactId` = the
+  vendor's contact id; `crmContactId` = OUR `contacts.id` (what funnel-events
+  serves as `contactId`, and what lead-service's pairings are keyed on), kept
+  out of the content hash so a reconnect's new row ids re-emit nothing.
 - **Emitted after every people build** (`emitScopeFacts`, recorded as
   `sourceReads.facts`; a failure never undoes the build). Candidates are
   re-derived from silver + the Gmail store and DIFFED on a natural key (vendor
