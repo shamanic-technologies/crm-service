@@ -24,7 +24,7 @@ import {
   type Presence,
 } from "./identity.js";
 import { siblingGet, siblingGetOk, type SiblingIdentity } from "./siblings.js";
-import type { GhlDeal } from "./state.js";
+import type { GhlDeal, LeadStanding } from "./state.js";
 
 export const SOURCE_STATUSES = ["not_connected", "ok", "failed"] as const;
 export type SourceStatus = (typeof SOURCE_STATUSES)[number];
@@ -645,7 +645,7 @@ interface LeadRow {
   leadId: string | null;
   email: string;
   campaignId: string | null;
-  standing: (Record<string, unknown> & { state: string }) | null;
+  standing: (Record<string, unknown> & { state: string; tag?: unknown }) | null;
 }
 
 /**
@@ -661,7 +661,7 @@ export async function lookupLeadStanding(
   | { found: false }
   | {
       found: true;
-      standing: Record<string, unknown> & { state: string };
+      standing: LeadStanding;
       leadCampaignId: string;
       leadId: string | null;
       campaignId: string | null;
@@ -684,9 +684,12 @@ export async function lookupLeadStanding(
   if (!first.standing || typeof first.standing.state !== "string") {
     throw new Error(`lead-service row ${first.id} carries no standing`);
   }
+  if (typeof first.standing.tag !== "string") {
+    throw new Error(`lead-service row ${first.id} standing carries no tag`);
+  }
   return {
     found: true,
-    standing: first.standing,
+    standing: { ...first.standing, tag: first.standing.tag },
     leadCampaignId: first.id,
     leadId: first.leadId,
     campaignId: first.campaignId,

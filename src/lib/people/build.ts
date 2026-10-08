@@ -145,7 +145,9 @@ async function observeStandings(
     const fresh =
       hit &&
       now - hit.observedAt.getTime() < STANDING_TTL_MS &&
-      (!lastActivity || new Date(lastActivity) <= hit.observedAt);
+      (!lastActivity || new Date(lastActivity) <= hit.observedAt) &&
+      // An answer cached before lead-service served `standing.tag` is re-asked.
+      (!hit.found || typeof (hit.payload as { standing?: { tag?: unknown } } | null)?.standing?.tag === "string");
     if (fresh) {
       observations.set(email, hit.found ? ({ found: true, email, ...(hit.payload as object) } as LeadObservation) : { found: false });
       reused++;
