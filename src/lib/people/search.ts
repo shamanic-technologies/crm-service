@@ -25,15 +25,21 @@ import {
   type PeopleScope,
 } from "../../db/schema.js";
 import type { Presence } from "./identity.js";
+import type { TextCleanStatus, TimelineItem } from "./timeline.js";
 import { mapLimit, siblingGet, type SiblingIdentity } from "./siblings.js";
 
-// ─── the index ──────────────────────────────────────────────────────────────
+// ─── the store ──────────────────────────────────────────────────────────────
 
 const INDEX_CONCURRENCY = 4;
 /** A unit is re-read at least this often even with no new activity (late body cleaning). */
 export const UNIT_REFRESH_MS = 24 * 60 * 60 * 1000;
-/** Bodies are stored up to this length; a search past it would be a needle in a quoted thread anyway. */
+/** Bodies are searched up to this length; a match past it would be a needle in a quoted thread anyway. */
 const BODY_MAX = 20_000;
+/**
+ * The stored row shape. 1 = text only (v0.15.0); 2 = the full timeline item
+ * rides in `item`. A unit stored in an older format is due for a re-read.
+ */
+export const STORE_FORMAT = 2;
 
 export interface IndexPerson {
   emails: string[];
@@ -41,7 +47,7 @@ export interface IndexPerson {
   lastActivityAt: Date | null;
 }
 
-interface Unit {
+export interface Unit {
   source: "gmail" | "instantly";
   unit: string;
   address: string;
@@ -49,12 +55,11 @@ interface Unit {
   activityAt: Date | null;
 }
 
-interface IndexedMessage {
-  messageKey: string;
-  at: string | null;
-  direction: string | null;
-  subject: string | null;
-  body: string | null;
+export interface UnitRefreshSummary {
+  read: number;
+  failed: number;
+  /** Gmail answered "not connected": nothing of Gmail was stored. */
+  gmailNotConnected: boolean;
 }
 
 export interface MessageIndexSummary {
@@ -65,52 +70,98 @@ export interface MessageIndexSummary {
   dropped: number;
 }
 
-/** Every unit the scope's people call for: one per Gmail address, one per (cold-email campaign, address). */
-async function unitsOf(scope: PeopleScope, persons: IndexPerson[], gmailConnected: boolean): Promise<Unit[]> {
+const gmailUnit = (email: string, activityAt: Date | null): Unit => ({
+  source: "gmail",
+  unit: email,
+  address: email,
+  campaignId: null,
+  activityAt,
+});
+const instantlyUnit = (campaignId: string, email: string, activityAt: Date | null): Unit => ({
+  source: "instantly",
+  unit: `${campaignId}:${email}`,
+  address: email,
+  campaignId,
+  activityAt,
+});
+
+/** Cold-email campaigns lead-service last reported per address (the build's cache, no call). */
+async function cachedLeadCampaigns(scope: PeopleScope, emails?: string[]): Promise<Map<string, string[]>> {
   const observed = await db
     .select({ email: leadStandingObservations.email, payload: leadStandingObservations.payload })
     .from(leadStandingObservations)
-    .where(and(eq(leadStandingObservations.orgId, scope.orgId), eq(leadStandingObservations.brandId, scope.brandId)));
-  const leadCampaigns = new Map(
+    .where(
+      and(
+        eq(leadStandingObservations.orgId, scope.orgId),
+        eq(leadStandingObservations.brandId, scope.brandId),
+        emails ? (emails.length ? inArray(leadStandingObservations.email, emails) : sql`false`) : sql`true`,
+      ),
+    );
+  return new Map(
     observed.map((o) => [o.email, ((o.payload as { campaignIds?: string[] } | null)?.campaignIds ?? []) as string[]]),
   );
+}
+
+/** Every unit one person calls for: one per Gmail address, one per (cold-email campaign, address). */
+function unitsOfPerson(p: IndexPerson, gmailConnected: boolean, leadCampaigns: Map<string, string[]>, extra: Unit[] = []): Unit[] {
   const units = new Map<string, Unit>();
-  for (const p of persons) {
-    for (const email of p.emails) {
-      if (gmailConnected) {
-        units.set(`gmail|${email}`, { source: "gmail", unit: email, address: email, campaignId: null, activityAt: p.lastActivityAt });
-      }
-      const campaigns = new Set(leadCampaigns.get(email) ?? []);
-      for (const pr of p.presences) {
-        if (pr.source === "instantly" && pr.sourceRef === email) {
-          for (const c of (pr.detail.campaignIds as string[] | undefined) ?? []) campaigns.add(c);
-        }
-      }
-      for (const c of campaigns) {
-        const unit = `${c}:${email}`;
-        units.set(`instantly|${unit}`, { source: "instantly", unit, address: email, campaignId: c, activityAt: p.lastActivityAt });
+  for (const email of p.emails) {
+    if (gmailConnected) units.set(`gmail|${email}`, gmailUnit(email, p.lastActivityAt));
+    const campaigns = new Set(leadCampaigns.get(email) ?? []);
+    for (const pr of p.presences) {
+      if (pr.source === "instantly" && pr.sourceRef === email) {
+        for (const c of (pr.detail.campaignIds as string[] | undefined) ?? []) campaigns.add(c);
       }
     }
+    for (const c of campaigns) units.set(`instantly|${c}:${email}`, instantlyUnit(c, email, p.lastActivityAt));
   }
+  for (const u of extra) if (!units.has(`${u.source}|${u.unit}`)) units.set(`${u.source}|${u.unit}`, { ...u, activityAt: p.lastActivityAt });
   return [...units.values()];
 }
 
 interface GmailConversation {
   threads: {
+    threadId: string;
     messages: {
       gmailMessageId: string;
-      direction: string;
+      threadId: string;
+      direction: "inbound" | "outbound" | "other";
+      fromEmail: string | null;
+      to: string[];
       subject: string | null;
       snippet: string | null;
       sentAt: string | null;
       bodyText: string | null;
+      bodyTextOriginal: string | null;
       bodyStatus: string;
+      bodyCleanStatus: TextCleanStatus;
     }[];
   }[];
 }
 
-/** One unit's messages, as the timeline would show them. `null` = Gmail is not connected. */
-async function readUnit(identity: SiblingIdentity, u: Unit): Promise<IndexedMessage[] | null> {
+interface InstantlyConversation {
+  conversation: {
+    campaignId: string;
+    messages: {
+      direction: "inbound" | "outbound";
+      from: string;
+      to: string;
+      at: string;
+      subject: string;
+      text: string;
+      campaignId: string;
+      instantlyCampaignId: string;
+    }[];
+  };
+}
+
+interface StoredMessage {
+  messageKey: string;
+  item: TimelineItem;
+}
+
+/** One unit's messages, as timeline items. `null` = Gmail is not connected. */
+async function readUnit(identity: SiblingIdentity, u: Unit): Promise<StoredMessage[] | null> {
   if (u.source === "gmail") {
     const r = await siblingGet("google", `/orgs/google/conversation?email=${encodeURIComponent(u.address)}&limit=500`, identity);
     const reason = (r.body as { reason?: string } | null)?.reason;
@@ -122,10 +173,24 @@ async function readUnit(identity: SiblingIdentity, u: Unit): Promise<IndexedMess
     return (r.body as GmailConversation).threads.flatMap((t) =>
       t.messages.map((m) => ({
         messageKey: m.gmailMessageId,
-        at: m.sentAt,
-        direction: m.direction,
-        subject: m.subject,
-        body: m.bodyStatus === "ok" ? m.bodyText : m.snippet,
+        item: {
+          at: m.sentAt,
+          source: "gmail" as const,
+          channel: "email",
+          kind: "message" as const,
+          direction: m.direction,
+          subject: m.subject,
+          text: m.bodyStatus === "ok" ? m.bodyText : m.snippet,
+          from: m.fromEmail,
+          to: m.to,
+          ref: { gmailMessageId: m.gmailMessageId, threadId: m.threadId, bodyStatus: m.bodyStatus },
+          textClean: {
+            status: m.bodyCleanStatus,
+            cleaned: m.bodyStatus === "ok" && m.bodyCleanStatus === "cleaned",
+            original: m.bodyTextOriginal,
+          },
+          event: null,
+        },
       })),
     );
   }
@@ -141,15 +206,23 @@ async function readUnit(identity: SiblingIdentity, u: Unit): Promise<IndexedMess
       `instantly-service conversation ${u.campaignId}/${u.address} returned ${r.status}: ${JSON.stringify(r.body).slice(0, 300)}`,
     );
   }
-  const messages = (r.body as { conversation: { messages: { direction: string; at: string; subject: string; text: string }[] } })
-    .conversation.messages;
   // instantly-service gives no message id: position + time + direction is stable for an append-only thread.
-  return messages.map((m, i) => ({
+  return (r.body as InstantlyConversation).conversation.messages.map((m, i) => ({
     messageKey: `${i}:${m.at}:${m.direction}`,
-    at: m.at || null,
-    direction: m.direction,
-    subject: m.subject || null,
-    body: m.text ?? null,
+    item: {
+      at: m.at || null,
+      source: "instantly" as const,
+      channel: "email",
+      kind: "message" as const,
+      direction: m.direction,
+      subject: m.subject || null,
+      text: m.text,
+      from: m.from,
+      to: m.to ? [m.to] : [],
+      ref: { campaignId: m.campaignId, instantlyCampaignId: m.instantlyCampaignId },
+      textClean: null,
+      event: null,
+    },
   }));
 }
 
@@ -159,11 +232,86 @@ const validDate = (s: string | null) => {
   return Number.isNaN(d.getTime()) ? null : d;
 };
 
+/** Read the given units from their source and replace what the store holds for each. */
+export async function refreshUnits(scopeId: string, units: Unit[], identity: SiblingIdentity): Promise<UnitRefreshSummary> {
+  let failed = 0;
+  let read = 0;
+  let gmailNotConnected = false;
+  await mapLimit(units, INDEX_CONCURRENCY, async (u) => {
+    if (u.source === "gmail" && gmailNotConnected) return;
+    let messages: StoredMessage[] | null;
+    try {
+      messages = await readUnit(identity, u);
+    } catch (err) {
+      failed++;
+      await db
+        .insert(peopleMessageUnits)
+        .values({ scopeId, source: u.source, unit: u.unit, address: u.address, activityAt: u.activityAt, status: "failed", error: (err as Error).message, runId: identity.runId, format: STORE_FORMAT })
+        .onConflictDoUpdate({
+          target: [peopleMessageUnits.scopeId, peopleMessageUnits.source, peopleMessageUnits.unit],
+          set: { status: "failed", error: (err as Error).message, indexedAt: new Date(), runId: identity.runId },
+        });
+      return;
+    }
+    if (messages === null) {
+      gmailNotConnected = true;
+      return;
+    }
+    read++;
+    const seen = new Set<string>();
+    const rows = messages
+      .filter((m) => (seen.has(m.messageKey) ? false : (seen.add(m.messageKey), true)))
+      .map((m) => {
+        const body = m.item.text ? m.item.text.slice(0, BODY_MAX) : null;
+        return {
+          scopeId,
+          source: u.source,
+          unit: u.unit,
+          address: u.address,
+          messageKey: m.messageKey,
+          at: validDate(m.item.at),
+          direction: m.item.direction,
+          subject: m.item.subject,
+          body,
+          searchText: `${m.item.subject ?? ""}\n${body ?? ""}`,
+          item: m.item,
+        };
+      });
+    await db.transaction(async (tx) => {
+      await tx
+        .delete(peopleMessageTexts)
+        .where(and(eq(peopleMessageTexts.scopeId, scopeId), eq(peopleMessageTexts.source, u.source), eq(peopleMessageTexts.unit, u.unit)));
+      for (let i = 0; i < rows.length; i += 500) await tx.insert(peopleMessageTexts).values(rows.slice(i, i + 500));
+      await tx
+        .insert(peopleMessageUnits)
+        .values({ scopeId, source: u.source, unit: u.unit, address: u.address, activityAt: u.activityAt, status: "ok", messages: rows.length, runId: identity.runId, format: STORE_FORMAT })
+        .onConflictDoUpdate({
+          target: [peopleMessageUnits.scopeId, peopleMessageUnits.source, peopleMessageUnits.unit],
+          set: { status: "ok", error: null, activityAt: u.activityAt, messages: rows.length, indexedAt: new Date(), runId: identity.runId, format: STORE_FORMAT },
+        });
+    });
+  });
+  return { read, failed, gmailNotConnected };
+}
+
+/** Whether a stored unit must be read again. */
+export function unitDue(
+  u: Unit,
+  known: { status: string; indexedAt: Date; activityAt: Date | null; format: number } | undefined,
+  now: number,
+  maxAgeMs = UNIT_REFRESH_MS,
+): boolean {
+  if (!known || known.status !== "ok" || known.format < STORE_FORMAT) return true;
+  if (now - known.indexedAt.getTime() >= maxAgeMs) return true;
+  return !!u.activityAt && (!known.activityAt || u.activityAt > known.activityAt);
+}
+
 /**
- * Bring the scope's message index up to date with its people. A unit is read
- * when it was never read, its last read failed, the person's activity moved past
- * what was read, or the read is a day old. Units no longer called for (the
- * person left the scope) are dropped with their messages.
+ * Bring the scope's message store up to date with its people. A unit is read
+ * when it was never read, its last read failed, its stored format is older,
+ * the person's activity moved past what was read, or the read is a day old.
+ * Units no longer called for (the person left the scope) are dropped with
+ * their messages.
  */
 export async function indexScopeMessages(
   scope: PeopleScope,
@@ -171,12 +319,24 @@ export async function indexScopeMessages(
   identity: SiblingIdentity,
   gmailConnected: boolean,
 ): Promise<MessageIndexSummary> {
-  const wanted = await unitsOf(scope, persons, gmailConnected);
+  const leadCampaigns = await cachedLeadCampaigns(scope);
   const existing = await db.select().from(peopleMessageUnits).where(eq(peopleMessageUnits.scopeId, scope.id));
   const known = new Map(existing.map((e) => [`${e.source}|${e.unit}`, e]));
-  const wantedKeys = new Set(wanted.map((u) => `${u.source}|${u.unit}`));
+  // Instantly units a timeline read discovered (lead-service campaigns the build's cache did not know) stay.
+  const discovered = new Map<string, Unit[]>();
+  for (const e of existing) {
+    if (e.source !== "instantly") continue;
+    const [campaignId] = e.unit.split(":");
+    discovered.set(e.address, [...(discovered.get(e.address) ?? []), instantlyUnit(campaignId, e.address, null)]);
+  }
+  const wantedMap = new Map<string, Unit>();
+  for (const p of persons) {
+    const extra = p.emails.flatMap((e) => discovered.get(e) ?? []);
+    for (const u of unitsOfPerson(p, gmailConnected, leadCampaigns, extra)) wantedMap.set(`${u.source}|${u.unit}`, u);
+  }
+  const wanted = [...wantedMap.values()];
 
-  const stale = existing.filter((e) => !wantedKeys.has(`${e.source}|${e.unit}`));
+  const stale = existing.filter((e) => !wantedMap.has(`${e.source}|${e.unit}`));
   for (const e of stale) {
     await db.transaction(async (tx) => {
       await tx
@@ -187,69 +347,130 @@ export async function indexScopeMessages(
   }
 
   const now = Date.now();
-  const due = wanted.filter((u) => {
-    const k = known.get(`${u.source}|${u.unit}`);
-    if (!k || k.status !== "ok") return true;
-    if (now - k.indexedAt.getTime() >= UNIT_REFRESH_MS) return true;
-    return !!u.activityAt && (!k.activityAt || u.activityAt > k.activityAt);
-  });
+  const due = wanted.filter((u) => unitDue(u, known.get(`${u.source}|${u.unit}`), now));
+  const r = await refreshUnits(scope.id, due, identity);
+  return { units: wanted.length, read: due.length, reused: wanted.length - due.length, failed: r.failed, dropped: stale.length };
+}
 
-  let failed = 0;
-  let gmailGone = false;
-  await mapLimit(due, INDEX_CONCURRENCY, async (u) => {
-    if (u.source === "gmail" && gmailGone) return;
-    let messages: IndexedMessage[] | null;
-    try {
-      messages = await readUnit(identity, u);
-    } catch (err) {
-      failed++;
-      await db
-        .insert(peopleMessageUnits)
-        .values({ scopeId: scope.id, source: u.source, unit: u.unit, address: u.address, activityAt: u.activityAt, status: "failed", error: (err as Error).message, runId: identity.runId })
-        .onConflictDoUpdate({
-          target: [peopleMessageUnits.scopeId, peopleMessageUnits.source, peopleMessageUnits.unit],
-          set: { status: "failed", error: (err as Error).message, indexedAt: new Date(), runId: identity.runId },
-        });
-      return;
-    }
-    if (messages === null) {
-      gmailGone = true;
-      return;
-    }
+// ─── one person, from the store ─────────────────────────────────────────────
+
+/** A person's stored timeline is re-read in the background once older than this. */
+export const TIMELINE_REFRESH_MS = Number(process.env.PEOPLE_TIMELINE_REFRESH_MS) || 60_000;
+
+export interface StoredSource {
+  /** ok = served from the store; failed = never read successfully (error). */
+  status: "ok" | "empty" | "failed";
+  items: TimelineItem[];
+  error: string | null;
+  asked: string[];
+  /** The OLDEST read the served items come from: everything is at least this fresh. */
+  readAt: string | null;
+}
+
+export interface StoredTimeline {
+  gmail: StoredSource;
+  instantly: StoredSource;
+  /** Units older than TIMELINE_REFRESH_MS (or never read with a lead-service discovery pending). */
+  refresh: () => Promise<void>;
+  stale: boolean;
+}
+
+const refreshing = new Set<string>();
+
+/**
+ * One person's Gmail + cold-email messages, from the store. A Gmail address
+ * never read yet is read NOW (first read only); everything else is served as
+ * stored and, when older than TIMELINE_REFRESH_MS, re-read in the background
+ * through `refresh()` (which also asks lead-service for cold-email campaigns
+ * the build's cache did not know).
+ */
+export async function readStoredTimeline(
+  scope: PeopleScope,
+  person: IndexPerson & { personKey: string },
+  gmailConnected: boolean,
+  identity: SiblingIdentity,
+  discoverCampaigns: (email: string) => Promise<string[]>,
+): Promise<StoredTimeline> {
+  const leadCampaigns = await cachedLeadCampaigns(scope, person.emails);
+  const loadUnits = () =>
+    person.emails.length
+      ? db
+          .select()
+          .from(peopleMessageUnits)
+          .where(and(eq(peopleMessageUnits.scopeId, scope.id), inArray(peopleMessageUnits.address, person.emails)))
+      : Promise.resolve([] as (typeof peopleMessageUnits.$inferSelect)[]);
+  let stored = await loadUnits();
+  const extra = stored
+    .filter((e) => e.source === "instantly")
+    .map((e) => instantlyUnit(e.unit.split(":")[0], e.address, null));
+  const units = unitsOfPerson(person, gmailConnected, leadCampaigns, extra);
+
+  // First read of a Gmail address (or of an older stored format): read it now, once.
+  const known = () => new Map(stored.map((e) => [`${e.source}|${e.unit}`, e]));
+  const k0 = known();
+  const missing = units.filter((u) => {
+    const k = k0.get(`${u.source}|${u.unit}`);
+    return !k || k.format < STORE_FORMAT;
+  });
+  if (missing.length) {
+    await refreshUnits(scope.id, missing, identity);
+    stored = await loadUnits();
+  }
+  const k1 = known();
+
+  const rows = person.emails.length
+    ? await db
+        .select({ source: peopleMessageTexts.source, unit: peopleMessageTexts.unit, messageKey: peopleMessageTexts.messageKey, item: peopleMessageTexts.item })
+        .from(peopleMessageTexts)
+        .where(and(eq(peopleMessageTexts.scopeId, scope.id), inArray(peopleMessageTexts.address, person.emails)))
+    : [];
+
+  const sourceOf = (source: "gmail" | "instantly"): StoredSource => {
+    const mine = units.filter((u) => u.source === source);
+    const asked = mine.map((u) => u.unit);
+    const states = mine.map((u) => k1.get(`${u.source}|${u.unit}`)).filter((x): x is NonNullable<typeof x> => !!x);
     const seen = new Set<string>();
-    const rows = messages
-      .filter((m) => (seen.has(m.messageKey) ? false : (seen.add(m.messageKey), true)))
-      .map((m) => {
-        const body = m.body ? m.body.slice(0, BODY_MAX) : null;
-        return {
-          scopeId: scope.id,
-          source: u.source,
-          unit: u.unit,
-          address: u.address,
-          messageKey: m.messageKey,
-          at: validDate(m.at),
-          direction: m.direction,
-          subject: m.subject,
-          body,
-          searchText: `${m.subject ?? ""}\n${body ?? ""}`,
-        };
-      });
-    await db.transaction(async (tx) => {
-      await tx
-        .delete(peopleMessageTexts)
-        .where(and(eq(peopleMessageTexts.scopeId, scope.id), eq(peopleMessageTexts.source, u.source), eq(peopleMessageTexts.unit, u.unit)));
-      for (let i = 0; i < rows.length; i += 500) await tx.insert(peopleMessageTexts).values(rows.slice(i, i + 500));
-      await tx
-        .insert(peopleMessageUnits)
-        .values({ scopeId: scope.id, source: u.source, unit: u.unit, address: u.address, activityAt: u.activityAt, status: "ok", messages: rows.length, runId: identity.runId })
-        .onConflictDoUpdate({
-          target: [peopleMessageUnits.scopeId, peopleMessageUnits.source, peopleMessageUnits.unit],
-          set: { status: "ok", error: null, activityAt: u.activityAt, messages: rows.length, indexedAt: new Date(), runId: identity.runId },
-        });
-    });
-  });
+    const items: TimelineItem[] = [];
+    for (const r of rows) {
+      if (r.source !== source || !r.item) continue;
+      // A Gmail message to two of the person's addresses is one message.
+      const key = source === "gmail" ? r.messageKey : `${r.unit}|${r.messageKey}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push(r.item as TimelineItem);
+    }
+    const okStates = states.filter((s) => s.status === "ok");
+    const failedStates = states.filter((s) => s.status !== "ok");
+    const error = failedStates.length ? failedStates.map((s) => s.error).join("; ") : null;
+    const readAt = okStates.length ? new Date(Math.min(...okStates.map((s) => s.indexedAt.getTime()))).toISOString() : null;
+    if (items.length === 0 && failedStates.length && okStates.length === 0) {
+      return { status: "failed", items, error, asked, readAt };
+    }
+    return { status: items.length ? "ok" : "empty", items, error, asked, readAt };
+  };
 
-  return { units: wanted.length, read: due.length, reused: wanted.length - due.length, failed, dropped: stale.length };
+  const now = Date.now();
+  const due = units.filter((u) => unitDue(u, k1.get(`${u.source}|${u.unit}`), now, TIMELINE_REFRESH_MS));
+  const key = `${scope.id}|${person.personKey}`;
+  const refresh = async () => {
+    if (refreshing.has(key)) return;
+    refreshing.add(key);
+    try {
+      const found: Unit[] = [];
+      for (const email of person.emails) {
+        for (const c of await discoverCampaigns(email)) found.push(instantlyUnit(c, email, person.lastActivityAt));
+      }
+      const fresh = await loadUnits();
+      const kf = new Map(fresh.map((e) => [`${e.source}|${e.unit}`, e]));
+      const todo = new Map(due.map((u) => [`${u.source}|${u.unit}`, u]));
+      for (const u of found) if (!kf.has(`${u.source}|${u.unit}`)) todo.set(`${u.source}|${u.unit}`, u);
+      await refreshUnits(scope.id, [...todo.values()], identity);
+    } finally {
+      refreshing.delete(key);
+    }
+  };
+
+  return { gmail: sourceOf("gmail"), instantly: sourceOf("instantly"), refresh, stale: due.length > 0 };
 }
 
 /** How complete the index is for a scope, so a search never claims coverage it does not have. */

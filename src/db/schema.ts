@@ -1020,6 +1020,8 @@ export const peopleMessageTexts = pgTable(
     subject: text("subject"),
     body: text("body"),
     searchText: text("search_text").notNull(),
+    // The full timeline item as the person thread serves it (null on rows stored in format 1).
+    item: jsonb("item"),
     indexedAt: timestamp("indexed_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
@@ -1052,6 +1054,8 @@ export const peopleMessageUnits = pgTable(
     messages: integer("messages").notNull().default(0),
     indexedAt: timestamp("indexed_at", { withTimezone: true }).notNull().defaultNow(),
     runId: text("run_id").notNull(),
+    // Stored row shape (see people/search.ts STORE_FORMAT); an older one is re-read.
+    format: integer("format").notNull().default(1),
   },
   (table) => [uniqueIndex("people_message_units_uq").on(table.scopeId, table.source, table.unit)],
 );

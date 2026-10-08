@@ -1736,6 +1736,13 @@ const PersonTimelineResponseSchema = registry.register(
           items: z.number().int(),
           error: z.string().nullable(),
           asked: z.array(z.string()).openapi({ description: "What was asked (addresses, campaign:address pairs, conversations, contacts), so an empty answer is auditable." }),
+          servedFrom: z.enum(["store", "mirror"]).openapi({
+            description:
+              "store = Gmail / cold email, served from crm-service's message store (never waits on google-service / instantly-service): " +
+              "re-read in the background when older than 60s on a read (the NEXT read shows a new message) and by the 15-minute build when the person's activity moved. " +
+              "mirror = crm-service's own synced data (Matrix, GoHighLevel, PostHog, Stripe), read in place.",
+          }),
+          readAt: z.string().nullable().openapi({ description: "store only: the oldest source read the served items come from. Null = never read (or a mirror source)." }),
         }),
       ),
       itemCount: z.number().int(),

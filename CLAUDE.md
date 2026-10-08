@@ -695,7 +695,7 @@ owner had written to. A recorded fact, never an address-shape guess.
 - **The first `GET /orgs/people` for a brand opens the scope** and kicks the
   build in the background: it answers `scope.status = "building"`, never an
   empty list posing as an answer. `POST /orgs/people/sync` forces a rebuild.
-- **The timeline is live** (`timeline.ts`): Gmail per-address conversation,
+- **The timeline** (`timeline.ts`): Gmail per-address conversation,
   Instantly conversation per (campaign, address) — campaigns from the engaged
   row AND from lead-service, so a person cold-emailed but not engaged still
   shows the sends — Matrix raw events, GoHighLevel funnel events. Per source
@@ -714,6 +714,12 @@ owner had written to. A recorded fact, never an address-shape guess.
   old text and shows in `search.messageIndex.failed`. Matrix text is searched
   in place. Each person gets `matches` (field + value, or message excerpt);
   blank `q` = the list byte for byte. The gateway forwards the query verbatim.
+- **The timeline serves Gmail + cold email FROM THAT STORE** (`readStoredTimeline`,
+  each stored row carries the full item, `format` 2): no sibling call on a read.
+  A never-read address is read once on the spot; a store older than 60s
+  (`PEOPLE_TIMELINE_REFRESH_MS`) is re-read in the background, so the NEXT read
+  shows a new message; lead-service campaign discovery runs there too. Sources
+  carry `servedFrom: store|mirror` + `readAt`.
 - Cron on the box, every 15 min: `/root/distribute/people-sync-cron.sh` →
   `POST /internal/people/sync` (platform run = the trigger; one ORG run per
   scope). Env: `GOOGLE_/INSTANTLY_/LEAD_/BRAND_SERVICE_URL` + `_API_KEY`.
