@@ -660,11 +660,14 @@ owner had written to. A recorded fact, never an address-shape guess.
 - **Automated senders are nobody either — and Jev says who they are**
   (`automated.ts`). A LinkedIn "X just messaged you" digest, a receipt, a
   newsletter, a no-reply: one Jev `choice` (`human|automated`) per ADDRESS,
-  input = the address, its names, per-source counts and its 3 latest Gmail
-  subjects/snippets. No regex of ours. Recorded in `sender_verdicts` keyed
-  (org, email), so an address is judged ONCE (a rebuild makes zero calls).
-  A person is `automated` only when EVERY address is `automated` at
-  confidence >= 0.5 and they hold no phone; `GET /orgs/people` hides them
+  input = the address, its names, counts and the 3 latest Gmail messages IT
+  SENT. No regex of ours. Recorded in `sender_verdicts` keyed (org, email),
+  so an address is judged ONCE (a rebuild makes zero calls). ⚠️ Only
+  Gmail-ONLY people who WROTE are asked: judged blind, Jev called Instantly
+  leads and PostHog signups automated at 0.5-0.8 (v0.13.0 prod, 60+ real
+  prospects hidden); any other source is a recorded human relationship.
+  A person is `automated` only when Gmail-only, no phone, EVERY address
+  `automated` at confidence >= 0.5; `GET /orgs/people` hides them
   unless `includeAutomated=true` (`automatedHidden` counts them). Jev down =
   nobody hidden, `senderVerdicts.status=failed`, retried next build. Source
   data stays whole.
