@@ -704,6 +704,16 @@ owner had written to. A recorded fact, never an address-shape guess.
   google-service's `bodyCleanStatus` verbatim, `cleaned` true only for `cleaned`,
   `original` = `bodyTextOriginal`. google-service owns the cleaning; this only
   forwards it, so an uncleaned fallback is never silent to the reader.
+- **Search = `GET /orgs/people?q=`** (`search.ts`), same order/paging/filters,
+  plain case-insensitive substring, no model. Matches name, company (person +
+  presences), any email (domain works), phone (4+ digits), and message text.
+  Gmail + cold-email text is copied into OUR index (`people_message_texts`,
+  trigram GIN; `people_message_units` = one per Gmail address / campaign x
+  address, re-read only when the person's activity moved, the read failed, or
+  it is a day old), refreshed right after each build; a failed read keeps the
+  old text and shows in `search.messageIndex.failed`. Matrix text is searched
+  in place. Each person gets `matches` (field + value, or message excerpt);
+  blank `q` = the list byte for byte. The gateway forwards the query verbatim.
 - Cron on the box, every 15 min: `/root/distribute/people-sync-cron.sh` →
   `POST /internal/people/sync` (platform run = the trigger; one ORG run per
   scope). Env: `GOOGLE_/INSTANTLY_/LEAD_/BRAND_SERVICE_URL` + `_API_KEY`.

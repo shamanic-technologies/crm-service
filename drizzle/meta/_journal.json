@@ -92,6 +92,13 @@
       "when": 1791438167495,
       "tag": "0012_sender_verdicts",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1791440875093,
+      "tag": "0013_people_message_index",
+      "breakpoints": true
     }
   ]
 }

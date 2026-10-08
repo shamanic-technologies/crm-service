@@ -987,6 +987,76 @@ export const people = pgTable(
 );
 
 /**
+ * SEARCH INDEX — one row per message an indexing UNIT holds, so a brand owner
+ * can search what was said without the dashboard fanning out to every source.
+ *
+ * Only the sources whose text lives in a SIBLING are indexed here (Gmail via
+ * google-service's per-address conversation, cold email via instantly-service's
+ * per-(campaign, address) conversation). Matrix text is already crm-service's
+ * own bronze and is searched in place. Nothing here is a source of truth: the
+ * timeline still reads live, and the whole index can be dropped and rebuilt.
+ *
+ * `address` is the person's lower-cased email the unit was read for; a search
+ * hit reaches the person through `people.emails`, so a rebuild of `people`
+ * (which replaces every row) never orphans the index. `search_text` is
+ * subject + body, trigram-indexed for substring search.
+ */
+export const peopleMessageTexts = pgTable(
+  "people_message_texts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => peopleScopes.id, { onDelete: "cascade" }),
+    // gmail | instantly
+    source: text("source").notNull(),
+    // gmail: the address; instantly: "<campaignId>:<address>"
+    unit: text("unit").notNull(),
+    address: text("address").notNull(),
+    messageKey: text("message_key").notNull(),
+    at: timestamp("at", { withTimezone: true }),
+    // inbound | outbound | other
+    direction: text("direction"),
+    subject: text("subject"),
+    body: text("body"),
+    searchText: text("search_text").notNull(),
+    indexedAt: timestamp("indexed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("people_message_texts_unit_message_uq").on(table.scopeId, table.source, table.unit, table.messageKey),
+    index("people_message_texts_scope_address_idx").on(table.scopeId, table.address),
+  ],
+);
+
+/**
+ * One row per indexing unit of a scope: what was read, when, through which
+ * activity. A unit is re-read when the person's last activity moved past
+ * `activity_at`, when its last read failed, or once a day (google-service
+ * cleans bodies after the fact). `status` is `ok` | `failed` — a failed read is
+ * recorded with its error and its old messages kept, never turned into "no
+ * messages".
+ */
+export const peopleMessageUnits = pgTable(
+  "people_message_units",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    scopeId: uuid("scope_id")
+      .notNull()
+      .references(() => peopleScopes.id, { onDelete: "cascade" }),
+    source: text("source").notNull(),
+    unit: text("unit").notNull(),
+    address: text("address").notNull(),
+    activityAt: timestamp("activity_at", { withTimezone: true }),
+    status: text("status").notNull(),
+    error: text("error"),
+    messages: integer("messages").notNull().default(0),
+    indexedAt: timestamp("indexed_at", { withTimezone: true }).notNull().defaultNow(),
+    runId: text("run_id").notNull(),
+  },
+  (table) => [uniqueIndex("people_message_units_uq").on(table.scopeId, table.source, table.unit)],
+);
+
+/**
  * What lead-service last said about one email of a brand: its standing (or that
  * the address is not one of our leads). A cache of lead-service's answer, never
  * a grade of ours, so a 5-minute rebuild does not ask lead-service about every
