@@ -252,7 +252,7 @@ router.get(
         });
       }
       const { scope } = await ensureScope(req.orgId!, brandId, req.userId!);
-      const timeline = await readTimeline(person, scope.sourceReads as BuildSummary | null, {
+      const timeline = await readTimeline(scope, person, scope.sourceReads as BuildSummary | null, {
         orgId: req.orgId!,
         userId: req.userId!,
         runId: req.runId!,

@@ -1,6 +1,8 @@
 /**
  * One person's whole exchange, every channel merged into ONE thread, oldest
- * first — read live, at request time, from where each exchange lives:
+ * first. Gmail and cold email are served from crm-service's message store
+ * (people/search.ts), refreshed in the background, so a read never waits on a
+ * slow sibling; every other source is crm-service's own mirror, read in place:
  *
  *  - gmail       google-service per-address conversation read (both directions)
  *  - instantly   instantly-service conversation read, per campaign the address is
@@ -13,8 +15,10 @@
  *  - stripe      crm-service's Stripe mirror: payments, refunds, subscriptions,
  *                with amount (minor unit, verbatim), currency and status
  *
- * Nothing is copied: the messages stay in their source and are fetched for the
- * person being read. Each source answers a status, so "not connected",
+ * Gmail and cold-email items carry `servedFrom: "store"` and `readAt` (the
+ * oldest read they come from); a person read with a store older than
+ * TIMELINE_REFRESH_MS is re-read in the background, so the NEXT read shows a new
+ * message. Each source answers a status, so "not connected",
  * "connected, nothing with this person" and "could not read it" never collapse
  * into an empty thread.
  */
@@ -28,13 +32,15 @@ import {
   people,
   posthogActivities,
   stripeTransactions,
+  type PeopleScope,
   type Person,
 } from "../../db/schema.js";
 import { majorAmount } from "../stripe/records.js";
 import { readFunnelEvents, type FunnelEvent } from "../gohighlevel/funnel-events.js";
 import type { BuildSummary } from "./build.js";
 import { PEOPLE_SOURCES, type PeopleSource, type Presence } from "./identity.js";
-import { siblingGet, type SiblingIdentity } from "./siblings.js";
+import type { SiblingIdentity } from "./siblings.js";
+import { readStoredTimeline, type StoredTimeline } from "./search.js";
 import { lookupLeadStanding } from "./sources.js";
 
 export const TIMELINE_SOURCE_STATUSES = ["ok", "empty", "not_connected", "failed"] as const;
@@ -96,6 +102,10 @@ export interface TimelineSource {
   error: string | null;
   /** What was asked (addresses, campaigns, contacts) so an empty answer is auditable. */
   asked: string[];
+  /** store = crm-service's message store (Gmail, cold email); mirror = crm-service's own synced data. */
+  servedFrom: "store" | "mirror";
+  /** store only: the oldest source read the items come from (null = never read). */
+  readAt: string | null;
 }
 
 interface SourceResult {
@@ -103,134 +113,10 @@ interface SourceResult {
   items: TimelineItem[];
   error: string | null;
   asked: string[];
+  readAt?: string | null;
 }
 
 const notConnected = (asked: string[] = []): SourceResult => ({ status: "not_connected", items: [], error: null, asked });
-
-// ─── gmail ──────────────────────────────────────────────────────────────────
-
-interface GmailConversation {
-  threads: {
-    threadId: string;
-    messages: {
-      gmailMessageId: string;
-      threadId: string;
-      direction: "inbound" | "outbound" | "other";
-      fromEmail: string | null;
-      to: string[];
-      subject: string | null;
-      snippet: string | null;
-      sentAt: string | null;
-      bodyText: string | null;
-      bodyTextOriginal: string | null;
-      bodyStatus: string;
-      bodyCleanStatus: TextCleanStatus;
-    }[];
-  }[];
-}
-
-async function gmailItems(identity: SiblingIdentity, emails: string[]): Promise<SourceResult> {
-  if (emails.length === 0) return { status: "empty", items: [], error: null, asked: [] };
-  const items: TimelineItem[] = [];
-  const seen = new Set<string>();
-  for (const email of emails) {
-    const r = await siblingGet("google", `/orgs/google/conversation?email=${encodeURIComponent(email)}&limit=500`, identity);
-    const reason = (r.body as { reason?: string } | null)?.reason;
-    if (r.status === 404 && reason === "no_google_account_connected") return notConnected(emails);
-    if (r.status === 404 && reason === "no_messages") continue;
-    if (r.status !== 200) {
-      return {
-        status: "failed",
-        items: [],
-        error: `google-service conversation for ${email} returned ${r.status}: ${JSON.stringify(r.body).slice(0, 300)}`,
-        asked: emails,
-      };
-    }
-    for (const thread of (r.body as GmailConversation).threads) {
-      for (const m of thread.messages) {
-        if (seen.has(m.gmailMessageId)) continue; // a message to two of the person's addresses
-        seen.add(m.gmailMessageId);
-        items.push({
-          at: m.sentAt,
-          source: "gmail",
-          channel: "email",
-          kind: "message",
-          direction: m.direction,
-          subject: m.subject,
-          text: m.bodyStatus === "ok" ? m.bodyText : m.snippet,
-          from: m.fromEmail,
-          to: m.to,
-          ref: { gmailMessageId: m.gmailMessageId, threadId: m.threadId, bodyStatus: m.bodyStatus },
-          textClean: {
-            status: m.bodyCleanStatus,
-            cleaned: m.bodyStatus === "ok" && m.bodyCleanStatus === "cleaned",
-            original: m.bodyTextOriginal,
-          },
-          event: null,
-        });
-      }
-    }
-  }
-  return { status: items.length ? "ok" : "empty", items, error: null, asked: emails };
-}
-
-// ─── instantly ──────────────────────────────────────────────────────────────
-
-interface InstantlyConversation {
-  conversation: {
-    campaignId: string;
-    messages: {
-      direction: "inbound" | "outbound";
-      from: string;
-      to: string;
-      at: string;
-      subject: string;
-      text: string;
-      campaignId: string;
-      instantlyCampaignId: string;
-    }[];
-  };
-}
-
-async function instantlyItems(identity: SiblingIdentity, pairs: { email: string; campaignId: string }[]): Promise<SourceResult> {
-  const asked = pairs.map((p) => `${p.campaignId}:${p.email}`);
-  if (pairs.length === 0) return { status: "empty", items: [], error: null, asked };
-  const items: TimelineItem[] = [];
-  for (const { email, campaignId } of pairs) {
-    const r = await siblingGet(
-      "instantly",
-      `/orgs/conversations?campaign_id=${encodeURIComponent(campaignId)}&email=${encodeURIComponent(email)}`,
-      identity,
-    );
-    // Documented: this org has no record of that (campaign, lead) — nothing was exchanged there.
-    if (r.status === 404) continue;
-    if (r.status !== 200) {
-      return {
-        status: "failed",
-        items: [],
-        error: `instantly-service conversation ${campaignId}/${email} returned ${r.status}: ${JSON.stringify(r.body).slice(0, 300)}`,
-        asked,
-      };
-    }
-    for (const m of (r.body as InstantlyConversation).conversation.messages) {
-      items.push({
-        at: m.at || null,
-        source: "instantly",
-        channel: "email",
-        kind: "message",
-        direction: m.direction,
-        subject: m.subject || null,
-        text: m.text,
-        from: m.from,
-        to: m.to ? [m.to] : [],
-        ref: { campaignId: m.campaignId, instantlyCampaignId: m.instantlyCampaignId },
-        textClean: null,
-        event: null,
-      });
-    }
-  }
-  return { status: items.length ? "ok" : "empty", items, error: null, asked };
-}
 
 // ─── matrix ─────────────────────────────────────────────────────────────────
 
@@ -419,6 +305,7 @@ const toFailed = (err: unknown, asked: string[] = []): SourceResult => ({
 });
 
 export async function readTimeline(
+  scope: PeopleScope,
   person: Person,
   sourceReads: BuildSummary | null,
   identity: SiblingIdentity,
@@ -429,24 +316,23 @@ export async function readTimeline(
     sourceReads?.sources.find((r) => r.source === s)?.status !== "not_connected";
   const emails = person.emails as string[];
 
-  const instantlyPairs = async () => {
-    const pairs = new Map<string, { email: string; campaignId: string }>();
-    for (const p of of("instantly")) {
-      for (const c of (p.detail.campaignIds as string[]) ?? []) pairs.set(`${c}:${p.sourceRef}`, { email: p.sourceRef, campaignId: c });
-    }
-    // Every campaign the address is a lead on, engaged or not — read from lead-service.
-    for (const email of emails) {
+  const storedRead = readStoredTimeline(
+    scope,
+    { personKey: person.personKey, emails, presences, lastActivityAt: person.lastActivityAt },
+    connected("gmail"),
+    identity,
+    // Every campaign the address is a lead on, engaged or not — asked in the background only.
+    async (email) => {
       const lead = await lookupLeadStanding(identity, email);
-      if (lead.found) for (const c of lead.campaignIds) pairs.set(`${c}:${email}`, { email, campaignId: c });
-    }
-    return [...pairs.values()];
-  };
+      return lead.found ? lead.campaignIds : [];
+    },
+  );
+  const fromStore = (pick: (t: StoredTimeline) => StoredTimeline["gmail"]) =>
+    storedRead.then((t): SourceResult => pick(t)).catch((e) => toFailed(e, emails));
 
   const [gmail, instantly, matrix, gohighlevel, posthog, stripe] = await Promise.all([
-    connected("gmail") ? gmailItems(identity, emails).catch((e) => toFailed(e, emails)) : Promise.resolve(notConnected()),
-    instantlyPairs()
-      .then((pairs) => instantlyItems(identity, pairs))
-      .catch((e) => toFailed(e, emails)),
+    connected("gmail") ? fromStore((t) => t.gmail) : Promise.resolve(notConnected()),
+    fromStore((t) => t.instantly),
     connected("matrix") ? matrixItems(of("matrix")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
     connected("gohighlevel")
       ? ghlItems(person, of("gohighlevel")).catch((e) => toFailed(e))
@@ -455,6 +341,17 @@ export async function readTimeline(
     connected("stripe") ? stripeItems(of("stripe")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
   ]);
   const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe };
+
+  // Stale store: re-read in the background; this read is answered from what is stored.
+  storedRead
+    .then((t) => {
+      if (t.stale) {
+        setImmediate(() => {
+          t.refresh().catch((e) => console.error(`[crm-service] timeline refresh failed person=${person.personKey}:`, e));
+        });
+      }
+    })
+    .catch(() => undefined);
 
   const items = PEOPLE_SOURCES.flatMap((s) => bySource[s].items).sort((a, b) => {
     if (a.at === null && b.at === null) return 0;
@@ -470,6 +367,8 @@ export async function readTimeline(
       items: bySource[s].items.length,
       error: bySource[s].error,
       asked: bySource[s].asked,
+      servedFrom: s === "gmail" || s === "instantly" ? ("store" as const) : ("mirror" as const),
+      readAt: bySource[s].readAt ?? null,
     })),
     items,
   };

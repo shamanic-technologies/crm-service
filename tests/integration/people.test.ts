@@ -45,6 +45,7 @@ const json = (body: unknown, status = 200) =>
 let gmailConnected = false;
 let leadServiceDown = false;
 let gmailConversationDown = false;
+let aliceNewMessage = false;
 const calls: string[] = [];
 
 /** Jev's stub: these addresses are automated, at this confidence; every other address is human. */
@@ -189,6 +190,9 @@ function installFetchStub() {
                   bodyStatus: "ok",
                   bodyCleanStatus: "nothing_kept",
                 },
+                ...(aliceNewMessage
+                  ? [{ gmailMessageId: "g3", threadId: "t1", direction: "inbound", fromEmail: "alice@x.com", to: ["me@brand.com"], subject: "Re: Intro", snippet: "deck", sentAt: "2026-09-10T09:00:00.000Z", bodyText: "Send me the deck", bodyTextOriginal: "Send me the deck", bodyStatus: "ok", bodyCleanStatus: "cleaned" }]
+                  : []),
               ],
             },
           ],
@@ -338,6 +342,7 @@ describe.skipIf(!RUN)("person layer", () => {
     gmailConnected = false;
     leadServiceDown = false;
     gmailConversationDown = false;
+    aliceNewMessage = false;
     automatedEmails = new Map();
     jevDown = false;
     extraCorrespondents = [];
@@ -730,6 +735,74 @@ describe.skipIf(!RUN)("person layer", () => {
       const s2 = await buildNow();
       expect(s2.messageIndex).toMatchObject({ status: "ok", failed: 0 });
       expect((await search("call me")).body.search.messageIndex.failed).toBe(0);
+    });
+  });
+
+  describe("timeline from the store", () => {
+    const timeline = () =>
+      request(app())
+        .get(`/orgs/people/timeline?brandId=${BRAND}&personKey=${encodeURIComponent("email:alice@x.com")}`)
+        .set("x-api-key", API_KEY)
+        .set("x-org-id", ORG)
+        .set("x-user-id", USER);
+    const siblingReads = () =>
+      calls.filter((c) => c.endsWith("/orgs/google/conversation") || c.endsWith("/orgs/conversations") || c.endsWith("/orgs/leads"));
+    const texts = (res: { body: { items: { text: string | null }[] } }) => res.body.items.map((i) => i.text);
+
+    beforeEach(async () => {
+      gmailConnected = true;
+      await seedLocalSources();
+      await buildNow();
+    });
+
+    it("a fresh store answers with no sibling call, the same items every time, and says where each source came from", async () => {
+      calls.length = 0;
+      const first = await timeline();
+      expect(first.status).toBe(200);
+      expect(texts(first)).toEqual(["Hi Alice", "Cold email", "Interested", "Sure, call me", "Hello on WhatsApp", "Hi Alice"]);
+      for (let i = 0; i < 9; i++) expect((await timeline()).body.items).toEqual(first.body.items);
+      expect(siblingReads()).toEqual([]);
+      const sources = Object.fromEntries(first.body.sources.map((x: { source: string }) => [x.source, x]));
+      expect(sources.gmail).toMatchObject({ status: "ok", servedFrom: "store", items: 2 });
+      expect(sources.gmail.readAt).toEqual(expect.any(String));
+      expect(sources.instantly).toMatchObject({ status: "ok", servedFrom: "store", items: 2 });
+      expect(sources.matrix).toMatchObject({ status: "ok", servedFrom: "mirror", readAt: null });
+    });
+
+    it("a stale store is served as is and re-read in the background: the next read shows the new message", async () => {
+      aliceNewMessage = true;
+      await db.execute(sql`UPDATE people_message_units SET indexed_at = now() - interval '5 minutes'`);
+      const stale = await timeline();
+      expect(texts(stale)).not.toContain("Send me the deck");
+      await vi.waitFor(
+        async () => {
+          const [row] = (await db.execute(
+            sql`SELECT count(*)::int AS n FROM people_message_units WHERE source = 'gmail' AND unit = 'alice@x.com' AND indexed_at > now() - interval '1 minute'`,
+          )) as unknown as { n: number }[];
+          expect(row.n).toBe(1);
+        },
+        { timeout: 5000, interval: 50 },
+      );
+      const fresh = await timeline();
+      expect(texts(fresh)).toContain("Send me the deck");
+      // and the search sees it too
+      const found = await request(app()).get(`/orgs/people?brandId=${BRAND}&q=deck`).set("x-api-key", API_KEY).set("x-org-id", ORG).set("x-user-id", USER);
+      expect(found.body.people.map((p: { personKey: string }) => p.personKey)).toEqual(["email:alice@x.com"]);
+    });
+
+    it("a never-read address is read once, on the spot; a source that could never be read says failed", async () => {
+      await db.execute(sql`DELETE FROM people_message_texts`);
+      await db.execute(sql`DELETE FROM people_message_units`);
+      const res = await timeline();
+      expect(texts(res)).toContain("Sure, call me");
+
+      await db.execute(sql`DELETE FROM people_message_texts`);
+      await db.execute(sql`DELETE FROM people_message_units`);
+      gmailConversationDown = true;
+      const down = await timeline();
+      const gmail = down.body.sources.find((x: { source: string }) => x.source === "gmail");
+      expect(gmail).toMatchObject({ status: "failed", items: 0, readAt: null });
+      expect(gmail.error).toContain("returned 500");
     });
   });
 });
