@@ -641,13 +641,28 @@ async function csvCandidates(orgId: string, brandId: string): Promise<CandidateF
   return out;
 }
 
-/** Which snapshot sources are connected now (so an absent record may be withdrawn). */
+/** `<source>|<vendor contact id>` → the crm contact row that holds it now. */
+async function crmContactRows(orgId: string, brandId: string): Promise<Map<string, string>> {
+  const found = await rows<{ id: string; source: string; vendor_id: string }>(sql`
+    SELECT id, source, CASE WHEN source = 'matrix' THEN channel_handle ELSE external_id END AS vendor_id
+    FROM contacts
+    WHERE org_id = ${orgId} AND brand_id = ${brandId}
+      AND source IN ('gohighlevel', 'posthog', 'stripe', 'matrix')
+  `);
+  return new Map(found.filter((r) => r.vendor_id).map((r) => [`${r.source}|${r.vendor_id}`, r.id]));
+}
+
+/**
+ * Which snapshot sources are connected AND fully synced at least once (so an
+ * absent record may be withdrawn). A connection still on its first pass, e.g.
+ * right after a reconnect, has not re-mirrored everything yet: nothing is gone.
+ */
 async function connectedSources(orgId: string, brandId: string): Promise<Set<FactSource>> {
   const [r] = await rows<{ ghl: boolean; posthog: boolean; stripe: boolean }>(sql`
     SELECT
-      EXISTS (SELECT 1 FROM ghl_connections WHERE org_id = ${orgId} AND brand_id = ${brandId}) AS ghl,
-      EXISTS (SELECT 1 FROM posthog_connections WHERE org_id = ${orgId} AND brand_id = ${brandId}) AS posthog,
-      EXISTS (SELECT 1 FROM stripe_connections WHERE org_id = ${orgId} AND brand_id = ${brandId}) AS stripe
+      EXISTS (SELECT 1 FROM ghl_connections WHERE org_id = ${orgId} AND brand_id = ${brandId} AND last_synced_at IS NOT NULL) AS ghl,
+      EXISTS (SELECT 1 FROM posthog_connections WHERE org_id = ${orgId} AND brand_id = ${brandId} AND last_synced_at IS NOT NULL) AS posthog,
+      EXISTS (SELECT 1 FROM stripe_connections WHERE org_id = ${orgId} AND brand_id = ${brandId} AND last_synced_at IS NOT NULL) AS stripe
   `);
   const out = new Set<FactSource>();
   if (r.ghl) out.add("gohighlevel");
@@ -709,6 +724,8 @@ export interface FactEmissionSummary {
   unchanged: number;
   corrected: number;
   withdrawnGone: number;
+  /** Facts re-stated because their vendor contact now sits on a new crm contact row. */
+  reminted: number;
   /** Candidates whose subject is nobody in the people build (e.g. the brand's own address). */
   held: number;
   duplicateKeys: number;
@@ -860,7 +877,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
     const ownerNow = new Map(moves.map((m) => [m.factId, m.to]));
 
     // 3-4. Withdrawals, then new facts.
-    const withdrawals: { fact: PeopleFact; reason: "vendor_record_changed" | "vendor_record_gone" }[] = [];
+    const withdrawals: { fact: PeopleFact; reason: "vendor_record_changed" | "vendor_record_gone" | "crm_contact_reminted" }[] = [];
     const fresh: (typeof peopleFacts.$inferInsert)[] = [];
     let unchanged = 0;
     let held = 0;
@@ -887,6 +904,55 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       if (!family?.snapshot || !connected.has(family.source)) continue;
       withdrawals.push({ fact: live, reason: "vendor_record_gone" });
       withdrawnGone++;
+    }
+
+    // A vendor contact that now sits on a NEW crm contact row (a disconnect +
+    // reconnect re-mints row ids): every live fact still naming the old row is
+    // withdrawn and re-stated with the new one, history facts included, so
+    // crmContactId is always a row the contacts reads still serve.
+    const rowNow = await crmContactRows(orgId, brandId);
+    const touched = new Set(withdrawals.map((w) => w.fact.factId));
+    let reminted = 0;
+    for (const live of liveByKey.values()) {
+      if (touched.has(live.factId) || !live.sourceContactId || !live.crmContactId) continue;
+      const now = rowNow.get(`${live.source}|${live.sourceContactId}`);
+      if (!now || now === live.crmContactId) continue;
+      withdrawals.push({ fact: live, reason: "crm_contact_reminted" });
+      reminted++;
+      const person =
+        index.resolve({
+          presence: live.subjectPresence,
+          keys: (live.subjectKeys as string[] | null) ?? [],
+          standalone: live.subjectStandalone,
+          emails: live.emails as string[],
+          phones: live.phones as string[],
+          fullName: live.fullName,
+        }) ?? personByKey.get(ownerNow.get(live.factId) ?? live.ownerPersonKey!);
+      const owner = person?.personKey ?? ownerNow.get(live.factId) ?? live.ownerPersonKey!;
+      fresh.push({
+        orgId,
+        brandId,
+        personKey: owner,
+        emails: person?.emails ?? (live.emails as string[]),
+        phones: person?.phones ?? (live.phones as string[]),
+        fullName: person?.fullName ?? live.fullName,
+        sourceContactId: live.sourceContactId,
+        crmContactId: now,
+        type: live.type,
+        occurredAt: live.occurredAt,
+        dateBasis: live.dateBasis,
+        source: live.source,
+        sourceRef: live.sourceRef,
+        payload: live.payload,
+        naturalKey: live.naturalKey,
+        family: live.family,
+        contentHash: live.contentHash,
+        ownerPersonKey: owner,
+        subjectPresence: live.subjectPresence,
+        subjectKeys: live.subjectKeys,
+        subjectStandalone: live.subjectStandalone,
+      });
+      bySource[live.source] = (bySource[live.source] ?? 0) + 1;
     }
 
     const withdrawnRows = withdrawals.map(({ fact, reason }): typeof peopleFacts.$inferInsert => {
@@ -920,8 +986,9 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       candidates: candidates.size,
       emitted: fresh.length,
       unchanged,
-      corrected: withdrawals.length - withdrawnGone,
+      corrected: withdrawals.length - withdrawnGone - reminted,
       withdrawnGone,
+      reminted,
       held,
       duplicateKeys,
       gmailOtherSkipped: gmail.skippedOther,
