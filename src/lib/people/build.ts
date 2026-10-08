@@ -39,6 +39,12 @@ import {
   type StripeStanding,
   type SourceRead,
 } from "./sources.js";
+import {
+  isAutomatedPerson,
+  personVerdicts,
+  resolveSenderVerdicts,
+  type SenderVerdictSummary,
+} from "./automated.js";
 import { resolvePersonState, type GhlDeal, type LeadObservation, type StripeStandingInput } from "./state.js";
 
 /** How long lead-service's answer about an address is reused. */
@@ -80,6 +86,8 @@ export interface BuildSummary {
   evidence: { kind: string; status: string; records: number; error: string | null }[];
   standing: { asked: number; reused: number; failed: number };
   ownAddresses: { status: "ok" | "failed"; addresses: number; domain: string | null; error: string | null };
+  /** Jev's human-vs-automated verdicts: how many reused, judged now, still pending; people hidden. */
+  senderVerdicts: SenderVerdictSummary;
 }
 
 function firstNonNull(
@@ -225,6 +233,9 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
   }
   const standings = await observeStandings(scope, identity, wanted);
 
+  // Jev says which addresses are automated senders (judged once per address, recorded).
+  const senders = await resolveSenderVerdicts(clusters, identity, gmail.status === "ok");
+
   const rows = clusters.map((c) => {
     const ghlDeals: GhlDeal[] = c.presences
       .filter((p) => p.source === "gohighlevel")
@@ -274,6 +285,8 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       state: state.state,
       stateSource: state.stateSource,
       stateDetail: state.stateDetail,
+      automated: isAutomatedPerson(c, senders.verdicts),
+      automatedVerdict: c.emails.length ? personVerdicts(c.emails, senders.verdicts) : null,
     };
   });
 
@@ -297,6 +310,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     })),
     standing: { asked: standings.asked, reused: standings.reused, failed: standings.failed },
     ownAddresses: { status: own.status, addresses: own.addresses.size, domain: own.domain, error: own.error },
+    senderVerdicts: { ...senders.summary, automatedPeople: rows.filter((r) => r.automated).length },
   };
 
   await db.transaction(async (tx) => {
@@ -336,7 +350,7 @@ export async function runScopeBuild(scope: PeopleScope): Promise<{ scopeId: stri
     const summary = await buildScopePeople(scope, run.id);
     await updateRun(run.id, "completed", { orgId: scope.orgId, userId: scope.createdByUserId });
     console.log(
-      `[crm-service] people build scope=${scope.id} brand=${scope.brandId} people=${summary.people} sources=${summary.sources
+      `[crm-service] people build scope=${scope.id} brand=${scope.brandId} people=${summary.people} automated=${summary.senderVerdicts.automatedPeople} judged=${summary.senderVerdicts.judged} pending=${summary.senderVerdicts.pending} sources=${summary.sources
         .map((s) => `${s.source}:${s.status}:${s.presences}`)
         .join(",")}`,
     );

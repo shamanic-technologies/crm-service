@@ -1584,6 +1584,13 @@ const PersonSchema = registry.register(
       mergeEvidence: z.array(z.unknown()).openapi({
         description: "The records that tied two keys of this person together (a Google / GoHighLevel / Stripe / CSV contact holding both, a lead-service accepted ruling). Empty when the person rests on a single key.",
       }),
+      automated: z.boolean().openapi({
+        description: "True when Jev (chat-service judgments) judged EVERY address of the person an automated sender (digest, notification, no-reply, newsletter) with confidence >= 0.5 and the person has no phone. Hidden from GET /orgs/people unless includeAutomated=true.",
+      }),
+      automatedVerdict: z
+        .array(z.object({ email: z.string(), verdict: z.enum(["human", "automated"]).nullable(), confidence: z.number().nullable() }))
+        .nullable()
+        .openapi({ description: "Jev's verdict per address (null verdict = not judged yet, read as human). Null for a person with no email." }),
     })
     .openapi("Person"),
 );
@@ -1622,6 +1629,19 @@ const PeopleListResponseSchema = registry.register(
         .object({ status: z.enum(["ok", "failed"]), addresses: z.number().int(), domain: z.string().nullable(), error: z.string().nullable() })
         .nullable()
         .openapi({ description: "What the build knew of the brand's own addresses. status=failed means nothing was excluded on this build (see error)." }),
+      senderVerdicts: z
+        .object({
+          status: z.enum(["ok", "failed"]),
+          reused: z.number().int(),
+          judged: z.number().int(),
+          pending: z.number().int(),
+          automatedPeople: z.number().int(),
+          model: z.string().nullable(),
+          error: z.string().nullable(),
+        })
+        .nullable()
+        .openapi({ description: "Jev's human-vs-automated verdicts on the last build: addresses reused from the record, judged now, still pending (shown as human until judged), people hidden. Null before a build that judged." }),
+      automatedHidden: z.number().int().openapi({ description: "People hidden from this list because they are automated senders (0 when includeAutomated=true)." }),
       total: z.number().int(),
       limit: z.number().int(),
       offset: z.number().int(),
@@ -1693,6 +1713,7 @@ registry.registerPath({
       limit: z.coerce.number().int().min(1).max(500).optional().openapi({ description: "Default 100." }),
       offset: z.coerce.number().int().min(0).optional(),
       source: PeopleSourceSchema.optional().openapi({ description: "Only people present on this source." }),
+      includeAutomated: z.enum(["true", "false"]).optional().openapi({ description: "Also return automated senders (person.automated = true). Default false: hidden." }),
     }),
   },
   responses: {
