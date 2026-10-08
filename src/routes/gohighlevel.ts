@@ -16,7 +16,6 @@ import { GHL_SOURCE } from "../lib/gohighlevel/records.js";
 import { rebuildFromBronze, runSyncPass } from "../lib/gohighlevel/sync.js";
 import { readContactOrigins } from "../lib/gohighlevel/origins.js";
 import { readPipelineView } from "../lib/gohighlevel/view.js";
-import { readFunnelEvents } from "../lib/gohighlevel/funnel-events.js";
 import { readFunnelReach } from "../lib/gohighlevel/funnel-reach.js";
 import { STAGE_MEANING_MIN_CONFIDENCE } from "../lib/gohighlevel/stage-meanings.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
@@ -376,46 +375,6 @@ router.get(
 
     const view = await readPipelineView(req.orgId!, brandParse.data);
     res.json(view);
-  },
-);
-
-// ─── GET /orgs/gohighlevel/funnel-events?brandId= ────────────────────────────
-
-/**
- * The DATED funnel events the brand's CRM evidences, grouped per CRM contact —
- * which step, when it happened (null when GoHighLevel did not say), and where
- * the evidence came from. Readable in bulk (paged over contacts) or for one
- * contact with `contactId`.
- */
-router.get(
-  "/orgs/gohighlevel/funnel-events",
-  apiKeyAuth,
-  requireOrg("gohighlevel.funnel-events.list"),
-  async (req: AuthenticatedRequest, res) => {
-    const brandParse = brandIdSchema.safeParse(req.query.brandId);
-    if (!brandParse.success) {
-      return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
-    }
-    let contactId: string | null = null;
-    if (req.query.contactId !== undefined) {
-      const contactParse = z.string().uuid().safeParse(req.query.contactId);
-      if (!contactParse.success) {
-        return res.status(400).json({ type: "validation", error: "contactId must be a uuid" });
-      }
-      contactId = contactParse.data;
-    }
-    const limit = Math.min(Math.max(Number(req.query.limit) || 500, 1), 1000);
-    const offset = Math.max(Number(req.query.offset) || 0, 0);
-
-    res.json(
-      await readFunnelEvents({
-        orgId: req.orgId!,
-        brandId: brandParse.data,
-        contactId,
-        limit,
-        offset,
-      }),
-    );
   },
 );
 
