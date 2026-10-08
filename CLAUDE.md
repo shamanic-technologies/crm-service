@@ -852,6 +852,14 @@ So the local build gate is `npx tsc --noEmit` plus `npm run generate:openapi`,
 run separately. Do not read the chained failure as a signal about your change.
 (Set 2026-09-22.)
 
+## Local tests: integration files SKIP silently without `CRM_TEST_DB=1`
+
+`npx vitest run` with no env prints `7 skipped` and green: every integration
+file is `describe.skipIf(!RUN)`. To run them, create a scratch DB, export the
+`env:` block of `.github/workflows/*.yml` (`CRM_TEST_DB=1`, fake service URLs,
+`CRM_SERVICE_DATABASE_URL` → the scratch DB), `npm run db:migrate`, then
+`npx vitest run`. A run with any `skipped` file is not the gate. (Set 2026-10-08.)
+
 ## Release: there is no `staging` branch here
 
 crm-service ships straight to `main`: open a PR with `--base main`, merge it
