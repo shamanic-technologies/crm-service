@@ -43,9 +43,12 @@ export type SenderVerdict = (typeof SENDER_VERDICTS)[number];
 
 /**
  * Below this confidence an `automated` verdict is recorded but does NOT hide
- * the person: the no-go is hiding a real person Jev was unsure about.
+ * the person: the no-go is hiding a real person Jev was unsure about. On a
+ * two-option choice 0.5 is a coin flip. Measured on the first brand (216
+ * senders): the real people Jev leaned `automated` on (an out-of-office, a
+ * human support agent) sat at 0.52-0.74; bulk senders at 0.80-1.0.
  */
-export const AUTOMATED_MIN_CONFIDENCE = 0.5;
+export const AUTOMATED_MIN_CONFIDENCE = 0.75;
 
 /** Addresses per judgments call — keeps one request well inside Jev's token budget. */
 const ADDRESSES_PER_CALL = 40;
@@ -55,11 +58,15 @@ const SNIPPET_CHARS = 240;
 
 const CRITERIA: Record<SenderVerdict, string> = {
   human:
-    "a real person writing in their own name or for their company: a prospect, a client, a partner, " +
-    "a supplier's or vendor's staff member answering in person. A role address (sales@, info@, support@, " +
-    "hello@) is still human when a person writes the messages.",
+    "the address belongs to a real person writing in their own name or for their company: a prospect, a " +
+    "client, a partner, a supplier's or vendor's staff member answering in person. A role address (sales@, " +
+    "info@, support@, hello@) is still human when a person writes the messages. A personal address is " +
+    "human even when the only mail it sent was generated on the person's behalf: a calendar response " +
+    "(\"Accepted:\", \"Declined:\", \"Proposed new time:\"), an out-of-office or vacation auto-reply. " +
+    "An address the owner writes real, personal messages to (messagesOwnerSent) is read by someone: human, " +
+    "even when what it sends is notifications.",
   automated:
-    "a machine sending on its own, nobody to talk to: notification or digest emails (\"X just messaged you\", " +
+    "the address belongs to a machine sending on its own, with nobody behind it to talk to: notification or digest emails (\"X just messaged you\", " +
     "\"new comment\"), receipts and invoices, account and security alerts, calendar or booking notifications, " +
     "no-reply addresses, newsletters and marketing blasts, ticket-system auto-acknowledgements.",
 };
@@ -78,6 +85,12 @@ export interface SenderInput {
   appearsOn: { source: string; inbound: number | null; outbound: number | null }[];
   /** A few recent messages the address SENT (Gmail), newest first. */
   recentMessages: SenderSample[];
+  /**
+   * A few recent messages the brand owner sent TO the address, newest first.
+   * An address the owner writes real messages to is read by someone (a
+   * client's info@ that also relays lead notifications).
+   */
+  messagesOwnerSent?: SenderSample[];
 }
 
 export interface RecordedVerdict {
@@ -105,26 +118,34 @@ interface GmailConversation {
   }[];
 }
 
-/** The latest messages `email` itself sent to the org's mailbox, via google-service. */
-async function gmailSample(identity: SiblingIdentity, email: string): Promise<SenderSample[]> {
+/**
+ * The latest messages `email` itself sent to the org's mailbox, and the latest
+ * the owner sent to it, via google-service. Kept apart: a notification WE sent
+ * about them (a booking confirmation) says nothing about what they send.
+ */
+async function gmailSample(
+  identity: SiblingIdentity,
+  email: string,
+): Promise<{ sent: SenderSample[]; ownerSent: SenderSample[] }> {
   const r = await siblingGet("google", `/orgs/google/conversation?email=${encodeURIComponent(email)}&limit=20`, identity);
   const reason = (r.body as { reason?: string } | null)?.reason;
-  if (r.status === 404 && (reason === "no_messages" || reason === "no_google_account_connected")) return [];
+  if (r.status === 404 && (reason === "no_messages" || reason === "no_google_account_connected")) return { sent: [], ownerSent: [] };
   if (r.status !== 200) {
     throw new Error(`google-service conversation for ${email} returned ${r.status}: ${JSON.stringify(r.body).slice(0, 200)}`);
   }
-  // Only what the address wrote: a notification WE sent about them (a booking
-  // confirmation) says nothing about who they are.
-  return (r.body as GmailConversation).threads
+  const messages = (r.body as GmailConversation).threads
     .flatMap((t) => t.messages)
-    .filter((m) => m.direction === "inbound" && m.fromEmail?.toLowerCase() === email)
-    .sort((a, b) => ((a.sentAt ?? "") < (b.sentAt ?? "") ? 1 : -1))
-    .slice(0, SAMPLE_MESSAGES)
-    .map((m) => ({
+    .sort((a, b) => ((a.sentAt ?? "") < (b.sentAt ?? "") ? 1 : -1));
+  const sample = (ms: typeof messages) =>
+    ms.slice(0, SAMPLE_MESSAGES).map((m) => ({
       subject: m.subject,
       snippet: m.snippet ? m.snippet.slice(0, SNIPPET_CHARS) : null,
       direction: m.direction,
     }));
+  return {
+    sent: sample(messages.filter((m) => m.direction === "inbound" && m.fromEmail?.toLowerCase() === email)),
+    ownerSent: sample(messages.filter((m) => m.direction === "outbound")),
+  };
 }
 
 /** A person Jev may judge: known from Gmail alone (every other source is a recorded human relationship). */
@@ -167,9 +188,9 @@ export async function judgeSenders(
     questions[`a${i}`] = {
       type: "choice",
       instructions:
-        `Read senders.a${i} in the state: the address ${input.email}, the names it signs with, where it appears ` +
-        "and the latest messages it sent. Is it a real human the brand owner is in conversation with, or an " +
-        "automated sender?",
+        `Read senders.a${i} in the state: the address ${input.email}, the names it signs with, where it appears, ` +
+        "the latest messages it sent and the latest the owner sent to it. Judge WHO OWNS the address, not the form of one message: is it a " +
+        "real human the brand owner is in conversation with, or an automated sender?",
       criteria: CRITERIA,
     };
   });
@@ -228,7 +249,9 @@ export async function resolveSenderVerdicts(
     const input = inputs.get(email)!;
     if (!gmailReadable) return; // judged on a later build, once its mail can be read
     try {
-      input.recentMessages = await gmailSample(identity, email);
+      const sample = await gmailSample(identity, email);
+      input.recentMessages = sample.sent;
+      input.messagesOwnerSent = sample.ownerSent;
     } catch (err) {
       if (errors.length < 3) errors.push((err as Error).message);
       return;
