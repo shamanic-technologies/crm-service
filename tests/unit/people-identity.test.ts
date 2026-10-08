@@ -7,6 +7,7 @@ import {
   type Presence,
 } from "../../src/lib/people/identity.js";
 import { resolvePersonState } from "../../src/lib/people/state.js";
+import { pairingEvidence, type LeadPairingRow } from "../../src/lib/people/sources.js";
 
 function presence(over: Partial<Presence> & Pick<Presence, "source" | "sourceRef">): Presence {
   return {
@@ -95,7 +96,7 @@ describe("clusterPeople", () => {
   it("prefers the smallest email as the person key", () => {
     const out = clusterPeople(
       [presence({ source: "gohighlevel", sourceRef: "c9", emails: ["b@x.com"], phones: ["+33612345678"] })],
-      [{ kind: "lead_ruling", ref: "c9", displayName: null, company: null, emails: ["b@x.com", "a@y.com"], phones: [] }],
+      [{ kind: "lead_pairing", ref: "c9", displayName: null, company: null, emails: ["b@x.com", "a@y.com"], phones: [] }],
     );
     expect(out[0].personKey).toBe("email:a@y.com");
   });
@@ -175,5 +176,28 @@ describe("resolvePersonState precedence", () => {
       resolvePersonState({ ...empty, instantly: { replied: false, clicked: true, replyClassification: null } }),
     ).toMatchObject({ state: "clicked", stateSource: "instantly" });
     expect(resolvePersonState(empty)).toMatchObject({ state: "in_conversation", stateSource: "none" });
+  });
+});
+
+describe("pairingEvidence: lead-service's paired verdict, nothing else", () => {
+  const row = (state: LeadPairingRow["pairing"]["state"], lead = true): LeadPairingRow => ({
+    crmContact: { id: "c1", email: "marketing@aim.com", phone: "+13529423443", fullName: "Joanie S", company: null },
+    pairing: { state, lead: lead ? { email: "joanie@aim.com", fullName: "Joanie S", company: "Aim" } : null },
+  });
+
+  it("a paired row ties the CRM contact's address and phone to the lead's address", () => {
+    expect(pairingEvidence(row("paired"))).toEqual({
+      kind: "lead_pairing",
+      ref: "c1",
+      displayName: "Joanie S",
+      company: "Aim",
+      emails: ["marketing@aim.com", "joanie@aim.com"],
+      phones: ["+13529423443"],
+    });
+  });
+
+  it("rejected, never judged (unconfirmed) and unpaired tie nothing", () => {
+    for (const s of ["rejected", "unconfirmed", "unpaired"] as const) expect(pairingEvidence(row(s))).toBeNull();
+    expect(pairingEvidence(row("paired", false))).toBeNull();
   });
 });
