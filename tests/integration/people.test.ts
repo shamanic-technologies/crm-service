@@ -232,8 +232,8 @@ function installFetchStub() {
           return json({
             leads: [
               // A substring hit that is NOT bob, first in lead-service's order: must be ignored.
-              { id: "lc-0", leadId: "l-0", email: "jimbob@y.com", campaignId: "camp-9", standing: { state: "customer" } },
-              { id: "lc-2", leadId: "l-2", email: "bob@y.com", campaignId: "camp-2", standing: { state: "engaged", signal: "click" } },
+              { id: "lc-0", leadId: "l-0", email: "jimbob@y.com", campaignId: "camp-9", standing: { state: "customer", tag: "customer" } },
+              { id: "lc-2", leadId: "l-2", email: "bob@y.com", campaignId: "camp-2", standing: { state: "engaged", tag: "engaged", signal: "click" } },
             ],
           });
         }
@@ -496,6 +496,23 @@ describe.skipIf(!RUN)("person layer", () => {
     const second = await buildNow();
     expect(second.standing.reused).toBe(2);
     expect(await db.select().from(people)).toHaveLength(2);
+  });
+
+  it("a cached standing from before lead-service served a tag is re-asked, never served tagless", async () => {
+    await seedLocalSources();
+    await buildNow();
+    const cached = await db.select().from(leadStandingObservations);
+    for (const c of cached.filter((x) => x.found)) {
+      const payload = c.payload as { standing: Record<string, unknown> };
+      const { tag: _tag, ...standing } = payload.standing;
+      await db
+        .update(leadStandingObservations)
+        .set({ payload: { ...payload, standing } })
+        .where(eq(leadStandingObservations.id, c.id));
+    }
+    const again = await buildNow();
+    expect(again.standing.asked).toBe(1);
+    expect(again.standing.reused).toBe(1);
   });
 
   it("an unknown person key is a 404 with a reason", async () => {

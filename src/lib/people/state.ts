@@ -4,8 +4,12 @@
  *
  * Precedence, first that applies wins:
  *  1. `lead_service` — the person is one of our leads: lead-service's own
- *     STANDING, verbatim (`unresolved | not_contacted | contacted | engaged |
- *     sales_interest | customer | disqualified | opted_out`). When lead-service
+ *     standing TAG, verbatim (its `state` vocabulary `unresolved |
+ *     not_contacted | contacted | engaged | sales_interest | customer |
+ *     disqualified | opted_out`, plus `website_visit`: a sales interest whose
+ *     only interest is a visit — a click — is tagged as that, while its state
+ *     stays `sales_interest` for the stats). lead-service owns the tag; the
+ *     full standing rides in the detail. When lead-service
  *     could not be asked, the state is `unavailable` with the error — never a
  *     guess from the other sources.
  *  2. `stripe` — the brand's own Stripe account holds money from them. Stripe's
@@ -35,12 +39,14 @@
 export const STATE_SOURCES = ["lead_service", "stripe", "gohighlevel", "matrix", "instantly", "none"] as const;
 export type StateSource = (typeof STATE_SOURCES)[number];
 
+/** lead-service's standing TAG vocabulary (its `state` values + `website_visit`). */
 export const LEAD_STANDING_STATES = [
   "unresolved",
   "not_contacted",
   "contacted",
   "engaged",
   "sales_interest",
+  "website_visit",
   "customer",
   "disqualified",
   "opted_out",
@@ -67,6 +73,9 @@ export interface StripeStandingInput {
 }
 export const INSTANTLY_STATES = ["replied", "clicked"] as const;
 
+/** lead-service's `standing` object: `state` for its stats, `tag` for display. */
+export type LeadStanding = Record<string, unknown> & { state: string; tag: string };
+
 /** What lead-service said about one address. */
 export type LeadObservation =
   | { found: false }
@@ -74,7 +83,7 @@ export type LeadObservation =
       found: true;
       email: string;
       /** lead-service's `standing` object, verbatim. */
-      standing: Record<string, unknown> & { state: string };
+      standing: LeadStanding;
       /** The leads_campaigns row whose standing it is (lead-service `sort=activity` first row). */
       leadCampaignId: string;
       leadId: string | null;
@@ -119,7 +128,7 @@ export function resolvePersonState(input: StateInputs): PersonState {
   const lead = input.leadObservations.find((o) => o.found === true);
   if (lead && lead.found === true) {
     return {
-      state: lead.standing.state,
+      state: lead.standing.tag,
       stateSource: "lead_service",
       stateDetail: {
         email: lead.email,

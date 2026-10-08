@@ -1576,7 +1576,7 @@ const PersonSchema = registry.register(
       state: z.string().openapi({
         example: "sales_interest",
         description:
-          "The ONE state, set by `stateSource` (first that applies): lead_service = lead-service's standing verbatim (unresolved | not_contacted | contacted | engaged | sales_interest | customer | disqualified | opted_out, or `unavailable` when lead-service could not be asked); stripe = subscription_active | subscription_trialing | subscription_past_due | subscription_unpaid | paid | refunded | subscription_canceled; gohighlevel = deal_won | deal_open | deal_lost | deal_abandoned; matrix = new | qualifying | negotiating | won | lost | unresponsive; instantly = replied | clicked; none = in_conversation. Render it; never recompute it.",
+          "The ONE state, set by `stateSource` (first that applies): lead_service = lead-service's standing TAG verbatim (unresolved | not_contacted | contacted | engaged | sales_interest | website_visit | customer | disqualified | opted_out; the standing's own `state` rides in `stateDetail.standing`), or `unavailable` when lead-service could not be asked; stripe = subscription_active | subscription_trialing | subscription_past_due | subscription_unpaid | paid | refunded | subscription_canceled; gohighlevel = deal_won | deal_open | deal_lost | deal_abandoned; matrix = new | qualifying | negotiating | won | lost | unresponsive; instantly = replied | clicked; none = in_conversation. Render it; never recompute it.",
       }),
       stateSource: z.enum(STATE_SOURCES),
       stateDetail: z.record(z.string(), z.unknown()).nullable(),

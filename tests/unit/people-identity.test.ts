@@ -112,7 +112,7 @@ describe("resolvePersonState precedence", () => {
         {
           found: true,
           email: "a@x.com",
-          standing: { state: "sales_interest", signal: "positive_reply" },
+          standing: { state: "sales_interest", tag: "sales_interest", signal: "positive_reply" },
           leadCampaignId: "lc1",
           leadId: "l1",
           campaignId: "c1",
@@ -123,6 +123,26 @@ describe("resolvePersonState precedence", () => {
     });
     expect(s.state).toBe("sales_interest");
     expect(s.stateSource).toBe("lead_service");
+  });
+
+  it("the Unibox tag is lead-service's standing TAG, not its state (a click alone is a website visit)", () => {
+    const s = resolvePersonState({
+      ...empty,
+      leadObservations: [
+        {
+          found: true,
+          email: "norman@x.com",
+          standing: { state: "sales_interest", tag: "website_visit", signal: "click" },
+          leadCampaignId: "lc1",
+          leadId: "l1",
+          campaignId: "c1",
+          campaignIds: ["c1"],
+        },
+      ],
+    });
+    expect(s.state).toBe("website_visit");
+    expect(s.stateSource).toBe("lead_service");
+    expect((s.stateDetail as { standing: { state: string } }).standing.state).toBe("sales_interest");
   });
 
   it("a failed lead-service read is unavailable, never a guess from another source", () => {
