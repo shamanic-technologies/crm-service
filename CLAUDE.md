@@ -740,7 +740,9 @@ owner had written to. A recorded fact, never an address-shape guess.
   email; several lead addresses → strongest, features' own union rule). Null = not our lead.
   `families.counts` = per family over the list's population with `family` NOT applied (the
   buttons), sum = `withFamily`; `producerCounts` = features' own over ALL leads. One read
-  (~4 MB, ~1s warm / ~25s cold) shared 60s per (org, brand), failures not cached. Read fails →
+  (~4 MB, ~1s warm / ~25s cold) shared 60s per (org, brand), failures not cached. Every sibling GET
+  (`siblings.ts`) retries a CONNECT failure (refused/reset, a sibling mid-deploy: ~2s) at
+  250/500/1000/2000 ms; an answered 4xx/5xx or our own timeout is never retried. Read fails →
   `families.status=failed` + `error`, All still lists, `family=` answers 502
   `lead_families_unavailable`. Env `FEATURES_SERVICE_URL` + `_API_KEY`. Moves with the list to
   lead-service's conversation gold (#61).

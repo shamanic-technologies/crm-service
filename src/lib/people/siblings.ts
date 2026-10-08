@@ -25,6 +25,37 @@ const ENV: Record<Sibling, { url: string; key: string }> = {
 
 export const SIBLING_TIMEOUT_MS = Number(process.env.PEOPLE_SIBLING_TIMEOUT_MS) || 30_000;
 
+/**
+ * Waits before each retry of a CONNECT-phase failure. A sibling's container swap
+ * on deploy refuses connections for ~2s (features-service, 2026-10-08: 8 owner
+ * family filters failed in 2s), so the budget (~3.75s) outlasts that window.
+ */
+export const SIBLING_CONNECT_RETRY_DELAYS_MS = [250, 500, 1000, 2000];
+
+const CONNECT_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "EPIPE", "EAI_AGAIN", "UND_ERR_SOCKET"]);
+
+/**
+ * PURE: the error is a connection that never got an answer (refused / reset /
+ * connect timeout), found by walking `cause` and `AggregateError.errors`. Our
+ * own abort (the sibling answered nothing within SIBLING_TIMEOUT_MS) is NOT one:
+ * a genuine timeout stays loud.
+ */
+export function isConnectError(err: unknown): boolean {
+  const seen = new Set<unknown>();
+  const walk = (e: unknown): boolean => {
+    if (!e || typeof e !== "object" || seen.has(e)) return false;
+    seen.add(e);
+    const o = e as { name?: string; code?: string; cause?: unknown; errors?: unknown[] };
+    if (o.name === "AbortError") return false;
+    if (o.code && CONNECT_CODES.has(o.code)) return true;
+    if (Array.isArray(o.errors) && o.errors.some(walk)) return true;
+    return walk(o.cause);
+  };
+  return walk(err);
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export interface SiblingIdentity {
   orgId: string;
   userId: string;
@@ -61,7 +92,8 @@ function envOf(sibling: Sibling): { url: string; key: string } {
 /**
  * GET a sibling route. Resolves with ANY HTTP status (the caller decides which
  * statuses are documented answers); rejects only when the sibling could not be
- * reached or did not answer JSON.
+ * reached or did not answer JSON. A connect-phase failure (refused / reset) is
+ * retried on SIBLING_CONNECT_RETRY_DELAYS_MS; an answered 4xx/5xx never is.
  */
 export async function siblingGet(
   sibling: Sibling,
@@ -69,27 +101,38 @@ export async function siblingGet(
   identity: SiblingIdentity,
 ): Promise<SiblingResponse> {
   const { url, key } = envOf(sibling);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), SIBLING_TIMEOUT_MS);
   let res: Response;
-  try {
-    res = await fetch(`${url}${path}`, {
-      method: "GET",
-      headers: {
-        "x-api-key": key,
-        "x-org-id": identity.orgId,
-        "x-user-id": identity.userId,
-        "x-run-id": identity.runId,
-        "x-brand-id": identity.brandId,
-      },
-      signal: controller.signal,
-    });
-  } catch (err) {
-    const reason =
-      (err as Error).name === "AbortError" ? `timed out after ${SIBLING_TIMEOUT_MS}ms` : (err as Error).message;
-    throw new SiblingError(sibling, path, null, `${sibling}-service GET ${path} unreachable: ${reason}`);
-  } finally {
-    clearTimeout(timer);
+  for (let attempt = 0; ; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), SIBLING_TIMEOUT_MS);
+    try {
+      res = await fetch(`${url}${path}`, {
+        method: "GET",
+        headers: {
+          "x-api-key": key,
+          "x-org-id": identity.orgId,
+          "x-user-id": identity.userId,
+          "x-run-id": identity.runId,
+          "x-brand-id": identity.brandId,
+        },
+        signal: controller.signal,
+      });
+      break;
+    } catch (err) {
+      // A GET is idempotent, and a refused / reset connection is a sibling
+      // mid-deploy: ask again a moment later. Anything else (our timeout, a
+      // bad URL) and an exhausted budget fail loud as before.
+      if (isConnectError(err) && attempt < SIBLING_CONNECT_RETRY_DELAYS_MS.length) {
+        await sleep(SIBLING_CONNECT_RETRY_DELAYS_MS[attempt]);
+        continue;
+      }
+      const reason =
+        (err as Error).name === "AbortError" ? `timed out after ${SIBLING_TIMEOUT_MS}ms` : (err as Error).message;
+      const tries = attempt > 0 ? ` (after ${attempt + 1} attempts)` : "";
+      throw new SiblingError(sibling, path, null, `${sibling}-service GET ${path} unreachable${tries}: ${reason}`);
+    } finally {
+      clearTimeout(timer);
+    }
   }
   const text = await res.text();
   let body: unknown;

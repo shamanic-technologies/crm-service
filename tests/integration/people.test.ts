@@ -49,6 +49,8 @@ let gmailConnected = false;
 /** features-service's lead families (won / hot / lost / cold) for the brand. */
 let leadFamilies: { leadId: string; email: string; family: string; lostReason: string | null }[] = [];
 let featuresDown = false;
+/** How many next features reads are REFUSED at connect (a container swap on deploy). */
+let featuresRefusals = 0;
 const featuresRequests: Record<string, string>[] = [];
 let leadServiceDown = false;
 /** lead-service's CRM pairings for the brand (served on `?state=paired`, filtered like the real route). */
@@ -209,6 +211,10 @@ function installFetchStub() {
       }
     }
     if (url.host === "features.test" && url.pathname === `/brands/${BRAND}/lead-families`) {
+      if (featuresRefusals > 0) {
+        featuresRefusals -= 1;
+        throw new TypeError("fetch failed", { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) });
+      }
       featuresRequests.push(init!.headers as Record<string, string>);
       if (featuresDown) return json({ error: "Failed to compute brand lead families" }, 502);
       const counts = { won: 0, hot: 0, lost: 0, cold: 0 } as Record<string, number>;
@@ -366,6 +372,7 @@ describe.skipIf(!RUN)("person layer", () => {
     extraCorrespondents = [];
     leadFamilies = [];
     featuresDown = false;
+    featuresRefusals = 0;
     featuresRequests.length = 0;
     clearFamiliesCache();
     installFetchStub();
@@ -618,6 +625,17 @@ describe.skipIf(!RUN)("person layer", () => {
 
       // One shared read serves every list call.
       expect(featuresRequests).toHaveLength(1);
+    });
+
+    it("features-service refusing connections mid-deploy, then accepting: family=hot still lists", async () => {
+      await seedLocalSources();
+      await buildNow();
+      featuresRefusals = 2;
+      const hot = await listPeople("&family=hot");
+      expect(hot.status).toBe(200);
+      expect(hot.body.families.status).toBe("ok");
+      expect(hot.body.people.map((p: { personKey: string }) => p.personKey)).toEqual(["email:bob@y.com"]);
+      expect(featuresRefusals).toBe(0);
     });
 
     it("a failed features read is stated: All still lists, a family filter is a 502", async () => {
