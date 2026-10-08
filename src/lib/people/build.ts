@@ -29,7 +29,7 @@ import {
   readGoHighLevel,
   readGoogleContactEvidence,
   readInstantly,
-  readLeadRulingEvidence,
+  readLeadPairingEvidence,
   readMatrix,
   readOwnAddresses,
   readPosthog,
@@ -57,7 +57,7 @@ const STANDING_CONCURRENCY = 6;
 const NAME_PRECEDENCE: (PeopleSource | Evidence["kind"])[] = [
   "gohighlevel",
   "gohighlevel_contact",
-  "lead_ruling",
+  "lead_pairing",
   "google_contact",
   "stripe",
   "stripe_customer",
@@ -203,7 +203,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
 
   const evidenceReads: EvidenceRead[] = [await readCsvEvidence(scope.orgId, scope.brandId)];
   if (gmail.status !== "not_connected") evidenceReads.push(await readGoogleContactEvidence(identity));
-  if (gohighlevel.status === "ok") evidenceReads.push(await readLeadRulingEvidence(identity));
+  if (gohighlevel.status === "ok") evidenceReads.push(await readLeadPairingEvidence(identity));
   // A GoHighLevel contact holding an email and a phone ties them — it is also a presence.
   const ghlEvidence: Evidence[] = gohighlevel.presences
     .filter((p) => p.emails.length + p.phones.length > 1)

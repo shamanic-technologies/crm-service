@@ -593,22 +593,44 @@ export async function readGoogleContactEvidence(identity: SiblingIdentity): Prom
 
 interface PairingsPage {
   crmConnected: boolean;
-  pairings: {
-    crmContact: { id: string; email: string | null; phone: string | null; fullName: string | null; company: string | null };
-    pairing: {
-      lead: { email: string | null; fullName: string | null; company: string | null } | null;
-      ruling: { ruling: "accepted" | "rejected" } | null;
-    };
-  }[];
+  pairings: LeadPairingRow[];
   nextOffset: number | null;
 }
 
+export interface LeadPairingRow {
+  crmContact: { id: string; email: string | null; phone: string | null; fullName: string | null; company: string | null };
+  pairing: {
+    state: "paired" | "unconfirmed" | "rejected" | "unpaired";
+    lead: { email: string | null; fullName: string | null; company: string | null } | null;
+  };
+}
+
 /**
- * lead-service rulings: a PERSON stated that a CRM contact and one of our leads
- * are the same human. Only an accepted human ruling counts — an automatic
- * pairing (signal or judgment) is lead-service's inference, not a statement.
+ * One lead-service pairing → merge evidence, or null. lead-service OWNS who in
+ * the customer's CRM is one of our leads (its matcher, its Jev judgment, a
+ * human ruling, in that order of authority), and its `paired` verdict is what
+ * already moves the lead's standing and attributes the CRM's meetings and deals
+ * to it. Reading the same verdict here is what keeps the Unibox showing ONE
+ * person where lead-service already counts one. `paired` includes `toConfirm`
+ * (a judgment between its thresholds): lead-service counts those exactly like
+ * any pairing, so splitting them here would serve a lead's CRM booking on a
+ * second, unowned person. Anything else (rejected, unconfirmed = never judged,
+ * unpaired) ties nothing. crm-service runs no matcher of its own.
  */
-export async function readLeadRulingEvidence(identity: SiblingIdentity): Promise<EvidenceRead> {
+export function pairingEvidence(row: LeadPairingRow): Evidence | null {
+  if (row.pairing.state !== "paired" || !row.pairing.lead) return null;
+  return {
+    kind: "lead_pairing",
+    ref: row.crmContact.id,
+    displayName: row.crmContact.fullName ?? row.pairing.lead.fullName,
+    company: row.crmContact.company ?? row.pairing.lead.company,
+    emails: [row.crmContact.email, row.pairing.lead.email].filter((e): e is string => !!e),
+    phones: row.crmContact.phone ? [row.crmContact.phone] : [],
+  };
+}
+
+/** lead-service `GET /orgs/leads/crm-pairings?state=paired`, every page. */
+export async function readLeadPairingEvidence(identity: SiblingIdentity): Promise<EvidenceRead> {
   try {
     const evidence: Evidence[] = [];
     let offset: number | null = 0;
@@ -620,21 +642,14 @@ export async function readLeadRulingEvidence(identity: SiblingIdentity): Promise
       );
       if (!page.crmConnected) break;
       for (const p of page.pairings) {
-        if (p.pairing.ruling?.ruling !== "accepted" || !p.pairing.lead) continue;
-        evidence.push({
-          kind: "lead_ruling",
-          ref: p.crmContact.id,
-          displayName: p.crmContact.fullName ?? p.pairing.lead.fullName,
-          company: p.crmContact.company ?? p.pairing.lead.company,
-          emails: [p.crmContact.email, p.pairing.lead.email].filter((e): e is string => !!e),
-          phones: p.crmContact.phone ? [p.crmContact.phone] : [],
-        });
+        const e = pairingEvidence(p);
+        if (e) evidence.push(e);
       }
       offset = page.nextOffset;
     }
-    return { kind: "lead_ruling", status: "ok", evidence, error: null };
+    return { kind: "lead_pairing", status: "ok", evidence, error: null };
   } catch (err) {
-    return { kind: "lead_ruling", status: "failed", evidence: [], error: (err as Error).message };
+    return { kind: "lead_pairing", status: "failed", evidence: [], error: (err as Error).message };
   }
 }
 

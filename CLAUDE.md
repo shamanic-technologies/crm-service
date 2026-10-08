@@ -678,8 +678,13 @@ owner had written to. A recorded fact, never an address-shape guess.
 - **Merge only on positive evidence.** Keys are `email:<lower>` and
   `phone:+<digits>` (international only — a national number has no country and
   is no key). Two keys merge only when ONE record states both: a GoHighLevel /
-  Google / CSV contact, or a lead-service ACCEPTED human ruling (an automatic
-  pairing is lead-service's inference, not a statement). No name matching, no
+  Google / CSV / Stripe contact, or a lead-service PAIRING (`lead_pairing`:
+  every `state=paired` row of `GET /orgs/leads/crm-pairings`, whoever decided
+  it — signal, Jev judgment, human — `toConfirm` included). lead-service owns
+  pairing and already moves the lead's standing on it; reading only human
+  rulings split Joanie (cold-emailed as joanie@, booked in GoHighLevel as
+  marketing@, judged 0.81) into a lead + a "Deal open" stranger (2026-10-08).
+  Rejected / unconfirmed / unpaired tie nothing. No name matching of ours, no
   model. Union-find in `identity.ts`, deterministic.
 - **`person_key`** = smallest email key, else phone, else `<source>:<ref>`.
   Any identity key opens the person (`people.identity_keys` GIN `@>`).

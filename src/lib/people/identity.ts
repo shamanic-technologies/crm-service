@@ -4,7 +4,7 @@
  * A person is keyed on their email addresses and phone numbers. Two keys belong
  * to the same person only when one record states both at once: a GoHighLevel,
  * Google or Stripe contact holding an email AND a phone, a CSV row carrying both, or a
- * lead-service "same person" ruling. Two records sharing a key are the same
+ * lead-service pairing (its `paired` verdict on a CRM contact and one of our leads). Two records sharing a key are the same
  * person (that key IS the identity). Nothing else merges: no name matching, no
  * domain matching, no model. Unmerged stays two people.
  *
@@ -58,7 +58,7 @@ export const EVIDENCE_KINDS = [
   "google_contact",
   "gohighlevel_contact",
   "csv_contact",
-  "lead_ruling",
+  "lead_pairing",
   "stripe_customer",
 ] as const;
 export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];

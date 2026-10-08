@@ -51,6 +51,8 @@ let leadFamilies: { leadId: string; email: string; family: string; lostReason: s
 let featuresDown = false;
 const featuresRequests: Record<string, string>[] = [];
 let leadServiceDown = false;
+/** lead-service's CRM pairings for the brand (served on `?state=paired`, filtered like the real route). */
+let leadPairings: { crmContact: { id: string; email: string | null; phone: string | null; fullName: string | null; company: string | null }; pairing: { state: string; toConfirm: boolean; lead: { email: string | null; fullName: string | null; company: string | null } | null } }[] = [];
 let gmailConversationDown = false;
 let aliceNewMessage = false;
 const calls: string[] = [];
@@ -254,7 +256,8 @@ function installFetchStub() {
         return json({ leads: [] });
       }
       if (url.pathname === "/orgs/leads/crm-pairings") {
-        return json({ crmConnected: true, connection: null, pairings: [], nextOffset: null });
+        const states = (url.searchParams.get("state") ?? "").split(",");
+        return json({ crmConnected: true, connection: null, pairings: leadPairings.filter((p) => states.includes(p.pairing.state)), nextOffset: null });
       }
     }
     throw new Error(`unexpected fetch ${url}`);
@@ -355,6 +358,7 @@ describe.skipIf(!RUN)("person layer", () => {
   beforeEach(async () => {
     gmailConnected = false;
     leadServiceDown = false;
+    leadPairings = [];
     gmailConversationDown = false;
     aliceNewMessage = false;
     automatedEmails = new Map();
@@ -392,6 +396,41 @@ describe.skipIf(!RUN)("person layer", () => {
     expect(bySource.instantly).toMatchObject({ status: "ok", presences: 2, sourceCount: 2 });
     expect(bySource.matrix).toMatchObject({ status: "ok", presences: 1, sourceCount: 1 });
     expect(bySource.gohighlevel).toMatchObject({ status: "ok", presences: 1, sourceCount: 1 });
+  });
+
+  it("a CRM contact lead-service paired with our lead is that lead: one person, lead-service's state", async () => {
+    await seedLocalSources();
+    const [ghl] = await db.select().from(ghlConnections);
+    const [bobCrm, other] = await db
+      .insert(contacts)
+      .values([
+        // Bob booked from another address: nothing but lead-service's pairing ties it to bob@y.com.
+        { orgId: ORG, brandId: BRAND, source: "gohighlevel", externalId: "ghl-bob", primaryEmail: "office@y.com", phoneE164: "+13529423443", fullName: "Bob Stone", rawAttributes: {}, sourceConnectionId: ghl.id },
+        // lead-service REJECTED this one's pairing with bob: it stays its own person.
+        { orgId: ORG, brandId: BRAND, source: "gohighlevel", externalId: "ghl-other", primaryEmail: "other@z.com", fullName: "Rob Stone", rawAttributes: {}, sourceConnectionId: ghl.id },
+      ])
+      .returning();
+    await db.insert(ghlOpportunities).values({ orgId: ORG, brandId: BRAND, connectionId: ghl.id, externalId: "opp-bob", name: "Bob deal", status: "open", stageName: "Booked", pipelineName: "Sales", contactId: bobCrm.id });
+    const lead = { email: "bob@y.com", fullName: "Bob Stone", company: null };
+    leadPairings = [
+      // A judgment between lead-service's thresholds: paired, to confirm. It counts like any pairing.
+      { crmContact: { id: bobCrm.id, email: "office@y.com", phone: "+13529423443", fullName: "Bob Stone", company: null }, pairing: { state: "paired", toConfirm: true, lead } },
+      { crmContact: { id: other.id, email: "other@z.com", phone: null, fullName: "Rob Stone", company: null }, pairing: { state: "rejected", toConfirm: false, lead } },
+    ];
+
+    const summary = await buildNow();
+    const rows = await db.select().from(people).orderBy(people.personKey);
+    expect(rows.map((r) => r.personKey)).toEqual(["email:alice@x.com", "email:bob@y.com", "email:other@z.com"]);
+
+    const bob = rows[1];
+    expect(bob.sources).toEqual(["instantly", "gohighlevel"]);
+    expect(bob.identityKeys).toEqual(["email:bob@y.com", "email:office@y.com", "phone:+13529423443"]);
+    // lead-service's standing outranks the CRM's open deal.
+    expect(bob).toMatchObject({ state: "engaged", stateSource: "lead_service" });
+    expect(bob.mergeEvidence).toContainEqual(expect.objectContaining({ kind: "lead_pairing", ref: bobCrm.id }));
+
+    expect(rows[2]).toMatchObject({ sources: ["gohighlevel"], identityKeys: ["email:other@z.com"] });
+    expect(summary.evidence).toContainEqual({ kind: "lead_pairing", status: "ok", records: 1, error: null });
   });
 
   it("a person on Gmail and Instantly appears once, their thread interleaved by time", async () => {
