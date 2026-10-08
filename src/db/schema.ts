@@ -1147,6 +1147,10 @@ export const peopleFacts = pgTable(
     phones: jsonb("phones").notNull(),
     fullName: text("full_name"),
     sourceContactId: text("source_contact_id"),
+    // crm-service's own contact row id (`contacts.id`) at emission: the id
+    // /orgs/gohighlevel/contacts serves as `id` and funnel-events as `contactId`.
+    // Not part of the content hash (a reconnect re-mints row ids, the fact is the same).
+    crmContactId: uuid("crm_contact_id"),
 
     type: text("type").notNull(),
     occurredAt: timestamp("occurred_at", { withTimezone: true }),

@@ -1846,6 +1846,7 @@ export const PeopleFactSchema = registry.register(
     phones: z.array(z.string()).openapi({ description: "Every international phone of the person at emission (+digits)." }),
     fullName: z.string().nullable(),
     sourceContactId: z.string().nullable().openapi({ description: "The vendor's CONTACT id at that source (GoHighLevel contactId, Stripe customer id, PostHog person id, Matrix handle); null when the source has no contact record (Gmail, CSV, crm)." }),
+    crmContactId: z.string().uuid().nullable().openapi({ description: "crm-service's own contact row id for that source at emission (the `id` of /orgs/gohighlevel/contacts, the `contactId` of funnel-events); null when there is no contact row (Gmail, crm meta facts). A disconnect + reconnect mints new row ids; CSV row ids change when a file is re-promoted." }),
     type: z.enum(FACT_TYPES),
     occurredAt: z.string().nullable().openapi({ description: "The vendor's own date; null when it gave none. Never the time we observed it." }),
     dateBasis: z.string().openapi({ description: "Which date occurredAt is (created_at, booked_at, scheduled_start, stage_entered_at, status_changed_at, submitted_at, contact_created_at, sent_at, created, start_date, canceled_at, visit_started_at, person_created_at, uploaded_at; none on crm meta facts)." }),
