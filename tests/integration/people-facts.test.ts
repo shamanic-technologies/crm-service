@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import express from "express";
 import request from "supertest";
 import { and, eq, sql } from "drizzle-orm";
@@ -36,8 +36,8 @@ import peopleRoutes from "../../src/routes/people.js";
  */
 const RUN = !!process.env.CRM_TEST_DB;
 
-const ORG = "eeeeeeee-1111-4111-8111-000000000001";
-const BRAND = "eeeeeeee-1111-4111-8111-000000000002";
+const ORG = "fac7fac7-1111-4111-8111-000000000001";
+const BRAND = "fac7fac7-1111-4111-8111-000000000002";
 const USER = "user-facts-1";
 const API_KEY = process.env.CRM_SERVICE_API_KEY || "test-crm-key";
 
@@ -324,10 +324,14 @@ const maxSeq = async () => {
 };
 
 describe.skipIf(!RUN)("people fact feed (real DB)", () => {
+  // Leave nothing behind: other suites share these tables (and once shared a brand id).
+  const wipe = () =>
+    db.execute(sql`TRUNCATE people_facts, people_scopes, people, people_message_texts, matrix_raw_events, conversations, matrix_connections, ghl_appointments, ghl_form_submissions, ghl_opportunity_history, ghl_stage_meanings, ghl_opportunities, ghl_connections, posthog_activities, posthog_connections, stripe_transactions, stripe_connections, contact_uploads, contacts CASCADE`);
   beforeEach(async () => {
     stubRuns();
-    await db.execute(sql`TRUNCATE people_facts, people_scopes, people, people_message_texts, matrix_raw_events, conversations, matrix_connections, ghl_appointments, ghl_form_submissions, ghl_opportunity_history, ghl_stage_meanings, ghl_opportunities, ghl_connections, posthog_activities, posthog_connections, stripe_transactions, stripe_connections, contact_uploads, contacts CASCADE`);
+    await wipe();
   });
+  afterAll(wipe);
 
   it("backfills every source's history with vendor dates, untagged, without our own outreach", async () => {
     const s = await seed();
