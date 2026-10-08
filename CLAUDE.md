@@ -707,6 +707,12 @@ owner had written to. A recorded fact, never an address-shape guess.
   google-service's `bodyCleanStatus` verbatim, `cleaned` true only for `cleaned`,
   `original` = `bodyTextOriginal`. google-service owns the cleaning; this only
   forwards it, so an uncleaned fallback is never silent to the reader.
+  An Instantly item carries `outreachFact {subjectKey, step, position}` (null
+  inbound, unmatched, and every other source): instantly-service's verbatim
+  statement of WHICH `email_sent` fact the email is; `subjectKey` = lead-service's
+  fact id / source ref, so the Unibox pairs email and label by identity, never by
+  clock (the two stamps of one send differ by ~1 min). Stored items predating
+  `STORE_FORMAT` 3 serve null until their background re-read.
 - **Search = `GET /orgs/people?q=`** (`search.ts`), same order/paging/filters,
   plain case-insensitive substring, no model. Matches name, company (person +
   presences), any email (domain works), phone (4+ digits), and message text.

@@ -231,8 +231,8 @@ function installFetchStub() {
           conversation: {
             campaignId: "camp-1",
             messages: [
-              { direction: "outbound", from: "kevin@send.com", to: "alice@x.com", at: "2026-09-02T08:00:00.000Z", subject: "Cold", text: "Cold email", campaignId: "camp-1", instantlyCampaignId: "self:1" },
-              { direction: "inbound", from: "alice@x.com", to: "kevin@send.com", at: "2026-09-02T10:00:00.000Z", subject: "Re: Cold", text: "Interested", campaignId: "camp-1", instantlyCampaignId: "self:1" },
+              { direction: "outbound", from: "kevin@send.com", to: "alice@x.com", at: "2026-09-02T08:00:00.000Z", subject: "Cold", text: "Cold email", campaignId: "camp-1", instantlyCampaignId: "self:1", outreachFact: { subjectKey: "ievt:evt-1", step: 1, position: "first" } },
+              { direction: "inbound", from: "alice@x.com", to: "kevin@send.com", at: "2026-09-02T10:00:00.000Z", subject: "Re: Cold", text: "Interested", campaignId: "camp-1", instantlyCampaignId: "self:1", outreachFact: null },
             ],
           },
         });
@@ -433,6 +433,14 @@ describe.skipIf(!RUN)("person layer", () => {
     expect(textClean("gmail", "Sure, call me")).toEqual({ status: "nothing_kept", cleaned: false, original: "Sure, call me" });
     expect(textClean("instantly", "Interested")).toBeNull();
     expect(textClean("matrix", "Hello on WhatsApp")).toBeNull();
+    // A sent cold email names its email_sent outreach fact verbatim, so the Unibox pairs it with
+    // lead-service's label by identity, not by clock. Inbound mail and other sources carry null.
+    const outreachFact = (src: string, text: string) =>
+      res.body.items.find((i: { source: string; text: string }) => i.source === src && i.text === text).outreachFact;
+    expect(outreachFact("instantly", "Cold email")).toEqual({ subjectKey: "ievt:evt-1", step: 1, position: "first" });
+    expect(outreachFact("instantly", "Interested")).toBeNull();
+    expect(outreachFact("gmail", "Hi Alice")).toBeNull();
+    expect(outreachFact("matrix", "Hello on WhatsApp")).toBeNull();
     const sources = Object.fromEntries(res.body.sources.map((s: { source: string }) => [s.source, s]));
     expect(sources.gmail.status).toBe("ok");
     expect(sources.instantly.status).toBe("ok");

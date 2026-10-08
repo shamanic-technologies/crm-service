@@ -1589,6 +1589,21 @@ const TimelineItemSchema = z
       })
       .nullable()
       .openapi({ description: "Gmail messages only; null for every other source. How `text` was derived, and the full original." }),
+    outreachFact: z
+      .object({
+        subjectKey: z.string().openapi({
+          description:
+            "The email_sent outreach fact's identity (`ievt:<event id>`), the same value lead-service keeps as that fact's id / source ref. Pair the email with its fact on this, never on time.",
+          example: "ievt:f2bc3a15-2643-4ed0-a571-a2f65c35cdb8",
+        }),
+        step: z.number().int().nullable().openapi({ description: "Sequence step (1 = first email). Null where instantly-service's feed serves none (poll-only sends)." }),
+        position: z.enum(["first", "followup"]).openapi({ description: "First email or follow-up, always set." }),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "Cold-email (instantly) OUTBOUND messages only: which email_sent outreach fact this email is, verbatim from instantly-service. Null on inbound mail, on a send instantly-service cannot tie to a fact (a manual reply), and on every other source.",
+      }),
   })
   .openapi("PersonTimelineItem");
 
