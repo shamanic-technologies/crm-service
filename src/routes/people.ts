@@ -13,6 +13,7 @@ import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { ensureScope, runPeopleBuildPass, runScopeBuild, type BuildSummary } from "../lib/people/build.js";
 import { PEOPLE_SOURCES, type Presence } from "../lib/people/identity.js";
 import { findPerson, readTimeline } from "../lib/people/timeline.js";
+import { readFacts } from "../lib/people/facts.js";
 import {
   matchesOf,
   messageHitsFor,
@@ -327,6 +328,48 @@ router.post("/internal/people/sync", apiKeyAuth, async (req, res) => {
       );
     }
   });
+});
+
+// ─── GET /internal/people/facts (lead-service pulls the fact feed) ──────────
+
+const factsQuerySchema = z.object({
+  since: z
+    .string()
+    .regex(/^\d+$/, "since must be a cursor returned by this route (digits)")
+    .optional(),
+  limit: z.coerce.number().int().min(1).max(1000).optional(),
+  orgId: z.string().uuid().optional(),
+  brandId: z.string().uuid().optional(),
+});
+
+/**
+ * The fact feed after `since` (exclusive), in feed order. Read-only and
+ * DB-only (no cost); its own platform run, like every internal route.
+ */
+router.get("/internal/people/facts", apiKeyAuth, async (req, res) => {
+  const parsed = factsQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res.status(400).json({ type: "validation", error: parsed.error.issues.map((i) => i.message).join("; ") });
+  }
+  let platformRunId: string;
+  try {
+    const run = await createPlatformRun({ serviceName: SERVICE_NAME, taskName: "people.facts.read" });
+    platformRunId = run.id;
+  } catch (err) {
+    return res.status(502).json({ type: "upstream", error: `run tracking unavailable: ${(err as Error).message}` });
+  }
+  try {
+    const { since, limit, orgId, brandId } = parsed.data;
+    const page = await readFacts({ since: since ? Number(since) : 0, limit: limit ?? 500, orgId, brandId });
+    await updatePlatformRun(platformRunId, "completed", SERVICE_NAME);
+    res.json(page);
+  } catch (err) {
+    console.error("[crm-service] people facts read failed:", err);
+    await updatePlatformRun(platformRunId, "failed", SERVICE_NAME).catch((e) =>
+      console.error("[crm-service] failed to close people facts run:", e),
+    );
+    res.status(500).json({ type: "internal", error: (err as Error).message });
+  }
 });
 
 export default router;

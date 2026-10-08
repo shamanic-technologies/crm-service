@@ -9,9 +9,11 @@ import {
   doublePrecision,
   boolean,
   bigint,
+  bigserial,
   uniqueIndex,
   index,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 /**
  * BRONZE — append-only raw mirror of an uploaded CSV.
@@ -1117,6 +1119,66 @@ export const senderVerdicts = pgTable(
 );
 
 /**
+ * THE FACT FEED — every dated, UNTAGGED thing the client's own accounts say
+ * happened to a person, in one total order (`feed_seq`). lead-service copies it
+ * verbatim (`GET /internal/people/facts`) and owns what it MEANS (the tags).
+ * See people/facts.ts.
+ *
+ * Append-only for every SERVED column: a fact is never rewritten; a correction
+ * is a `withdrawn` fact plus a new one. Three columns are bookkeeping, never
+ * served: `live` (false once withdrawn), `owner_person_key` (who the fact
+ * belongs to NOW, to detect merges/splits) and the `subject_*` columns (how to
+ * find that owner again).
+ *
+ * There is deliberately NO foreign key to any connection or scope: disconnecting
+ * a source STOPS its facts, it never deletes or withdraws the ones already
+ * emitted (owner decision 2026-10-08).
+ */
+export const peopleFacts = pgTable(
+  "people_facts",
+  {
+    feedSeq: bigserial("feed_seq", { mode: "number" }).primaryKey(),
+    factId: uuid("fact_id").notNull().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+
+    personKey: text("person_key").notNull(),
+    emails: jsonb("emails").notNull(),
+    phones: jsonb("phones").notNull(),
+    fullName: text("full_name"),
+    sourceContactId: text("source_contact_id"),
+
+    type: text("type").notNull(),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }),
+    dateBasis: text("date_basis").notNull(),
+    source: text("source").notNull(),
+    sourceRef: text("source_ref").notNull(),
+    payload: jsonb("payload").notNull(),
+    withdrawnOf: uuid("withdrawn_of"),
+
+    // Bookkeeping (never served). Null on crm meta facts (withdrawn, merged, split).
+    naturalKey: text("natural_key"),
+    family: text("family"),
+    contentHash: text("content_hash"),
+    live: boolean("live").notNull().default(true),
+    ownerPersonKey: text("owner_person_key"),
+    subjectPresence: text("subject_presence"),
+    subjectKeys: jsonb("subject_keys"),
+    subjectStandalone: boolean("subject_standalone").notNull().default(false),
+
+    emittedAt: timestamp("emitted_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("people_facts_fact_id_uq").on(table.factId),
+    // One LIVE fact per natural key: a re-sync of an unchanged record emits nothing.
+    uniqueIndex("people_facts_live_natural_key_uq")
+      .on(table.orgId, table.brandId, table.naturalKey)
+      .where(sql`${table.live} AND ${table.naturalKey} IS NOT NULL`),
+    index("people_facts_org_brand_seq_idx").on(table.orgId, table.brandId, table.feedSeq),
+  ],
+);
+
+/**
  * BRONZE — the source artifact for a brand's PostHog project, mirrored
  * READ-ONLY. One row per (org, brand).
  *
@@ -1366,3 +1428,5 @@ export type PosthogConnection = typeof posthogConnections.$inferSelect;
 export type PosthogActivity = typeof posthogActivities.$inferSelect;
 export type StripeConnection = typeof stripeConnections.$inferSelect;
 export type StripeTransaction = typeof stripeTransactions.$inferSelect;
+export type PeopleFact = typeof peopleFacts.$inferSelect;
+export type NewPeopleFact = typeof peopleFacts.$inferInsert;

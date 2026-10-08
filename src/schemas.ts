@@ -7,6 +7,7 @@ import { PEOPLE_SOURCES } from "./lib/people/identity.js";
 import { STATE_SOURCES } from "./lib/people/state.js";
 import { SOURCE_STATUSES } from "./lib/people/sources.js";
 import { TEXT_CLEAN_STATUSES, TIMELINE_SOURCE_STATUSES } from "./lib/people/timeline.js";
+import { FACT_SOURCES, FACT_TYPES } from "./lib/people/facts.js";
 
 extendZodWithOpenApi(z);
 
@@ -1829,6 +1830,63 @@ registry.registerPath({
     body: { content: { "application/json": { schema: z.object({ scopeId: z.string().uuid().optional() }) } } },
   },
   responses: { 202: { description: "Pass started" } },
+});
+
+// ─── The people fact feed (lead-service) ─────────────────────────────────────
+
+export const PeopleFactSchema = registry.register(
+  "PeopleFact",
+  z.object({
+    factId: z.string().uuid().openapi({ description: "Stable, never reused." }),
+    seq: z.string().openapi({ description: "feed_seq (bigint as a string): the total order of the feed." }),
+    orgId: z.string().uuid(),
+    brandId: z.string().uuid(),
+    personKey: z.string().openapi({ description: "crm-service person key AT EMISSION. Not stable: follow person_merged / person_split." }),
+    emails: z.array(z.string()).openapi({ description: "Every email of the person at emission (lower-case)." }),
+    phones: z.array(z.string()).openapi({ description: "Every international phone of the person at emission (+digits)." }),
+    fullName: z.string().nullable(),
+    sourceContactId: z.string().nullable().openapi({ description: "The vendor's CONTACT id at that source (GoHighLevel contactId, Stripe customer id, PostHog person id, Matrix handle); null when the source has no contact record (Gmail, CSV, crm)." }),
+    type: z.enum(FACT_TYPES),
+    occurredAt: z.string().nullable().openapi({ description: "The vendor's own date; null when it gave none. Never the time we observed it." }),
+    dateBasis: z.string().openapi({ description: "Which date occurredAt is (created_at, booked_at, scheduled_start, stage_entered_at, status_changed_at, submitted_at, contact_created_at, sent_at, created, start_date, canceled_at, visit_started_at, person_created_at, uploaded_at; none on crm meta facts)." }),
+    source: z.enum(FACT_SOURCES),
+    sourceRef: z.string().openapi({ description: "The vendor's own record id (appointment, opportunity, submission, contact, message, charge...)." }),
+    payload: z.record(z.string(), z.unknown()).openapi({ description: "Type-specific, see crm-service CLAUDE.md (people fact feed)." }),
+    withdrawnOf: z.string().uuid().optional().openapi({ description: "type=withdrawn only: the factId it withdraws." }),
+  }),
+);
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/people/facts",
+  summary: "The people fact feed: dated, untagged facts from the client's own accounts",
+  description:
+    "Every fact after `since` (exclusive) in one total order. Facts are immutable; a correction is a `withdrawn` fact plus a new one. " +
+    "Disconnecting a source stops its facts and never withdraws them. Out of the feed: our own outreach (Instantly, self-send).",
+  request: {
+    query: z.object({
+      since: z.string().optional().openapi({ description: "Opaque cursor (nextCursor of the previous page). Absent = from the start." }),
+      limit: z.coerce.number().int().min(1).max(1000).optional().openapi({ description: "Default 500." }),
+      orgId: z.string().uuid().optional(),
+      brandId: z.string().uuid().optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "One page",
+      content: {
+        "application/json": {
+          schema: z.object({
+            facts: z.array(PeopleFactSchema),
+            nextCursor: z.string().openapi({ description: "Pass as `since` next time (equals `since` when the page is empty)." }),
+            hasMore: z.boolean(),
+          }),
+        },
+      },
+    },
+    400: { description: "Invalid cursor / limit / ids" },
+    502: { description: "Run tracking unavailable" },
+  },
 });
 
 // ─── PostHog + Stripe (read-only sources of the person thread) ───────────────
