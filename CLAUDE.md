@@ -646,7 +646,7 @@ never writes to them (no write path to any outside tool, by design).
 | Source | Who counts as "in conversation" | Read from |
 |--------|--------------------------------|-----------|
 | `gmail` | addresses the org's mailbox WROTE to (Gmail is per ORG) | google-service `GET /orgs/google/correspondents` |
-| `instantly` | replied (not to stop) or clicked our cold email | instantly-service `GET /orgs/engaged-leads?brand_id=` |
+| `instantly` | every lead our cold email WROTE to (at least one real send), answered or not (owner 2026-10-09); replied/clicked read only off its `engaged` rows | instantly-service `GET /orgs/written-to-leads?brand_id=` (cursor-paged) |
 | `matrix` | every Matrix conversation of the brand | own silver |
 | `gohighlevel` | every mirrored GoHighLevel contact | own silver |
 
@@ -690,7 +690,9 @@ owner had written to. A recorded fact, never an address-shape guess.
   Any identity key opens the person (`people.identity_keys` GIN `@>`).
 - **ONE state, read not graded** (`state.ts`): lead-service standing verbatim
   (first exact-address row of its own `sort=activity` search; a failed read is
-  `unavailable`, never a guess) > GoHighLevel deal status (fixed vocabulary,
+  `unavailable`, never a guess; from `PEOPLE_STANDING_WALK_MIN` (200) addresses
+  to ask, ONE walk of the brand's whole lead list in the same order replaces the
+  per-address searches: 17.5k searches were ~15 min per build) > GoHighLevel deal status (fixed vocabulary,
   `deal_*`) > Matrix thread reading > Instantly `replied|clicked` >
   `in_conversation`. The browser renders `state` + `stateSource`.
 - **Materialized, rebuilt whole.** `people_scopes` (one per (org, brand),

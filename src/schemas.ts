@@ -1646,7 +1646,7 @@ registry.registerPath({
   summary: "Every person the brand is in conversation with, merged across channels, with one state",
   description:
     "Gold person layer over Gmail (google-service correspondents: addresses the org's mailbox wrote to), " +
-    "cold email (instantly-service engaged leads: replied or clicked), WhatsApp / Telegram / Discord (Matrix) " +
+    "cold email (instantly-service written-to leads: everyone we sent at least one email to, answered or not), WhatsApp / Telegram / Discord (Matrix) " +
     "and GoHighLevel. People are merged on email / phone only on positive evidence (a record holding both, " +
     "or a lead-service accepted ruling); never on a name. Most recent activity first. Served from the last " +
     "build (rebuilt by cron every 15 minutes); the FIRST read for a brand opens its scope, starts the build " +

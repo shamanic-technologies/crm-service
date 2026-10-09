@@ -31,7 +31,8 @@
  *     (`new | qualifying | negotiating | won | lost | unresponsive`).
  *  5. `instantly` — they engaged with our cold email but are not one of our
  *     leads (a platform send): `replied`, else `clicked`.
- *  6. `none` — nothing states anything: `in_conversation`.
+ *  6. `none` — nothing states anything: `in_conversation` (e.g. a platform
+ *     send nobody answered: we wrote to them, they are not one of our leads).
  *
  * The browser renders `state` + `stateSource`; it never computes either.
  */
