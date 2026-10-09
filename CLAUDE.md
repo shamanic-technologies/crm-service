@@ -692,7 +692,9 @@ owner had written to. A recorded fact, never an address-shape guess.
   (first exact-address row of its own `sort=activity` search; a failed read is
   `unavailable`, never a guess; from `PEOPLE_STANDING_WALK_MIN` (200) addresses
   to ask, ONE walk of the brand's whole lead list in the same order replaces the
-  per-address searches: 17.5k searches were ~15 min per build) > GoHighLevel deal status (fixed vocabulary,
+  per-address searches: 17.5k searches were ~15 min per build; the walk also
+  finds a lead lead-service SERVES under the address we emailed while its
+  search only indexes the identity address, 1 of 40 repliers on 2026-10-09) > GoHighLevel deal status (fixed vocabulary,
   `deal_*`) > Matrix thread reading > Instantly `replied|clicked` >
   `in_conversation`. The browser renders `state` + `stateSource`.
 - **Materialized, rebuilt whole.** `people_scopes` (one per (org, brand),
