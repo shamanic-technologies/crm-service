@@ -24,6 +24,8 @@ import {
 import { mapLimit, type SiblingIdentity } from "./siblings.js";
 import {
   lookupLeadStanding,
+  walkLeadStandings,
+  type LeadStandingAnswer,
   readCsvEvidence,
   readGmail,
   readGoHighLevel,
@@ -52,6 +54,12 @@ import { emitScopeFacts, type FactEmissionSummary } from "./facts.js";
 /** How long lead-service's answer about an address is reused. */
 export const STANDING_TTL_MS = 60 * 60 * 1000;
 const STANDING_CONCURRENCY = 6;
+/**
+ * From this many addresses to ask, lead-service is read in ONE walk of the
+ * brand's lead list instead of one search per address (a brand whose cold email
+ * wrote to 17.5k people would otherwise make 17.5k searches every hour).
+ */
+export const standingWalkMin = () => Number(process.env.PEOPLE_STANDING_WALK_MIN) || 200;
 
 /** Display-name / company precedence: the CRM first, then address books, then the rest. */
 const NAME_PRECEDENCE: (PeopleSource | Evidence["kind"])[] = [
@@ -159,23 +167,43 @@ async function observeStandings(
     }
   }
   let failed = 0;
-  await mapLimit(toAsk, STANDING_CONCURRENCY, async (email) => {
+  const answers = new Map<string, LeadStandingAnswer | Error>();
+  if (toAsk.length >= standingWalkMin()) {
     try {
-      const answer = await lookupLeadStanding(identity, email);
-      const payload = answer.found ? { ...answer, found: undefined } : null;
-      await db
-        .insert(leadStandingObservations)
-        .values({ orgId: scope.orgId, brandId: scope.brandId, email, found: answer.found, payload, observedAt: new Date() })
-        .onConflictDoUpdate({
-          target: [leadStandingObservations.orgId, leadStandingObservations.brandId, leadStandingObservations.email],
-          set: { found: answer.found, payload, observedAt: new Date() },
-        });
-      observations.set(email, answer.found ? { ...answer, email } : { found: false });
+      for (const [email, answer] of await walkLeadStandings(identity, new Set(toAsk))) answers.set(email, answer);
     } catch (err) {
-      failed++;
-      observations.set(email, { found: "error", error: (err as Error).message });
+      for (const email of toAsk) answers.set(email, err as Error);
     }
-  });
+  } else {
+    await mapLimit(toAsk, STANDING_CONCURRENCY, async (email) => {
+      try {
+        answers.set(email, await lookupLeadStanding(identity, email));
+      } catch (err) {
+        answers.set(email, err as Error);
+      }
+    });
+  }
+  const observedAt = new Date();
+  const records: (typeof leadStandingObservations.$inferInsert)[] = [];
+  for (const [email, answer] of answers) {
+    if (answer instanceof Error) {
+      failed++;
+      observations.set(email, { found: "error", error: answer.message });
+      continue;
+    }
+    const payload = answer.found ? { ...answer, found: undefined } : null;
+    records.push({ orgId: scope.orgId, brandId: scope.brandId, email, found: answer.found, payload, observedAt });
+    observations.set(email, answer.found ? { ...answer, email } : { found: false });
+  }
+  for (let i = 0; i < records.length; i += 500) {
+    await db
+      .insert(leadStandingObservations)
+      .values(records.slice(i, i + 500))
+      .onConflictDoUpdate({
+        target: [leadStandingObservations.orgId, leadStandingObservations.brandId, leadStandingObservations.email],
+        set: { found: sql`excluded.found`, payload: sql`excluded.payload`, observedAt: sql`excluded.observed_at` },
+      });
+  }
   return { observations, asked: toAsk.length, reused, failed };
 }
 

@@ -63,15 +63,22 @@ const minIso = (values: (string | null | undefined)[]): string | null => {
   return present.reduce((a, b) => (new Date(a) < new Date(b) ? a : b));
 };
 
-// ─── instantly-service: the people who engaged with our cold email ──────────
+// ─── instantly-service: every lead our cold email WROTE to ──────────────────
 
-interface EngagedLead {
+/** One instantly-service `GET /orgs/written-to-leads` row: one (sequence, lead) we sent at least one real email to. */
+export interface WrittenToLead {
   campaignId: string | null;
   instantlyCampaignId: string;
   leadEmail: string;
-  engagedAt: string;
+  brandIds: string[];
+  firstSentAt: string;
+  lastSentAt: string;
+  /** `(replied AND NOT unsubscribed) OR clicked` — exactly the rows engaged-leads serves. */
+  engaged: boolean;
   replied: boolean;
   clicked: boolean;
+  unsubscribed: boolean;
+  bounced: boolean;
   firstRepliedAt: string | null;
   firstClickedAt: string | null;
   replyClassification: string | null;
@@ -79,60 +86,89 @@ interface EngagedLead {
   disqualified: boolean;
 }
 
+interface WrittenToPage {
+  count: number;
+  nextCursor: string | null;
+  leads: WrittenToLead[];
+}
+
+const WRITTEN_TO_PAGE = 5000;
+
 /**
- * instantly-service `GET /orgs/engaged-leads?brand_id=` — everyone who replied
- * (without asking to stop) or clicked a link we sent. Those are the cold-email
- * people "in conversation"; someone merely written to is not. One presence per
- * address; `sourceCount` is instantly's own row count (one per campaign × lead).
+ * PURE: one presence per address over its (sequence, lead) rows. Every lead we
+ * wrote to is a person in conversation, answered or not (owner, 2026-10-09:
+ * "toutes nos conversations, y compris celles où c'est que nous qui avons
+ * écrit"). The engagement half (`replied`, `clicked`, the reply's
+ * classification) reads ONLY the `engaged` rows, so a person who replied or
+ * clicked keeps exactly the signals engaged-leads used to give them, and a
+ * reply asking to stop (replied + unsubscribed, never engaged) states no reply.
+ */
+export function writtenToPresences(leads: WrittenToLead[]): Presence[] {
+  const byEmail = new Map<string, WrittenToLead[]>();
+  for (const lead of leads) {
+    const email = normalizeEmail(lead.leadEmail);
+    if (!email) continue;
+    const list = byEmail.get(email) ?? [];
+    list.push(lead);
+    byEmail.set(email, list);
+  }
+  return [...byEmail.entries()].map(([email, rows]) => {
+    const engaged = rows.filter((r) => r.engaged);
+    const latestReply = engaged
+      .filter((r) => r.replied && r.firstRepliedAt)
+      .sort((a, b) => (a.firstRepliedAt! < b.firstRepliedAt! ? 1 : -1))[0];
+    return {
+      source: "instantly",
+      sourceRef: email,
+      displayName: null,
+      company: null,
+      emails: [email],
+      phones: [],
+      firstActivityAt: minIso(rows.map((r) => r.firstSentAt)),
+      lastActivityAt: maxIso(
+        rows.flatMap((r) => [r.lastSentAt, r.engaged ? r.firstRepliedAt : null, r.engaged ? r.firstClickedAt : null]),
+      ),
+      messageCount: null,
+      inboundCount: null,
+      outboundCount: null,
+      detail: {
+        campaignIds: [...new Set(rows.map((r) => r.campaignId).filter((c): c is string => !!c))],
+        platformSends: rows.filter((r) => !r.campaignId).length,
+        engaged: engaged.length > 0,
+        replied: engaged.some((r) => r.replied),
+        clicked: engaged.some((r) => r.clicked),
+        replyClassification: latestReply?.replyClassification ?? null,
+        replyKind: latestReply?.replyKind ?? null,
+        disqualified: rows.some((r) => r.disqualified),
+        firstSentAt: minIso(rows.map((r) => r.firstSentAt)),
+        lastSentAt: maxIso(rows.map((r) => r.lastSentAt)),
+      },
+    };
+  });
+}
+
+/**
+ * instantly-service `GET /orgs/written-to-leads?brand_id=` — every lead we
+ * actually sent at least one email to, whether or not they answered, walked
+ * page by page until `nextCursor` is null. One presence per address;
+ * `sourceCount` is instantly's own row count (one per sequence × lead).
  */
 export async function readInstantly(identity: SiblingIdentity): Promise<SourceRead> {
   const base = {
     source: "instantly" as const,
     scope: "brand" as const,
-    sourceCountBasis: "instantly-service engaged-leads rows (one per campaign × lead)",
+    sourceCountBasis: "instantly-service written-to-leads rows (one per sequence × lead we sent at least one email to)",
   };
   try {
-    const body = await siblingGetOk<{ count: number; leads: EngagedLead[] }>(
-      "instantly",
-      `/orgs/engaged-leads?brand_id=${encodeURIComponent(identity.brandId)}`,
-      identity,
-    );
-    const byEmail = new Map<string, EngagedLead[]>();
-    for (const lead of body.leads) {
-      const email = normalizeEmail(lead.leadEmail);
-      if (!email) continue;
-      const list = byEmail.get(email) ?? [];
-      list.push(lead);
-      byEmail.set(email, list);
-    }
-    const presences: Presence[] = [...byEmail.entries()].map(([email, rows]) => {
-      const latestReply = rows
-        .filter((r) => r.firstRepliedAt)
-        .sort((a, b) => (a.firstRepliedAt! < b.firstRepliedAt! ? 1 : -1))[0];
-      return {
-        source: "instantly",
-        sourceRef: email,
-        displayName: null,
-        company: null,
-        emails: [email],
-        phones: [],
-        firstActivityAt: minIso(rows.map((r) => r.engagedAt)),
-        lastActivityAt: maxIso(rows.flatMap((r) => [r.engagedAt, r.firstRepliedAt, r.firstClickedAt])),
-        messageCount: null,
-        inboundCount: null,
-        outboundCount: null,
-        detail: {
-          campaignIds: [...new Set(rows.map((r) => r.campaignId).filter((c): c is string => !!c))],
-          platformSends: rows.filter((r) => !r.campaignId).length,
-          replied: rows.some((r) => r.replied),
-          clicked: rows.some((r) => r.clicked),
-          replyClassification: latestReply?.replyClassification ?? null,
-          replyKind: latestReply?.replyKind ?? null,
-          disqualified: rows.some((r) => r.disqualified),
-        },
-      };
-    });
-    return { ...base, status: "ok", presences, sourceCount: body.count, error: null };
+    const leads: WrittenToLead[] = [];
+    let cursor: string | null = null;
+    do {
+      const qs: string = `brand_id=${encodeURIComponent(identity.brandId)}&limit=${WRITTEN_TO_PAGE}${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+      const page: WrittenToPage = await siblingGetOk<WrittenToPage>("instantly", `/orgs/written-to-leads?${qs}`, identity);
+      leads.push(...page.leads);
+      cursor = page.nextCursor;
+    } while (cursor);
+    return { ...base, status: "ok", presences: writtenToPresences(leads), sourceCount: leads.length, error: null };
   } catch (err) {
     return { ...base, status: "failed", presences: [], sourceCount: null, error: (err as Error).message };
   }
@@ -655,7 +691,7 @@ export async function readLeadPairingEvidence(identity: SiblingIdentity): Promis
 
 // ─── lead-service: one address's standing ───────────────────────────────────
 
-interface LeadRow {
+export interface LeadRow {
   id: string;
   leadId: string | null;
   email: string;
@@ -663,16 +699,7 @@ interface LeadRow {
   standing: (Record<string, unknown> & { state: string; tag?: unknown }) | null;
 }
 
-/**
- * What lead-service says about one address for the brand. Its own search, in
- * its own `sort=activity` order (newest proving evidence first), filtered to
- * the EXACT address (the search is a substring match). The first row's standing
- * is the person's; we never pick a "better" one.
- */
-export async function lookupLeadStanding(
-  identity: SiblingIdentity,
-  email: string,
-): Promise<
+export type LeadStandingAnswer =
   | { found: false }
   | {
       found: true;
@@ -681,19 +708,13 @@ export async function lookupLeadStanding(
       leadId: string | null;
       campaignId: string | null;
       campaignIds: string[];
-    }
-> {
-  const r = await siblingGet(
-    "lead",
-    `/orgs/leads?brandId=${encodeURIComponent(identity.brandId)}&q=${encodeURIComponent(email)}&view=basic&sort=activity&status=all&limit=50`,
-    identity,
-  );
-  if (r.status < 200 || r.status >= 300) {
-    throw new Error(`lead-service GET /orgs/leads returned ${r.status}: ${JSON.stringify(r.body).slice(0, 300)}`);
-  }
-  const rows = ((r.body as { leads: LeadRow[] }).leads ?? []).filter(
-    (row) => normalizeEmail(row.email) === email,
-  );
+    };
+
+/**
+ * PURE: one address's answer from ITS rows, in lead-service's `sort=activity`
+ * order. The first row's standing is the person's; we never pick a "better" one.
+ */
+export function standingFromRows(rows: LeadRow[]): LeadStandingAnswer {
   if (rows.length === 0) return { found: false };
   const first = rows[0];
   if (!first.standing || typeof first.standing.state !== "string") {
@@ -710,6 +731,67 @@ export async function lookupLeadStanding(
     campaignId: first.campaignId,
     campaignIds: [...new Set(rows.map((x) => x.campaignId).filter((c): c is string => !!c))],
   };
+}
+
+const leadsPath = (identity: SiblingIdentity, extra: string) =>
+  `/orgs/leads?brandId=${encodeURIComponent(identity.brandId)}${extra}&view=basic&sort=activity&status=all`;
+
+/**
+ * What lead-service says about one address for the brand. Its own search, in
+ * its own `sort=activity` order (newest proving evidence first), filtered to
+ * the EXACT address (the search is a substring match).
+ */
+export async function lookupLeadStanding(identity: SiblingIdentity, email: string): Promise<LeadStandingAnswer> {
+  const r = await siblingGet("lead", `${leadsPath(identity, `&q=${encodeURIComponent(email)}`)}&limit=50`, identity);
+  if (r.status < 200 || r.status >= 300) {
+    throw new Error(`lead-service GET /orgs/leads returned ${r.status}: ${JSON.stringify(r.body).slice(0, 300)}`);
+  }
+  return standingFromRows(((r.body as { leads: LeadRow[] }).leads ?? []).filter((row) => normalizeEmail(row.email) === email));
+}
+
+const LEAD_WALK_PAGE = 2000;
+
+/**
+ * The same answer as `lookupLeadStanding`, for MANY addresses in one walk of
+ * the brand's whole lead list (same view, same `sort=activity` order, paged).
+ * Taking each address's rows in list order gives exactly the rows its own
+ * search would return, in the same order. Built for a brand whose cold email
+ * wrote to thousands of people: one lookup per address was ~50 ms each, so
+ * 17.5k addresses cost ~15 minutes of lead-service searches per build; the
+ * walk is ~10 pages. An address absent from the list is not one of our leads.
+ * Any page failing fails the walk, loud (every address it was for reads
+ * `unavailable`, never a guess); a malformed row fails only its own address.
+ */
+export async function walkLeadStandings(
+  identity: SiblingIdentity,
+  wanted: Set<string>,
+): Promise<Map<string, LeadStandingAnswer | Error>> {
+  const rowsByEmail = new Map<string, LeadRow[]>();
+  for (let offset = 0; ; offset += LEAD_WALK_PAGE) {
+    const page = await siblingGetOk<{ leads: LeadRow[] }>(
+      "lead",
+      `${leadsPath(identity, "")}&limit=${LEAD_WALK_PAGE}&offset=${offset}`,
+      identity,
+    );
+    const leads = page.leads ?? [];
+    for (const row of leads) {
+      const email = normalizeEmail(row.email);
+      if (!email || !wanted.has(email)) continue;
+      const list = rowsByEmail.get(email) ?? [];
+      list.push(row);
+      rowsByEmail.set(email, list);
+    }
+    if (leads.length < LEAD_WALK_PAGE) break;
+  }
+  const answers = new Map<string, LeadStandingAnswer | Error>();
+  for (const email of wanted) {
+    try {
+      answers.set(email, standingFromRows(rowsByEmail.get(email) ?? []));
+    } catch (err) {
+      answers.set(email, err as Error);
+    }
+  }
+  return answers;
 }
 
 // ─── the brand's OWN addresses: never a person it is in conversation with ───

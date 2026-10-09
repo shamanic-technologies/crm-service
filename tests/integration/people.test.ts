@@ -69,13 +69,25 @@ let extraCorrespondents: { email: string; name: string | null }[] = [];
 
 const DIGEST = "messaging-digest-noreply@linkedin.com";
 
-const ENGAGED = [
+/** Extra written-to rows a test adds (people we wrote to who never engaged). */
+let extraWritten: Record<string, unknown>[] = [];
+/** How many written-to rows one page serves (the real route pages on a cursor). */
+let writtenPageSize = 1000;
+/** Rows of the brand's whole lead list, in lead-service's `sort=activity` order (the walk). */
+let leadList: Record<string, unknown>[] = [];
+
+/** instantly-service written-to-leads rows: alice replied, bob clicked (both engaged). */
+const WRITTEN = [
   {
     campaignId: "camp-1",
     instantlyCampaignId: "self:1",
     leadEmail: "Alice@X.com",
     brandIds: [BRAND],
-    engagedAt: "2026-09-02T10:00:00.000Z",
+    firstSentAt: "2026-09-02T08:00:00.000Z",
+    lastSentAt: "2026-09-02T08:00:00.000Z",
+    engaged: true,
+    unsubscribed: false,
+    bounced: false,
     replied: true,
     clicked: false,
     firstRepliedAt: "2026-09-02T10:00:00.000Z",
@@ -89,7 +101,11 @@ const ENGAGED = [
     instantlyCampaignId: "self:2",
     leadEmail: "bob@y.com",
     brandIds: [BRAND],
-    engagedAt: "2026-09-05T08:00:00.000Z",
+    firstSentAt: "2026-09-04T08:00:00.000Z",
+    lastSentAt: "2026-09-04T08:00:00.000Z",
+    engaged: true,
+    unsubscribed: false,
+    bounced: false,
     replied: false,
     clicked: true,
     firstRepliedAt: null,
@@ -228,9 +244,29 @@ function installFetchStub() {
       if (url.pathname === "/internal/accounts") {
         return json({ accounts: [{ email: "Kevin@send.com", mailboxLogin: "kevin@send.com" }] });
       }
-      if (url.pathname === "/orgs/engaged-leads") return json({ success: true, count: ENGAGED.length, leads: ENGAGED });
+      if (url.pathname === "/orgs/written-to-leads") {
+        expect(url.searchParams.get("brand_id")).toBe(BRAND);
+        const all = [...WRITTEN, ...extraWritten];
+        const start = Number(url.searchParams.get("cursor") ?? 0);
+        const limit = Math.min(Number(url.searchParams.get("limit")), writtenPageSize);
+        const leads = all.slice(start, start + limit);
+        const next = start + limit < all.length ? String(start + limit) : null;
+        return json({ success: true, count: leads.length, nextCursor: next, leads });
+      }
       if (url.pathname === "/orgs/conversations") {
         const email = url.searchParams.get("email");
+        if (url.searchParams.get("campaign_id") === "camp-3" && email === "dave@w.com") {
+          return json({
+            success: true,
+            conversation: {
+              campaignId: "camp-3",
+              messages: [
+                { direction: "outbound", from: "kevin@send.com", to: "dave@w.com", at: "2026-09-06T08:00:00.000Z", subject: "Hello Dave", text: "Initial to Dave", campaignId: "camp-3", instantlyCampaignId: "self:3", outreachFact: { subjectKey: "ievt:evt-3", step: 1, position: "first" } },
+                { direction: "outbound", from: "kevin@send.com", to: "dave@w.com", at: "2026-09-09T08:00:00.000Z", subject: "Re: Hello Dave", text: "Followup to Dave", campaignId: "camp-3", instantlyCampaignId: "self:3", outreachFact: { subjectKey: "ievt:evt-4", step: 2, position: "followup" } },
+              ],
+            },
+          });
+        }
         if (url.searchParams.get("campaign_id") !== "camp-1" || email !== "alice@x.com") {
           return json({ error: "campaign_not_found" }, 404);
         }
@@ -250,6 +286,12 @@ function installFetchStub() {
       if (leadServiceDown) return json({ error: "down" }, 503);
       if (url.pathname === "/orgs/leads") {
         const q = url.searchParams.get("q");
+        if (q === null) {
+          // The whole-brand walk: same order, paged on offset.
+          const offset = Number(url.searchParams.get("offset"));
+          const limit = Number(url.searchParams.get("limit"));
+          return json({ leads: leadList.slice(offset, offset + limit), total: leadList.length });
+        }
         if (q === "bob@y.com") {
           return json({
             leads: [
@@ -370,6 +412,10 @@ describe.skipIf(!RUN)("person layer", () => {
     automatedEmails = new Map();
     jevDown = false;
     extraCorrespondents = [];
+    extraWritten = [];
+    writtenPageSize = 1000;
+    leadList = [];
+    delete process.env.PEOPLE_STANDING_WALK_MIN;
     leadFamilies = [];
     featuresDown = false;
     featuresRefusals = 0;
@@ -403,6 +449,88 @@ describe.skipIf(!RUN)("person layer", () => {
     expect(bySource.instantly).toMatchObject({ status: "ok", presences: 2, sourceCount: 2 });
     expect(bySource.matrix).toMatchObject({ status: "ok", presences: 1, sourceCount: 1 });
     expect(bySource.gohighlevel).toMatchObject({ status: "ok", presences: 1, sourceCount: 1 });
+  });
+
+  it("every lead we wrote to is a person, answered or not; repliers keep what they showed", async () => {
+    const written = (email: string, campaignId: string, extra: Record<string, unknown> = {}) => ({
+      campaignId,
+      instantlyCampaignId: `self:${campaignId}`,
+      leadEmail: email,
+      brandIds: [BRAND],
+      firstSentAt: "2026-09-06T08:00:00.000Z",
+      lastSentAt: "2026-09-09T08:00:00.000Z",
+      engaged: false,
+      replied: false,
+      clicked: false,
+      unsubscribed: false,
+      bounced: false,
+      firstRepliedAt: null,
+      firstClickedAt: null,
+      replyClassification: null,
+      replyKind: null,
+      disqualified: false,
+      ...extra,
+    });
+    // dave never answered; erin replied asking to stop (never engaged) and is not one of our leads.
+    extraWritten = [
+      written("dave@w.com", "camp-3"),
+      written("erin@v.com", "camp-4", { replied: true, unsubscribed: true, firstRepliedAt: "2026-09-07T08:00:00.000Z", replyClassification: "negative" }),
+    ];
+    writtenPageSize = 1; // every row on its own page: the cursor is walked to the end
+    // The whole-brand walk answers lead-service's standing for every address at once.
+    process.env.PEOPLE_STANDING_WALK_MIN = "1";
+    leadList = [
+      { id: "lc-0", leadId: "l-0", email: "jimbob@y.com", campaignId: "camp-9", standing: { state: "customer", tag: "customer" } },
+      { id: "lc-2", leadId: "l-2", email: "bob@y.com", campaignId: "camp-2", standing: { state: "engaged", tag: "engaged", signal: "click" } },
+      { id: "lc-3", leadId: "l-3", email: "Dave@w.com", campaignId: "camp-3", standing: { state: "contacted", tag: "contacted" } },
+      { id: "lc-4", leadId: "l-4", email: "dave@w.com", campaignId: "camp-5", standing: { state: "unresolved", tag: "unresolved" } },
+    ];
+    const summary = await buildNow();
+
+    const rows = await db.select().from(people).orderBy(people.personKey);
+    expect(rows.map((r) => r.personKey)).toEqual(["email:alice@x.com", "email:bob@y.com", "email:dave@w.com", "email:erin@v.com"]);
+    const [alice, bob, dave, erin] = rows;
+    // The repliers are unchanged: alice (not a lead) replied, bob is lead-service's exact row.
+    expect(alice).toMatchObject({ state: "replied", stateSource: "instantly" });
+    expect(bob).toMatchObject({ state: "engaged", stateSource: "lead_service" });
+    expect((bob.stateDetail as { leadCampaignId: string }).leadCampaignId).toBe("lc-2");
+    // dave: lead-service's FIRST row for his address in its own order.
+    expect(dave).toMatchObject({ state: "contacted", stateSource: "lead_service", sources: ["instantly"] });
+    expect((dave.stateDetail as { leadCampaignId: string }).leadCampaignId).toBe("lc-3");
+    expect(dave.lastActivityAt!.toISOString()).toBe("2026-09-09T08:00:00.000Z");
+    // A reply asking to stop is not an engagement: erin is in the list, stating no reply.
+    expect(erin).toMatchObject({ state: "in_conversation", stateSource: "none" });
+    expect((erin.presences as { detail: { replied: boolean } }[])[0].detail.replied).toBe(false);
+
+    expect(summary.standing).toMatchObject({ asked: 4, failed: 0 });
+    expect(calls.filter((c) => c === "lead.test/orgs/leads")).toHaveLength(1);
+    const instantly = summary.sources.find((s) => s.source === "instantly")!;
+    expect(instantly).toMatchObject({ status: "ok", presences: 4, sourceCount: 4 });
+    expect(calls.filter((c) => c === "instantly.test/orgs/written-to-leads")).toHaveLength(4);
+
+    // dave's thread shows the emails we sent him.
+    const res = await request(app())
+      .get(`/orgs/people/timeline?brandId=${BRAND}&personKey=${encodeURIComponent("email:dave@w.com")}`)
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", ORG)
+      .set("x-user-id", USER);
+    expect(res.status).toBe(200);
+    expect(res.body.items.map((i: { source: string; direction: string; text: string }) => [i.source, i.direction, i.text])).toEqual([
+      ["instantly", "outbound", "Initial to Dave"],
+      ["instantly", "outbound", "Followup to Dave"],
+    ]);
+  });
+
+  it("a lead-service walk that fails reads every address unavailable, never a guess", async () => {
+    process.env.PEOPLE_STANDING_WALK_MIN = "1";
+    leadServiceDown = true;
+    const summary = await buildNow();
+    const rows = await db.select().from(people).orderBy(people.personKey);
+    expect(rows.map((r) => [r.personKey, r.state, r.stateSource])).toEqual([
+      ["email:alice@x.com", "unavailable", "lead_service"],
+      ["email:bob@y.com", "unavailable", "lead_service"],
+    ]);
+    expect(summary.standing).toMatchObject({ asked: 2, failed: 2 });
   });
 
   it("a CRM contact lead-service paired with our lead is that lead: one person, lead-service's state", async () => {
