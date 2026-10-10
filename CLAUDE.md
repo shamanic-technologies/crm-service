@@ -51,7 +51,7 @@ There are exactly THREE such calls, all once-per-artifact, never per row:
 3. stage meaning, one Jev call per GoHighLevel sync that finds a pipeline stage
    NAME never decided before (recorded, so every later sync makes zero calls);
 4. business relevance, one Jev call per personal-channel conversation (Gmail
-   correspondent, Matrix DM), re-asked only when it moves (see "Business only").
+   correspondent, Matrix DM), re-asked only when it moves (see "Sales leads only").
 
 Everything else GoHighLevel sends arrives already structured, so deriving it is
 pure code — no model, no metered call, no catalogue row.
@@ -694,26 +694,23 @@ owner had written to. A recorded fact, never an address-shape guess.
   unless `includeAutomated=true` (`automatedHidden` counts them). Jev down =
   nobody hidden, `senderVerdicts.status=failed`, retried next build. Source
   data stays whole.
-- **Business only — a personal thread is nobody either** (`relevance.ts`,
-  owner 2026-10-10). Every Gmail / Matrix conversation of a non-automated person
-  gets ONE Jev call: `topic` choice `personal | other_business | this_brand`
-  (state = brand name + website + `companyOverview` extracted field, its ACTIVE
-  offers, the org's other brands, all read from brand-service; the overview is
-  NOT in the context hash: it is re-extracted in new words every few days).
-  Suppliers / tools, the company's own admin, and service delivery count as
-  the brand: judged on name + offers alone, Jev filed Instantly, Twilio and the
-  accountant as "other business" (v0.27.0, 311 hidden); with the overview it
-  still did for suppliers / accountant / "mentor for my SaaS", whose thread
-  names no company (v0.28.1). So `other_business` requires the thread to POINT
-  at another company; an unnamed work thread is the brand's (v0.29.1). That
-  still hid suppliers: they name THEMSELVES. The question is ON WHOSE BEHALF
-  the owner acts; the counterpart's own company never counts (v0.29.2). Plus one
-  `noul` per active offer. Text is clipped on code points (Jev refuses a lone
-  surrogate: "invalid Unicode text"). Recorded in
-  `conversation_verdicts` keyed (org, brand, `gmail:<addr>` | `matrix:<conv id>`):
-  Gmail is per ORG, so each brand judges the same thread for itself. Re-judged
-  only when `judged_through` moved (Gmail `lastActivityAt|messageCount`, Matrix
-  `last_event_id`) or the brand context hash changed. Hidden (`people.not_business`)
+- **Sales leads only — every other thread is nobody** (`relevance.ts`,
+  owner 2026-10-10: « je veux que mes sales lead »). Every Gmail / Matrix
+  conversation of a non-automated person gets ONE Jev call: `topic` choice
+  `personal | other_business | this_brand`, where `this_brand` = the
+  counterpart is a SALES LEAD of the brand (prospect, client, user, referral
+  partner) and `other_business` = any other work: suppliers / tools / vendors
+  pitching the owner, accountant, lawyer, bank, admin, mentors, investors,
+  press, candidates, another company (state = brand name + website +
+  `companyOverview` extracted field, its ACTIVE offers, the org's other brands,
+  from brand-service; the overview is NOT in the context hash). This REPLACES
+  v0.29.x's rule that kept suppliers, the accountant and mentors visible.
+  Plus one `noul` per active offer. Text is clipped on code points (Jev refuses
+  a lone surrogate). Recorded in `conversation_verdicts` keyed (org, brand,
+  `gmail:<addr>` | `matrix:<conv id>`): Gmail is per ORG, so each brand judges
+  the same thread for itself. Re-judged only when `judged_through` moved (Gmail
+  `lastActivityAt|messageCount`, Matrix `last_event_id`) or the brand context
+  hash changed. Hidden (`people.not_business`)
   only when the person is on Gmail / Matrix ALONE (no Instantly / CRM / CSV /
   Stripe / PostHog presence, no csv / lead_pairing / ghl / stripe evidence, no
   lead-service lead, a failed lead read counts as a lead) AND every conversation

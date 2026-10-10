@@ -173,6 +173,19 @@ describe("judgeConversation", () => {
     expect(v.offerScores).toEqual({ "offer-a": 0.93, "offer-b": 0.1 });
   });
 
+  it("asks for SALES LEADS only: suppliers, accountant, mentors and investors are other work (owner 2026-10-10)", async () => {
+    stub({
+      topic: { type: "choice", choice: "this_brand", confidence: 0.8, probabilities: { personal: 0.05, other_business: 0.05, this_brand: 0.9 } },
+      o0: { type: "noul", noul: 0.1 },
+      o1: { type: "noul", noul: 0.1 },
+    });
+    await judgeConversation(input, context, tracking);
+    const topic = body!.questions.topic as unknown as { criteria: Record<string, string> };
+    expect(topic.criteria.this_brand).toMatch(/SALES LEAD/);
+    for (const who of ["supplier", "accountant", "mentors", "investors"]) expect(topic.criteria.other_business).toContain(who);
+    expect(topic.criteria.this_brand).not.toMatch(/supplier|accountant|mentor|investor/);
+  });
+
   it("never tags an offer on a conversation hidden as not about the brand", async () => {
     stub({
       topic: { type: "choice", choice: "personal", confidence: 0.9, probabilities: { personal: 0.9, other_business: 0.05, this_brand: 0.05 } },
