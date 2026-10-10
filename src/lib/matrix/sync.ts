@@ -9,13 +9,15 @@
  *  - SILVER  rebuild the contact + conversation for each touched room by reading
  *            BRONZE back (never the sync page), deterministically, zero LLM.
  *  - GOLD    read the thread with one chat-service call, but ONLY when the
- *            conversation's watermark moved past the stored one.
+ *            conversation's watermark moved past the stored one, AND only
+ *            once Jev judged the conversation about the brand
+ *            (people/relevance.ts): a personal thread is never read.
  *
  * Because silver and gold are both rebuilt FROM bronze, truncating the leads
  * table and re-running reproduces it.
  */
 
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import {
   contacts,
@@ -38,6 +40,14 @@ import {
   splitName,
 } from "./events.js";
 import { readThread, THREAD_WINDOW } from "./leads.js";
+import {
+  hidesConversation,
+  judgeAndRecord,
+  matrixConversationInput,
+  matrixMarkers,
+  readBrandContext,
+  type JudgePassSummary,
+} from "../people/relevance.js";
 
 /** Hard ceiling on /sync pages drained in one pass — a cron re-runs every 5 min. */
 const MAX_PAGES = Number(process.env.MATRIX_SYNC_MAX_PAGES) || 20;
@@ -52,6 +62,59 @@ export interface ConnectionSyncResult {
   conversationsRebuilt: number;
   leadsComputed: number;
   leadsSkippedUnchanged: number;
+  /** Conversations Jev judged not about the brand: never read by the lead model. */
+  leadsSkippedNotBusiness: number;
+  /** Conversations with no verdict yet (Jev or brand-service failed): read once judged. */
+  leadsDeferredUnjudged: number;
+  relevance: JudgePassSummary;
+}
+
+/**
+ * Jev judges, BEFORE the paid lead reading, whether each conversation is about
+ * the brand (people/relevance.ts, recorded per conversation, re-judged only
+ * when it moved). Candidates are the conversations rebuilt now plus every one
+ * of the connection whose lead is behind its watermark, so a conversation left
+ * unjudged by a failure is picked up on the next pass.
+ */
+async function gateLeadReading(
+  conn: MatrixConnection,
+  rebuilt: string[],
+  runId: string,
+): Promise<{ cleared: string[]; notBusiness: number; deferred: number; relevance: JudgePassSummary }> {
+  const behind = (await db.execute(sql`
+    SELECT v.id FROM conversations v
+    LEFT JOIN matrix_leads l ON l.conversation_id = v.id
+    WHERE v.connection_id = ${conn.id}
+      AND (l.id IS NULL OR l.computed_through_event_id <> v.last_event_id)
+  `)) as unknown as { id: string }[];
+  const ids = [...new Set([...rebuilt, ...behind.map((b) => b.id)])];
+  const empty: JudgePassSummary = { status: "ok", reused: 0, judged: 0, pending: 0, model: null, error: null };
+  if (ids.length === 0) return { cleared: [], notBusiness: 0, deferred: 0, relevance: empty };
+  const identity = { orgId: conn.orgId, userId: conn.createdByUserId, runId, brandId: conn.brandId };
+  let context;
+  try {
+    context = await readBrandContext(identity);
+  } catch (err) {
+    const error = `brand context: ${(err as Error).message}`.slice(0, 1000);
+    console.error(`[crm-service][matrix] relevance gate skipped connection=${conn.id}: ${error}`);
+    return { cleared: [], notBusiness: 0, deferred: ids.length, relevance: { ...empty, status: "failed", pending: ids.length, error } };
+  }
+  const markers = await matrixMarkers(ids);
+  const plans = ids
+    .filter((id) => markers.has(id))
+    .map((id) => ({ key: `matrix:${id}`, judgedThrough: markers.get(id)!, plan: id }));
+  const { verdicts, summary } = await judgeAndRecord(identity, context, plans, matrixConversationInput);
+  if (summary.error) console.error(`[crm-service][matrix] relevance judgments connection=${conn.id}: ${summary.error}`);
+  const cleared: string[] = [];
+  let notBusiness = 0;
+  let deferred = 0;
+  for (const p of plans) {
+    const v = verdicts.get(p.key);
+    if (!v) deferred++;
+    else if (hidesConversation(v)) notBusiness++;
+    else cleared.push(p.plan);
+  }
+  return { cleared, notBusiness, deferred, relevance: summary };
 }
 
 /** Every event of a room in one sync page (state + timeline, deduped). */
@@ -367,15 +430,17 @@ export async function syncConnection(conn: MatrixConnection): Promise<Connection
   try {
     const bronze = await ingestBronze(conn);
 
-    let conversationsRebuilt = 0;
-    let leadsComputed = 0;
-    let leadsSkippedUnchanged = 0;
-
+    const rebuiltIds: string[] = [];
     for (const roomId of bronze.rooms) {
       const rebuilt = await rebuildRoom(conn, roomId);
-      if (!rebuilt) continue;
-      conversationsRebuilt += 1;
-      const outcome = await computeLead(conn, rebuilt.conversationId, run.id);
+      if (rebuilt) rebuiltIds.push(rebuilt.conversationId);
+    }
+    const conversationsRebuilt = rebuiltIds.length;
+    const gate = await gateLeadReading(conn, rebuiltIds, run.id);
+    let leadsComputed = 0;
+    let leadsSkippedUnchanged = 0;
+    for (const conversationId of gate.cleared) {
+      const outcome = await computeLead(conn, conversationId, run.id);
       if (outcome === "computed") leadsComputed += 1;
       else leadsSkippedUnchanged += 1;
     }
@@ -401,6 +466,9 @@ export async function syncConnection(conn: MatrixConnection): Promise<Connection
       conversationsRebuilt,
       leadsComputed,
       leadsSkippedUnchanged,
+      leadsSkippedNotBusiness: gate.notBusiness,
+      leadsDeferredUnjudged: gate.deferred,
+      relevance: gate.relevance,
     };
   } catch (err) {
     const message = (err as Error).message;
@@ -473,15 +541,17 @@ export async function rebuildFromBronze(conn: MatrixConnection): Promise<Connect
       .from(matrixRawEvents)
       .where(eq(matrixRawEvents.connectionId, conn.id));
 
-    let conversationsRebuilt = 0;
-    let leadsComputed = 0;
-    let leadsSkippedUnchanged = 0;
-
+    const rebuiltIds: string[] = [];
     for (const { roomId } of roomRows) {
       const rebuilt = await rebuildRoom(conn, roomId);
-      if (!rebuilt) continue;
-      conversationsRebuilt += 1;
-      const outcome = await computeLead(conn, rebuilt.conversationId, run.id);
+      if (rebuilt) rebuiltIds.push(rebuilt.conversationId);
+    }
+    const conversationsRebuilt = rebuiltIds.length;
+    const gate = await gateLeadReading(conn, rebuiltIds, run.id);
+    let leadsComputed = 0;
+    let leadsSkippedUnchanged = 0;
+    for (const conversationId of gate.cleared) {
+      const outcome = await computeLead(conn, conversationId, run.id);
       if (outcome === "computed") leadsComputed += 1;
       else leadsSkippedUnchanged += 1;
     }
@@ -503,6 +573,9 @@ export async function rebuildFromBronze(conn: MatrixConnection): Promise<Connect
       conversationsRebuilt,
       leadsComputed,
       leadsSkippedUnchanged,
+      leadsSkippedNotBusiness: gate.notBusiness,
+      leadsDeferredUnjudged: gate.deferred,
+      relevance: gate.relevance,
     };
   } catch (err) {
     await updateRun(run.id, "failed", {

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../db/index.js";
 import { contacts, conversations, matrixConnections, matrixLeads } from "../db/schema.js";
@@ -12,6 +12,7 @@ import {
 } from "../middleware/auth.js";
 import { MATRIX_CHANNELS } from "../lib/matrix/events.js";
 import { LEAD_STATUSES } from "../lib/matrix/leads.js";
+import { BRAND_MIN_PROBABILITY } from "../lib/people/relevance.js";
 import { rebuildFromBronze, runSyncPass } from "../lib/matrix/sync.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { BridgeError, LINK_METHODS } from "../lib/matrix/bridge.js";
@@ -202,6 +203,14 @@ router.get(
       eq(matrixLeads.brandId, brandParse.data),
     ];
     if (status) filters.push(eq(matrixLeads.status, status));
+    // A conversation Jev judged not about this brand (personal life, another
+    // business: people/relevance.ts) is not a lead, whatever an older reading said.
+    filters.push(sql`NOT EXISTS (
+      SELECT 1 FROM conversation_verdicts cv
+      WHERE cv.org_id = ${matrixLeads.orgId} AND cv.brand_id = ${matrixLeads.brandId}
+        AND cv.conversation_key = 'matrix:' || ${matrixLeads.conversationId}::text
+        AND cv.brand_probability < ${BRAND_MIN_PROBABILITY}
+    )`);
 
     const rows = await db
       .select({

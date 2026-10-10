@@ -49,7 +49,9 @@ There are exactly THREE such calls, all once-per-artifact, never per row:
    (watermark-gated) — it writes a next step and a summary, so it is the one
    completion; its config is `CRM_LEAD_READING_CHAT_CONFIG` (`google/flash`);
 3. stage meaning, one Jev call per GoHighLevel sync that finds a pipeline stage
-   NAME never decided before (recorded, so every later sync makes zero calls).
+   NAME never decided before (recorded, so every later sync makes zero calls);
+4. business relevance, one Jev call per personal-channel conversation (Gmail
+   correspondent, Matrix DM), re-asked only when it moves (see "Business only").
 
 Everything else GoHighLevel sends arrives already structured, so deriving it is
 pure code — no model, no metered call, no catalogue row.
@@ -692,6 +694,26 @@ owner had written to. A recorded fact, never an address-shape guess.
   unless `includeAutomated=true` (`automatedHidden` counts them). Jev down =
   nobody hidden, `senderVerdicts.status=failed`, retried next build. Source
   data stays whole.
+- **Business only — a personal thread is nobody either** (`relevance.ts`,
+  owner 2026-10-10). Every Gmail / Matrix conversation of a non-automated person
+  gets ONE Jev call: `topic` choice `personal | other_business | this_brand`
+  (state = brand name + website, its ACTIVE offers, the org's other brands, all
+  read from brand-service) + one `noul` per active offer. Recorded in
+  `conversation_verdicts` keyed (org, brand, `gmail:<addr>` | `matrix:<conv id>`):
+  Gmail is per ORG, so each brand judges the same thread for itself. Re-judged
+  only when `judged_through` moved (Gmail `lastActivityAt|messageCount`, Matrix
+  `last_event_id`) or the brand context hash changed. Hidden (`people.not_business`)
+  only when the person is on Gmail / Matrix ALONE (no Instantly / CRM / CSV /
+  Stripe / PostHog presence, no csv / lead_pairing / ghl / stripe evidence, no
+  lead-service lead, a failed lead read counts as a lead) AND every conversation
+  has P(this_brand) < 0.25. Unjudged = shown. Offers tagged at noul >= 0.5, only
+  on a conversation about the brand → `people.offer_ids`; `GET /orgs/people`
+  takes `offerId=` and `includeNotBusiness=true`. A hidden person's message text
+  is dropped from our search index and their new facts are HELD (never emitted).
+  The Matrix lead reading (`/complete`, paid) runs only on a conversation judged
+  about the brand: the judgment sits BEFORE it, a conversation left unjudged is
+  retried next pass (candidates = rebuilt + every conversation whose lead is
+  behind), and `GET /orgs/matrix/leads` drops a conversation judged not about it.
 - **Merge only on positive evidence.** Keys are `email:<lower>` and
   `phone:+<digits>` (international only — a national number has no country and
   is no key). Two keys merge only when ONE record states both: a GoHighLevel /

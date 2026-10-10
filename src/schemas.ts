@@ -1517,6 +1517,25 @@ const PersonSchema = registry.register(
         .array(z.object({ email: z.string(), verdict: z.enum(["human", "automated"]).nullable(), confidence: z.number().nullable() }))
         .nullable()
         .openapi({ description: "Jev's verdict per address (null verdict = not judged yet, read as human). Null for a person with no email." }),
+      notBusiness: z.boolean().openapi({
+        description:
+          "True when the person is known from the owner's personal channels ALONE (Gmail, Matrix-bridged WhatsApp / Telegram / ...: no cold email, lead, CRM, CSV, Stripe or PostHog record) and Jev (chat-service judgments) judged EVERY one of their conversations not about this brand (personal life or another business) with P(about this brand) < 0.25. Hidden from GET /orgs/people unless includeNotBusiness=true.",
+      }),
+      offerIds: z.array(z.string()).openapi({
+        description: "The brand's offers (brand-service offer ids) Jev tied this person's personal-channel conversations to (yes-probability >= 0.5, on a conversation about the brand). Empty when none or not judged.",
+      }),
+      relevance: z
+        .array(
+          z.object({
+            conversation: z.string().openapi({ description: "gmail:<address> or matrix:<conversation id>." }),
+            topic: z.enum(["personal", "other_business", "this_brand"]).nullable(),
+            confidence: z.number().nullable(),
+            brandProbability: z.number().nullable().openapi({ description: "Jev's probability the conversation is about this brand." }),
+            offerIds: z.array(z.string()),
+          }),
+        )
+        .nullable()
+        .openapi({ description: "Jev's verdict per personal-channel conversation (null topic = not judged yet, shown). Null for a person with no Gmail / Matrix conversation." }),
       possibleLeads: z
         .array(
           z.object({
@@ -1600,6 +1619,23 @@ const PeopleListResponseSchema = registry.register(
         .nullable()
         .openapi({ description: "Jev's human-vs-automated verdicts on the last build: addresses reused from the record, judged now, still pending (shown as human until judged), people hidden. Null before a build that judged." }),
       automatedHidden: z.number().int().openapi({ description: "People hidden from this list because they are automated senders (0 when includeAutomated=true)." }),
+      relevance: z
+        .object({
+          status: z.enum(["ok", "failed"]),
+          conversations: z.number().int(),
+          reused: z.number().int(),
+          judged: z.number().int(),
+          pending: z.number().int(),
+          topics: z.object({ personal: z.number().int(), other_business: z.number().int(), this_brand: z.number().int() }),
+          notBusinessPeople: z.number().int(),
+          contextHash: z.string().nullable(),
+          model: z.string().nullable(),
+          error: z.string().nullable(),
+        })
+        .nullable()
+        .openapi({ description: "Jev's business / brand / offer verdicts on the last build's personal-channel conversations: recorded ones reused, judged now, still pending (shown until judged), verdicts per topic, people hidden. Null before a build that judged." }),
+      notBusinessHidden: z.number().int().openapi({ description: "People hidden from this list because Jev judged them not about this brand (0 when includeNotBusiness=true)." }),
+      offerId: z.string().nullable().openapi({ description: "The offer filter applied (null = every offer)." }),
       total: z.number().int(),
       limit: z.number().int(),
       offset: z.number().int(),
@@ -1762,6 +1798,8 @@ registry.registerPath({
       offset: z.coerce.number().int().min(0).optional(),
       source: PeopleSourceSchema.optional().openapi({ description: "Only people present on this source." }),
       includeAutomated: z.enum(["true", "false"]).optional().openapi({ description: "Also return automated senders (person.automated = true). Default false: hidden." }),
+      includeNotBusiness: z.enum(["true", "false"]).optional().openapi({ description: "Also return personal-channel people Jev judged not about this brand (person.notBusiness = true: personal life, another business). Default false: hidden." }),
+      offerId: z.string().uuid().optional().openapi({ description: "Only people with a conversation Jev tied to this offer of the brand (person.offerIds contains it)." }),
       family: z.enum(["won", "hot", "lost", "cold"]).optional().openapi({
         description:
           "Unibox family filter: only people whose family (features-service's verdict on our lead, read verbatim) is this one. " +
