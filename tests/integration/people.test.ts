@@ -56,7 +56,7 @@ let featuresRefusals = 0;
 const featuresRequests: Record<string, string>[] = [];
 let leadServiceDown = false;
 /** lead-service's CRM pairings for the brand (served on `?state=paired`, filtered like the real route). */
-let leadPairings: { crmContact: { id: string; email: string | null; phone: string | null; fullName: string | null; company: string | null }; pairing: { state: string; toConfirm: boolean; lead: { email: string | null; fullName: string | null; company: string | null } | null } }[] = [];
+let leadPairings: { crmContact: { id: string; email: string | null; phone: string | null; fullName: string | null; company: string | null }; pairing: { state: string; toConfirm: boolean; lead: { leadId?: string; email: string | null; fullName: string | null; company: string | null } | null } }[] = [];
 let gmailConversationDown = false;
 let aliceNewMessage = false;
 const calls: string[] = [];
@@ -581,7 +581,7 @@ describe.skipIf(!RUN)("person layer", () => {
       .returning();
     await db.insert(ghlOpportunities).values({ orgId: ORG, brandId: BRAND, connectionId: ghl.id, externalId: "opp-bob", name: "Bob deal", status: "open", stageName: "Booked", pipelineName: "Sales", contactId: bobCrm.id });
     leadPairings = [
-      { crmContact: { id: bobCrm.id, email: "aa.bob@gmail.com", phone: null, fullName: "Bob Stone", company: null }, pairing: { state: "paired", toConfirm: true, lead: { email: "Bob@y.com", fullName: "Bob Stone", company: "Y" } } },
+      { crmContact: { id: bobCrm.id, email: "aa.bob@gmail.com", phone: null, fullName: "Bob Stone", company: null }, pairing: { state: "paired", toConfirm: true, lead: { leadId: "bbbbbbbb-1111-4111-8111-00000000b0b0", email: "Bob@y.com", fullName: "Bob Stone", company: "Y" } } },
     ];
 
     const summary = await buildNow();
@@ -592,7 +592,7 @@ describe.skipIf(!RUN)("person layer", () => {
       emails: ["aa.bob@gmail.com"],
       stateSource: "gohighlevel",
       mergeEvidence: [],
-      possibleLeads: [{ crmContactId: bobCrm.id, email: "bob@y.com", fullName: "Bob Stone", company: "Y" }],
+      possibleLeads: [{ crmContactId: bobCrm.id, leadId: "bbbbbbbb-1111-4111-8111-00000000b0b0", email: "bob@y.com", fullName: "Bob Stone", company: "Y" }],
     });
     expect(rows[2]).toMatchObject({ sources: ["instantly"], emails: ["bob@y.com"], stateSource: "lead_service", possibleLeads: [] });
     expect(summary.evidence).toContainEqual({ kind: "lead_pairing", status: "ok", records: 0, error: null });
@@ -604,7 +604,7 @@ describe.skipIf(!RUN)("person layer", () => {
       .set("x-user-id", USER);
     expect(res.status).toBe(200);
     const crm = res.body.people.find((x: { personKey: string }) => x.personKey === "email:aa.bob@gmail.com");
-    expect(crm.possibleLeads).toEqual([{ crmContactId: bobCrm.id, email: "bob@y.com", fullName: "Bob Stone", company: "Y" }]);
+    expect(crm.possibleLeads).toEqual([{ crmContactId: bobCrm.id, leadId: "bbbbbbbb-1111-4111-8111-00000000b0b0", email: "bob@y.com", fullName: "Bob Stone", company: "Y" }]);
   });
 
   it("a person on Gmail and Instantly appears once, their thread interleaved by time", async () => {

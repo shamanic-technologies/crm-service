@@ -639,13 +639,15 @@ export interface LeadPairingRow {
     state: "paired" | "unconfirmed" | "rejected" | "unpaired";
     /** lead-service: paired on a judgment between its thresholds — a guess, listed for a person to confirm. */
     toConfirm: boolean;
-    lead: { email: string | null; fullName: string | null; company: string | null } | null;
+    lead: { leadId?: string | null; email: string | null; fullName: string | null; company: string | null } | null;
   };
 }
 
 /** A CRM contact lead-service MAY have paired with one of our leads: shown beside it, never merged. */
 export interface PossibleLead {
   crmContactId: string;
+  /** lead-service's lead id: what its pairing rulings take beside crmContactId. */
+  leadId: string | null;
   email: string | null;
   fullName: string | null;
   company: string | null;
@@ -689,6 +691,7 @@ export function possibleLeadOf(row: LeadPairingRow): PossibleLead | null {
   if (row.pairing.state !== "paired" || !row.pairing.lead || isConfidentPairing(row)) return null;
   return {
     crmContactId: row.crmContact.id,
+    leadId: row.pairing.lead.leadId ?? null,
     email: normalizeEmail(row.pairing.lead.email),
     fullName: row.pairing.lead.fullName,
     company: row.pairing.lead.company,

@@ -684,7 +684,8 @@ owner had written to. A recorded fact, never an address-shape guess.
   acceptance). A `paired` + `toConfirm` row (a judgment between its thresholds)
   is a GUESS: lead-service still counts it in its stats, but it merges nothing
   here; the CRM contact stays its own person carrying `possibleLeads` ("maybe
-  the same as X, to confirm"). Brice Jackson (2026-10-10): paired by full name
+  the same as X, to confirm"; each with lead-service's `leadId` so the Unibox
+  sends confirm / deny straight to lead-service's rulings). Brice Jackson (2026-10-10): paired by full name
   at 0.69, merged, shown under the CRM's gmail; 47 of 62 pairing merges in his
   brand were such guesses. Rejected / unconfirmed / unpaired tie nothing. No
   name matching of ours, no model. Union-find in `identity.ts`, deterministic.

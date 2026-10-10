@@ -183,7 +183,7 @@ describe("resolvePersonState precedence", () => {
 describe("pairingEvidence: lead-service's CONFIDENT paired verdict, nothing else", () => {
   const row = (state: LeadPairingRow["pairing"]["state"], lead = true, toConfirm = false): LeadPairingRow => ({
     crmContact: { id: "c1", email: "marketing@aim.com", phone: "+13529423443", fullName: "Joanie S", company: null },
-    pairing: { state, toConfirm, lead: lead ? { email: "joanie@aim.com", fullName: "Joanie S", company: "Aim" } : null },
+    pairing: { state, toConfirm, lead: lead ? { leadId: "lead-1", email: "joanie@aim.com", fullName: "Joanie S", company: "Aim" } : null },
   });
 
   it("a confident paired row ties the CRM contact's address and phone to the lead's address", () => {
@@ -202,6 +202,7 @@ describe("pairingEvidence: lead-service's CONFIDENT paired verdict, nothing else
     expect(pairingEvidence(row("paired", true, true))).toBeNull();
     expect(possibleLeadOf(row("paired", true, true))).toEqual({
       crmContactId: "c1",
+      leadId: "lead-1",
       email: "joanie@aim.com",
       fullName: "Joanie S",
       company: "Aim",
