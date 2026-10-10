@@ -705,7 +705,9 @@ owner had written to. A recorded fact, never an address-shape guess.
   accountant as "other business" (v0.27.0, 311 hidden); with the overview it
   still did for suppliers / accountant / "mentor for my SaaS", whose thread
   names no company (v0.28.1). So `other_business` requires the thread to POINT
-  at another company; an unnamed work thread is the brand's (v0.28.2). Plus one
+  at another company; an unnamed work thread is the brand's (v0.29.1). That
+  still hid suppliers: they name THEMSELVES. The question is ON WHOSE BEHALF
+  the owner acts; the counterpart's own company never counts (v0.29.2). Plus one
   `noul` per active offer. Text is clipped on code points (Jev refuses a lone
   surrogate: "invalid Unicode text"). Recorded in
   `conversation_verdicts` keyed (org, brand, `gmail:<addr>` | `matrix:<conv id>`):
@@ -715,7 +717,7 @@ owner had written to. A recorded fact, never an address-shape guess.
   only when the person is on Gmail / Matrix ALONE (no Instantly / CRM / CSV /
   Stripe / PostHog presence, no csv / lead_pairing / ghl / stripe evidence, no
   lead-service lead, a failed lead read counts as a lead) AND every conversation
-  has P(this_brand) < 0.25. Unjudged = shown. Offers tagged at noul >= 0.5, only
+  has P(this_brand) < 0.15. Unjudged = shown. Offers tagged at noul >= 0.5, only
   on a conversation about the brand → `people.offer_ids`; `GET /orgs/people`
   takes `offerId=` and `includeNotBusiness=true`. A hidden person's message text
   is dropped from our search index and their new facts are HELD (never emitted).
