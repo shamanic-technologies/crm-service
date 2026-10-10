@@ -333,8 +333,25 @@ function installFetchStub() {
   });
 }
 
+/**
+ * A thread read re-reads stale units in the BACKGROUND, so a test can end while one of those
+ * writes is still in flight; a wipe racing it can be picked as a deadlock victim (40P01).
+ * The wipe is then simply run again once the writer is done.
+ */
+async function retryOnDeadlock(fn: () => Promise<unknown>): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fn();
+      return;
+    } catch (err) {
+      if ((err as { code?: string }).code !== "40P01" || attempt >= 5) throw err;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+}
+
 async function wipe() {
-  await db.execute(sql`TRUNCATE sender_verdicts, people_scopes, people, person_ids, person_id_aliases, contact_uploads, lead_standing_observations, matrix_raw_events, conversations, matrix_leads, matrix_connections, ghl_opportunities, ghl_connections, contacts CASCADE`);
+  await retryOnDeadlock(() => db.execute(sql`TRUNCATE sender_verdicts, people_scopes, people, person_ids, person_id_aliases, contact_uploads, lead_standing_observations, matrix_raw_events, conversations, matrix_leads, matrix_connections, ghl_opportunities, ghl_connections, contacts CASCADE`));
 }
 
 /** Alice in GoHighLevel (email + phone, a won deal) and on WhatsApp (phone only). */
@@ -1434,14 +1451,20 @@ describe.skipIf(!RUN)("person layer", () => {
       expect(calls.filter((c) => c.endsWith("/orgs/google/conversation"))).toEqual([]);
     });
 
+    const wipeMessageStore = () =>
+      retryOnDeadlock(() =>
+        db.transaction(async (tx) => {
+          await tx.execute(sql`DELETE FROM people_message_texts`);
+          await tx.execute(sql`DELETE FROM people_message_units`);
+        }),
+      );
+
     it("a never-read address is read once, on the spot; a source that could never be read says failed", async () => {
-      await db.execute(sql`DELETE FROM people_message_texts`);
-      await db.execute(sql`DELETE FROM people_message_units`);
+      await wipeMessageStore();
       const res = await timeline();
       expect(texts(res)).toContain("Sure, call me");
 
-      await db.execute(sql`DELETE FROM people_message_texts`);
-      await db.execute(sql`DELETE FROM people_message_units`);
+      await wipeMessageStore();
       gmailConversationDown = true;
       const down = await timeline();
       const gmail = down.body.sources.find((x: { source: string }) => x.source === "gmail");
