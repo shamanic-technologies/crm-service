@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   BRAND_MIN_PROBABILITY,
+  clip,
   conversationKeysOf,
   hidesConversation,
   isPersonalChannelOnly,
@@ -172,5 +173,15 @@ describe("judgeConversation", () => {
       o0: { type: "noul", noul: 0.5 },
     });
     await expect(judgeConversation(input, context, tracking)).rejects.toThrow(/no answer for offer offer-b/);
+  });
+});
+
+describe("clip", () => {
+  it("never cuts inside an emoji and drops a lone surrogate (Jev refuses invalid Unicode)", () => {
+    const text = "a".repeat(399) + "😀" + "tail";
+    const out = clip(text);
+    expect(out).toBe("a".repeat(399) + "😀…");
+    expect(clip("broken \uD83D end")).toBe("broken \uFFFD end");
+    expect(clip("short")).toBe("short");
   });
 });

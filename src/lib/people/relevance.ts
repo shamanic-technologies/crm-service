@@ -61,14 +61,16 @@ const TOPIC_CRITERIA: Record<Topic, string> = {
     "the owner's private life, nothing a company does: family, partner, friends, dating, health and doctors, " +
     "housing and landlords, personal shopping and admin, personal travel, social plans and small talk.",
   other_business:
-    "work for a DIFFERENT company or project than the brand: one of otherBrandsOfTheSameOwner, or any other " +
-    "company or project the owner runs, coaches for, works for or invests in, whose activity is not what " +
-    "brand.description says the brand does.",
+    "work that VISIBLY belongs to a different company or project than the brand: the conversation names that " +
+    "other company or project (one of otherBrandsOfTheSameOwner, a client the owner works FOR, a coaching " +
+    "practice, a former company), or what it discusses is plainly not what brand.description says the brand " +
+    "does. Only pick this when the thread itself points at that other company.",
   this_brand:
-    "the brand's business, as brand.description describes it: a prospect, client, user, partner, reseller, " +
-    "investor, advisor, journalist or job candidate; the suppliers, tools and vendors the brand runs on; the " +
-    "company's own accounting, legal, banking and admin; and delivering the brand's service, including talking " +
-    "to third parties on its clients' behalf when that is what the brand sells.",
+    "the brand's business (brand.description), AND any work conversation that does not visibly belong to " +
+    "another company: prospects, clients, users, partners, investors, advisors and mentors, journalists, " +
+    "job candidates; the suppliers, software tools and vendors the owner pays or gets support from; the " +
+    "accountant, lawyer, bank and the company's own admin and invoices. The owner runs the brand, so a " +
+    "work thread that names no other company is the brand's.",
 };
 
 export interface BrandContext {
@@ -108,7 +110,7 @@ export async function readBrandContext(identity: SiblingIdentity): Promise<Brand
   return {
     ...ctx,
     brand: { ...ctx.brand, description: typeof overview === "string" && overview.trim() ? overview.trim() : null },
-    hash: createHash("sha256").update(JSON.stringify(["v2", ctx])).digest("hex").slice(0, 32),
+    hash: createHash("sha256").update(JSON.stringify(["v3", ctx])).digest("hex").slice(0, 32),
   };
 }
 
@@ -151,7 +153,16 @@ export function hidesConversation(v: { brandProbability: number }): boolean {
   return v.brandProbability < BRAND_MIN_PROBABILITY;
 }
 
-const clip = (s: string) => (s.length > MESSAGE_CHARS ? `${s.slice(0, MESSAGE_CHARS)}…` : s);
+/**
+ * PURE: at most MESSAGE_CHARS characters, cut on a code point (never inside an
+ * emoji's surrogate pair) and well-formed: Jev refuses a request holding a lone
+ * surrogate ("invalid Unicode text", 2 WhatsApp threads on the first backfill).
+ */
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+export function clip(s: string): string {
+  const chars = Array.from(s.replace(LONE_SURROGATE, "\uFFFD"));
+  return chars.length > MESSAGE_CHARS ? `${chars.slice(0, MESSAGE_CHARS).join("")}…` : chars.join("");
+}
 
 /** One Jev call: the topic choice plus one yes/no per active offer. Fails loud on a malformed answer. */
 export async function judgeConversation(
@@ -168,8 +179,8 @@ export async function judgeConversation(
     otherBrandsOfTheSameOwner: context.otherBrandsOfTheSameOwner,
     conversation: {
       channel: input.channel,
-      counterpart: input.counterpart,
-      messages: input.messages.map((m) => ({ ...m, text: clip(m.text) })),
+      counterpart: { ...input.counterpart, names: input.counterpart.names.map(clip) },
+      messages: input.messages.map((m) => ({ ...m, subject: m.subject ? clip(m.subject) : m.subject, text: clip(m.text) })),
     },
   };
   const questions: Record<string, ChoiceQuestion | NoulQuestion> = {

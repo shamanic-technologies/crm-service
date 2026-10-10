@@ -702,7 +702,12 @@ owner had written to. A recorded fact, never an address-shape guess.
   NOT in the context hash: it is re-extracted in new words every few days).
   Suppliers / tools, the company's own admin, and service delivery count as
   the brand: judged on name + offers alone, Jev filed Instantly, Twilio and the
-  accountant as "other business" (v0.27.0, 311 hidden) + one `noul` per active offer. Recorded in
+  accountant as "other business" (v0.27.0, 311 hidden); with the overview it
+  still did for suppliers / accountant / "mentor for my SaaS", whose thread
+  names no company (v0.28.1). So `other_business` requires the thread to POINT
+  at another company; an unnamed work thread is the brand's (v0.28.2). Plus one
+  `noul` per active offer. Text is clipped on code points (Jev refuses a lone
+  surrogate: "invalid Unicode text"). Recorded in
   `conversation_verdicts` keyed (org, brand, `gmail:<addr>` | `matrix:<conv id>`):
   Gmail is per ORG, so each brand judges the same thread for itself. Re-judged
   only when `judged_through` moved (Gmail `lastActivityAt|messageCount`, Matrix
