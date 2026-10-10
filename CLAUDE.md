@@ -695,6 +695,18 @@ owner had written to. A recorded fact, never an address-shape guess.
   (identity, the fact feed keys on it); the fact content hash ignores `emails`.
 - **`person_key`** = smallest email key, else phone, else `<source>:<ref>`.
   Any identity key opens the person (`people.identity_keys` GIN `@>`).
+  It is PII: a URL / link / analytics event carries **`personId`** instead
+  (`person-id.ts`): a random uuid, stable across rebuilds because
+  `person_ids` (identity key → id, never wiped by a build) carries it over.
+  Merge: the id holding most of the person's keys wins (tie: older, then
+  smaller), the other is retired into it (`person_id_aliases`, still opens the
+  person). Split: the part holding most of the old id's keys keeps it, the
+  other gets a new id. Timeline takes `personId=` OR `personKey=` (exactly one).
+- **Entry events** (`timeline.ts` `entryItems` / `csvEntryItems`): every source
+  record that brought the person in adds one dated event, so a CRM-only person
+  is never an empty thread: GoHighLevel `added_to_crm` (`contact_created_at`),
+  CSV `added_to_crm` (`uploaded_at`, item `source: "csv"`), PostHog `signup`,
+  Stripe `became_customer`. No vendor date → no event (never build time).
 - **ONE state, read not graded** (`state.ts`): lead-service standing verbatim
   (first exact-address row of its own `sort=activity` search; a failed read is
   `unavailable`, never a guess; from `PEOPLE_STANDING_WALK_MIN` (200) addresses
@@ -862,7 +874,7 @@ service. Body `{sourceBrandId, sourceOrgId, targetOrgId, targetBrandId?}`,
 apiKeyAuth, response `{ updatedTables: [{ tableName, count }] }`
 (`src/lib/transfer-brand.ts`).
 
-- **Every table carrying `brand_id` moves** (all 27: CSV, serves, Matrix,
+- **Every table carrying `brand_id` moves** (all 29: CSV, serves, Matrix,
   GoHighLevel incl. history + stage meanings, PostHog, Stripe, the fact feed). Only `org_id` / `brand_id` change;
   FKs are on row ids so the graph stays wired. Provenance (`run_id`,
   `created_by_user_id`) stays as recorded.

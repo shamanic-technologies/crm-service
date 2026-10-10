@@ -1409,6 +1409,14 @@ const PersonSchema = registry.register(
   "Person",
   z
     .object({
+      personId: z.string().uuid().nullable().openapi({
+        example: "7b0f6a52-1c43-4b8e-9d2a-0f5e3c1a9b77",
+        description:
+          "The person's OPAQUE id: random, carries no personal data (put THIS in a URL, never personKey). Stable across rebuilds " +
+          "(same person, same id). Merge: the merged person keeps the id holding most of its keys (tie: the older); the other id is " +
+          "retired and still opens the merged person. Split: the part holding most of the old id's keys keeps it, the other gets a new id. " +
+          "Null only on a row built before ids existed (gone at the next build). Pass it to GET /orgs/people/timeline as `personId`.",
+      }),
       personKey: z.string().openapi({
         example: "email:alice@acme.com",
         description:
@@ -1584,7 +1592,9 @@ const PeopleListResponseSchema = registry.register(
 const TimelineItemSchema = z
   .object({
     at: z.string().nullable().openapi({ description: "When it was sent / happened. Null = the source gave no date; undated items sort last." }),
-    source: PeopleSourceSchema,
+    source: z.enum([...PEOPLE_SOURCES, "csv"]).openapi({
+      description: "A people source, or `csv` for the `added_to_crm` event of a contact imported from an uploaded file (CSV is merge evidence, never a source of people).",
+    }),
     channel: z.string().openapi({ example: "email" }),
     kind: z.enum(["message", "event"]),
     direction: z.enum(["inbound", "outbound", "other"]).nullable().openapi({ description: "inbound = the person wrote; outbound = the brand did; null on an event." }),
@@ -1595,7 +1605,14 @@ const TimelineItemSchema = z
     ref: z.record(z.string(), z.string().nullable()),
     event: z
       .object({ step: z.string(), dateBasis: z.string(), detail: z.record(z.string(), z.unknown()) })
-      .nullable(),
+      .nullable()
+      .openapi({
+        description:
+          "Events only. Besides the funnel / web / payment steps, every source record that brought the person in adds ONE entry event, " +
+          "only when the source dates it (never invented, never the build time): " +
+          "gohighlevel `added_to_crm` (dateBasis `contact_created_at`), csv `added_to_crm` (dateBasis `uploaded_at`, detail filename + uploadId), " +
+          "posthog `signup` (dateBasis `person_created_at`), stripe `became_customer` (dateBasis `customer_created_at`).",
+      }),
     textClean: z
       .object({
         status: z.enum(TEXT_CLEAN_STATUSES).openapi({
@@ -1708,17 +1725,24 @@ registry.registerPath({
     "Read live from where each exchange lives: Gmail (google-service per-address conversation), cold email " +
     "(instantly-service conversation per campaign the address is a lead on), Matrix DMs and GoHighLevel " +
     "funnel events (appointments, stage entries, won/lost, form submissions). Each source answers ok / empty " +
-    "/ not_connected / failed. `personKey` may be any of the person's identity keys.",
+    "/ not_connected / failed. Name the person with EXACTLY ONE of `personId` (the opaque id on every person, preferred) " +
+    "or `personKey` (any of the person's identity keys, kept for existing callers). Every source record that dates how the person " +
+    "entered it (GoHighLevel contact created, CSV file uploaded, PostHog person created, Stripe customer created) adds one entry event.",
   request: {
     headers: IDENTITY_HEADERS,
     query: z.object({
       brandId: z.string().uuid(),
-      personKey: z.string().openapi({ example: "email:alice@acme.com" }),
+      personId: z.string().uuid().optional().openapi({
+        example: "7b0f6a52-1c43-4b8e-9d2a-0f5e3c1a9b77",
+        description: "The person's opaque id (Person.personId). A retired id (merged away) opens the person it merged into.",
+      }),
+      personKey: z.string().optional().openapi({ example: "email:alice@acme.com", description: "Any identity key of the person." }),
     }),
   },
   responses: {
     200: { description: "The merged thread", content: { "application/json": { schema: PersonTimelineResponseSchema } } },
-    404: { description: "reason=person_not_found: no person of this brand holds that key" },
+    400: { description: "Neither or both of personId / personKey, or a personId that is not a uuid" },
+    404: { description: "reason=person_not_found: no person of this brand holds that key / id" },
   },
 });
 

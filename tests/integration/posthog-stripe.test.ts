@@ -414,6 +414,9 @@ describe.skipIf(!RUN)("PostHog + Stripe sources", () => {
       (i: { at: string; source: string; event: { step: string } }) => `${i.at} ${i.source}:${i.event.step}`,
     );
     expect(t).toEqual([
+      // How alice came in: PostHog person created, Stripe customer created (each dated by the vendor).
+      "2026-09-01T08:00:00.000Z posthog:signup",
+      "2026-09-01T08:06:40.000Z stripe:became_customer",
       "2026-09-01T09:00:00.000Z posthog:visit",
       "2026-09-01T09:05:00.000Z posthog:event",
       "2026-09-01T10:53:20.000Z stripe:subscription_started",
@@ -422,7 +425,7 @@ describe.skipIf(!RUN)("PostHog + Stripe sources", () => {
     ]);
     const payment = tl.body.items.find((i: { event: { step: string } }) => i.event.step === "payment");
     expect(payment.event.detail).toMatchObject({ amountMinor: 9900, amount: 99, currency: "usd", status: "succeeded" });
-    const visit = tl.body.items[0];
+    const visit = tl.body.items.find((i: { event: { step: string } }) => i.event.step === "visit");
     expect(visit).toMatchObject({
       channel: "web",
       text: "/pricing",

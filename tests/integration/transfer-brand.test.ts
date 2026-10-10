@@ -104,6 +104,12 @@ async function seedBrand(org: string, brand: string, tag: string) {
   await db.execute(sql`
     INSERT INTO people_facts (org_id, brand_id, person_key, emails, phones, type, date_basis, source, source_ref, payload, natural_key)
     VALUES (${org}, ${brand}, 'email:a@b.co', '[]', '[]', 'payment', 'created', 'stripe', 'ch_1', '{}', 'stripe|payment|ch_1')`);
+  await db.execute(sql`
+    INSERT INTO person_ids (org_id, brand_id, identity_key, person_id)
+    VALUES (${org}, ${brand}, 'email:a@b.co', gen_random_uuid())`);
+  await db.execute(sql`
+    INSERT INTO person_id_aliases (org_id, brand_id, retired_id, person_id)
+    VALUES (${org}, ${brand}, gen_random_uuid(), gen_random_uuid())`);
 }
 
 /** Rows per table for (org, brand). */
