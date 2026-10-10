@@ -19,6 +19,7 @@ import {
 } from "../../src/db/schema.js";
 import { ensureScope, runScopeBuild } from "../../src/lib/people/build.js";
 import { clearFamiliesCache } from "../../src/lib/people/families.js";
+import { runFreshnessPass } from "../../src/lib/people/freshness.js";
 import peopleRoutes from "../../src/routes/people.js";
 
 /**
@@ -59,6 +60,10 @@ let leadServiceDown = false;
 let leadPairings: { crmContact: { id: string; email: string | null; phone: string | null; fullName: string | null; company: string | null }; pairing: { state: string; toConfirm: boolean; lead: { leadId?: string; email: string | null; fullName: string | null; company: string | null } | null } }[] = [];
 let gmailConversationDown = false;
 let aliceNewMessage = false;
+/** Our own reply to Alice exists in instantly-service's thread (sent after the store read it). */
+let aliceOurReply = false;
+/** instantly-service's outreach fact feed (seq = position + 1). */
+let outreachFacts: Record<string, unknown>[] = [];
 const calls: string[] = [];
 
 /** Jev's stub: these addresses are automated, at this confidence; every other address is human. */
@@ -255,6 +260,13 @@ function installFetchStub() {
         const next = start + limit < all.length ? String(start + limit) : null;
         return json({ success: true, count: leads.length, nextCursor: next, leads });
       }
+      if (url.pathname === "/internal/outreach-facts") {
+        expect(url.searchParams.get("orgId")).toBe(ORG);
+        expect(url.searchParams.get("brandId")).toBe(BRAND);
+        const since = Number(url.searchParams.get("since") ?? 0);
+        const facts = outreachFacts.filter((f) => Number(f.seq) > since);
+        return json({ facts, nextCursor: facts.length ? String(facts[facts.length - 1].seq) : String(since), hasMore: false });
+      }
       if (url.pathname === "/orgs/conversations") {
         const email = url.searchParams.get("email");
         if (url.searchParams.get("campaign_id") === "camp-3" && email === "dave@w.com") {
@@ -279,6 +291,9 @@ function installFetchStub() {
             messages: [
               { direction: "outbound", from: "kevin@send.com", to: "alice@x.com", at: "2026-09-02T08:00:00.000Z", subject: "Cold", text: "Cold email", campaignId: "camp-1", instantlyCampaignId: "self:1", outreachFact: { subjectKey: "ievt:evt-1", step: 1, position: "first" } },
               { direction: "inbound", from: "alice@x.com", to: "kevin@send.com", at: "2026-09-02T10:00:00.000Z", subject: "Re: Cold", text: "Interested", campaignId: "camp-1", instantlyCampaignId: "self:1", outreachFact: null },
+              ...(aliceOurReply
+                ? [{ direction: "outbound", from: "kevin@send.com", to: "alice@x.com", at: "2026-09-12T21:28:45.000Z", subject: "Re: Cold", text: "Floating this to the top of your inbox", campaignId: "camp-1", instantlyCampaignId: "self:1", outreachFact: null }]
+                : []),
             ],
           },
         });
@@ -411,6 +426,8 @@ describe.skipIf(!RUN)("person layer", () => {
     leadPairings = [];
     gmailConversationDown = false;
     aliceNewMessage = false;
+    aliceOurReply = false;
+    outreachFacts = [];
     automatedEmails = new Map();
     jevDown = false;
     extraCorrespondents = [];
@@ -1304,6 +1321,74 @@ describe.skipIf(!RUN)("person layer", () => {
       // and the search sees it too
       const found = await request(app()).get(`/orgs/people?brandId=${BRAND}&q=deck`).set("x-api-key", API_KEY).set("x-org-id", ORG).set("x-user-id", USER);
       expect(found.body.people.map((p: { personKey: string }) => p.personKey)).toEqual(["email:alice@x.com"]);
+    });
+
+    const factFor = (seq: number, email: string, campaignId: string, orgId = ORG, brandIds = [BRAND], recordedAt = new Date().toISOString()) => ({
+      seq: String(seq),
+      type: "email_sent",
+      subjectKey: `ievt:${seq}`,
+      supersedesSeq: null,
+      occurredAt: recordedAt,
+      recordedAt,
+      leadEmail: email,
+      orgId,
+      campaignId,
+      instantlyCampaignId: "self:1",
+      brandIds,
+      transport: "smtp",
+    });
+
+    it("a reply we sent hours after the store read the thread is in it on the FIRST open (the watch re-read it)", async () => {
+      aliceOurReply = true;
+      gmailConnected = false; // the Gmail half of the watch has its own test
+      await db.execute(sql`UPDATE people_message_units SET indexed_at = now() - interval '10 hours'`);
+      outreachFacts = [
+        factFor(1, "Alice@X.com", "camp-1"),
+        // Another brand's thread and a fact older than a day name nothing here.
+        factFor(2, "alice@x.com", "camp-1", ORG, ["eeeeeeee-1111-4111-8111-000000000009"]),
+        factFor(3, "bob@y.com", "camp-2", ORG, [BRAND], "2026-01-01T00:00:00.000Z"),
+      ];
+      const [pass] = (await runFreshnessPass())!;
+      expect(pass).toMatchObject({ moved: 1, refreshed: 1, failed: 0 });
+
+      calls.length = 0;
+      const first = await timeline();
+      expect(texts(first)).toContain("Floating this to the top of your inbox");
+      // Served from the store the watch refreshed: the open itself read no conversation.
+      expect(calls.filter((c) => c.endsWith("/orgs/conversations"))).toEqual([]);
+
+      // The cursor moved: a second pass names nothing new and reads nothing.
+      calls.length = 0;
+      const [again] = (await runFreshnessPass())!;
+      expect(again).toMatchObject({ moved: 0, refreshed: 0 });
+      expect(calls.filter((c) => c.endsWith("/orgs/conversations"))).toEqual([]);
+    });
+
+    it("an open that finds a thread stored before a known move re-reads that thread first, and only it", async () => {
+      aliceOurReply = true;
+      await db.execute(sql`UPDATE people_message_units SET indexed_at = now() - interval '30 seconds'`);
+      await db.execute(sql`UPDATE people_message_units SET changed_at = now() WHERE source = 'instantly' AND unit = 'camp-1:alice@x.com'`);
+      calls.length = 0;
+      const first = await timeline();
+      expect(texts(first)).toContain("Floating this to the top of your inbox");
+      expect(calls.filter((c) => c.endsWith("/orgs/conversations"))).toHaveLength(1);
+      expect(calls.filter((c) => c.endsWith("/orgs/google/conversation"))).toEqual([]);
+    });
+
+    it("a Gmail address whose last message moved past what we saw is re-read by the watch", async () => {
+      aliceNewMessage = true;
+      await db.execute(sql`UPDATE people_message_units SET indexed_at = now() - interval '10 hours'`);
+      await runFreshnessPass();
+      calls.length = 0;
+      expect(texts(await timeline())).toContain("Send me the deck");
+      // The open answered from the store the watch refreshed (the 10-hour-old cold-email copy
+      // is only re-read in the background, after the answer).
+      expect(calls.filter((c) => c.endsWith("/orgs/google/conversation"))).toEqual([]);
+      // Same last message on the next pass: nothing to re-read.
+      calls.length = 0;
+      const [again] = (await runFreshnessPass())!;
+      expect(again).toMatchObject({ moved: 0, refreshed: 0 });
+      expect(calls.filter((c) => c.endsWith("/orgs/google/conversation"))).toEqual([]);
     });
 
     it("a never-read address is read once, on the spot; a source that could never be read says failed", async () => {

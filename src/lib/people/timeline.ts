@@ -23,9 +23,11 @@
  * So a person is never an empty thread while any of their records is dated.
  *
  * Gmail and cold-email items carry `servedFrom: "store"` and `readAt` (the
- * oldest read they come from); a person read with a store older than
- * TIMELINE_REFRESH_MS is re-read in the background, so the NEXT read shows a new
- * message. Each source answers a status, so "not connected",
+ * oldest read they come from). The freshness watch (people/freshness.ts) re-reads
+ * a stored thread within about a minute of its source moving, and an open that
+ * finds a thread stored before a known move re-reads it first, so a message that
+ * exists is in the thread on the first open. A store older than
+ * TIMELINE_REFRESH_MS is also re-read in the background after the answer. Each source answers a status, so "not connected",
  * "connected, nothing with this person" and "could not read it" never collapse
  * into an empty thread.
  */
