@@ -8,6 +8,12 @@
  * person (that key IS the identity). Nothing else merges: no name matching, no
  * domain matching, no model. Unmerged stays two people.
  *
+ * A third key, `uid:<id>`, is the brand's OWN user id: the auth provider's
+ * (Clerk) user id, and every PostHog distinct id of a person (the brand's
+ * product names its users to PostHog by that same id). Two tools of one brand
+ * stating the same user id is positive evidence; it is what ties a PostHog
+ * person PostHog holds no email for to the signed-up user.
+ *
  * Keys are normalised exactly, never fuzzily:
  *  - email: trimmed and lower-cased; nothing else (no Gmail dot folding).
  *  - phone: only an INTERNATIONAL number (`+` or `00` prefix, 8-15 digits) is a
@@ -15,7 +21,7 @@
  *    no country, so it cannot be compared with anything and is not a key.
  */
 
-export const PEOPLE_SOURCES = ["gmail", "instantly", "matrix", "gohighlevel", "posthog", "stripe"] as const;
+export const PEOPLE_SOURCES = ["gmail", "instantly", "matrix", "gohighlevel", "posthog", "stripe", "clerk"] as const;
 export type PeopleSource = (typeof PEOPLE_SOURCES)[number];
 
 export function normalizeEmail(raw: string | null | undefined): string | null {
@@ -36,6 +42,7 @@ export function normalizePhone(raw: string | null | undefined): string | null {
 
 export const emailKey = (email: string) => `email:${email}`;
 export const phoneKey = (phone: string) => `phone:${phone}`;
+export const userIdKey = (id: string) => `uid:${id}`;
 
 /** One source record a person appears on. */
 export interface Presence {
@@ -46,6 +53,8 @@ export interface Presence {
   company: string | null;
   emails: string[];
   phones: string[];
+  /** The brand's own user ids the record states (auth user id, PostHog distinct ids). */
+  userIds?: string[];
   firstActivityAt: string | null;
   lastActivityAt: string | null;
   messageCount: number | null;
@@ -74,7 +83,10 @@ export interface Evidence {
 }
 
 /** The keys a record states. A record with neither email nor phone gets its own. */
-export function keysOf(record: { emails: string[]; phones: string[] }, fallback: string | null): string[] {
+export function keysOf(
+  record: { emails: string[]; phones: string[]; userIds?: string[] },
+  fallback: string | null,
+): string[] {
   const keys = new Set<string>();
   for (const e of record.emails) {
     const n = normalizeEmail(e);
@@ -83,6 +95,10 @@ export function keysOf(record: { emails: string[]; phones: string[] }, fallback:
   for (const p of record.phones) {
     const n = normalizePhone(p);
     if (n) keys.add(phoneKey(n));
+  }
+  for (const u of record.userIds ?? []) {
+    const id = u.trim();
+    if (id) keys.add(userIdKey(id));
   }
   if (keys.size === 0 && fallback) keys.add(fallback);
   return [...keys];

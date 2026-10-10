@@ -1,8 +1,10 @@
 /**
  * Deriving PostHog silver from bronze — pure, deterministic, zero LLM.
  *
- * Identity is PostHog's own: a person PostHog holds an email for. The email is
- * trimmed and lower-cased, nothing else; no name matching, no model.
+ * Identity is PostHog's own: an identified person, with the email PostHog
+ * holds (trimmed and lower-cased, nothing else) when it holds one, and the
+ * distinct ids the brand named them by (its auth provider's user id among
+ * them) — no name matching, no model.
  */
 
 export const POSTHOG_SOURCE = "posthog";
@@ -28,7 +30,9 @@ export const visitId = (row: Record<string, unknown>) => `${row.session_id}:${ro
 
 export interface DerivedPosthogContact {
   externalId: string;
-  primaryEmail: string;
+  primaryEmail: string | null;
+  /** PostHog's distinct ids of the person, verbatim (the brand's own user ids among them). */
+  distinctIds: string[];
   fullName: string | null;
   firstName: string | null;
   lastName: string | null;
@@ -38,12 +42,15 @@ export interface DerivedPosthogContact {
 export function derivePosthogContact(payload: Record<string, unknown>): DerivedPosthogContact | null {
   const externalId = str(payload.id);
   const email = str(payload.email)?.toLowerCase() ?? null;
-  if (!externalId || !email) return null;
+  if (!externalId) return null;
   const firstName = str(payload.first_name);
   const lastName = str(payload.last_name);
   return {
     externalId,
     primaryEmail: email,
+    distinctIds: Array.isArray(payload.distinct_ids)
+      ? [...new Set(payload.distinct_ids.map((d) => str(d)).filter((d): d is string => !!d))].sort()
+      : [],
     fullName: str(payload.name) ?? ([firstName, lastName].filter(Boolean).join(" ") || null),
     firstName,
     lastName,

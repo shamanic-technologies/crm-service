@@ -22,7 +22,7 @@ const standing = (over: Partial<StripeStandingInput>): StripeStandingInput => ({
 });
 
 describe("PostHog derivation", () => {
-  it("an identified person keeps PostHog's id and a lower-cased email; no email = not a contact", () => {
+  it("an identified person keeps PostHog's id, a lower-cased email and its distinct ids; no email still a contact", () => {
     expect(
       derivePosthogContact({
         id: "p1",
@@ -38,8 +38,14 @@ describe("PostHog derivation", () => {
       fullName: "Alice M",
       sourceCreatedAt: new Date("2026-09-01T00:00:00Z"),
     });
-    expect(derivePosthogContact({ id: "p2", email: "" })).toBeNull();
-    expect(derivePosthogContact({ id: "p3", email: null })).toBeNull();
+    // Known to PostHog only by the brand's user id: kept, the id is what joins it to the signed-up user.
+    expect(derivePosthogContact({ id: "p2", email: "", distinct_ids: ["user_b", "anon-1", "user_b", ""] })).toMatchObject({
+      externalId: "p2",
+      primaryEmail: null,
+      distinctIds: ["anon-1", "user_b"],
+    });
+    expect(derivePosthogContact({ id: "p3", email: null })).toMatchObject({ primaryEmail: null, distinctIds: [] });
+    expect(derivePosthogContact({ id: null, email: "a@b.com" })).toBeNull();
   });
 
   it("a visit is one session of one person, named by its entry page", () => {

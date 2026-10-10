@@ -64,7 +64,7 @@ export const FACT_TYPES = [
 ] as const;
 export type FactType = (typeof FACT_TYPES)[number];
 
-export const FACT_SOURCES = ["gohighlevel", "gmail", "matrix", "stripe", "posthog", "csv", "crm"] as const;
+export const FACT_SOURCES = ["gohighlevel", "gmail", "matrix", "stripe", "posthog", "clerk", "csv", "crm"] as const;
 export type FactSource = (typeof FACT_SOURCES)[number];
 
 /**
@@ -82,6 +82,7 @@ const FAMILIES = {
   posthog_visit: { source: "posthog", snapshot: true, immutable: false },
   stripe_money: { source: "stripe", snapshot: true, immutable: false },
   stripe_subscription: { source: "stripe", snapshot: false, immutable: false },
+  clerk_user: { source: "clerk", snapshot: true, immutable: false },
   csv_contact: { source: "csv", snapshot: false, immutable: true },
 } as const;
 export type FactFamily = keyof typeof FAMILIES;
@@ -518,6 +519,32 @@ async function posthogCandidates(orgId: string, brandId: string): Promise<Candid
   return out;
 }
 
+/**
+ * One `signup` per user of the brand's auth provider, dated by the provider's
+ * own creation date (`user_created_at`) — the same fact type PostHog signups
+ * use, so lead-service reads both alike. A user deleted in the provider is a
+ * snapshot record gone: its signup is withdrawn.
+ */
+async function authCandidates(orgId: string, brandId: string, provider: "clerk"): Promise<CandidateFact[]> {
+  const users = await rows<{ id: string; external_id: string; full_name: string | null; source_created_at: string | Date | null }>(sql`
+    SELECT id, external_id, full_name, source_created_at FROM contacts
+    WHERE org_id = ${orgId} AND brand_id = ${brandId} AND source = ${provider} AND external_id IS NOT NULL
+  `);
+  return users.map((u) => ({
+    naturalKey: `${provider}|signup|${u.external_id}`,
+    family: "clerk_user" as const,
+    type: "signup" as const,
+    source: provider,
+    sourceRef: u.external_id,
+    sourceContactId: u.external_id,
+    crmContactId: u.id,
+    occurredAt: iso(u.source_created_at),
+    dateBasis: "user_created_at",
+    payload: {},
+    subject: presenceSubject(provider, u.external_id, u.full_name),
+  }));
+}
+
 /** Which date a subscription status is dated by — Stripe states no date for most transitions. */
 function subscriptionDate(status: string | null, startedAt: string | null, detail: Record<string, unknown>) {
   if (status === "canceled") return { occurredAt: (detail.canceledAt as string | null) ?? null, dateBasis: "canceled_at" };
@@ -651,7 +678,7 @@ async function crmContactRows(orgId: string, brandId: string): Promise<Map<strin
     SELECT id, source, CASE WHEN source = 'matrix' THEN channel_handle ELSE external_id END AS vendor_id
     FROM contacts
     WHERE org_id = ${orgId} AND brand_id = ${brandId}
-      AND source IN ('gohighlevel', 'posthog', 'stripe', 'matrix')
+      AND source IN ('gohighlevel', 'posthog', 'stripe', 'clerk', 'matrix')
   `);
   const out = new Map<string, Set<string>>();
   for (const r of found) {
@@ -682,16 +709,18 @@ async function mirroredStripeIds(tx: Tx, orgId: string, brandId: string, ids: st
  * right after a reconnect, has not re-mirrored everything yet: nothing is gone.
  */
 async function connectedSources(orgId: string, brandId: string): Promise<Set<FactSource>> {
-  const [r] = await rows<{ ghl: boolean; posthog: boolean; stripe: boolean }>(sql`
+  const [r] = await rows<{ ghl: boolean; posthog: boolean; stripe: boolean; clerk: boolean }>(sql`
     SELECT
       EXISTS (SELECT 1 FROM ghl_connections WHERE org_id = ${orgId} AND brand_id = ${brandId} AND last_synced_at IS NOT NULL) AS ghl,
       EXISTS (SELECT 1 FROM posthog_connections WHERE org_id = ${orgId} AND brand_id = ${brandId} AND last_synced_at IS NOT NULL) AS posthog,
-      EXISTS (SELECT 1 FROM stripe_connections WHERE org_id = ${orgId} AND brand_id = ${brandId} AND last_synced_at IS NOT NULL) AS stripe
+      EXISTS (SELECT 1 FROM stripe_connections WHERE org_id = ${orgId} AND brand_id = ${brandId} AND last_synced_at IS NOT NULL) AS stripe,
+      EXISTS (SELECT 1 FROM auth_connections WHERE org_id = ${orgId} AND brand_id = ${brandId} AND provider = 'clerk' AND last_synced_at IS NOT NULL) AS clerk
   `);
   const out = new Set<FactSource>();
   if (r.ghl) out.add("gohighlevel");
   if (r.posthog) out.add("posthog");
   if (r.stripe) out.add("stripe");
+  if (r.clerk) out.add("clerk");
   return out;
 }
 
@@ -815,16 +844,17 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       .where(and(eq(people.scopeId, scope.id), eq(people.notBusiness, false)));
     const index = new PersonIndex(personRows);
 
-    const [ghl, matrix, gmail, posthog, stripe, csv, connected] = await Promise.all([
+    const [ghl, matrix, gmail, posthog, stripe, clerk, csv, connected] = await Promise.all([
       ghlCandidates(orgId, brandId),
       matrixCandidates(orgId, brandId),
       gmailCandidates(scope.id),
       posthogCandidates(orgId, brandId),
       stripeCandidates(orgId, brandId),
+      authCandidates(orgId, brandId, "clerk"),
       csvCandidates(orgId, brandId),
       connectedSources(orgId, brandId),
     ]);
-    const all = [...ghl, ...matrix, ...gmail.facts, ...posthog, ...stripe, ...csv];
+    const all = [...ghl, ...matrix, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv];
     const candidates = new Map<string, CandidateFact>();
     let duplicateKeys = 0;
     for (const c of all) {

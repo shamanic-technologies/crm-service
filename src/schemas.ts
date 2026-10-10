@@ -1987,6 +1987,24 @@ export const StripeConnectionSchema = registry.register(
     .openapi("StripeConnection"),
 );
 
+export const AuthConnectionSchema = registry.register(
+  "AuthConnection",
+  z
+    .object({
+      id: z.string().uuid(),
+      brandId: z.string().uuid(),
+      provider: z.string().openapi({ description: "The auth provider: 'clerk'.", example: "clerk" }),
+      status: VendorConnectionStatus,
+      synced: z.boolean().openapi({ description: "True once a sync has completed." }),
+      lastSyncedAt: z.string().nullable(),
+      providerUserCount: z.number().int().nullable().openapi({ description: "The provider's own user count at the last pass (reconcile with the people served)." }),
+      lastError: z.string().nullable().openapi({ description: "Why the last sync failed, verbatim. Null when healthy." }),
+      lastRunId: z.string().nullable(),
+      createdAt: z.string(),
+    })
+    .openapi("AuthConnection"),
+);
+
 const VendorDisconnectSchema = z.object({ disconnected: z.literal(true), connectionId: z.string().uuid() });
 const vendorPatchBody = { content: { "application/json": { schema: z.object({ status: z.enum(["active", "paused"]) }) } } };
 
@@ -2000,9 +2018,9 @@ for (const v of [
       projectId: z.string().openapi({ example: "171095" }),
       region: z.enum(["us", "eu"]),
     }),
-    extra: { identifiedPersons: z.number().int().openapi({ description: "PostHog's own count of identified persons (email known) in the project, at connect time." }) },
+    extra: { identifiedPersons: z.number().int().openapi({ description: "PostHog's own count of identified persons in the project at connect time: `is_identified` or an email property. Persons named by one of the brand's auth user ids (Clerk) are mirrored on top." }) },
     description:
-      "Resolves the brand's PostHog personal API key from key-service (provider `posthog`, brand-scoped, no org fallback; only the `query:read` scope is needed), then PROVES it by counting the project's identified persons through PostHog's query API. A key PostHog refuses (invalid, missing scope, wrong project or region) comes back 400 with PostHog's own status and message. Read-only: nothing is ever written to PostHog. Requires x-api-key, x-org-id, x-user-id.",
+      "Resolves the brand's PostHog personal API key from key-service (provider `posthog`, brand-scoped, no org fallback; only the `query:read` scope is needed), then PROVES it by counting the project's identified persons through PostHog's query API. The sync mirrors every identified person (is_identified or an email), plus every person carrying one of the brand's auth-provider user ids as a distinct id (a server-side capture keyed on the Clerk user id); a person PostHog holds no email for joins the signed-up user on that shared id. A key PostHog refuses (invalid, missing scope, wrong project or region) comes back 400 with PostHog's own status and message. Read-only: nothing is ever written to PostHog. Requires x-api-key, x-org-id, x-user-id.",
   },
   {
     slug: "stripe",
@@ -2020,6 +2038,15 @@ for (const v of [
     extra: {},
     description:
       "A brand connects N Stripe accounts, one connection per key-service provider name (`stripe`, `stripe-<label>`); every Stripe read (payments, customers matched to people) covers all of them. The same account connected twice answers 409 `stripe_account_already_connected`. Resolves the account's Stripe key from key-service (brand-scoped, no org fallback). Only a RESTRICTED key (rk_live_… / rk_test_…) with READ permission on Customers, Charges, Refunds and Subscriptions is accepted: a secret key can move money and is refused before any call. The key is proven by one read of each resource; a missing permission comes back 400 with Stripe's own status and message. Read-only: nothing is ever written to Stripe. Requires x-api-key, x-org-id, x-user-id.",
+  },
+  {
+    slug: "clerk",
+    label: "Clerk",
+    schema: AuthConnectionSchema,
+    body: z.object({ brandId: z.string().uuid() }),
+    extra: { userCount: z.number().int().openapi({ description: "Clerk's own count of the instance's users, at connect time." }) },
+    description:
+      "Connects the brand's AUTH PROVIDER: every person who signed up to the brand's product, past and future. Store the Clerk instance's SECRET key (sk_live_… / sk_test_…) in key-service first (provider `clerk`, brand-scoped, no org fallback); this route PROVES it by counting the users through Clerk's Backend API, writes the connection, and starts the first sync at once (then a cron every 15 minutes). Every user becomes a person (verified emails, phones, name) with a dated `signup` fact (dateBasis `user_created_at`) on the people fact feed; a user deleted in Clerk leaves, and its signup is withdrawn. A key Clerk refuses comes back 400 with Clerk's own status and message. Read-only: nothing is ever written to Clerk; `private_metadata` is never stored. Requires x-api-key, x-org-id, x-user-id.",
   },
 ] as const) {
   registry.registerPath({

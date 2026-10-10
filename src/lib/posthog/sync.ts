@@ -3,7 +3,8 @@
  * toward PostHog; free (PostHog bills by ingestion, not by API read), so no
  * cost is declared — crm-service declares none of its own.
  *
- *  - BRONZE  every identified person, every visit (session) and every custom
+ *  - BRONZE  every identified person (plus every person named by one of the
+ *            brand's auth user ids, see client.ts), every visit (session) and every custom
  *            event of an identified person, verbatim in `posthog_raw_records`,
  *            keyed on PostHog's own id. The upsert writes only when the content
  *            hash moved.
@@ -13,7 +14,9 @@
  * Persons are re-listed in full each pass (cheap: one keyset query per 5,000).
  * Activity is read from a window: everything since the last pass's start minus
  * one hour, so an event PostHog ingested late is still picked up. The first pass
- * reads the project's whole history.
+ * reads the project's whole history, and so does a person mirrored for the
+ * first time on a later pass (newly identified, or newly named by an auth
+ * user id): their past visits predate the window.
  */
 
 import { and, eq, inArray, sql } from "drizzle-orm";
@@ -32,11 +35,14 @@ import { canonicalHash } from "../gohighlevel/records.js";
 import {
   listIdentifiedPersons,
   listKeyEvents,
+  listPersonsByDistinctIds,
   listVisits,
   POSTHOG_MAX_PAGES,
+  type PersonScope,
   type PosthogRegion,
   type PosthogTarget,
 } from "./client.js";
+import { authUserIds } from "../auth/sync.js";
 import {
   deriveKeyEvent,
   derivePosthogContact,
@@ -51,10 +57,18 @@ export const POSTHOG_PROVIDER = "posthog";
 export const POSTHOG_LATE_INGESTION_MS = 60 * 60 * 1000;
 const FIRST_PASS_SINCE = new Date("2000-01-01T00:00:00Z");
 
+/** Ids per HogQL `IN (…)` list. */
+const ID_CHUNK = 200;
+const chunks = <T>(xs: T[]) => Array.from({ length: Math.ceil(xs.length / ID_CHUNK) }, (_, i) => xs.slice(i * ID_CHUNK, (i + 1) * ID_CHUNK));
+
 export interface PosthogSyncResult {
   connectionId: string;
   runId: string;
   personsMirrored: number;
+  /** Of which: not identified in PostHog, mirrored because an auth user id names them. */
+  personsByAuthUserId: number;
+  /** Persons mirrored for the first time on this pass whose whole history was read. */
+  personsBackfilled: number;
   personsChanged: number;
   visitsMirrored: number;
   visitsChanged: number;
@@ -128,6 +142,7 @@ async function deriveContacts(conn: PosthogConnection, externalIds?: string[]): 
       fullName: c.fullName,
       firstName: c.firstName,
       lastName: c.lastName,
+      rawAttributes: { distinctIds: c.distinctIds },
       sourceCreatedAt: c.sourceCreatedAt,
       sourceConnectionId: conn.id,
       lastRebuiltAt: now,
@@ -138,7 +153,6 @@ async function deriveContacts(conn: PosthogConnection, externalIds?: string[]): 
         orgId: conn.orgId,
         brandId: conn.brandId,
         ...fields,
-        rawAttributes: {},
         consentStatus: "unknown",
         unsubscribed: false,
         source: POSTHOG_SOURCE,
@@ -235,39 +249,63 @@ export async function syncPosthogConnection(conn: PosthogConnection): Promise<Po
       ? new Date(conn.syncedThrough.getTime() - POSTHOG_LATE_INGESTION_MS)
       : FIRST_PASS_SINCE;
 
-    const persons = { mirrored: 0, changed: [] as string[] };
+    const before = new Set(
+      (
+        await db
+          .select({ externalId: posthogRawRecords.externalId })
+          .from(posthogRawRecords)
+          .where(and(eq(posthogRawRecords.connectionId, conn.id), eq(posthogRawRecords.kind, "person")))
+      ).map((r) => r.externalId),
+    );
+    const persons = { mirrored: 0, changed: [] as string[], listed: [] as string[] };
     for await (const page of listIdentifiedPersons(target)) {
       persons.mirrored += page.length;
+      persons.listed.push(...page.map((r) => String(r.id)));
       persons.changed.push(...(await mirrorBatch(conn, "person", page, (r) => String(r.id))));
     }
+    const byAuthId = new Set<string>();
+    for (const ids of chunks(await authUserIds(conn.orgId, conn.brandId))) {
+      const page = await listPersonsByDistinctIds(target, ids);
+      for (const r of page) byAuthId.add(String(r.id));
+      persons.listed.push(...page.map((r) => String(r.id)));
+      persons.changed.push(...(await mirrorBatch(conn, "person", page, (r) => String(r.id))));
+    }
+    persons.mirrored += byAuthId.size;
+
     // A stream that hit the page ceiling stopped early: the next pass must
     // resume from the last row it actually read, not from this pass's start.
     let resumeFrom: Date | null = null;
-    const capped = (pages: number, last: unknown) => {
-      if (pages < POSTHOG_MAX_PAGES || typeof last !== "string") return;
-      const at = new Date(last);
-      if (!resumeFrom || at < resumeFrom) resumeFrom = at;
-    };
     const visits = { mirrored: 0, changed: [] as string[] };
-    let pages = 0;
-    let last: unknown = null;
-    for await (const page of listVisits(target, since)) {
-      pages++;
-      last = page[page.length - 1].started_at;
-      visits.mirrored += page.length;
-      visits.changed.push(...(await mirrorBatch(conn, "visit", page, visitId)));
-    }
-    capped(pages, last);
     const events = { mirrored: 0, changed: [] as string[] };
-    pages = 0;
-    last = null;
-    for await (const page of listKeyEvents(target, since)) {
-      pages++;
-      last = page[page.length - 1].timestamp;
-      events.mirrored += page.length;
-      events.changed.push(...(await mirrorBatch(conn, "event", page, (r) => String(r.id))));
-    }
-    capped(pages, last);
+    const readActivity = async (from: Date, scope: PersonScope, windowed: boolean) => {
+      let pages = 0;
+      let last: unknown = null;
+      for await (const page of listVisits(target, from, scope)) {
+        pages++;
+        last = page[page.length - 1].started_at;
+        visits.mirrored += page.length;
+        visits.changed.push(...(await mirrorBatch(conn, "visit", page, visitId)));
+      }
+      const capped = (n: number, at: unknown) => {
+        if (!windowed || n < POSTHOG_MAX_PAGES || typeof at !== "string") return;
+        const d = new Date(at);
+        if (!resumeFrom || d < resumeFrom) resumeFrom = d;
+      };
+      capped(pages, last);
+      pages = 0;
+      last = null;
+      for await (const page of listKeyEvents(target, from, scope)) {
+        pages++;
+        last = page[page.length - 1].timestamp;
+        events.mirrored += page.length;
+        events.changed.push(...(await mirrorBatch(conn, "event", page, (r) => String(r.id))));
+      }
+      capped(pages, last);
+    };
+    await readActivity(since, { kind: "identified" }, true);
+    for (const ids of chunks([...byAuthId])) await readActivity(since, { kind: "ids", ids }, true);
+    const fresh = since === FIRST_PASS_SINCE ? [] : [...new Set(persons.listed)].filter((id) => !before.has(id));
+    for (const ids of chunks(fresh)) await readActivity(FIRST_PASS_SINCE, { kind: "ids", ids }, false);
 
     const contactsDerived = await deriveContacts(conn, persons.changed);
     const activitiesDerived =
@@ -289,6 +327,8 @@ export async function syncPosthogConnection(conn: PosthogConnection): Promise<Po
       connectionId: conn.id,
       runId: run.id,
       personsMirrored: persons.mirrored,
+      personsByAuthUserId: byAuthId.size,
+      personsBackfilled: fresh.length,
       personsChanged: persons.changed.length,
       visitsMirrored: visits.mirrored,
       visitsChanged: visits.changed.length,

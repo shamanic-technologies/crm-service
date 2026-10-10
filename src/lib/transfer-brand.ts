@@ -48,6 +48,8 @@ import {
   stripeConnections,
   stripeRawRecords,
   stripeTransactions,
+  authConnections,
+  authRawRecords,
   peopleFacts,
   personIds,
   personIdAliases,
@@ -81,6 +83,8 @@ export const TRANSFER_TABLES: PgTable[] = [
   stripeConnections,
   stripeRawRecords,
   stripeTransactions,
+  authConnections,
+  authRawRecords,
   // The fact feed follows its brand (a fact keeps its id and seq; only org/brand change).
   peopleFacts,
   // The person-id memory follows too, so a moved person keeps their id.
