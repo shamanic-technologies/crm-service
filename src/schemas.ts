@@ -1417,7 +1417,10 @@ const PersonSchema = registry.register(
       identityKeys: z.array(z.string()).openapi({ example: ["email:alice@acme.com", "phone:+33612345678"] }),
       displayName: z.string().nullable(),
       company: z.string().nullable(),
-      emails: z.array(z.string()),
+      emails: z.array(z.string()).openapi({
+        description:
+          "Every address of the person. Addresses lead-service serves for one of our leads come FIRST: show `emails[0]` as the person's address.",
+      }),
       phones: z.array(z.string()),
       sources: z.array(PeopleSourceSchema),
       firstActivityAt: z.string().nullable(),
@@ -1431,7 +1434,7 @@ const PersonSchema = registry.register(
       stateDetail: z.record(z.string(), z.unknown()).nullable(),
       presences: z.array(PersonPresenceSchema),
       mergeEvidence: z.array(z.unknown()).openapi({
-        description: "The records that tied two keys of this person together (a Google / GoHighLevel / Stripe / CSV contact holding both, a lead-service accepted ruling). Empty when the person rests on a single key.",
+        description: "The records that tied two keys of this person together (a Google / GoHighLevel / Stripe / CSV contact holding both, a CONFIDENT lead-service pairing: signal, judgment at or above its pair threshold, or human acceptance). Empty when the person rests on a single key.",
       }),
       automated: z.boolean().openapi({
         description: "True when Jev (chat-service judgments) judged EVERY address of the person an automated sender (digest, notification, no-reply, newsletter) with confidence >= 0.75, the person has no phone and Gmail is their only source. Hidden from GET /orgs/people unless includeAutomated=true.",
@@ -1440,6 +1443,19 @@ const PersonSchema = registry.register(
         .array(z.object({ email: z.string(), verdict: z.enum(["human", "automated"]).nullable(), confidence: z.number().nullable() }))
         .nullable()
         .openapi({ description: "Jev's verdict per address (null verdict = not judged yet, read as human). Null for a person with no email." }),
+      possibleLeads: z
+        .array(
+          z.object({
+            crmContactId: z.string().openapi({ description: "This person's GoHighLevel contact (crm-service contact id) lead-service paired." }),
+            email: z.string().nullable().openapi({ description: "The lead's address as lead-service serves it." }),
+            fullName: z.string().nullable(),
+            company: z.string().nullable(),
+          }),
+        )
+        .openapi({
+          description:
+            "Leads lead-service paired with this person's CRM contact on a GUESS (`toConfirm`: a judgment between its thresholds). NOT merged: the lead is its own person. Show as \"maybe the same as <fullName> (<email>), to confirm\". Empty when none.",
+        }),
     })
     .openapi("Person"),
 );

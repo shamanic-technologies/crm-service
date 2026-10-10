@@ -533,14 +533,14 @@ describe.skipIf(!RUN)("person layer", () => {
     expect(summary.standing).toMatchObject({ asked: 2, failed: 2 });
   });
 
-  it("a CRM contact lead-service paired with our lead is that lead: one person, lead-service's state", async () => {
+  it("a CRM contact lead-service CONFIDENTLY paired with our lead is that lead, shown under the lead's address", async () => {
     await seedLocalSources();
     const [ghl] = await db.select().from(ghlConnections);
     const [bobCrm, other] = await db
       .insert(contacts)
       .values([
-        // Bob booked from another address: nothing but lead-service's pairing ties it to bob@y.com.
-        { orgId: ORG, brandId: BRAND, source: "gohighlevel", externalId: "ghl-bob", primaryEmail: "office@y.com", phoneE164: "+13529423443", fullName: "Bob Stone", rawAttributes: {}, sourceConnectionId: ghl.id },
+        // Bob booked from another address that sorts BEFORE bob@y.com: nothing but lead-service's pairing ties them.
+        { orgId: ORG, brandId: BRAND, source: "gohighlevel", externalId: "ghl-bob", primaryEmail: "aa.bob@gmail.com", phoneE164: "+13529423443", fullName: "Bob Stone", rawAttributes: {}, sourceConnectionId: ghl.id },
         // lead-service REJECTED this one's pairing with bob: it stays its own person.
         { orgId: ORG, brandId: BRAND, source: "gohighlevel", externalId: "ghl-other", primaryEmail: "other@z.com", fullName: "Rob Stone", rawAttributes: {}, sourceConnectionId: ghl.id },
       ])
@@ -548,24 +548,61 @@ describe.skipIf(!RUN)("person layer", () => {
     await db.insert(ghlOpportunities).values({ orgId: ORG, brandId: BRAND, connectionId: ghl.id, externalId: "opp-bob", name: "Bob deal", status: "open", stageName: "Booked", pipelineName: "Sales", contactId: bobCrm.id });
     const lead = { email: "bob@y.com", fullName: "Bob Stone", company: null };
     leadPairings = [
-      // A judgment between lead-service's thresholds: paired, to confirm. It counts like any pairing.
-      { crmContact: { id: bobCrm.id, email: "office@y.com", phone: "+13529423443", fullName: "Bob Stone", company: null }, pairing: { state: "paired", toConfirm: true, lead } },
+      { crmContact: { id: bobCrm.id, email: "aa.bob@gmail.com", phone: "+13529423443", fullName: "Bob Stone", company: null }, pairing: { state: "paired", toConfirm: false, lead } },
       { crmContact: { id: other.id, email: "other@z.com", phone: null, fullName: "Rob Stone", company: null }, pairing: { state: "rejected", toConfirm: false, lead } },
     ];
 
     const summary = await buildNow();
     const rows = await db.select().from(people).orderBy(people.personKey);
-    expect(rows.map((r) => r.personKey)).toEqual(["email:alice@x.com", "email:bob@y.com", "email:other@z.com"]);
+    expect(rows.map((r) => r.personKey)).toEqual(["email:aa.bob@gmail.com", "email:alice@x.com", "email:other@z.com"]);
 
-    const bob = rows[1];
+    const bob = rows[0];
     expect(bob.sources).toEqual(["instantly", "gohighlevel"]);
-    expect(bob.identityKeys).toEqual(["email:bob@y.com", "email:office@y.com", "phone:+13529423443"]);
+    expect(bob.identityKeys).toEqual(["email:aa.bob@gmail.com", "email:bob@y.com", "phone:+13529423443"]);
+    // The address lead-service serves comes first, whatever the key order.
+    expect(bob.emails).toEqual(["bob@y.com", "aa.bob@gmail.com"]);
     // lead-service's standing outranks the CRM's open deal.
-    expect(bob).toMatchObject({ state: "engaged", stateSource: "lead_service" });
+    expect(bob).toMatchObject({ state: "engaged", stateSource: "lead_service", possibleLeads: [] });
     expect(bob.mergeEvidence).toContainEqual(expect.objectContaining({ kind: "lead_pairing", ref: bobCrm.id }));
 
-    expect(rows[2]).toMatchObject({ sources: ["gohighlevel"], identityKeys: ["email:other@z.com"] });
+    expect(rows[2]).toMatchObject({ sources: ["gohighlevel"], identityKeys: ["email:other@z.com"], possibleLeads: [] });
     expect(summary.evidence).toContainEqual({ kind: "lead_pairing", status: "ok", records: 1, error: null });
+  });
+
+  it("a pairing lead-service is only guessing (toConfirm) is NOT one person: the CRM contact carries a hint", async () => {
+    await seedLocalSources();
+    const [ghl] = await db.select().from(ghlConnections);
+    // Brice Jackson's shape (2026-10-10): paired by full name at 0.69, CRM gmail vs the lead's work address.
+    const [bobCrm] = await db
+      .insert(contacts)
+      .values({ orgId: ORG, brandId: BRAND, source: "gohighlevel", externalId: "ghl-bob", primaryEmail: "aa.bob@gmail.com", fullName: "Bob Stone", rawAttributes: {}, sourceConnectionId: ghl.id })
+      .returning();
+    await db.insert(ghlOpportunities).values({ orgId: ORG, brandId: BRAND, connectionId: ghl.id, externalId: "opp-bob", name: "Bob deal", status: "open", stageName: "Booked", pipelineName: "Sales", contactId: bobCrm.id });
+    leadPairings = [
+      { crmContact: { id: bobCrm.id, email: "aa.bob@gmail.com", phone: null, fullName: "Bob Stone", company: null }, pairing: { state: "paired", toConfirm: true, lead: { email: "Bob@y.com", fullName: "Bob Stone", company: "Y" } } },
+    ];
+
+    const summary = await buildNow();
+    const rows = await db.select().from(people).orderBy(people.personKey);
+    expect(rows.map((r) => r.personKey)).toEqual(["email:aa.bob@gmail.com", "email:alice@x.com", "email:bob@y.com"]);
+    expect(rows[0]).toMatchObject({
+      sources: ["gohighlevel"],
+      emails: ["aa.bob@gmail.com"],
+      stateSource: "gohighlevel",
+      mergeEvidence: [],
+      possibleLeads: [{ crmContactId: bobCrm.id, email: "bob@y.com", fullName: "Bob Stone", company: "Y" }],
+    });
+    expect(rows[2]).toMatchObject({ sources: ["instantly"], emails: ["bob@y.com"], stateSource: "lead_service", possibleLeads: [] });
+    expect(summary.evidence).toContainEqual({ kind: "lead_pairing", status: "ok", records: 0, error: null });
+
+    const res = await request(app())
+      .get(`/orgs/people?brandId=${BRAND}`)
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", ORG)
+      .set("x-user-id", USER);
+    expect(res.status).toBe(200);
+    const crm = res.body.people.find((x: { personKey: string }) => x.personKey === "email:aa.bob@gmail.com");
+    expect(crm.possibleLeads).toEqual([{ crmContactId: bobCrm.id, email: "bob@y.com", fullName: "Bob Stone", company: "Y" }]);
   });
 
   it("a person on Gmail and Instantly appears once, their thread interleaved by time", async () => {

@@ -7,7 +7,8 @@ import {
   type Presence,
 } from "../../src/lib/people/identity.js";
 import { resolvePersonState } from "../../src/lib/people/state.js";
-import { pairingEvidence, type LeadPairingRow } from "../../src/lib/people/sources.js";
+import { pairingEvidence, possibleLeadOf, type LeadPairingRow } from "../../src/lib/people/sources.js";
+import { leadAddressesFirst, type LeadObservation } from "../../src/lib/people/state.js";
 
 function presence(over: Partial<Presence> & Pick<Presence, "source" | "sourceRef">): Presence {
   return {
@@ -179,13 +180,13 @@ describe("resolvePersonState precedence", () => {
   });
 });
 
-describe("pairingEvidence: lead-service's paired verdict, nothing else", () => {
-  const row = (state: LeadPairingRow["pairing"]["state"], lead = true): LeadPairingRow => ({
+describe("pairingEvidence: lead-service's CONFIDENT paired verdict, nothing else", () => {
+  const row = (state: LeadPairingRow["pairing"]["state"], lead = true, toConfirm = false): LeadPairingRow => ({
     crmContact: { id: "c1", email: "marketing@aim.com", phone: "+13529423443", fullName: "Joanie S", company: null },
-    pairing: { state, lead: lead ? { email: "joanie@aim.com", fullName: "Joanie S", company: "Aim" } : null },
+    pairing: { state, toConfirm, lead: lead ? { email: "joanie@aim.com", fullName: "Joanie S", company: "Aim" } : null },
   });
 
-  it("a paired row ties the CRM contact's address and phone to the lead's address", () => {
+  it("a confident paired row ties the CRM contact's address and phone to the lead's address", () => {
     expect(pairingEvidence(row("paired"))).toEqual({
       kind: "lead_pairing",
       ref: "c1",
@@ -194,10 +195,45 @@ describe("pairingEvidence: lead-service's paired verdict, nothing else", () => {
       emails: ["marketing@aim.com", "joanie@aim.com"],
       phones: ["+13529423443"],
     });
+    expect(possibleLeadOf(row("paired"))).toBeNull();
   });
 
-  it("rejected, never judged (unconfirmed) and unpaired tie nothing", () => {
-    for (const s of ["rejected", "unconfirmed", "unpaired"] as const) expect(pairingEvidence(row(s))).toBeNull();
+  it("a paired row lead-service is only guessing (toConfirm) merges nothing: it is a hint", () => {
+    expect(pairingEvidence(row("paired", true, true))).toBeNull();
+    expect(possibleLeadOf(row("paired", true, true))).toEqual({
+      crmContactId: "c1",
+      email: "joanie@aim.com",
+      fullName: "Joanie S",
+      company: "Aim",
+    });
+  });
+
+  it("rejected, never judged (unconfirmed) and unpaired tie nothing and hint nothing", () => {
+    for (const s of ["rejected", "unconfirmed", "unpaired"] as const) {
+      expect(pairingEvidence(row(s))).toBeNull();
+      expect(possibleLeadOf(row(s, true, true))).toBeNull();
+    }
     expect(pairingEvidence(row("paired", false))).toBeNull();
+  });
+
+  it("a paired row without toConfirm fails loud instead of guessing", () => {
+    const r = row("paired") as unknown as { pairing: Record<string, unknown> };
+    delete r.pairing.toConfirm;
+    expect(() => pairingEvidence(r as unknown as LeadPairingRow)).toThrow(/toConfirm/);
+  });
+});
+
+describe("leadAddressesFirst: a lead shows under the address lead-service serves", () => {
+  it("puts lead-service's addresses first, each group kept in key order", () => {
+    const obs = new Map<string, LeadObservation>([
+      ["drjackson@mabnr.com", { found: true } as LeadObservation],
+      ["drbricejackson@gmail.com", { found: false }],
+    ]);
+    expect(leadAddressesFirst(["a@x.com", "drbricejackson@gmail.com", "drjackson@mabnr.com"], obs)).toEqual([
+      "drjackson@mabnr.com",
+      "a@x.com",
+      "drbricejackson@gmail.com",
+    ]);
+    expect(leadAddressesFirst(["b@x.com", "a@x.com"], new Map())).toEqual(["b@x.com", "a@x.com"]);
   });
 });

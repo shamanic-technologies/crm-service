@@ -194,3 +194,13 @@ export function resolveStripeState(customers: StripeStandingInput[]): (typeof ST
   if (statuses.includes("canceled")) return "subscription_canceled";
   return null;
 }
+
+/**
+ * A person's addresses, those lead-service serves for one of our leads first
+ * (each group in key order). The Unibox shows a lead under the address
+ * lead-service knows it by, never a CRM or Gmail address merged into it.
+ */
+export function leadAddressesFirst(emails: string[], observations: Map<string, LeadObservation>): string[] {
+  const isLead = (e: string) => observations.get(e)?.found === true;
+  return [...emails.filter(isLead), ...emails.filter((e) => !isLead(e))];
+}

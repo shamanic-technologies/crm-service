@@ -32,6 +32,7 @@ import {
   readGoogleContactEvidence,
   readInstantly,
   readLeadPairingEvidence,
+  type PossibleLead,
   readMatrix,
   readOwnAddresses,
   readPosthog,
@@ -47,7 +48,7 @@ import {
   resolveSenderVerdicts,
   type SenderVerdictSummary,
 } from "./automated.js";
-import { resolvePersonState, type GhlDeal, type LeadObservation, type StripeStandingInput } from "./state.js";
+import { leadAddressesFirst, resolvePersonState, type GhlDeal, type LeadObservation, type StripeStandingInput } from "./state.js";
 import { indexScopeMessages, type MessageIndexSummary } from "./search.js";
 import { emitScopeFacts, type FactEmissionSummary } from "./facts.js";
 
@@ -231,7 +232,15 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
 
   const evidenceReads: EvidenceRead[] = [await readCsvEvidence(scope.orgId, scope.brandId)];
   if (gmail.status !== "not_connected") evidenceReads.push(await readGoogleContactEvidence(identity));
-  if (gohighlevel.status === "ok") evidenceReads.push(await readLeadPairingEvidence(identity));
+  // A pairing lead-service is only GUESSING (`toConfirm`) merges nothing: it rides on the CRM contact as a hint.
+  const possibleLeadsByCrmContact = new Map<string, PossibleLead[]>();
+  if (gohighlevel.status === "ok") {
+    const pairings = await readLeadPairingEvidence(identity);
+    evidenceReads.push(pairings);
+    for (const h of pairings.possibleLeads) {
+      possibleLeadsByCrmContact.set(h.crmContactId, [...(possibleLeadsByCrmContact.get(h.crmContactId) ?? []), h]);
+    }
+  }
   // A GoHighLevel contact holding an email and a phone ties them — it is also a presence.
   const ghlEvidence: Evidence[] = gohighlevel.presences
     .filter((p) => p.emails.length + p.phones.length > 1)
@@ -305,7 +314,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       identityKeys: c.identityKeys,
       displayName: firstNonNull(c, "displayName"),
       company: firstNonNull(c, "company"),
-      emails: c.emails,
+      emails: leadAddressesFirst(c.emails, standings.observations),
       phones: c.phones,
       sources: PEOPLE_SOURCES.filter((s) => c.presences.some((p) => p.source === s)),
       presences: c.presences,
@@ -323,6 +332,10 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       stateDetail: state.stateDetail,
       automated: isAutomatedPerson(c, senders.verdicts),
       automatedVerdict: c.emails.length ? personVerdicts(c.emails, senders.verdicts) : null,
+      possibleLeads: c.presences
+        .filter((p) => p.source === "gohighlevel")
+        .flatMap((p) => possibleLeadsByCrmContact.get(p.sourceRef) ?? [])
+        .filter((h) => !h.email || !c.emails.includes(h.email)),
     };
   });
 
