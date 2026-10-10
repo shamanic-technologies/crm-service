@@ -19,6 +19,18 @@ export interface ChoiceQuestion {
   criteria: Record<string, string>;
 }
 
+export interface NoulQuestion {
+  type: "noul";
+  instructions: string;
+  criteria?: { true: string; false: string };
+}
+
+export interface NoulAnswer {
+  type: "noul";
+  /** Probability that the answer is yes. */
+  noul: number;
+}
+
 export interface ChoiceAnswer {
   type: "choice";
   choice: string;
@@ -39,6 +51,16 @@ export async function judgeChoices(
   tracking: ChatTrackingHeaders,
   timeoutMs: number = JUDGMENTS_TIMEOUT_MS,
 ): Promise<JudgmentsResult> {
+  return (await judgeQuestions(state, questions, tracking, timeoutMs)) as JudgmentsResult;
+}
+
+/** Mixed question types (choice + noul) in one call. */
+export async function judgeQuestions(
+  state: unknown,
+  questions: Record<string, ChoiceQuestion | NoulQuestion>,
+  tracking: ChatTrackingHeaders,
+  timeoutMs: number = JUDGMENTS_TIMEOUT_MS,
+): Promise<{ model: string; answers: Record<string, ChoiceAnswer | NoulAnswer> }> {
   const url = process.env.CHAT_SERVICE_URL;
   if (!url) throw new Error("[crm-service] CHAT_SERVICE_URL is required");
   const apiKey = process.env.CHAT_SERVICE_API_KEY;
@@ -66,7 +88,7 @@ export async function judgeChoices(
       const text = await res.text().catch(() => "");
       throw new Error(`[crm-service][judgments] POST /orgs/judgments returned ${res.status}: ${text}`);
     }
-    return (await res.json()) as JudgmentsResult;
+    return (await res.json()) as { model: string; answers: Record<string, ChoiceAnswer | NoulAnswer> };
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
       throw new Error(

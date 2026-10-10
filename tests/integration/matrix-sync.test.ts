@@ -75,6 +75,9 @@ function emptyPage(nextBatch: string): MatrixSyncResponse {
 
 let syncPages: MatrixSyncResponse[] = [];
 let chatCalls = 0;
+/** Jev's answer on "is this conversation about the brand" (people/relevance.ts). */
+let judgeCalls = 0;
+let judgedTopic: "personal" | "other_business" | "this_brand" = "this_brand";
 let chatReply = {
   status: "qualifying",
   nextStep: "Send June availability",
@@ -105,6 +108,26 @@ function installFetchStub() {
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
+    if (url.startsWith("http://brand.test/")) {
+      const body = url.endsWith("/offers")
+        ? { offers: [{ offerId: "offer-1", name: "Weddings", description: null, status: "active" }] }
+        : url.endsWith("/orgs/brands")
+          ? { brands: [{ id: BRAND, name: "Acme", domain: "acme.test" }] }
+          : { brand: { name: "Acme", domain: "acme.test", url: "https://acme.test" } };
+      return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.includes("/orgs/judgments")) {
+      judgeCalls += 1;
+      const p = { personal: 0.05, other_business: 0.05, this_brand: 0.05, [judgedTopic]: 0.9 };
+      return new Response(
+        JSON.stringify({
+          model: "jev-test",
+          answers: { topic: { type: "choice", choice: judgedTopic, confidence: 0.9, probabilities: p }, o0: { type: "noul", noul: 0.8 } },
+          usage: { inputTokens: 10, outputTokens: 0 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
     if (url.includes("/v1/runs")) {
       return new Response(
         JSON.stringify({
@@ -128,6 +151,7 @@ function installFetchStub() {
 }
 
 async function wipe() {
+  await db.execute(sql`DELETE FROM conversation_verdicts`);
   await db.delete(matrixLeads);
   await db.delete(conversations);
   await db.delete(matrixRawEvents);
@@ -176,13 +200,60 @@ describe.skipIf(!RUN)("matrix ingestion", () => {
     process.env.MATRIX_ACCESS_TOKEN = "test-token";
     process.env.MATRIX_INGESTION_FLOOR = FLOOR;
     process.env.CRM_LEAD_READING_CHAT_CONFIG = "google/flash";
+    process.env.BRAND_SERVICE_URL = "http://brand.test";
+    process.env.BRAND_SERVICE_API_KEY = "test-brand-key";
     installFetchStub();
   });
 
   beforeEach(async () => {
     await wipe();
     chatCalls = 0;
+    judgeCalls = 0;
+    judgedTopic = "this_brand";
     syncPages = [];
+  });
+
+  it("never reads a conversation Jev judged not about the brand, and judges it once", async () => {
+    const connectionId = await seedConnection();
+    judgedTopic = "personal";
+    syncPages = [page("s2", [message("$m1", GHOST, "2026-08-02T10:00:00Z", "dinner at mum's on sunday?")]), emptyPage("s3")];
+    const [first] = (await runSyncPass(connectionId)).results;
+    expect(judgeCalls).toBe(1);
+    expect(chatCalls).toBe(0); // the paid lead reading never ran
+    expect(first.leadsSkippedNotBusiness).toBe(1);
+    expect(await db.select().from(matrixLeads)).toHaveLength(0);
+    const [v] = (await db.execute(sql`SELECT topic, brand_probability, offer_ids FROM conversation_verdicts`)) as unknown as {
+      topic: string;
+      brand_probability: number;
+      offer_ids: string[];
+    }[];
+    expect(v).toMatchObject({ topic: "personal", brand_probability: 0.05, offer_ids: [] });
+
+    // Nothing new → no second judgment, no reading.
+    syncPages = [page("s3", []), emptyPage("s4")];
+    await runSyncPass(connectionId);
+    expect(judgeCalls).toBe(1);
+    expect(chatCalls).toBe(0);
+
+    // The thread turns into business → re-judged on the new message, then read.
+    judgedTopic = "this_brand";
+    syncPages = [page("s4", [message("$m2", GHOST, "2026-08-03T09:00:00Z", "also, my company needs a quote")]), emptyPage("s5")];
+    await runSyncPass(connectionId);
+    expect(judgeCalls).toBe(2);
+    expect(chatCalls).toBe(1);
+  });
+
+  it("hides from the leads read a conversation read before Jev judged it personal", async () => {
+    const connectionId = await seedConnection();
+    syncPages = [page("s2", [message("$m1", GHOST, "2026-08-02T10:00:00Z", "hi")]), emptyPage("s3")];
+    await runSyncPass(connectionId);
+    expect(await db.select().from(matrixLeads)).toHaveLength(1);
+    await db.execute(sql`UPDATE conversation_verdicts SET topic = 'personal', brand_probability = 0.02`);
+    const visible = (await db.execute(sql`
+      SELECT l.id FROM matrix_leads l WHERE NOT EXISTS (
+        SELECT 1 FROM conversation_verdicts cv WHERE cv.conversation_key = 'matrix:' || l.conversation_id::text AND cv.brand_probability < 0.25)
+    `)) as unknown as unknown[];
+    expect(visible).toHaveLength(0);
   });
 
   it("ingests only events at or after the floor, and is idempotent", async () => {

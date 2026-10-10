@@ -13,6 +13,7 @@ import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { ensureScope, runPeopleBuildPass, runScopeBuild, type BuildSummary } from "../lib/people/build.js";
 import { PEOPLE_SOURCES, type Presence } from "../lib/people/identity.js";
 import type { PossibleLead } from "../lib/people/sources.js";
+import type { PersonRelevance } from "../lib/people/relevance.js";
 import { findPerson, readTimeline } from "../lib/people/timeline.js";
 import { readFacts } from "../lib/people/facts.js";
 import { findPersonById } from "../lib/people/person-id.js";
@@ -36,6 +37,11 @@ const listQuerySchema = z.object({
   source: z.enum(PEOPLE_SOURCES).optional(),
   // Automated senders (Jev-judged digests, notifications, no-replies) are hidden unless asked for.
   includeAutomated: z.enum(["true", "false"]).optional(),
+  // Personal-channel people Jev judged not about this brand (personal life, another
+  // business) are hidden unless asked for (people/relevance.ts).
+  includeNotBusiness: z.enum(["true", "false"]).optional(),
+  // Only people with a conversation Jev tied to this offer of the brand.
+  offerId: z.string().uuid().optional(),
   // Search: name, any email / phone, company, and what was said in their messages.
   // Blank (or absent) = the plain list, unchanged.
   q: z.string().max(SEARCH_MAX_LENGTH).optional(),
@@ -86,6 +92,9 @@ function personView(row: typeof people.$inferSelect) {
     mergeEvidence: row.mergeEvidence as unknown[],
     automated: row.automated,
     automatedVerdict: row.automatedVerdict as { email: string; verdict: string | null; confidence: number | null }[] | null,
+    notBusiness: row.notBusiness,
+    offerIds: row.offerIds as string[],
+    relevance: row.relevance as PersonRelevance["relevance"],
     possibleLeads: row.possibleLeads as PossibleLead[],
   };
 }
@@ -120,6 +129,8 @@ router.get(
     }
     const { brandId, source, family } = parsed.data;
     const includeAutomated = parsed.data.includeAutomated === "true";
+    const includeNotBusiness = parsed.data.includeNotBusiness === "true";
+    const offerId = parsed.data.offerId ?? null;
     const limit = parsed.data.limit ?? 100;
     const offset = parsed.data.offset ?? 0;
     const q = parsed.data.q?.trim() || null;
@@ -142,6 +153,8 @@ router.get(
         eq(people.scopeId, scope.id),
         source ? sql`${people.sources} @> ${JSON.stringify([source])}::jsonb` : sql`true`,
         includeAutomated ? sql`true` : eq(people.automated, false),
+        includeNotBusiness ? sql`true` : eq(people.notBusiness, false),
+        offerId ? sql`${people.offerIds} @> ${JSON.stringify([offerId])}::jsonb` : sql`true`,
         q && keys ? searchPredicate(q, keys) : sql`true`,
       );
       const [{ automatedHidden }] = includeAutomated
@@ -154,6 +167,19 @@ router.get(
                 eq(people.scopeId, scope.id),
                 eq(people.automated, true),
                 // Under a search: the automated people the search WOULD have returned.
+                q && keys ? searchPredicate(q, keys) : sql`true`,
+              ),
+            );
+      const [{ notBusinessHidden }] = includeNotBusiness
+        ? [{ notBusinessHidden: 0 }]
+        : await db
+            .select({ notBusinessHidden: sql<number>`count(*)::int` })
+            .from(people)
+            .where(
+              and(
+                eq(people.scopeId, scope.id),
+                eq(people.notBusiness, true),
+                includeAutomated ? sql`true` : eq(people.automated, false),
                 q && keys ? searchPredicate(q, keys) : sql`true`,
               ),
             );
@@ -226,6 +252,7 @@ router.get(
         SELECT s AS source, count(*)::int AS people
         FROM people, jsonb_array_elements_text(people.sources) s
         WHERE people.scope_id = ${scope.id} ${includeAutomated ? sql`` : sql`AND people.automated = false`}
+          ${includeNotBusiness ? sql`` : sql`AND people.not_business = false`}
         GROUP BY s
       `)) as unknown as { source: string; people: number }[];
       const reads = scope.sourceReads as BuildSummary | null;
@@ -277,6 +304,9 @@ router.get(
         ownAddresses: reads?.ownAddresses ?? null,
         senderVerdicts: reads?.senderVerdicts ?? null,
         automatedHidden,
+        relevance: reads?.relevance ?? null,
+        notBusinessHidden,
+        offerId,
         total,
         limit,
         offset,
