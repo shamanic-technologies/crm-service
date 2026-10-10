@@ -43,8 +43,13 @@ export const FRESHNESS_INTERVAL_MS = Number(process.env.PEOPLE_FRESHNESS_INTERVA
 /** A moved thread is read again this long after we learned of the move. */
 export const CHANGE_CONFIRM_MS = 5 * 60_000;
 const FACT_PAGE = 1000;
-/** Pages of the fact feed walked per scope per tick; a backlog drains over the next ticks. */
-const FACT_PAGES_PER_TICK = 20;
+/**
+ * Time spent walking one scope's fact feed per tick; a backlog drains over the
+ * next ticks. A first walk starts at the feed's beginning (~3.4M fleet facts on
+ * 2026-10-10, ~90 ms a page of 1000): pages-per-tick at 20 left the largest brand
+ * unwatched for over an hour.
+ */
+const FACT_WALK_BUDGET_MS = 30_000;
 /** Gmail correspondents read per tick (most recent first). */
 const GMAIL_RECENT = 200;
 
@@ -87,7 +92,8 @@ async function instantlyMoved(scope: PeopleScope, identity: SiblingIdentity): Pr
   let cursor = scope.outreachFactsCursor;
   const units = new Set<string>();
   const since = Date.now() - UNIT_REFRESH_MS;
-  for (let page = 0; page < FACT_PAGES_PER_TICK; page++) {
+  const deadline = Date.now() + FACT_WALK_BUDGET_MS;
+  while (Date.now() < deadline) {
     const q = new URLSearchParams({ orgId: scope.orgId, brandId: scope.brandId, limit: String(FACT_PAGE) });
     if (cursor) q.set("since", cursor);
     const r = await siblingGet("instantly", `/internal/outreach-facts?${q}`, identity);
