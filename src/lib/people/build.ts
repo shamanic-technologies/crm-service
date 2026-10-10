@@ -51,6 +51,7 @@ import {
 import { leadAddressesFirst, resolvePersonState, type GhlDeal, type LeadObservation, type StripeStandingInput } from "./state.js";
 import { indexScopeMessages, type MessageIndexSummary } from "./search.js";
 import { emitScopeFacts, type FactEmissionSummary } from "./facts.js";
+import { persistPersonIds } from "./person-id.js";
 
 /** How long lead-service's answer about an address is reused. */
 export const STANDING_TTL_MS = 60 * 60 * 1000;
@@ -363,9 +364,12 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
   };
 
   await db.transaction(async (tx) => {
+    // Same person, same opaque id as last build (people/person-id.ts).
+    const { ids } = await persistPersonIds(tx, scope.orgId, scope.brandId, rows);
+    const withIds = rows.map((r) => ({ ...r, personId: ids.get(r.personKey)! }));
     await tx.delete(people).where(eq(people.scopeId, scope.id));
-    for (let i = 0; i < rows.length; i += 500) {
-      await tx.insert(people).values(rows.slice(i, i + 500));
+    for (let i = 0; i < withIds.length; i += 500) {
+      await tx.insert(people).values(withIds.slice(i, i + 500));
     }
     await tx
       .update(peopleScopes)

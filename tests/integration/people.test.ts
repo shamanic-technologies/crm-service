@@ -5,6 +5,7 @@ import { eq, sql } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
 import {
   contacts,
+  contactUploads,
   conversations,
   ghlConnections,
   ghlOpportunities,
@@ -13,6 +14,7 @@ import {
   matrixRawEvents,
   people,
   peopleScopes,
+  personIdAliases,
   senderVerdicts,
 } from "../../src/db/schema.js";
 import { ensureScope, runScopeBuild } from "../../src/lib/people/build.js";
@@ -313,7 +315,7 @@ function installFetchStub() {
 }
 
 async function wipe() {
-  await db.execute(sql`TRUNCATE sender_verdicts, people_scopes, people, lead_standing_observations, matrix_raw_events, conversations, matrix_leads, matrix_connections, ghl_opportunities, ghl_connections, contacts CASCADE`);
+  await db.execute(sql`TRUNCATE sender_verdicts, people_scopes, people, person_ids, person_id_aliases, contact_uploads, lead_standing_observations, matrix_raw_events, conversations, matrix_leads, matrix_connections, ghl_opportunities, ghl_connections, contacts CASCADE`);
 }
 
 /** Alice in GoHighLevel (email + phone, a won deal) and on WhatsApp (phone only). */
@@ -861,6 +863,166 @@ describe.skipIf(!RUN)("person layer", () => {
       .set("x-user-id", USER);
     expect(res.status).toBe(404);
     expect(res.body.reason).toBe("person_not_found");
+  });
+
+  describe("entry events: how the person came in", () => {
+    const timeline = (q: string) =>
+      request(app()).get(`/orgs/people/timeline?brandId=${BRAND}&${q}`).set("x-api-key", API_KEY).set("x-org-id", ORG).set("x-user-id", USER);
+
+    it("a CRM contact with no deal and no message still has a thread: added to the CRM on its date", async () => {
+      await seedLocalSources();
+      const [ghl] = await db.select().from(ghlConnections);
+      await db.insert(contacts).values([
+        {
+          orgId: ORG,
+          brandId: BRAND,
+          source: "gohighlevel",
+          externalId: "ghl-dan",
+          phoneE164: "+12014713892",
+          rawAttributes: {},
+          sourceConnectionId: ghl.id,
+          sourceCreatedAt: new Date("2026-10-09T22:44:00Z"),
+          leadSource: "Meta Ads",
+        },
+        // GoHighLevel gave no creation date: nothing is invented.
+        { orgId: ORG, brandId: BRAND, source: "gohighlevel", externalId: "ghl-undated", phoneE164: "+12014710000", rawAttributes: {}, sourceConnectionId: ghl.id },
+      ]);
+      await buildNow();
+
+      const dan = await timeline(`personKey=${encodeURIComponent("phone:+12014713892")}`);
+      expect(dan.status).toBe(200);
+      expect(dan.body.itemCount).toBe(1);
+      expect(dan.body.items[0]).toMatchObject({
+        at: "2026-10-09T22:44:00.000Z",
+        source: "gohighlevel",
+        channel: "crm",
+        kind: "event",
+        ref: { externalContactId: "ghl-dan" },
+        event: { step: "added_to_crm", dateBasis: "contact_created_at", detail: { leadSource: "Meta Ads" } },
+      });
+      expect(dan.body.sources.find((s: { source: string }) => s.source === "gohighlevel")).toMatchObject({ status: "ok", items: 1 });
+
+      const undated = await timeline(`personKey=${encodeURIComponent("phone:+12014710000")}`);
+      expect(undated.body.itemCount).toBe(0);
+    });
+
+    it("a person the client imported from a file shows the import, dated by the upload", async () => {
+      await seedLocalSources();
+      const [upload] = await db
+        .insert(contactUploads)
+        .values({
+          orgId: ORG,
+          brandId: BRAND,
+          filename: "clients.csv",
+          contentHash: "h-people-entry",
+          columnHeaders: ["email"],
+          runId: "run-x",
+          uploadedAt: new Date("2026-07-01T09:00:00Z"),
+        })
+        .returning();
+      await db.insert(contacts).values({
+        orgId: ORG,
+        brandId: BRAND,
+        source: "csv",
+        primaryEmail: "Bob@Y.com",
+        rawAttributes: {},
+        sourceUploadId: upload.id,
+      });
+      await buildNow();
+
+      const bob = await timeline(`personKey=${encodeURIComponent("email:bob@y.com")}`);
+      const imported = bob.body.items.find((i: { source: string }) => i.source === "csv");
+      expect(imported).toMatchObject({
+        at: "2026-07-01T09:00:00.000Z",
+        channel: "file",
+        kind: "event",
+        event: { step: "added_to_crm", dateBasis: "uploaded_at", detail: { origin: "csv_import", filename: "clients.csv", uploadId: upload.id } },
+      });
+      // Oldest first: the import precedes the cold email.
+      expect(bob.body.items[0].source).toBe("csv");
+    });
+  });
+
+  describe("opaque person id", () => {
+    const timeline = (q: string) =>
+      request(app()).get(`/orgs/people/timeline?brandId=${BRAND}&${q}`).set("x-api-key", API_KEY).set("x-org-id", ORG).set("x-user-id", USER);
+    const list = () =>
+      request(app()).get(`/orgs/people?brandId=${BRAND}`).set("x-api-key", API_KEY).set("x-org-id", ORG).set("x-user-id", USER);
+    const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+    it("every person carries one, carrying no personal data, identical after a rebuild", async () => {
+      await seedLocalSources();
+      await buildNow();
+      const first = await list();
+      const ids = Object.fromEntries(first.body.people.map((p: { personKey: string; personId: string }) => [p.personKey, p.personId]));
+      expect(Object.keys(ids)).toHaveLength(2);
+      for (const id of Object.values(ids)) expect(id).toMatch(UUID);
+      expect(new Set(Object.values(ids)).size).toBe(2);
+
+      await buildNow();
+      const second = await list();
+      expect(Object.fromEntries(second.body.people.map((p: { personKey: string; personId: string }) => [p.personKey, p.personId]))).toEqual(ids);
+    });
+
+    it("the thread read answers the same thread by id as by key; bad or unknown ids are refused", async () => {
+      await seedLocalSources();
+      await buildNow();
+      const [alice] = await db.select().from(people).where(eq(people.personKey, "email:alice@x.com"));
+      const byKey = await timeline(`personKey=${encodeURIComponent("email:alice@x.com")}`);
+      const byId = await timeline(`personId=${alice.personId}`);
+      expect(byId.status).toBe(200);
+      expect(byId.body.person.personId).toBe(alice.personId);
+      expect(byId.body.items).toEqual(byKey.body.items);
+
+      expect((await timeline(`personId=not-a-uuid`)).status).toBe(400);
+      expect((await timeline(`personId=${alice.personId}&personKey=${encodeURIComponent("email:alice@x.com")}`)).status).toBe(400);
+      expect((await timeline(``)).status).toBe(400);
+      const unknown = await timeline(`personId=bbbbbbbb-1111-4111-8111-00000000beef`);
+      expect(unknown.status).toBe(404);
+      expect(unknown.body.reason).toBe("person_not_found");
+    });
+
+    it("an id retired by a merge still opens the person it merged into", async () => {
+      await seedLocalSources();
+      await buildNow();
+      const [alice] = await db.select().from(people).where(eq(people.personKey, "email:alice@x.com"));
+      const retired = "bbbbbbbb-1111-4111-8111-0000000000a1";
+      await db.insert(personIdAliases).values({ orgId: ORG, brandId: BRAND, retiredId: retired, personId: alice.personId! });
+      const res = await timeline(`personId=${retired}`);
+      expect(res.status).toBe(200);
+      expect(res.body.person.personKey).toBe("email:alice@x.com");
+    });
+
+    it("two people found to be one keep one of their ids; the other id is retired into it", async () => {
+      await seedLocalSources();
+      // Carol on WhatsApp only (phone), and carol's email in cold email: two people today.
+      const [mx] = await db.select().from(matrixConnections);
+      const [carolWa] = await db
+        .insert(contacts)
+        .values({ orgId: ORG, brandId: BRAND, source: "matrix", channel: "whatsapp", channelHandle: "@whatsapp_33699999999:hs", phoneE164: "+33699999999", rawAttributes: {}, sourceConnectionId: mx.id })
+        .returning();
+      await db.insert(conversations).values({
+        orgId: ORG, brandId: BRAND, connectionId: mx.id, contactId: carolWa.id, channel: "whatsapp", roomId: "!carol",
+        firstMessageAt: new Date("2026-09-06T12:00:00Z"), lastMessageAt: new Date("2026-09-06T12:00:00Z"),
+        messageCount: 1, inboundCount: 1, outboundCount: 0, lastEventId: "$c1",
+      });
+      extraWritten = [{ ...WRITTEN[1], campaignId: "camp-3", leadEmail: "carol@z.com", engaged: false, clicked: false, firstClickedAt: null }];
+      await buildNow();
+      const before = await db.select().from(people);
+      const phoneId = before.find((p) => p.personKey === "phone:+33699999999")!.personId!;
+      const emailId = before.find((p) => p.personKey === "email:carol@z.com")!.personId!;
+
+      // A GoHighLevel contact states both: one person now.
+      const [ghl] = await db.select().from(ghlConnections);
+      await db.insert(contacts).values({ orgId: ORG, brandId: BRAND, source: "gohighlevel", externalId: "ghl-carol", primaryEmail: "carol@z.com", phoneE164: "+33699999999", rawAttributes: {}, sourceConnectionId: ghl.id });
+      await buildNow();
+      const carol = (await db.select().from(people).where(eq(people.personKey, "email:carol@z.com")))[0];
+      expect([phoneId, emailId]).toContain(carol.personId);
+      const retiredId = carol.personId === phoneId ? emailId : phoneId;
+      const viaRetired = await timeline(`personId=${retiredId}`);
+      expect(viaRetired.status).toBe(200);
+      expect(viaRetired.body.person.personId).toBe(carol.personId);
+    });
   });
 
   describe("automated senders", () => {

@@ -15,6 +15,7 @@ import { PEOPLE_SOURCES, type Presence } from "../lib/people/identity.js";
 import type { PossibleLead } from "../lib/people/sources.js";
 import { findPerson, readTimeline } from "../lib/people/timeline.js";
 import { readFacts } from "../lib/people/facts.js";
+import { findPersonById } from "../lib/people/person-id.js";
 import { familyOf, LEAD_FAMILIES, readBrandFamilies, type FamilyVerdict, type LeadFamily } from "../lib/people/families.js";
 import {
   matchesOf,
@@ -67,6 +68,8 @@ function presenceView(p: Presence) {
 
 function personView(row: typeof people.$inferSelect) {
   return {
+    // Opaque, stable across rebuilds, no personal data: the id to put in a URL.
+    personId: row.personId,
     personKey: row.personKey,
     identityKeys: row.identityKeys as string[],
     displayName: row.displayName,
@@ -296,14 +299,21 @@ router.get(
 
 // ─── GET /orgs/people/timeline?brandId=&personKey= ───────────────────────────
 
-const timelineQuerySchema = z.object({
-  brandId: brandIdSchema,
-  personKey: z.string().min(3).max(320),
-});
+const timelineQuerySchema = z
+  .object({
+    brandId: brandIdSchema,
+    personKey: z.string().min(3).max(320).optional(),
+    personId: z.string().uuid().optional(),
+  })
+  .refine((q) => (q.personKey === undefined) !== (q.personId === undefined), {
+    message: "exactly one of personId (uuid) or personKey is required",
+  });
 
 /**
- * One person, every channel merged into one thread, oldest first. `personKey`
- * may be ANY of the person's identity keys (`email:…`, `phone:+…`).
+ * One person, every channel merged into one thread, oldest first. The person is
+ * named by `personId` (the opaque id served on every person, stable across
+ * rebuilds; a retired id still opens the person it merged into) or by
+ * `personKey`, ANY of the person's identity keys (`email:…`, `phone:+…`).
  */
 router.get(
   "/orgs/people/timeline",
@@ -314,14 +324,16 @@ router.get(
     if (!parsed.success) {
       return res.status(400).json({ type: "validation", error: `invalid query: ${parsed.error.message}` });
     }
-    const { brandId, personKey } = parsed.data;
+    const { brandId, personKey, personId } = parsed.data;
     try {
-      const person = await findPerson(req.orgId!, brandId, personKey);
+      const person = personId
+        ? await findPersonById(req.orgId!, brandId, personId)
+        : await findPerson(req.orgId!, brandId, personKey!);
       if (!person) {
         return res.status(404).json({
           type: "not_found",
           reason: "person_not_found",
-          error: `no person holds ${personKey} for brand ${brandId} (read GET /orgs/people first; the index is built in the background)`,
+          error: `no person holds ${personId ? `id ${personId}` : personKey} for brand ${brandId} (read GET /orgs/people first; the index is built in the background)`,
         });
       }
       const { scope } = await ensureScope(req.orgId!, brandId, req.userId!);

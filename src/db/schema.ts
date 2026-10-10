@@ -984,12 +984,59 @@ export const people = pgTable(
     // (`toConfirm`): shown beside the person, never merged into it.
     possibleLeads: jsonb("possible_leads").notNull().default([]),
 
+    // The person's OPAQUE id (a random uuid, no personal data), stable across
+    // rebuilds: carried over through `person_ids` (see people/person-id.ts).
+    // Null only on a row built before the column existed.
+    personId: uuid("person_id"),
+
     builtAt: timestamp("built_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     uniqueIndex("people_scope_person_key_uq").on(table.scopeId, table.personKey),
     index("people_org_brand_activity_idx").on(table.orgId, table.brandId, table.lastActivityAt),
+    index("people_org_brand_person_id_idx").on(table.orgId, table.brandId, table.personId),
   ],
+);
+
+/**
+ * Which opaque person id each identity key belongs to, per (org, brand). Unlike
+ * `people` it is NEVER wiped by a build: it is the memory that gives the same
+ * person the same `person_id` tomorrow (and again if they vanish and come back).
+ * A build points every key of a person at that person's id.
+ */
+export const personIds = pgTable(
+  "person_ids",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    identityKey: text("identity_key").notNull(),
+    personId: uuid("person_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("person_ids_org_brand_key_uq").on(table.orgId, table.brandId, table.identityKey),
+    index("person_ids_org_brand_person_idx").on(table.orgId, table.brandId, table.personId),
+  ],
+);
+
+/**
+ * A person id RETIRED by a merge (two people found to be one: the merged person
+ * keeps the older id) points at the id that absorbed it, so a link holding the
+ * retired id still opens the person.
+ */
+export const personIdAliases = pgTable(
+  "person_id_aliases",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    retiredId: uuid("retired_id").notNull(),
+    personId: uuid("person_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("person_id_aliases_org_brand_retired_uq").on(table.orgId, table.brandId, table.retiredId)],
 );
 
 /**

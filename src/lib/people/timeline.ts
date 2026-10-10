@@ -15,6 +15,13 @@
  *  - stripe      crm-service's Stripe mirror: payments, refunds, subscriptions,
  *                with amount (minor unit, verbatim), currency and status
  *
+ * Every source record that brought the person in also adds ONE entry event,
+ * dated by the source (`entryItems`): GoHighLevel `added_to_crm` (contact
+ * created), CSV `added_to_crm` (file uploaded), PostHog `signup` (person
+ * created), Stripe `became_customer` (customer created). A record whose source
+ * gives no date adds nothing: a date is never invented, never the build time.
+ * So a person is never an empty thread while any of their records is dated.
+ *
  * Gmail and cold-email items carry `servedFrom: "store"` and `readAt` (the
  * oldest read they come from); a person read with a store older than
  * TIMELINE_REFRESH_MS is re-read in the background, so the NEXT read shows a new
@@ -26,6 +33,8 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import {
+  contacts,
+  contactUploads,
   conversations,
   matrixConnections,
   matrixRawEvents,
@@ -49,7 +58,8 @@ export type TimelineSourceStatus = (typeof TIMELINE_SOURCE_STATUSES)[number];
 export interface TimelineItem {
   /** ISO time the message was sent / the event happened; null when the source gave none. */
   at: string | null;
-  source: PeopleSource;
+  /** `csv` only on the entry event of a contact imported from an uploaded file. */
+  source: PeopleSource | "csv";
   /** email | whatsapp | telegram | discord | crm | web | payment */
   channel: string;
   kind: "message" | "event";
@@ -186,12 +196,113 @@ async function matrixItems(presences: Presence[]): Promise<SourceResult> {
   return { status: items.length ? "ok" : "empty", items, error: null, asked: conversationIds };
 }
 
+// ─── entry events: how the person entered each source record ───────────────
+
+const ENTRY: Record<"gohighlevel" | "posthog" | "stripe", { step: string; dateBasis: string; channel: string }> = {
+  gohighlevel: { step: "added_to_crm", dateBasis: "contact_created_at", channel: "crm" },
+  posthog: { step: "signup", dateBasis: "person_created_at", channel: "web" },
+  stripe: { step: "became_customer", dateBasis: "customer_created_at", channel: "payment" },
+};
+
+const entryEvent = (
+  source: TimelineItem["source"],
+  channel: string,
+  at: Date,
+  ref: Record<string, string | null>,
+  step: string,
+  dateBasis: string,
+  detail: Record<string, unknown>,
+): TimelineItem => ({
+  at: at.toISOString(),
+  source,
+  channel,
+  kind: "event",
+  direction: null,
+  subject: null,
+  text: null,
+  from: null,
+  to: [],
+  ref,
+  textClean: null,
+  outreachFact: null,
+  event: { step, dateBasis, detail },
+});
+
+/** One entry event per mirrored contact of the source the vendor dated (its own creation date). */
+export async function entryItems(source: keyof typeof ENTRY, presences: Presence[]): Promise<TimelineItem[]> {
+  const ids = presences.map((p) => p.sourceRef);
+  if (ids.length === 0) return [];
+  const rows = await db
+    .select({
+      id: contacts.id,
+      externalId: contacts.externalId,
+      createdAt: contacts.sourceCreatedAt,
+      leadSource: contacts.leadSource,
+      originMedium: contacts.originMedium,
+      contactType: contacts.contactType,
+    })
+    .from(contacts)
+    .where(and(inArray(contacts.id, ids), eq(contacts.source, source)));
+  const { step, dateBasis, channel } = ENTRY[source];
+  return rows
+    .filter((r) => r.createdAt !== null)
+    .map((r) =>
+      entryEvent(
+        source,
+        channel,
+        r.createdAt!,
+        { contactId: r.id, externalContactId: r.externalId },
+        step,
+        dateBasis,
+        source === "gohighlevel"
+          ? { leadSource: r.leadSource, originMedium: r.originMedium, contactType: r.contactType }
+          : {},
+      ),
+    );
+}
+
+/**
+ * The person imported from the brand's uploaded files: one `added_to_crm` per
+ * CSV contact holding one of their addresses or phones, dated by the upload.
+ * CSV contacts make nobody a person; they only say when the client imported one.
+ */
+export async function csvEntryItems(person: Person): Promise<TimelineItem[]> {
+  const emails = person.emails as string[];
+  const phones = person.phones as string[];
+  if (emails.length === 0 && phones.length === 0) return [];
+  const rows = await db
+    .select({
+      id: contacts.id,
+      uploadId: contactUploads.id,
+      filename: contactUploads.filename,
+      uploadedAt: contactUploads.uploadedAt,
+    })
+    .from(contacts)
+    .innerJoin(contactUploads, eq(contactUploads.id, contacts.sourceUploadId))
+    .where(
+      and(
+        eq(contacts.orgId, person.orgId),
+        eq(contacts.brandId, person.brandId),
+        eq(contacts.source, "csv"),
+        sql`(${emails.length ? sql`lower(${contacts.primaryEmail}) IN (${sql.join(emails.map((e) => sql`${e}`), sql`, `)})` : sql`false`}
+          OR ${phones.length ? sql`${contacts.phoneE164} IN (${sql.join(phones.map((p) => sql`${p}`), sql`, `)})` : sql`false`})`,
+      ),
+    );
+  return rows.map((r) =>
+    entryEvent("csv", "file", r.uploadedAt, { contactId: r.id, uploadId: r.uploadId }, "added_to_crm", "uploaded_at", {
+      origin: "csv_import",
+      uploadId: r.uploadId,
+      filename: r.filename,
+    }),
+  );
+}
+
 // ─── gohighlevel ────────────────────────────────────────────────────────────
 
 async function ghlItems(person: Person, presences: Presence[]): Promise<SourceResult> {
   const contactIds = presences.map((p) => p.sourceRef);
   if (contactIds.length === 0) return { status: "empty", items: [], error: null, asked: [] };
-  const items: TimelineItem[] = [];
+  const items: TimelineItem[] = await entryItems("gohighlevel", presences);
   for (const contactId of contactIds) {
     const r = await readFunnelEvents({ orgId: person.orgId, brandId: person.brandId, contactId, limit: 1, offset: 0 });
     for (const c of r.contacts) {
@@ -223,7 +334,7 @@ async function posthogItems(presences: Presence[]): Promise<SourceResult> {
   const contactIds = presences.map((p) => p.sourceRef);
   if (contactIds.length === 0) return { status: "empty", items: [], error: null, asked: [] };
   const rows = await db.select().from(posthogActivities).where(inArray(posthogActivities.contactId, contactIds));
-  const items: TimelineItem[] = rows.map((a) => ({
+  const items: TimelineItem[] = (await entryItems("posthog", presences)).concat(rows.map((a): TimelineItem => ({
     at: a.occurredAt.toISOString(),
     source: "posthog",
     channel: "web",
@@ -247,7 +358,7 @@ async function posthogItems(presences: Presence[]): Promise<SourceResult> {
         ...(a.detail as Record<string, unknown>),
       },
     },
-  }));
+  })));
   return { status: items.length ? "ok" : "empty", items, error: null, asked: contactIds };
 }
 
@@ -259,7 +370,7 @@ async function stripeItems(presences: Presence[]): Promise<SourceResult> {
   const contactIds = presences.map((p) => p.sourceRef);
   if (contactIds.length === 0) return { status: "empty", items: [], error: null, asked: [] };
   const rows = await db.select().from(stripeTransactions).where(inArray(stripeTransactions.contactId, contactIds));
-  const items: TimelineItem[] = [];
+  const items: TimelineItem[] = await entryItems("stripe", presences);
   for (const t of rows) {
     const detail = t.detail as Record<string, unknown>;
     const money = {
@@ -361,6 +472,8 @@ export async function readTimeline(
     connected("stripe") ? stripeItems(of("stripe")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
   ]);
   const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe };
+  // CSV is no people source (it has no status row); its import dates ride in the thread.
+  const csv = await csvEntryItems(person);
 
   // Stale store: re-read in the background; this read is answered from what is stored.
   storedRead
@@ -373,7 +486,7 @@ export async function readTimeline(
     })
     .catch(() => undefined);
 
-  const items = PEOPLE_SOURCES.flatMap((s) => bySource[s].items).sort((a, b) => {
+  const items = [...PEOPLE_SOURCES.flatMap((s) => bySource[s].items), ...csv].sort((a, b) => {
     if (a.at === null && b.at === null) return 0;
     if (a.at === null) return 1; // undated last
     if (b.at === null) return -1;
