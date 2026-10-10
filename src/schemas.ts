@@ -1447,6 +1447,10 @@ const PersonSchema = registry.register(
         .array(
           z.object({
             crmContactId: z.string().openapi({ description: "This person's GoHighLevel contact (crm-service contact id) lead-service paired." }),
+            leadId: z.string().nullable().openapi({
+              description:
+                "lead-service's lead id, as its pairing rulings take it beside crmContactId (confirm / deny). Null on a person built before v0.25.0 until its next build.",
+            }),
             email: z.string().nullable().openapi({ description: "The lead's address as lead-service serves it." }),
             fullName: z.string().nullable(),
             company: z.string().nullable(),
