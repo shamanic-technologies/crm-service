@@ -62,7 +62,7 @@ export interface ConnectionSyncResult {
   conversationsRebuilt: number;
   leadsComputed: number;
   leadsSkippedUnchanged: number;
-  /** Conversations Jev judged not about the brand: never read by the lead model. */
+  /** Conversations Jev judged not about the brand, or holding nothing a person wrote: never read by the lead model. */
   leadsSkippedNotBusiness: number;
   /** Conversations with no verdict yet (Jev or brand-service failed): read once judged. */
   leadsDeferredUnjudged: number;
@@ -88,7 +88,7 @@ async function gateLeadReading(
       AND (l.id IS NULL OR l.computed_through_event_id <> v.last_event_id)
   `)) as unknown as { id: string }[];
   const ids = [...new Set([...rebuilt, ...behind.map((b) => b.id)])];
-  const empty: JudgePassSummary = { status: "ok", reused: 0, judged: 0, pending: 0, model: null, error: null };
+  const empty: JudgePassSummary = { status: "ok", reused: 0, judged: 0, noContent: 0, pending: 0, model: null, error: null };
   if (ids.length === 0) return { cleared: [], notBusiness: 0, deferred: 0, relevance: empty };
   const identity = { orgId: conn.orgId, userId: conn.createdByUserId, runId, brandId: conn.brandId };
   let context;

@@ -26,6 +26,7 @@ const gmail = (email: string) => presence("gmail", { emails: [email] });
 const matrix = (conversationId: string) => presence("matrix", { detail: { conversationId } });
 
 const verdict = (topic: RecordedVerdict["topic"], brandProbability: number, offerIds: string[] = []): RecordedVerdict => ({
+  content: "readable",
   topic,
   confidence: 0.9,
   brandProbability,
@@ -33,12 +34,15 @@ const verdict = (topic: RecordedVerdict["topic"], brandProbability: number, offe
 });
 
 describe("hidesConversation", () => {
-  it("hides only below the bar: a hesitant verdict stays visible", () => {
-    expect(BRAND_MIN_PROBABILITY).toBe(0.15);
+  it("hides below the owner's 0.50 line (Alejandro's 0.47 photo-only thread hides, 0.5 stays)", () => {
+    expect(BRAND_MIN_PROBABILITY).toBe(0.5);
     expect(hidesConversation({ brandProbability: 0.05 })).toBe(true);
-    expect(hidesConversation({ brandProbability: 0.149 })).toBe(true);
-    expect(hidesConversation({ brandProbability: 0.15 })).toBe(false);
+    expect(hidesConversation({ brandProbability: 0.47 })).toBe(true);
+    expect(hidesConversation({ brandProbability: 0.5 })).toBe(false);
     expect(hidesConversation({ brandProbability: 0.6 })).toBe(false);
+  });
+  it("a conversation with nothing a person wrote is no evidence of the brand", () => {
+    expect(hidesConversation({ content: "none", brandProbability: null })).toBe(true);
   });
 });
 
@@ -90,6 +94,20 @@ describe("personRelevance", () => {
     const r = personRelevance(person, oneAboutBrand, false);
     expect(r.notBusiness).toBe(false);
     expect(r.offerIds).toEqual(["offer-a"]);
+  });
+
+  it("content-free conversations never keep a personal-channel person visible; an unjudged one still does", () => {
+    const none: RecordedVerdict = { content: "none", topic: null, confidence: null, brandProbability: null, offerIds: [] };
+    const alejandro = new Map([
+      ["gmail:mom@x.com", verdict("personal", 0.01)],
+      ["matrix:c1", none],
+    ]);
+    const r = personRelevance(person, alejandro, false);
+    expect(r.notBusiness).toBe(true);
+    expect(r.relevance?.[1]).toMatchObject({ conversation: "matrix:c1", content: "none", topic: null, brandProbability: null });
+    expect(personRelevance(person, new Map([["matrix:c1", none]]), false).notBusiness).toBe(false);
+    expect(personRelevance({ presences: [matrix("c1")] }, new Map([["matrix:c1", none]]), false).notBusiness).toBe(true);
+    expect(personRelevance({ presences: [matrix("c1"), presence("instantly")] }, new Map([["matrix:c1", none]]), false).notBusiness).toBe(false);
   });
 
   it("never hides a person a business source knows, even when every conversation is personal", () => {

@@ -1224,19 +1224,23 @@ export const conversationVerdicts = pgTable(
     // gmail:<address> | matrix:<conversation id>
     conversationKey: text("conversation_key").notNull(),
     source: text("source").notNull(),
+    // readable = Jev judged it; none = no word a person wrote is left once the
+    // bridge's own notices and uncaptioned media are dropped: nothing to judge,
+    // so every judgment column below is NULL (people/relevance.ts).
+    content: text("content").notNull().default("readable"),
     // personal | other_business | this_brand
-    topic: text("topic").notNull(),
-    confidence: doublePrecision("confidence").notNull(),
-    probabilities: jsonb("probabilities").notNull(),
+    topic: text("topic"),
+    confidence: doublePrecision("confidence"),
+    probabilities: jsonb("probabilities"),
     // Jev's probability that the conversation is about this brand.
-    brandProbability: doublePrecision("brand_probability").notNull(),
+    brandProbability: doublePrecision("brand_probability"),
     // offerId -> Jev's yes-probability; offer_ids = the ones at or above the bar.
-    offerScores: jsonb("offer_scores").notNull(),
+    offerScores: jsonb("offer_scores"),
     offerIds: jsonb("offer_ids").notNull(),
     contextHash: text("context_hash").notNull(),
     judgedThrough: text("judged_through").notNull(),
     input: jsonb("input").notNull(),
-    model: text("model").notNull(),
+    model: text("model"),
     runId: text("run_id").notNull(),
     judgedAt: timestamp("judged_at", { withTimezone: true }).notNull().defaultNow(),
   },

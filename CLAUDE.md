@@ -717,7 +717,12 @@ owner had written to. A recorded fact, never an address-shape guess.
   only when the person is on Gmail / Matrix ALONE (no Instantly / CRM / CSV /
   Stripe / PostHog presence, no csv / lead_pairing / ghl / stripe evidence, no
   lead-service lead, a failed lead read counts as a lead) AND every conversation
-  has P(this_brand) < 0.15. Unjudged = shown. Offers tagged at noul >= 0.5, only
+  has P(this_brand) < 0.50 (owner 2026-10-10, was 0.15) OR holds no word a
+  person wrote (`content = 'none'`, recorded without a Jev call: the bridge's
+  own `m.notice` lines "Old photo…" / "Failed to bridge…" (first paragraph;
+  a caption after a blank line is kept), uncaptioned media and empty mails
+  are dropped on STRUCTURE by `humanText` before the window; Jev read a
+  notice-only thread as this_brand at 0.47-0.83). Unjudged = shown. Offers tagged at noul >= 0.5, only
   on a conversation about the brand → `people.offer_ids`; `GET /orgs/people`
   takes `offerId=` and `includeNotBusiness=true`. A hidden person's message text
   is dropped from our search index and their new facts are HELD (never emitted).
