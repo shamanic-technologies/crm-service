@@ -678,14 +678,20 @@ owner had written to. A recorded fact, never an address-shape guess.
 - **Merge only on positive evidence.** Keys are `email:<lower>` and
   `phone:+<digits>` (international only — a national number has no country and
   is no key). Two keys merge only when ONE record states both: a GoHighLevel /
-  Google / CSV / Stripe contact, or a lead-service PAIRING (`lead_pairing`:
-  every `state=paired` row of `GET /orgs/leads/crm-pairings`, whoever decided
-  it — signal, Jev judgment, human — `toConfirm` included). lead-service owns
-  pairing and already moves the lead's standing on it; reading only human
-  rulings split Joanie (cold-emailed as joanie@, booked in GoHighLevel as
-  marketing@, judged 0.81) into a lead + a "Deal open" stranger (2026-10-08).
-  Rejected / unconfirmed / unpaired tie nothing. No name matching of ours, no
-  model. Union-find in `identity.ts`, deterministic.
+  Google / CSV / Stripe contact, or a CONFIDENT lead-service pairing
+  (`lead_pairing`: a `state=paired` row of `GET /orgs/leads/crm-pairings` with
+  `toConfirm: false` = signal, judgment >= its pair threshold, or human
+  acceptance). A `paired` + `toConfirm` row (a judgment between its thresholds)
+  is a GUESS: lead-service still counts it in its stats, but it merges nothing
+  here; the CRM contact stays its own person carrying `possibleLeads` ("maybe
+  the same as X, to confirm"). Brice Jackson (2026-10-10): paired by full name
+  at 0.69, merged, shown under the CRM's gmail; 47 of 62 pairing merges in his
+  brand were such guesses. Rejected / unconfirmed / unpaired tie nothing. No
+  name matching of ours, no model. Union-find in `identity.ts`, deterministic.
+- **A person's `emails` list lead-service's addresses FIRST**
+  (`leadAddressesFirst`): a lead shows under the address lead-service serves,
+  never a CRM / Gmail address merged into it. `person_key` keeps its key order
+  (identity, the fact feed keys on it); the fact content hash ignores `emails`.
 - **`person_key`** = smallest email key, else phone, else `<source>:<ref>`.
   Any identity key opens the person (`people.identity_keys` GIN `@>`).
 - **ONE state, read not graded** (`state.ts`): lead-service standing verbatim

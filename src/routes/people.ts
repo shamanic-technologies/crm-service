@@ -12,6 +12,7 @@ import {
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { ensureScope, runPeopleBuildPass, runScopeBuild, type BuildSummary } from "../lib/people/build.js";
 import { PEOPLE_SOURCES, type Presence } from "../lib/people/identity.js";
+import type { PossibleLead } from "../lib/people/sources.js";
 import { findPerson, readTimeline } from "../lib/people/timeline.js";
 import { readFacts } from "../lib/people/facts.js";
 import { familyOf, LEAD_FAMILIES, readBrandFamilies, type FamilyVerdict, type LeadFamily } from "../lib/people/families.js";
@@ -82,6 +83,7 @@ function personView(row: typeof people.$inferSelect) {
     mergeEvidence: row.mergeEvidence as unknown[],
     automated: row.automated,
     automatedVerdict: row.automatedVerdict as { email: string; verdict: string | null; confidence: number | null }[] | null,
+    possibleLeads: row.possibleLeads as PossibleLead[],
   };
 }
 

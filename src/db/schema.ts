@@ -980,6 +980,10 @@ export const people = pgTable(
     automated: boolean("automated").notNull().default(false),
     automatedVerdict: jsonb("automated_verdict"),
 
+    // CRM contacts lead-service paired with one of our leads on a GUESS
+    // (`toConfirm`): shown beside the person, never merged into it.
+    possibleLeads: jsonb("possible_leads").notNull().default([]),
+
     builtAt: timestamp("built_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [

@@ -637,38 +637,71 @@ export interface LeadPairingRow {
   crmContact: { id: string; email: string | null; phone: string | null; fullName: string | null; company: string | null };
   pairing: {
     state: "paired" | "unconfirmed" | "rejected" | "unpaired";
+    /** lead-service: paired on a judgment between its thresholds — a guess, listed for a person to confirm. */
+    toConfirm: boolean;
     lead: { email: string | null; fullName: string | null; company: string | null } | null;
   };
 }
 
+/** A CRM contact lead-service MAY have paired with one of our leads: shown beside it, never merged. */
+export interface PossibleLead {
+  crmContactId: string;
+  email: string | null;
+  fullName: string | null;
+  company: string | null;
+}
+
+const isConfidentPairing = (row: LeadPairingRow): boolean => {
+  if (row.pairing.state !== "paired" || !row.pairing.lead) return false;
+  if (typeof row.pairing.toConfirm !== "boolean") {
+    throw new Error(`lead-service pairing for CRM contact ${row.crmContact.id} carries no toConfirm`);
+  }
+  return !row.pairing.toConfirm;
+};
+
 /**
  * One lead-service pairing → merge evidence, or null. lead-service OWNS who in
  * the customer's CRM is one of our leads (its matcher, its Jev judgment, a
- * human ruling, in that order of authority), and its `paired` verdict is what
- * already moves the lead's standing and attributes the CRM's meetings and deals
- * to it. Reading the same verdict here is what keeps the Unibox showing ONE
- * person where lead-service already counts one. `paired` includes `toConfirm`
- * (a judgment between its thresholds): lead-service counts those exactly like
- * any pairing, so splitting them here would serve a lead's CRM booking on a
- * second, unowned person. Anything else (rejected, unconfirmed = never judged,
- * unpaired) ties nothing. crm-service runs no matcher of its own.
+ * human ruling). Only a CONFIDENT `paired` verdict merges: a signal, a judgment
+ * at or above lead-service's pair threshold, or a human acceptance. A `paired`
+ * row with `toConfirm` is a judgment between the thresholds (Brice Jackson's
+ * gmail paired by full name at 0.69, 2026-10-10): lead-service still COUNTS it
+ * (its stats rule), but the Unibox does not show a guess as one person — the
+ * CRM contact stays its own person carrying a `possibleLeads` hint
+ * (`possibleLeadOf`). Rejected / unconfirmed / unpaired tie nothing.
+ * crm-service runs no matcher of its own.
  */
 export function pairingEvidence(row: LeadPairingRow): Evidence | null {
-  if (row.pairing.state !== "paired" || !row.pairing.lead) return null;
+  if (!isConfidentPairing(row)) return null;
+  const lead = row.pairing.lead!;
   return {
     kind: "lead_pairing",
     ref: row.crmContact.id,
-    displayName: row.crmContact.fullName ?? row.pairing.lead.fullName,
-    company: row.crmContact.company ?? row.pairing.lead.company,
-    emails: [row.crmContact.email, row.pairing.lead.email].filter((e): e is string => !!e),
+    displayName: row.crmContact.fullName ?? lead.fullName,
+    company: row.crmContact.company ?? lead.company,
+    emails: [row.crmContact.email, lead.email].filter((e): e is string => !!e),
     phones: row.crmContact.phone ? [row.crmContact.phone] : [],
   };
 }
 
+/** A `paired` + `toConfirm` row → the hint its CRM contact carries; anything else → null. */
+export function possibleLeadOf(row: LeadPairingRow): PossibleLead | null {
+  if (row.pairing.state !== "paired" || !row.pairing.lead || isConfidentPairing(row)) return null;
+  return {
+    crmContactId: row.crmContact.id,
+    email: normalizeEmail(row.pairing.lead.email),
+    fullName: row.pairing.lead.fullName,
+    company: row.pairing.lead.company,
+  };
+}
+
 /** lead-service `GET /orgs/leads/crm-pairings?state=paired`, every page. */
-export async function readLeadPairingEvidence(identity: SiblingIdentity): Promise<EvidenceRead> {
+export async function readLeadPairingEvidence(
+  identity: SiblingIdentity,
+): Promise<EvidenceRead & { possibleLeads: PossibleLead[] }> {
   try {
     const evidence: Evidence[] = [];
+    const possibleLeads: PossibleLead[] = [];
     let offset: number | null = 0;
     while (offset !== null) {
       const page: PairingsPage = await siblingGetOk<PairingsPage>(
@@ -680,12 +713,14 @@ export async function readLeadPairingEvidence(identity: SiblingIdentity): Promis
       for (const p of page.pairings) {
         const e = pairingEvidence(p);
         if (e) evidence.push(e);
+        const hint = possibleLeadOf(p);
+        if (hint) possibleLeads.push(hint);
       }
       offset = page.nextOffset;
     }
-    return { kind: "lead_pairing", status: "ok", evidence, error: null };
+    return { kind: "lead_pairing", status: "ok", evidence, possibleLeads, error: null };
   } catch (err) {
-    return { kind: "lead_pairing", status: "failed", evidence: [], error: (err as Error).message };
+    return { kind: "lead_pairing", status: "failed", evidence: [], possibleLeads: [], error: (err as Error).message };
   }
 }
 
