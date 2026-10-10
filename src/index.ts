@@ -14,6 +14,7 @@ import matrixRoutes from "./routes/matrix.js";
 import gohighlevelRoutes from "./routes/gohighlevel.js";
 import peopleRoutes from "./routes/people.js";
 import posthogStripeRoutes from "./routes/posthog-stripe.js";
+import { startFreshnessWatch } from "./lib/people/freshness.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -72,6 +73,8 @@ if (process.env.NODE_ENV !== "test") {
       .then(() => {
         console.log("[crm-service] Migrations complete");
         startServer();
+        // Keeps the people message store current before anyone opens a person.
+        startFreshnessWatch();
       })
       .catch((err) => {
         console.error("[crm-service] Migration failed:", err);

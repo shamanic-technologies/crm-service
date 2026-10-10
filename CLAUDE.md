@@ -754,9 +754,20 @@ owner had written to. A recorded fact, never an address-shape guess.
 - **The timeline serves Gmail + cold email FROM THAT STORE** (`readStoredTimeline`,
   each stored row carries the full item, `format` 2): no sibling call on a read.
   A never-read address is read once on the spot; a store older than 60s
-  (`PEOPLE_TIMELINE_REFRESH_MS`) is re-read in the background, so the NEXT read
-  shows a new message; lead-service campaign discovery runs there too. Sources
-  carry `servedFrom: store|mirror` + `readAt`.
+  (`PEOPLE_TIMELINE_REFRESH_MS`) is re-read in the background after the answer;
+  lead-service campaign discovery runs there too. Sources carry
+  `servedFrom: store|mirror` + `readAt`.
+- **The freshness watch keeps the store current BEFORE an open** (`freshness.ts`,
+  in-process, every 60s, first pass 60s after boot). Per scope it reads what MOVED:
+  instantly-service's outreach fact feed (cursor `people_scopes.outreach_facts_cursor`,
+  facts recorded > 1 day ago only walked past) and Gmail correspondents (most recent
+  first, `change_mark` = last `lastMessageAt` seen). A moved unit gets `changed_at`,
+  is re-read now and once more 5 min later (sibling read trailing its signal). An
+  open re-reads inline ONLY a unit stored before its `changed_at`; an unchanged
+  thread never waits. Why: the build's activity date ignores replies WE send
+  (written-to `lastSentAt` = last sequence step), so Robert Burke's automated
+  follow-up stayed out of his thread 10 h (2026-10-10). Our own replies reach the
+  fact feed only once instantly-service states them (UNIBOX-OUR-REPLIES-FACT-1010).
 - **Family filters (Unibox Won / Hot / Lost / Cold, `families.ts`)**: `GET /orgs/people?family=won|hot|lost|cold`
   (combines with `q`, `source`, paging). Each person carries `family` + `familyLostReason`
   = features-service's verdict (`GET /brands/{brandId}/lead-families`, read verbatim, matched on

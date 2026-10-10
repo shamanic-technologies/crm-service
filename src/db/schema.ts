@@ -920,6 +920,8 @@ export const peopleScopes = pgTable(
     lastError: text("last_error"),
     lastBuiltAt: timestamp("last_built_at", { withTimezone: true }),
     lastRunId: text("last_run_id"),
+    // instantly-service outreach fact feed position this scope's freshness watch has read up to.
+    outreachFactsCursor: text("outreach_facts_cursor"),
 
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1109,6 +1111,10 @@ export const peopleMessageUnits = pgTable(
     runId: text("run_id").notNull(),
     // Stored row shape (see people/search.ts STORE_FORMAT); an older one is re-read.
     format: integer("format").notNull().default(1),
+    // When the freshness watch learned the source thread gained a message (people/freshness.ts).
+    changedAt: timestamp("changed_at", { withTimezone: true }),
+    // The source's own marker of that change (Gmail: the correspondent's lastMessageAt).
+    changeMark: text("change_mark"),
   },
   (table) => [uniqueIndex("people_message_units_uq").on(table.scopeId, table.source, table.unit)],
 );

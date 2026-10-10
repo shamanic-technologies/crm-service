@@ -299,6 +299,11 @@ export async function refreshUnits(scopeId: string, units: Unit[], identity: Sib
   return { read, failed, gmailNotConnected };
 }
 
+/** PURE: the stored copy was read before the source's last known move. */
+export function storedBeforeChange(u: { changedAt: Date | null; indexedAt: Date }): boolean {
+  return !!u.changedAt && u.indexedAt.getTime() < u.changedAt.getTime();
+}
+
 /** Whether a stored unit must be read again. */
 export function unitDue(
   u: Unit,
@@ -383,8 +388,8 @@ export interface StoredTimeline {
 const refreshing = new Set<string>();
 
 /**
- * One person's Gmail + cold-email messages, from the store. A Gmail address
- * never read yet is read NOW (first read only); everything else is served as
+ * One person's Gmail + cold-email messages, from the store. A unit never read
+ * yet, or stored before a move the freshness watch saw, is read NOW; everything else is served as
  * stored and, when older than TIMELINE_REFRESH_MS, re-read in the background
  * through `refresh()` (which also asks lead-service for cold-email campaigns
  * the build's cache did not know).
@@ -410,12 +415,18 @@ export async function readStoredTimeline(
     .map((e) => instantlyUnit(e.unit.split(":")[0], e.address, null));
   const units = unitsOfPerson(person, gmailConnected, leadCampaigns, extra);
 
-  // A unit never attempted is read now, once. A failed or older-format unit is
-  // NOT: it is served as stored and re-read in the background, so one slow
-  // mailbox (a 30s timeout) never makes every click wait.
+  // A unit never attempted is read now, once; so is a unit stored BEFORE a move
+  // the freshness watch learned of (people/freshness.ts), so a message that
+  // exists is in the thread on the first open. A failed or older-format unit
+  // is NOT: it is served as stored and re-read in the background, so one slow
+  // mailbox (a 30s timeout) never makes every click wait. A thread nobody saw
+  // move is served as stored: no wait on an unchanged thread.
   const known = () => new Map(stored.map((e) => [`${e.source}|${e.unit}`, e]));
   const k0 = known();
-  const missing = units.filter((u) => !k0.has(`${u.source}|${u.unit}`));
+  const missing = units.filter((u) => {
+    const k = k0.get(`${u.source}|${u.unit}`);
+    return !k || (k.status === "ok" && storedBeforeChange(k));
+  });
   if (missing.length) {
     await refreshUnits(scope.id, missing, identity);
     stored = await loadUnits();
