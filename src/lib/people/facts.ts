@@ -641,15 +641,39 @@ async function csvCandidates(orgId: string, brandId: string): Promise<CandidateF
   return out;
 }
 
-/** `<source>|<vendor contact id>` → the crm contact row that holds it now. */
-async function crmContactRows(orgId: string, brandId: string): Promise<Map<string, string>> {
+/**
+ * `<source>|<vendor contact id>` → the crm contact rows that hold it now. A SET:
+ * a counterpart who wrote to two linked accounts of one channel is one contact
+ * row per account, and a fact naming either row still names a served row.
+ */
+async function crmContactRows(orgId: string, brandId: string): Promise<Map<string, Set<string>>> {
   const found = await rows<{ id: string; source: string; vendor_id: string }>(sql`
     SELECT id, source, CASE WHEN source = 'matrix' THEN channel_handle ELSE external_id END AS vendor_id
     FROM contacts
     WHERE org_id = ${orgId} AND brand_id = ${brandId}
       AND source IN ('gohighlevel', 'posthog', 'stripe', 'matrix')
   `);
-  return new Map(found.filter((r) => r.vendor_id).map((r) => [`${r.source}|${r.vendor_id}`, r.id]));
+  const out = new Map<string, Set<string>>();
+  for (const r of found) {
+    if (!r.vendor_id) continue;
+    const key = `${r.source}|${r.vendor_id}`;
+    out.set(key, (out.get(key) ?? new Set()).add(r.id));
+  }
+  return out;
+}
+
+/** Which of these Stripe object ids a live connection of the brand still mirrors. */
+async function mirroredStripeIds(tx: Tx, orgId: string, brandId: string, ids: string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (let i = 0; i < ids.length; i += 1000) {
+    const found = (await tx.execute(sql`
+      SELECT DISTINCT external_id FROM stripe_raw_records
+      WHERE org_id = ${orgId} AND brand_id = ${brandId}
+        AND external_id IN (${sql.join(ids.slice(i, i + 1000).map((id) => sql`${id}`), sql`, `)})
+    `)) as unknown as { external_id: string }[];
+    for (const r of found) out.add(r.external_id);
+  }
+  return out;
 }
 
 /**
@@ -903,10 +927,24 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       bySource[c.source] = (bySource[c.source] ?? 0) + 1;
     }
     let withdrawnGone = 0;
+    // A brand connects several Stripe accounts: disconnecting ONE drops its
+    // mirror (cascade) while the source stays connected. Its facts stop, they
+    // are not withdrawn: a Stripe record counts as gone only while an account
+    // still mirrors it.
+    const stillMirrored = await mirroredStripeIds(
+      tx,
+      orgId,
+      brandId,
+      [...liveByKey.entries()]
+        .filter(([key, live]) => !candidates.has(key) && FAMILIES[live.family as FactFamily]?.source === "stripe")
+        .map(([, live]) => live.sourceRef)
+        .filter((ref): ref is string => !!ref),
+    );
     for (const [key, live] of liveByKey) {
       if (candidates.has(key)) continue;
       const family = FAMILIES[live.family as FactFamily];
       if (!family?.snapshot || !connected.has(family.source)) continue;
+      if (family.source === "stripe" && !stillMirrored.has(live.sourceRef ?? "")) continue;
       withdrawals.push({ fact: live, reason: "vendor_record_gone" });
       withdrawnGone++;
     }
@@ -920,8 +958,11 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
     let reminted = 0;
     for (const live of liveByKey.values()) {
       if (touched.has(live.factId) || !live.sourceContactId || !live.crmContactId) continue;
-      const now = rowNow.get(`${live.source}|${live.sourceContactId}`);
-      if (!now || now === live.crmContactId) continue;
+      const held = rowNow.get(`${live.source}|${live.sourceContactId}`);
+      if (!held || held.has(live.crmContactId)) continue;
+      // The row the fact's own candidate names when it is one of them, else the smallest (deterministic).
+      const fromCandidate = candidates.get(live.naturalKey!)?.crmContactId;
+      const now = fromCandidate && held.has(fromCandidate) ? fromCandidate : [...held].sort()[0];
       withdrawals.push({ fact: live, reason: "crm_contact_reminted" });
       reminted++;
       const person =

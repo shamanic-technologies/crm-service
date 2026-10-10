@@ -8,7 +8,7 @@
 
 import type { MatrixEvent } from "./client.js";
 
-export const MATRIX_CHANNELS = ["whatsapp", "telegram", "discord"] as const;
+export const MATRIX_CHANNELS = ["whatsapp", "telegram", "discord", "linkedin"] as const;
 export type MatrixChannel = (typeof MATRIX_CHANNELS)[number];
 
 export function isMatrixChannel(value: string): value is MatrixChannel {

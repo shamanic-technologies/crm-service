@@ -204,9 +204,14 @@ export const contacts = pgTable(
     // Second natural key, for the Matrix source. Postgres treats NULLs as
     // distinct, so every CSV row (channel + channel_handle both null) is exempt
     // — no partial predicate needed and no existing row can collide.
-    uniqueIndex("contacts_org_brand_channel_handle_uq").on(
+    // Keyed per CONNECTION too: a brand can link several accounts on one
+    // channel (two WhatsApp numbers), and the same counterpart writing to both
+    // is one contact per account, each removed with its own account on unlink.
+    // The person layer joins them back (same stable handle = same person).
+    uniqueIndex("contacts_org_brand_conn_channel_handle_uq").on(
       table.orgId,
       table.brandId,
+      table.sourceConnectionId,
       table.channel,
       table.channelHandle,
     ),
@@ -312,10 +317,13 @@ export const matrixConnections = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex("matrix_connections_org_brand_channel_uq").on(
+    // Several accounts per (org, brand, channel): each linked account is its
+    // own dedicated Matrix account, so the account is part of the key.
+    uniqueIndex("matrix_connections_org_brand_channel_account_uq").on(
       table.orgId,
       table.brandId,
       table.channel,
+      table.matrixUserId,
     ),
     index("matrix_connections_status_idx").on(table.status),
   ],
@@ -372,6 +380,12 @@ export const matrixLinks = pgTable(
     remoteLoginId: text("remote_login_id"),
     remoteName: text("remote_name"),
 
+    // The bridge step waiting for the USER to answer (a LinkedIn login form, an
+    // emailed code, cookies): the bridge's own step verbatim (ids, field ids,
+    // types, labels). Null when no input is awaited. What the user types is
+    // relayed to the bridge and never stored.
+    inputStep: jsonb("input_step"),
+
     // The bridge's OWN error code + message, verbatim.
     errorCode: text("error_code"),
     errorMessage: text("error_message"),
@@ -386,7 +400,9 @@ export const matrixLinks = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex("matrix_links_org_brand_channel_uq").on(table.orgId, table.brandId, table.channel),
+    // NOT unique: a brand links N accounts per channel, one row (and one
+    // dedicated Matrix account) each. A link is addressed by its id.
+    index("matrix_links_org_brand_channel_idx").on(table.orgId, table.brandId, table.channel),
   ],
 );
 
@@ -1424,6 +1440,15 @@ export const stripeConnections = pgTable(
     orgId: uuid("org_id").notNull(),
     brandId: uuid("brand_id").notNull(),
     keyMode: text("key_mode").notNull(),
+    // The key-service provider name this connection's restricted key is stored
+    // under. `stripe` for the brand's first account (every connection made
+    // before several were possible); each further account stores its own key
+    // under its own name (`stripe-<label>`), so N keys coexist in key-service.
+    credentialProvider: text("credential_provider").notNull().default("stripe"),
+    // Which Stripe account the key reads, as Stripe states it (`GET /v1/account`).
+    // Null when the restricted key has no permission to read the account.
+    accountId: text("account_id"),
+    accountName: text("account_name"),
     createdByUserId: text("created_by_user_id").notNull(),
     // 'active' | 'paused' | 'error'
     status: text("status").notNull().default("active"),
@@ -1434,7 +1459,7 @@ export const stripeConnections = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex("stripe_connections_org_brand_uq").on(table.orgId, table.brandId),
+    uniqueIndex("stripe_connections_org_brand_provider_uq").on(table.orgId, table.brandId, table.credentialProvider),
     index("stripe_connections_status_idx").on(table.status),
   ],
 );

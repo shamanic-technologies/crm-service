@@ -16,7 +16,16 @@ import { BRAND_MIN_PROBABILITY } from "../lib/people/relevance.js";
 import { rebuildFromBronze, runSyncPass } from "../lib/matrix/sync.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { BridgeError, LINK_METHODS } from "../lib/matrix/bridge.js";
-import { LinkUnavailableError, getLinkView, listLinks, startLink, unlink } from "../lib/matrix/link.js";
+import {
+  LinkRequestError,
+  LinkUnavailableError,
+  brandLinks,
+  getLinkView,
+  getLinkViewById,
+  startLink,
+  submitLinkInput,
+  unlink,
+} from "../lib/matrix/link.js";
 
 const router = Router();
 
@@ -70,9 +79,9 @@ router.post(
           matrixConnections.orgId,
           matrixConnections.brandId,
           matrixConnections.channel,
+          matrixConnections.matrixUserId,
         ],
         set: {
-          matrixUserId: body.matrixUserId,
           counterpartPrefix: body.counterpartPrefix,
           createdByUserId: req.userId!,
         },
@@ -244,16 +253,39 @@ router.get(
 const linkStartSchema = z.object({
   brandId: z.string().uuid(),
   channel: z.enum(MATRIX_CHANNELS),
-  method: z.enum(LINK_METHODS),
+  /** The login flow: WhatsApp `qr` | `phone`, LinkedIn `password` | `cookies`. Required to START. */
+  method: z.enum(LINK_METHODS).optional(),
   /** International format (+33612345678). Required for method 'phone'. */
   phoneNumber: z.string().min(1).max(32).optional(),
+  /**
+   * With `input`: the link whose waiting step is answered. Without: RELINK that
+   * account (same account, same mirror) instead of adding a new one.
+   */
+  linkId: z.string().uuid().optional(),
+  /** Answer to the link's waiting step: field id → value. Relayed to the bridge, never stored. */
+  input: z.record(z.string(), z.string().max(16_384)).optional(),
 });
 
+function bridgeErrorBody(err: BridgeError) {
+  return {
+    type: "bridge",
+    error: err.bridgeMessage,
+    bridgeStatus: err.status,
+    bridgeError: { code: err.code, message: err.bridgeMessage },
+  };
+}
+
 /**
- * Start linking a channel for a brand. Answers with the link once the bridge
- * has produced its first code: a QR (method 'qr') or an 8-character pairing
- * code (method 'phone'). The code refreshes on WhatsApp's schedule — poll
- * `GET /orgs/matrix/links` for the current one and for completion.
+ * Start linking an account, answer its waiting step, or relink it.
+ *
+ *  - `{brandId, channel, method[, phoneNumber]}` ADDS an account: a fresh link
+ *    flow on its own account, never the one already linked.
+ *  - `{brandId, channel, method, linkId}` relinks that account (expired session).
+ *  - `{brandId, channel, linkId, input}` answers the step it waits on (a login
+ *    form, the code LinkedIn emailed, cookies).
+ *
+ * Answers `{ link }` = that account. Poll `GET /orgs/matrix/links` for refreshed
+ * codes, the next step and completion.
  */
 router.post(
   "/orgs/matrix/links",
@@ -261,27 +293,35 @@ router.post(
   requireOrgAndUser("matrix.links.start"),
   async (req: AuthenticatedRequest, res) => {
     const parsed = linkStartSchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
+    if (!parsed.success || (!parsed.data.method && !parsed.data.input)) {
       return res.status(400).json({
         type: "validation",
-        error: `brandId (uuid), channel (${MATRIX_CHANNELS.join("|")}) and method (${LINK_METHODS.join("|")}) are required`,
+        error: `brandId (uuid), channel (${MATRIX_CHANNELS.join("|")}) and method (${LINK_METHODS.join("|")}) are required, or linkId + input to answer a waiting step`,
       });
     }
     const body = parsed.data;
+    if (body.input && !body.linkId) {
+      return res.status(400).json({ type: "validation", error: "linkId is required with input" });
+    }
     if (body.method === "phone" && !body.phoneNumber) {
       return res
         .status(400)
         .json({ type: "validation", error: "phoneNumber is required for method 'phone'" });
     }
     const scope = { orgId: req.orgId!, brandId: body.brandId, channel: body.channel };
+    let linkId: string | undefined = body.linkId;
     try {
-      await startLink({
-        ...scope,
-        method: body.method,
-        phoneNumber: body.phoneNumber,
-        userId: req.userId!,
-        runId: req.runId ?? null,
-      });
+      const row = body.input
+        ? await submitLinkInput({ ...scope, linkId: body.linkId!, input: body.input })
+        : await startLink({
+            ...scope,
+            method: body.method!,
+            phoneNumber: body.phoneNumber,
+            linkId: body.linkId,
+            userId: req.userId!,
+            runId: req.runId ?? null,
+          });
+      linkId = row.id;
     } catch (err) {
       if (err instanceof LinkUnavailableError) {
         return res.status(409).json({
@@ -290,22 +330,28 @@ router.post(
           error: err.reason,
         });
       }
+      if (err instanceof LinkRequestError) {
+        return res.status(err.status).json({ type: err.type, error: err.message, ...err.extra });
+      }
       if (err instanceof BridgeError) {
         return res.status(err.isRefusal ? 422 : 502).json({
-          type: "bridge",
-          error: err.bridgeMessage,
-          bridgeStatus: err.status,
-          bridgeError: { code: err.code, message: err.bridgeMessage },
-          link: await getLinkView(scope),
+          ...bridgeErrorBody(err),
+          link: linkId
+            ? ((await getLinkViewById(scope.orgId, scope.brandId, linkId)) ?? (await getLinkView(scope)))
+            : await getLinkView(scope),
         });
       }
       throw err;
     }
-    res.json({ link: await getLinkView(scope) });
+    res.json({ link: await getLinkViewById(scope.orgId, scope.brandId, linkId!) });
   },
 );
 
-/** Every channel of a brand: availability, link status, the CURRENT code. Poll this. */
+/**
+ * Every channel of a brand. `links` = one entry per channel (its tile);
+ * `accounts` = every account linked or in progress, each with its `linkId`,
+ * its own identity, status and CURRENT code or waiting step. Poll this.
+ */
 router.get(
   "/orgs/matrix/links",
   apiKeyAuth,
@@ -315,14 +361,15 @@ router.get(
     if (!brandParse.success) {
       return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
     }
-    res.json({ links: await listLinks(req.orgId!, brandParse.data) });
+    res.json(await brandLinks(req.orgId!, brandParse.data));
   },
 );
 
 /**
- * Unlink a channel: the bridge logs the account out, syncing stops, and
- * everything mirrored for it is deleted. Its people leave the person layer on
- * the next build (one is started right away).
+ * Unlink ONE account (`?linkId=`): the bridge logs it out, its syncing stops,
+ * and everything mirrored for it is deleted. Other accounts are untouched. Its
+ * people leave the person layer on the next build (one is started right away).
+ * Without `linkId` the channel's only account is meant; 409 when it has several.
  */
 router.delete(
   "/orgs/matrix/links/:channel",
@@ -339,19 +386,19 @@ router.delete(
     if (!brandParse.success) {
       return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
     }
+    const linkParse = z.string().uuid().optional().safeParse(req.query.linkId || undefined);
+    if (!linkParse.success) {
+      return res.status(400).json({ type: "validation", error: "linkId must be a uuid" });
+    }
     const scope = { orgId: req.orgId!, brandId: brandParse.data, channel: channelParse.data };
     let result;
     try {
-      result = await unlink(scope);
+      result = await unlink(scope, linkParse.data);
     } catch (err) {
-      if (err instanceof BridgeError) {
-        return res.status(502).json({
-          type: "bridge",
-          error: err.bridgeMessage,
-          bridgeStatus: err.status,
-          bridgeError: { code: err.code, message: err.bridgeMessage },
-        });
+      if (err instanceof LinkRequestError) {
+        return res.status(err.status).json({ type: err.type, error: err.message, ...err.extra });
       }
+      if (err instanceof BridgeError) return res.status(502).json(bridgeErrorBody(err));
       throw err;
     }
     if (!result) return res.status(404).json({ type: "not_found", error: "no link for this brand and channel" });

@@ -241,18 +241,23 @@ deliberate requirement — do not add a write.
 
 ### Bronze — `matrix_connections` + `matrix_raw_events`
 
-- `matrix_connections` — one row per (org, brand, channel). The analogue of
+- `matrix_connections` — one row per linked ACCOUNT (org, brand, channel,
+  account MXID): a brand links N accounts per channel. The analogue of
   `contact_uploads`: it IS the source artifact. Holds `matrix_user_id` (the
   user's OWN bridged MXID — `sender == this` is what makes a message OUTBOUND),
   `counterpart_prefix` (the bridge ghost namespace, e.g. `@whatsapp_`),
   `since_token` (the `/sync` cursor), `status`, `last_error`, `last_synced_at`.
-  - **Natural key = `UNIQUE(org_id, brand_id, channel)`.**
+  - **Natural key = `UNIQUE(org_id, brand_id, channel, matrix_user_id)`.**
   - `created_by_user_id` is persisted at create time ON PURPOSE: the sync runs
     from a cron with NO inbound identity headers, and the org run + the
     chat-service call it triggers must still be attributed. A request-scoped
     header does not survive that async boundary — the row is the carrier.
 - `matrix_raw_events` — one row per event, `payload` jsonb = the event verbatim.
-  - **Natural key = `UNIQUE(event_id)`.** The Matrix event id is globally unique,
+  - **Natural key = `UNIQUE(event_id)`.** Matrix contacts key on (org, brand,
+    connection, channel, handle): a counterpart writing to two linked accounts
+    is one contact per account; the person layer joins them on the shared
+    bridge handle (`clusterPeople`), and the fact feed's re-mint check treats
+    the handle's rows as a SET (else every pass would withdraw + re-emit). The Matrix event id is globally unique,
     so it IS the idempotency key — no content hash needed (unlike CSV, where the
     same bytes can legitimately be re-uploaded). Re-running a pass inserts nothing.
   - Room metadata (who the counterpart is) arrives as Matrix STATE events
@@ -331,19 +336,31 @@ result — never swallowed, and one broken bridge does not stop the others.
 Connecting an account is a product feature, never a staff step (owner rule
 2026-10-01). A signed-in user links the brand's WhatsApp from the dashboard:
 
-- `POST /orgs/matrix/links {brandId, channel, method: qr|phone, phoneNumber?}`
-  → the first QR (`qr.data` + `qr.imageDataUrl`) or 8-char `pairingCode`.
-- `GET /orgs/matrix/links?brandId=` → every channel: `available`, `status`
+- `POST /orgs/matrix/links {brandId, channel, method, phoneNumber?}` ADDS an
+  account (fresh flow on its own Matrix account; a linked account is never
+  returned or touched) → the first QR / 8-char `pairingCode`, or `input` (a
+  form). `{…, method, linkId}` relinks THAT account (same mirror);
+  `{brandId, channel, linkId, input: {fieldId: value}}` answers the step it
+  waits on (claimed first, relayed, never stored). Methods per channel
+  (`CHANNEL_METHODS`): WhatsApp `qr|phone`, LinkedIn `password|cookies`
+  (mautrix-linkedin: credentials form, then maybe LinkedIn's emailed 6-digit
+  code; or browser cookies). The same remote account linked twice on a brand
+  → `ACCOUNT_ALREADY_LINKED` (it would mirror every thread twice).
+- `GET /orgs/matrix/links?brandId=` → `{ links, accounts }`: `accounts` = every
+  account (each its `linkId`, `account`, `needsRelink` when the bridge says
+  BAD_CREDENTIALS / LOGGED_OUT); `links` = one tile per channel (in-progress >
+  latest linked > latest failed), the pre-multi-account shape. Each: `available`, `status`
   (`not_linked|waiting|linked|failed`), the CURRENT code (WhatsApp refreshes the
   QR at 60s then every 20s, then times out ~2m40s → `failed`, start again), the
   bridge's own `error {code, message}`, and once linked `account` + live
   `bridgeState` + `connection`. The dashboard polls this.
-- `DELETE /orgs/matrix/links/:channel?brandId=` → bridge logout, sync token
+- `DELETE /orgs/matrix/links/:channel?brandId=&linkId=` → ONE account (no
+  `linkId` + several accounts = 409 `link_id_required`): bridge logout, sync token
   revoked, the link's connection + its raw events / conversations / leads AND its
   Matrix contacts (no FK: deleted explicitly) dropped, people rebuild kicked. A
   hand-registered connection (no link) is never touched by it.
 
-**Isolation = one dedicated Matrix account per (org, brand, channel)**,
+**Isolation = one dedicated Matrix account per LINK (account)**,
 `@crm_<random>:matrix.distribute.you`, created through crm-service's own
 appservice (`id: crm`, exclusive `@crm_*` namespace, registration in
 `/root/distribute/matrix/crm/` on the box). The bridge keeps one login per
@@ -904,6 +921,14 @@ re-derives silver with no vendor call. API reads are free → no cost declared.
   (`visit` = one session aggregated over ALL its pageviews, `event` = custom
   non-`$` event). Window = `synced_through - 1h`; a capped stream resumes from
   its last row.
+- **Stripe, N accounts per brand**: each connection names the key-service
+  provider holding its key (`credential_provider`: `stripe` = first account,
+  `stripe-<label>` each further one; key-service registers any provider name,
+  so no change there). `account` = `GET /v1/account` id + name when the key may
+  read it. The same account twice → 409 (account id, or its newest objects
+  already mirrored). Disconnecting ONE account withdraws none of its facts (a
+  Stripe record counts as gone only while some account still mirrors it), and
+  a not-yet-synced account never hides the others (`connectionHealth`).
 - **Stripe**: only a RESTRICTED key (`rk_live_`/`rk_test_`) is accepted; `sk_`
   is refused before any call. Silver: `contacts` (source `stripe`) +
   `stripe_transactions` (`payment` | `refund` | `subscription`, amount in MINOR

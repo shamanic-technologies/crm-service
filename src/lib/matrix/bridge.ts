@@ -11,6 +11,12 @@
  * configured. Telegram's bridge needs a platform Telegram app credential
  * (api_id / api_hash) that is not provisioned yet, so it is not started and its
  * env is absent: Telegram answers "not available yet" until it is.
+ *
+ * LinkedIn (mautrix-linkedin, bridgev2) has no QR: its flows are `password`
+ * (email/phone + password, then possibly a 6-digit code LinkedIn emails) and
+ * `cookies` (the browser's session headers). Both are USER INPUT steps the
+ * bridge describes field by field; the link records the step and the user's
+ * answer is relayed back (contract read from the deployed bridge, 2026-10-10).
  */
 
 import type { MatrixChannel } from "./events.js";
@@ -21,17 +27,27 @@ export const COUNTERPART_PREFIX: Record<MatrixChannel, string> = {
   whatsapp: "@whatsapp_",
   telegram: "@telegram_",
   discord: "@discord_",
+  linkedin: "@linkedin_",
 };
 
 const CHANNEL_LABEL: Record<MatrixChannel, string> = {
   whatsapp: "WhatsApp",
   telegram: "Telegram",
   discord: "Discord",
+  linkedin: "LinkedIn",
 };
 
-/** What a link may use on each channel (bridgev2 login flow ids). */
-export const LINK_METHODS = ["qr", "phone"] as const;
+/** Every login method any channel offers (bridgev2 login flow ids). */
+export const LINK_METHODS = ["qr", "phone", "password", "cookies"] as const;
 export type LinkMethod = (typeof LINK_METHODS)[number];
+
+/** The flows each channel's bridge serves, in the order the dashboard should offer them. */
+export const CHANNEL_METHODS: Record<MatrixChannel, readonly LinkMethod[]> = {
+  whatsapp: ["qr", "phone"],
+  telegram: ["qr", "phone"],
+  discord: ["qr"],
+  linkedin: ["password", "cookies"],
+};
 
 interface BridgeConfig {
   url: string;
@@ -77,6 +93,25 @@ export class BridgeError extends Error {
   }
 }
 
+/** One field of a user_input step, as bridgev2 describes it. */
+export interface LoginInputField {
+  type: string;
+  id: string;
+  name?: string;
+  description?: string;
+  pattern?: string;
+  options?: string[];
+  default_value?: string;
+}
+
+/** One value of a cookies step: where the browser holds it (cookie, header, local storage…). */
+export interface LoginCookieField {
+  id: string;
+  required?: boolean;
+  sources?: { type: string; name: string; cookie_domain?: string }[];
+  pattern?: string;
+}
+
 /** A login step as bridgev2 serves it (`RespSubmitLogin`). */
 export interface LoginStep {
   login_id: string;
@@ -84,8 +119,15 @@ export interface LoginStep {
   step_id: string;
   instructions?: string;
   display_and_wait?: { type: "qr" | "code" | "emoji" | "nothing" | string; data?: string };
-  user_input?: { fields?: { type: string; id: string }[] };
+  user_input?: { fields?: LoginInputField[] };
+  cookies?: { url?: string; user_agent?: string; fields?: LoginCookieField[]; extract_js?: string };
   complete?: { user_login_id?: string };
+}
+
+/** Steps whose answer comes from the USER, relayed by `submitStepInput`. */
+export const INPUT_STEP_TYPES = ["user_input", "cookies"] as const;
+export function isInputStep(step: LoginStep): boolean {
+  return (INPUT_STEP_TYPES as readonly string[]).includes(step.type);
 }
 
 export interface BridgeLogin {
@@ -159,6 +201,23 @@ export function submitUserInput(
     userId,
     "POST",
     `/login/step/${encodeURIComponent(step.login_id)}/${encodeURIComponent(step.step_id)}/user_input`,
+    input,
+    CALL_TIMEOUT_MS,
+  );
+}
+
+/** Answer an input step (`user_input` or `cookies`) with the user's values, verbatim. */
+export function submitStepInput(
+  channel: MatrixChannel,
+  userId: string,
+  step: Pick<LoginStep, "login_id" | "step_id" | "type">,
+  input: Record<string, string>,
+) {
+  return call<LoginStep>(
+    channel,
+    userId,
+    "POST",
+    `/login/step/${encodeURIComponent(step.login_id)}/${encodeURIComponent(step.step_id)}/${step.type}`,
     input,
     CALL_TIMEOUT_MS,
   );

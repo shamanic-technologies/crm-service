@@ -42,6 +42,23 @@ describe("identity keys are exact, never fuzzy", () => {
 });
 
 describe("clusterPeople", () => {
+  it("one counterpart writing to two linked WhatsApp accounts is ONE person (same bridge handle)", () => {
+    const handle = "@whatsapp_lid-2324214886506:matrix.distribute.you";
+    const onFounder = presence({ source: "matrix", sourceRef: "contact-a", detail: { channelHandle: handle } });
+    const onRep = presence({ source: "matrix", sourceRef: "contact-b", detail: { channelHandle: handle } });
+    const other = presence({
+      source: "matrix",
+      sourceRef: "contact-c",
+      detail: { channelHandle: "@whatsapp_lid-999:matrix.distribute.you" },
+    });
+    const out = clusterPeople([onFounder, onRep, other], []);
+    expect(out).toHaveLength(2);
+    const merged = out.find((c) => c.presences.length === 2)!;
+    expect(merged.presences.map((p) => p.sourceRef).sort()).toEqual(["contact-a", "contact-b"]);
+    // One account only: the person key is exactly what it was before several accounts existed.
+    expect(clusterPeople([onFounder], [])[0].personKey).toBe("matrix:contact-a");
+  });
+
   it("one address on Gmail and Instantly is ONE person", () => {
     const out = clusterPeople(
       [

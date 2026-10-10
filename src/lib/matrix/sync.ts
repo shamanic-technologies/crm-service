@@ -241,8 +241,9 @@ async function rebuildRoom(
   const names = splitName(counterpart.displayName);
   const now = new Date();
 
-  // Contact — natural key (org, brand, channel, channel_handle). A WhatsApp DM
-  // has no email, which is exactly why this second key exists.
+  // Contact — natural key (org, brand, connection, channel, channel_handle). A
+  // WhatsApp DM has no email, which is exactly why this key exists; the
+  // connection is in it because a brand links several accounts per channel.
   const [contact] = await db
     .insert(contacts)
     .values({
@@ -263,13 +264,12 @@ async function rebuildRoom(
       lastRebuiltAt: now,
     })
     .onConflictDoUpdate({
-      target: [contacts.orgId, contacts.brandId, contacts.channel, contacts.channelHandle],
+      target: [contacts.orgId, contacts.brandId, contacts.sourceConnectionId, contacts.channel, contacts.channelHandle],
       set: {
         phoneE164: counterpart.phoneE164,
         fullName: names.fullName,
         firstName: names.firstName,
         lastName: names.lastName,
-        sourceConnectionId: conn.id,
         lastRebuiltAt: now,
       },
     })
