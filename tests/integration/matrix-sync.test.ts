@@ -111,7 +111,9 @@ function installFetchStub() {
     if (url.startsWith("http://brand.test/")) {
       const body = url.endsWith("/offers")
         ? { offers: [{ offerId: "offer-1", name: "Weddings", description: null, status: "active" }] }
-        : url.endsWith("/orgs/brands")
+        : url.endsWith("/extracted-fields")
+          ? { fields: [{ key: "companyOverview", value: "Acme plans weddings." }] }
+          : url.endsWith("/orgs/brands")
           ? { brands: [{ id: BRAND, name: "Acme", domain: "acme.test" }] }
           : { brand: { name: "Acme", domain: "acme.test", url: "https://acme.test" } };
       return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });

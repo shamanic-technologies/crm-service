@@ -61,17 +61,18 @@ const TOPIC_CRITERIA: Record<Topic, string> = {
     "the owner's private life, nothing a company does: family, partner, friends, dating, health and doctors, " +
     "housing and landlords, personal shopping and admin, personal travel, social plans and small talk.",
   other_business:
-    "work, but NOT for the brand: a company or project other than the brand (one of otherBrandsOfTheSameOwner, " +
-    "or any other company the owner runs, works for or invests in), the owner's job search, or professionals " +
-    "handling the owner's own affairs unrelated to the brand.",
+    "work for a DIFFERENT company or project than the brand: one of otherBrandsOfTheSameOwner, or any other " +
+    "company or project the owner runs, coaches for, works for or invests in, whose activity is not what " +
+    "brand.description says the brand does.",
   this_brand:
-    "about the brand or what it sells: a prospect, client, user, partner, reseller, supplier, investor, " +
-    "advisor, journalist or job candidate talking with the owner about the brand, its product, its offers, " +
-    "its fundraising, its hiring or its operations.",
+    "the brand's business, as brand.description describes it: a prospect, client, user, partner, reseller, " +
+    "investor, advisor, journalist or job candidate; the suppliers, tools and vendors the brand runs on; the " +
+    "company's own accounting, legal, banking and admin; and delivering the brand's service, including talking " +
+    "to third parties on its clients' behalf when that is what the brand sells.",
 };
 
 export interface BrandContext {
-  brand: { name: string; website: string | null };
+  brand: { name: string; website: string | null; description: string | null };
   offers: { offerId: string; name: string; description: string | null }[];
   otherBrandsOfTheSameOwner: { name: string; website: string | null }[];
   hash: string;
@@ -80,7 +81,7 @@ export interface BrandContext {
 /** The brand, its active offers and the org's other brands, from brand-service. Fails loud. */
 export async function readBrandContext(identity: SiblingIdentity): Promise<BrandContext> {
   const id = encodeURIComponent(identity.brandId);
-  const [brand, offers, orgBrands] = await Promise.all([
+  const [brand, offers, orgBrands, fields] = await Promise.all([
     siblingGetOk<{ brand: { name: string; domain: string | null; url: string | null } }>("brand", `/internal/brands/${id}`, identity),
     siblingGetOk<{ offers: { offerId: string; name: string; description: string | null; status: string }[] }>(
       "brand",
@@ -88,7 +89,9 @@ export async function readBrandContext(identity: SiblingIdentity): Promise<Brand
       identity,
     ),
     siblingGetOk<{ brands: { id: string; name: string | null; domain: string | null }[] }>("brand", "/orgs/brands", identity),
+    siblingGetOk<{ fields: { key: string; value: unknown }[] }>("brand", `/internal/brands/${id}/extracted-fields`, identity),
   ]);
+  const overview = fields.fields.find((f) => f.key === "companyOverview")?.value;
   const ctx = {
     brand: { name: brand.brand.name, website: brand.brand.domain ?? brand.brand.url },
     offers: offers.offers
@@ -100,7 +103,13 @@ export async function readBrandContext(identity: SiblingIdentity): Promise<Brand
       .map((b) => ({ name: b.name ?? b.domain ?? "unnamed", website: b.domain }))
       .sort((a, b) => (a.name < b.name ? -1 : 1)),
   };
-  return { ...ctx, hash: createHash("sha256").update(JSON.stringify(ctx)).digest("hex").slice(0, 32) };
+  // The description is re-extracted every few days in different words: it is shown to
+  // Jev but kept OUT of the hash, so a re-extraction never re-judges every conversation.
+  return {
+    ...ctx,
+    brand: { ...ctx.brand, description: typeof overview === "string" && overview.trim() ? overview.trim() : null },
+    hash: createHash("sha256").update(JSON.stringify(["v2", ctx])).digest("hex").slice(0, 32),
+  };
 }
 
 export interface ConversationMessage {

@@ -284,6 +284,9 @@ function installFetchStub() {
         return json({ offers: [{ offerId: OFFER, brandId: BRAND, name: "Pro plan", description: null, status: "active" }] });
       }
       if (url.pathname === "/orgs/brands") return json({ brands: [{ id: BRAND, name: "Brand", domain: "brand.com" }] });
+      if (url.pathname.endsWith("/extracted-fields")) {
+        return json({ brandId: BRAND, fields: [{ key: "companyOverview", value: "Brand sells a Pro plan to teams." }] });
+      }
       return json({ brand: { id: BRAND, name: "Brand", domain: "brand.com", url: "https://brand.com" } });
     }
     if (url.host === "instantly.test") {
