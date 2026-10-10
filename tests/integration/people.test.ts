@@ -62,6 +62,8 @@ let gmailConversationDown = false;
 let aliceNewMessage = false;
 /** Our own reply to Alice exists in instantly-service's thread (sent after the store read it). */
 let aliceOurReply = false;
+/** Alice is also a lead on camp-1b, a sibling campaign row of camp-1's family. */
+let aliceTwinCampaign = false;
 /** instantly-service's outreach fact feed (seq = position + 1). */
 let outreachFacts: Record<string, unknown>[] = [];
 const calls: string[] = [];
@@ -281,7 +283,9 @@ function installFetchStub() {
             },
           });
         }
-        if (url.searchParams.get("campaign_id") !== "camp-1" || email !== "alice@x.com") {
+        // camp-1b is a sibling row of camp-1's family: instantly-service answers the family's whole thread.
+        const aliceCampaigns = aliceTwinCampaign ? ["camp-1", "camp-1b"] : ["camp-1"];
+        if (!aliceCampaigns.includes(url.searchParams.get("campaign_id") ?? "") || email !== "alice@x.com") {
           return json({ error: "campaign_not_found" }, 404);
         }
         return json({
@@ -427,6 +431,7 @@ describe.skipIf(!RUN)("person layer", () => {
     gmailConversationDown = false;
     aliceNewMessage = false;
     aliceOurReply = false;
+    aliceTwinCampaign = false;
     outreachFacts = [];
     automatedEmails = new Map();
     jevDown = false;
@@ -680,6 +685,44 @@ describe.skipIf(!RUN)("person layer", () => {
     expect(sources.matrix.status).toBe("ok");
     // The won deal carries no dated history row here, so GoHighLevel has nothing to put in the thread.
     expect(sources.gohighlevel.status).toBe("empty");
+  });
+
+  it("a cold email read through two campaign units of one family is stored and served once", async () => {
+    aliceTwinCampaign = true;
+    extraWritten = [{ ...WRITTEN[0], campaignId: "camp-1b" }];
+    await seedLocalSources();
+    await buildNow();
+    const read = () =>
+      request(app())
+        .get(`/orgs/people/timeline?brandId=${BRAND}&personKey=${encodeURIComponent("email:alice@x.com")}`)
+        .set("x-api-key", API_KEY)
+        .set("x-org-id", ORG)
+        .set("x-user-id", USER);
+    const res = await read();
+    expect(res.status).toBe(200);
+    expect(res.body.sources.find((s: { source: string }) => s.source === "instantly").asked.sort()).toEqual([
+      "camp-1:alice@x.com",
+      "camp-1b:alice@x.com",
+    ]);
+    const cold = () => res.body.items.filter((i: { source: string }) => i.source === "instantly");
+    expect(cold().map((i: { text: string }) => i.text)).toEqual(["Cold email", "Interested"]);
+    expect(cold()[0].outreachFact).toEqual({ subjectKey: "ievt:evt-1", step: 1, position: "first" });
+    const stored = await db.execute(sql`SELECT unit FROM people_message_texts WHERE source = 'instantly' AND address = 'alice@x.com'`);
+    expect(stored.length).toBe(2);
+    const units = await db.execute(sql`SELECT unit, messages FROM people_message_units WHERE source = 'instantly' AND address = 'alice@x.com' ORDER BY unit`);
+    expect((units as unknown as { messages: number }[]).reduce((n, u) => n + u.messages, 0)).toBe(2);
+
+    // A real new message reaches the thread once, whichever unit re-reads it; a re-read of both adds nothing.
+    aliceOurReply = true;
+    await db.execute(sql`UPDATE people_message_units SET indexed_at = now() - interval '2 days' WHERE source = 'instantly'`);
+    await buildNow();
+    const again = await read();
+    expect(again.body.items.filter((i: { source: string }) => i.source === "instantly").map((i: { text: string }) => i.text)).toEqual([
+      "Cold email",
+      "Interested",
+      "Floating this to the top of your inbox",
+    ]);
+
   });
 
   it("an unconnected source says so; a failed read says failed, not empty", async () => {
