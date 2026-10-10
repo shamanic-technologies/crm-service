@@ -765,6 +765,16 @@ owner had written to. A recorded fact, never an address-shape guess.
   (`instantlyMessageKey`, never the unit or the position), which splits prod
   exactly as the outreach fact's `subjectKey` does; the unit read second skips
   what another unit of the address already holds (advisory lock per address).
+  The serve recomputes that key from the item, so a row an older build wrote
+  (a rolled-back deploy did, 2026-10-10) never doubles; store format 4 makes
+  such a unit due for a re-read.
+
+## Boot: the port binds BEFORE migrations
+
+`src/index.ts` listens first, then migrates; until migrations finish every
+route but `/health` / `/openapi.json` answers 503. A data migration that held
+the old pre-listen boot past deploy.sh's 60s window rolled the deploy back,
+and the OLD code then wrote onto the NEW schema (0020, 2026-10-10).
 - **The freshness watch keeps the store current BEFORE an open** (`freshness.ts`,
   in-process, every 60s, first pass 60s after boot). Per scope it reads what MOVED:
   instantly-service's outreach fact feed (cursor `people_scopes.outreach_facts_cursor`,

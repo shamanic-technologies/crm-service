@@ -729,6 +729,26 @@ describe.skipIf(!RUN)("person layer", () => {
     const units = await db.execute(sql`SELECT unit, messages FROM people_message_units WHERE source = 'instantly' AND address = 'alice@x.com' ORDER BY unit`);
     expect((units as unknown as { messages: number }[]).reduce((n, u) => n + u.messages, 0)).toBe(2);
 
+    // A row an older build stored under a per-unit key (a deploy rolled back) is still one message
+    // on the serve, and its unit is re-read and re-keyed by the next pass (store format < 4).
+    await db.execute(sql`
+      INSERT INTO people_message_texts (scope_id, source, unit, address, message_key, at, direction, search_text, item)
+      SELECT scope_id, source, 'camp-1b:alice@x.com', address, '0:' || (item->>'at') || ':outbound', at, direction, search_text, item
+      FROM people_message_texts WHERE source = 'instantly' AND address = 'alice@x.com' AND direction = 'outbound'
+      ON CONFLICT DO NOTHING`);
+    await db.execute(sql`UPDATE people_message_units SET format = 3 WHERE unit = 'camp-1b:alice@x.com'`);
+    const legacy = await read();
+    expect(legacy.body.items.filter((i: { source: string }) => i.source === "instantly").map((i: { text: string }) => i.text)).toEqual([
+      "Cold email",
+      "Interested",
+    ]);
+    await buildNow();
+    const keys = (await db.execute(
+      sql`SELECT message_key FROM people_message_texts WHERE source = 'instantly' AND address = 'alice@x.com'`,
+    )) as unknown as { message_key: string }[];
+    expect(keys.filter((k) => !k.message_key.includes("|"))).toEqual([]);
+    expect(keys).toHaveLength(2);
+
     // A real new message reaches the thread once, whichever unit re-reads it; a re-read of both adds nothing.
     aliceOurReply = true;
     await db.execute(sql`UPDATE people_message_units SET indexed_at = now() - interval '2 days' WHERE source = 'instantly'`);
