@@ -40,6 +40,18 @@ app.get("/openapi.json", (_req, res) => {
 });
 
 app.use(healthRoutes);
+
+/**
+ * The port is bound BEFORE migrations run (a long data migration held the old
+ * pre-listen boot past deploy.sh's 60s health window: the deploy rolled back and
+ * the OLD code wrote onto the NEW schema). Until migrations finish, every route
+ * but /health and /openapi.json answers 503, loud, never on a half-migrated schema.
+ */
+let migrated = false;
+app.use((_req, res, next) => {
+  if (migrated || process.env.NODE_ENV === "test") return next();
+  res.status(503).json({ type: "unavailable", error: "migrations in progress, retry shortly" });
+});
 app.use(contactsRoutes);
 app.use(internalRoutes);
 app.use(matrixRoutes);
@@ -68,11 +80,12 @@ if (process.env.NODE_ENV !== "test") {
   };
 
   if (dbUrl) {
+    startServer();
     const migrateDb = drizzle(getSql());
     migrate(migrateDb, { migrationsFolder: "./drizzle" })
       .then(() => {
         console.log("[crm-service] Migrations complete");
-        startServer();
+        migrated = true;
         // Keeps the people message store current before anyone opens a person.
         startFreshnessWatch();
       })
@@ -82,6 +95,7 @@ if (process.env.NODE_ENV !== "test") {
       });
   } else {
     console.warn("[crm-service] CRM_SERVICE_DATABASE_URL not set, skipping migrations");
+    migrated = true;
     startServer();
   }
 }

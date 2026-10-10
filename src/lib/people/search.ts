@@ -37,10 +37,12 @@ export const UNIT_REFRESH_MS = 24 * 60 * 60 * 1000;
 const BODY_MAX = 20_000;
 /**
  * The stored row shape. 1 = text only (v0.15.0); 2 = the full timeline item
- * rides in `item`; 3 = a cold email carries its `outreachFact`. A unit stored in
- * an older format is due for a re-read.
+ * rides in `item`; 3 = a cold email carries its `outreachFact`; 4 = a cold email
+ * is keyed on its own identity (`instantlyMessageKey`), never its unit or
+ * position. A unit stored in an older format is due for a re-read: so a unit an
+ * older build writes (a deploy rolled back) is re-keyed on the next pass.
  */
-export const STORE_FORMAT = 3;
+export const STORE_FORMAT = 4;
 
 export interface IndexPerson {
   emails: string[];
@@ -471,12 +473,16 @@ export async function readStoredTimeline(
     for (const r of rows) {
       if (r.source !== source || !r.item) continue;
       // One message, one item: a Gmail message to two of the person's addresses, a cold email
-      // read through two campaign units of one family (keys are unit-independent).
-      const key = r.messageKey;
+      // read through two campaign units of one family. A cold email's key is computed from the
+      // item itself, so a row an older build stored under a per-unit key still counts once.
+      const item = r.item as TimelineItem;
+      const key =
+        source === "gmail"
+          ? r.messageKey
+          : instantlyMessageKey({ direction: item.direction ?? "", at: item.at ?? "", from: item.from ?? "", to: item.to[0] ?? "" });
       if (seen.has(key)) continue;
       seen.add(key);
       // A row stored before format 3 has no outreachFact yet (re-read in the background): served as null.
-      const item = r.item as TimelineItem;
       items.push({ ...item, outreachFact: item.outreachFact ?? null });
     }
     const okStates = states.filter((s) => s.status === "ok");
