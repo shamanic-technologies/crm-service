@@ -111,7 +111,7 @@ describe("personRelevance", () => {
 
 describe("judgeConversation", () => {
   const context: BrandContext = {
-    brand: { name: "Acme", website: "acme.com" },
+    brand: { name: "Acme", website: "acme.com", description: "Acme sells software." },
     offers: [
       { offerId: "offer-a", name: "Pro plan", description: null },
       { offerId: "offer-b", name: "Angel round", description: null },

@@ -697,8 +697,12 @@ owner had written to. A recorded fact, never an address-shape guess.
 - **Business only — a personal thread is nobody either** (`relevance.ts`,
   owner 2026-10-10). Every Gmail / Matrix conversation of a non-automated person
   gets ONE Jev call: `topic` choice `personal | other_business | this_brand`
-  (state = brand name + website, its ACTIVE offers, the org's other brands, all
-  read from brand-service) + one `noul` per active offer. Recorded in
+  (state = brand name + website + `companyOverview` extracted field, its ACTIVE
+  offers, the org's other brands, all read from brand-service; the overview is
+  NOT in the context hash: it is re-extracted in new words every few days).
+  Suppliers / tools, the company's own admin, and service delivery count as
+  the brand: judged on name + offers alone, Jev filed Instantly, Twilio and the
+  accountant as "other business" (v0.27.0, 311 hidden) + one `noul` per active offer. Recorded in
   `conversation_verdicts` keyed (org, brand, `gmail:<addr>` | `matrix:<conv id>`):
   Gmail is per ORG, so each brand judges the same thread for itself. Re-judged
   only when `judged_through` moved (Gmail `lastActivityAt|messageCount`, Matrix
