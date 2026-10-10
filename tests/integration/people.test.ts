@@ -73,6 +73,11 @@ let automatedEmails = new Map<string, number>();
 let jevDown = false;
 const jevRequests: { headers: Record<string, string>; body: { state: { senders: Record<string, { email: string; recentMessages: { subject: string | null }[] }> }; questions: Record<string, unknown> } }[] = [];
 
+/** Jev's relevance stub: these counterpart addresses are personal; every other conversation is about the brand. */
+let personalEmails = new Set<string>();
+const OFFER = "dddddddd-1111-4111-8111-0000000000f1";
+const relevanceRequests: { headers: Record<string, string>; body: { state: { conversation: { counterpart: { email: string | null } } } } }[] = [];
+
 /** Extra Gmail correspondents a test adds (an automated digest, a role address). */
 let extraCorrespondents: { email: string; name: string | null }[] = [];
 
@@ -134,6 +139,20 @@ function installFetchStub() {
     if (url.host === "localhost:9998" && url.pathname === "/orgs/judgments") {
       if (jevDown) return json({ error: "jev down" }, 503);
       const body = JSON.parse(String(init!.body));
+      if (body.state.conversation) {
+        relevanceRequests.push({ headers: init!.headers as Record<string, string>, body });
+        const personal = personalEmails.has(body.state.conversation.counterpart.email);
+        const p = personal
+          ? { personal: 0.92, other_business: 0.05, this_brand: 0.03 }
+          : { personal: 0.02, other_business: 0.03, this_brand: 0.95 };
+        return json({
+          model: "jev-test",
+          answers: {
+            topic: { type: "choice", choice: personal ? "personal" : "this_brand", confidence: 0.9, probabilities: p },
+            o0: { type: "noul", noul: personal ? 0.1 : 0.85 },
+          },
+        });
+      }
       jevRequests.push({ headers: init!.headers as Record<string, string>, body });
       const answers: Record<string, unknown> = {};
       for (const [key, sender] of Object.entries(body.state.senders as Record<string, { email: string }>)) {
@@ -182,6 +201,20 @@ function installFetchStub() {
                 threadId: "td",
                 messages: [
                   { gmailMessageId: "d1", threadId: "td", direction: "inbound", fromEmail: DIGEST, to: ["me@brand.com"], subject: "Marwene just messaged you", snippet: "You have 1 new message", sentAt: "2026-07-10T09:00:00.000Z", bodyText: null, bodyTextOriginal: null, bodyStatus: "ok", bodyCleanStatus: "not_applicable" },
+                ],
+              },
+            ],
+          });
+        }
+        if (url.searchParams.get("email") === "mom@family.com") {
+          return json({
+            address: "mom@family.com",
+            status: "ok",
+            threads: [
+              {
+                threadId: "tm",
+                messages: [
+                  { gmailMessageId: "m1", threadId: "tm", direction: "inbound", fromEmail: "mom@family.com", to: ["me@brand.com"], subject: "Sunday lunch", snippet: "Are you coming on Sunday?", sentAt: "2026-07-10T09:00:00.000Z", bodyText: "Are you coming on Sunday? Bring the kids.", bodyTextOriginal: null, bodyStatus: "ok", bodyCleanStatus: "cleaned" },
                 ],
               },
             ],
@@ -247,7 +280,11 @@ function installFetchStub() {
       return json({ brandId: BRAND, counts, lostBreakdown: { wentCold: 0, ruledOut: 0 }, offers: [], people: leadFamilies.map((p) => ({ ...p, campaignLeadIds: [], offerId: "o1" })) });
     }
     if (url.host === "brand.test") {
-      return json({ brand: { id: BRAND, domain: "brand.com" } });
+      if (url.pathname.endsWith("/offers")) {
+        return json({ offers: [{ offerId: OFFER, brandId: BRAND, name: "Pro plan", description: null, status: "active" }] });
+      }
+      if (url.pathname === "/orgs/brands") return json({ brands: [{ id: BRAND, name: "Brand", domain: "brand.com" }] });
+      return json({ brand: { id: BRAND, name: "Brand", domain: "brand.com", url: "https://brand.com" } });
     }
     if (url.host === "instantly.test") {
       if (url.pathname === "/internal/accounts") {
@@ -351,7 +388,7 @@ async function retryOnDeadlock(fn: () => Promise<unknown>): Promise<void> {
 }
 
 async function wipe() {
-  await retryOnDeadlock(() => db.execute(sql`TRUNCATE sender_verdicts, people_scopes, people, person_ids, person_id_aliases, contact_uploads, lead_standing_observations, matrix_raw_events, conversations, matrix_leads, matrix_connections, ghl_opportunities, ghl_connections, contacts CASCADE`));
+  await retryOnDeadlock(() => db.execute(sql`TRUNCATE sender_verdicts, conversation_verdicts, people_scopes, people, person_ids, person_id_aliases, contact_uploads, lead_standing_observations, matrix_raw_events, conversations, matrix_leads, matrix_connections, ghl_opportunities, ghl_connections, contacts CASCADE`));
 }
 
 /** Alice in GoHighLevel (email + phone, a won deal) and on WhatsApp (phone only). */
@@ -451,6 +488,8 @@ describe.skipIf(!RUN)("person layer", () => {
     aliceTwinCampaign = false;
     outreachFacts = [];
     automatedEmails = new Map();
+    personalEmails = new Set();
+    relevanceRequests.length = 0;
     jevDown = false;
     extraCorrespondents = [];
     extraWritten = [];
@@ -1221,6 +1260,79 @@ describe.skipIf(!RUN)("person layer", () => {
       const up = await buildNow();
       expect(up.senderVerdicts).toMatchObject({ status: "ok", pending: 0, automatedPeople: 1 });
       expect((await listPeople()).body.automatedHidden).toBe(1);
+    });
+  });
+
+  describe("business only (personal-channel conversations judged by Jev)", () => {
+    const listPeople = (query = "") =>
+      request(app())
+        .get(`/orgs/people?brandId=${BRAND}${query}`)
+        .set("x-api-key", API_KEY)
+        .set("x-org-id", ORG)
+        .set("x-user-id", USER);
+    const keysOf = (res: { body: { people: { personKey: string }[] } }) => res.body.people.map((p) => p.personKey);
+
+    beforeEach(() => {
+      gmailConnected = true;
+      extraCorrespondents = [{ email: "mom@family.com", name: "Mom" }];
+      personalEmails = new Set(["mom@family.com"]);
+    });
+
+    it("hides a personal Gmail thread, keeps a brand thread tagged with its offer, and judges each once", async () => {
+      const summary = await buildNow();
+      expect(summary.relevance).toMatchObject({ status: "ok", judged: 2, notBusinessPeople: 1 });
+      expect(summary.relevance!.topics).toMatchObject({ personal: 1, this_brand: 1 });
+      // Org-billed on the build's run; brand and offers are in what Jev reads.
+      expect(relevanceRequests[0].headers["x-org-id"]).toBe(ORG);
+      expect(relevanceRequests[0].headers["x-run-id"]).toMatch(/^run-/);
+      expect((relevanceRequests[0].body.state as unknown as { offers: { name: string }[] }).offers[0].name).toBe("Pro plan");
+
+      const list = await listPeople();
+      expect(keysOf(list)).not.toContain("email:mom@family.com");
+      expect(list.body.notBusinessHidden).toBe(1);
+      const alice = list.body.people.find((p: { personKey: string }) => p.personKey === "email:alice@x.com");
+      expect(alice).toMatchObject({ notBusiness: false, offerIds: [OFFER] });
+      expect(alice.relevance[0]).toMatchObject({ conversation: "gmail:alice@x.com", topic: "this_brand" });
+
+      const all = await listPeople("&includeNotBusiness=true");
+      expect(keysOf(all)).toContain("email:mom@family.com");
+      expect(all.body.people.find((p: { personKey: string }) => p.personKey === "email:mom@family.com").notBusiness).toBe(true);
+
+      // An offer-scoped read: only the people Jev tied to that offer.
+      expect(keysOf(await listPeople(`&offerId=${OFFER}`))).toEqual(["email:alice@x.com"]);
+      expect(keysOf(await listPeople("&offerId=dddddddd-1111-4111-8111-0000000000f2"))).toEqual([]);
+
+      // A search never reaches a hidden person.
+      expect(keysOf(await listPeople("&q=Mom"))).toEqual([]);
+
+      // A rebuild with nothing new judges nothing (no new bill).
+      relevanceRequests.length = 0;
+      const again = await buildNow();
+      expect(relevanceRequests).toHaveLength(0);
+      expect(again.relevance).toMatchObject({ judged: 0, reused: 2, notBusinessPeople: 1 });
+    });
+
+    it("never hides a person a business source knows, even when Jev calls the thread personal", async () => {
+      personalEmails = new Set(["mom@family.com", "alice@x.com"]);
+      await buildNow();
+      const keys = keysOf(await listPeople());
+      expect(keys).toContain("email:alice@x.com"); // a cold-email lead
+      expect(keys).not.toContain("email:mom@family.com");
+    });
+
+    it("an unjudged thread stays visible: brand-service down hides nobody", async () => {
+      const failing = vi.fn();
+      vi.stubGlobal("fetch", ((orig) => async (input: RequestInfo | URL, init?: RequestInit) => {
+        if (new URL(String(input)).pathname.endsWith("/offers")) {
+          failing();
+          return json({ error: "down" }, 503);
+        }
+        return orig(input, init);
+      })(globalThis.fetch));
+      const summary = await buildNow();
+      expect(failing).toHaveBeenCalled();
+      expect(summary.relevance).toMatchObject({ status: "failed", judged: 0, notBusinessPeople: 0 });
+      expect(keysOf(await listPeople())).toContain("email:mom@family.com");
     });
   });
 

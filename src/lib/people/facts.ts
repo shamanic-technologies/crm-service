@@ -783,7 +783,12 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
   return db.transaction(async (tx) => {
     await tx.execute(FEED_LOCK);
 
-    const personRows = await tx.select().from(people).where(eq(people.scopeId, scope.id));
+    // A person hidden as not about the brand (people/relevance.ts) is nobody to the
+    // feed: their messages are HELD (never emitted), their earlier facts stay put.
+    const personRows = await tx
+      .select()
+      .from(people)
+      .where(and(eq(people.scopeId, scope.id), eq(people.notBusiness, false)));
     const index = new PersonIndex(personRows);
 
     const [ghl, matrix, gmail, posthog, stripe, csv, connected] = await Promise.all([

@@ -48,6 +48,7 @@ import {
   resolveSenderVerdicts,
   type SenderVerdictSummary,
 } from "./automated.js";
+import { personRelevance, resolvePeopleRelevance, type RelevanceSummary } from "./relevance.js";
 import { leadAddressesFirst, resolvePersonState, type GhlDeal, type LeadObservation, type StripeStandingInput } from "./state.js";
 import { indexScopeMessages, type MessageIndexSummary } from "./search.js";
 import { emitScopeFacts, type FactEmissionSummary } from "./facts.js";
@@ -100,6 +101,8 @@ export interface BuildSummary {
   ownAddresses: { status: "ok" | "failed"; addresses: number; domain: string | null; error: string | null };
   /** Jev's human-vs-automated verdicts: how many reused, judged now, still pending; people hidden. */
   senderVerdicts: SenderVerdictSummary;
+  /** Jev's business / brand / offer verdicts on personal-channel conversations; people hidden. */
+  relevance?: RelevanceSummary;
   /** The message search index refresh that followed the build (absent until it ran). */
   messageIndex?: ({ status: "ok" } & MessageIndexSummary) | { status: "failed"; error: string };
   /** The fact feed emission that followed (absent until it ran). */
@@ -282,6 +285,22 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
   // Jev says which addresses are automated senders (judged once per address, recorded).
   const senders = await resolveSenderVerdicts(clusters, identity, gmail.status === "ok");
 
+  // Jev says which personal-channel conversations (Gmail, Matrix) are about THIS
+  // brand and which offer (judged once per conversation, recorded). An automated
+  // sender is already hidden: not judged.
+  const automated = new Map(clusters.map((c) => [c.personKey, isAutomatedPerson(c, senders.verdicts)]));
+  const relevance = await resolvePeopleRelevance(
+    identity,
+    clusters.filter((c) => !automated.get(c.personKey)),
+    gmail.status === "ok",
+  );
+  // A lead-service read that failed may be hiding a lead: never hide on it.
+  const isOurLead = (c: PersonCluster) =>
+    c.emails.some((e) => {
+      const found = standings.observations.get(e)?.found;
+      return found === true || found === "error";
+    });
+
   const rows = clusters.map((c) => {
     const ghlDeals: GhlDeal[] = c.presences
       .filter((p) => p.source === "gohighlevel")
@@ -331,8 +350,11 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       state: state.state,
       stateSource: state.stateSource,
       stateDetail: state.stateDetail,
-      automated: isAutomatedPerson(c, senders.verdicts),
+      automated: automated.get(c.personKey)!,
       automatedVerdict: c.emails.length ? personVerdicts(c.emails, senders.verdicts) : null,
+      ...(automated.get(c.personKey)
+        ? { notBusiness: false, offerIds: [] as string[], relevance: null }
+        : personRelevance(c, relevance.verdicts, isOurLead(c))),
       possibleLeads: c.presences
         .filter((p) => p.source === "gohighlevel")
         .flatMap((p) => possibleLeadsByCrmContact.get(p.sourceRef) ?? [])
@@ -361,6 +383,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     standing: { asked: standings.asked, reused: standings.reused, failed: standings.failed },
     ownAddresses: { status: own.status, addresses: own.addresses.size, domain: own.domain, error: own.error },
     senderVerdicts: { ...senders.summary, automatedPeople: rows.filter((r) => r.automated).length },
+    relevance: { ...relevance.summary, notBusinessPeople: rows.filter((r) => r.notBusiness).length },
   };
 
   await db.transaction(async (tx) => {
@@ -380,7 +403,8 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
   // The people are live; now bring the message search index up to date with them.
   // Its failure does not undo the build: it is recorded beside it and retried next pass.
   try {
-    const indexed = await indexScopeMessages(scope, rows, identity, gmail.status === "ok");
+    // A person hidden as not about the brand keeps no copy of their messages in our index.
+    const indexed = await indexScopeMessages(scope, rows.filter((r) => !r.notBusiness), identity, gmail.status === "ok");
     summary.messageIndex = { status: "ok", ...indexed };
   } catch (err) {
     console.error(`[crm-service] people message index failed scope=${scope.id}:`, err);
@@ -423,7 +447,7 @@ export async function runScopeBuild(scope: PeopleScope): Promise<{ scopeId: stri
     const summary = await buildScopePeople(scope, run.id);
     await updateRun(run.id, "completed", { orgId: scope.orgId, userId: scope.createdByUserId });
     console.log(
-      `[crm-service] people build scope=${scope.id} brand=${scope.brandId} people=${summary.people} automated=${summary.senderVerdicts.automatedPeople} judged=${summary.senderVerdicts.judged} pending=${summary.senderVerdicts.pending} facts=${summary.facts?.status === "ok" ? `+${summary.facts.emitted}/-${summary.facts.corrected + summary.facts.withdrawnGone}` : summary.facts?.status} sources=${summary.sources
+      `[crm-service] people build scope=${scope.id} brand=${scope.brandId} people=${summary.people} automated=${summary.senderVerdicts.automatedPeople} notBusiness=${summary.relevance?.notBusinessPeople} relevanceJudged=${summary.relevance?.judged} relevancePending=${summary.relevance?.pending} judged=${summary.senderVerdicts.judged} pending=${summary.senderVerdicts.pending} facts=${summary.facts?.status === "ok" ? `+${summary.facts.emitted}/-${summary.facts.corrected + summary.facts.withdrawnGone}` : summary.facts?.status} sources=${summary.sources
         .map((s) => `${s.source}:${s.status}:${s.presences}`)
         .join(",")}`,
     );

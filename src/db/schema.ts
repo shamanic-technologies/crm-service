@@ -982,6 +982,15 @@ export const people = pgTable(
     automated: boolean("automated").notNull().default(false),
     automatedVerdict: jsonb("automated_verdict"),
 
+    // Jev said none of the person's conversations is about THIS brand (personal
+    // life, or another business of the owner): hidden from the list by default.
+    // Only a person known from a personal channel ALONE (Gmail, Matrix) can be;
+    // see people/relevance.ts. `relevance` = the per-conversation verdicts,
+    // `offer_ids` = the brand's offers those conversations are about.
+    notBusiness: boolean("not_business").notNull().default(false),
+    relevance: jsonb("relevance"),
+    offerIds: jsonb("offer_ids").notNull().default([]),
+
     // CRM contacts lead-service paired with one of our leads on a GUESS
     // (`toConfirm`): shown beside the person, never merged into it.
     possibleLeads: jsonb("possible_leads").notNull().default([]),
@@ -1176,6 +1185,48 @@ export const senderVerdicts = pgTable(
     decidedAt: timestamp("decided_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [uniqueIndex("sender_verdicts_org_email_uq").on(table.orgId, table.email)],
+);
+
+/**
+ * Whether one conversation from an owner's PERSONAL channel (a Gmail
+ * correspondent, a Matrix-bridged DM) is about THIS brand, as Jev judged it
+ * (chat-service `POST /orgs/judgments`): `topic` = personal | other_business |
+ * this_brand, plus one yes/no per active offer of the brand. See
+ * people/relevance.ts.
+ *
+ * Keyed per (org, brand, conversation): Gmail is connected per ORG and shared
+ * by every brand of the org, so the same thread is judged once per brand.
+ * Re-judged only when the conversation moved (`judged_through` = its last
+ * activity / last event id) or the brand's context changed (`context_hash`).
+ */
+export const conversationVerdicts = pgTable(
+  "conversation_verdicts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    // gmail:<address> | matrix:<conversation id>
+    conversationKey: text("conversation_key").notNull(),
+    source: text("source").notNull(),
+    // personal | other_business | this_brand
+    topic: text("topic").notNull(),
+    confidence: doublePrecision("confidence").notNull(),
+    probabilities: jsonb("probabilities").notNull(),
+    // Jev's probability that the conversation is about this brand.
+    brandProbability: doublePrecision("brand_probability").notNull(),
+    // offerId -> Jev's yes-probability; offer_ids = the ones at or above the bar.
+    offerScores: jsonb("offer_scores").notNull(),
+    offerIds: jsonb("offer_ids").notNull(),
+    contextHash: text("context_hash").notNull(),
+    judgedThrough: text("judged_through").notNull(),
+    input: jsonb("input").notNull(),
+    model: text("model").notNull(),
+    runId: text("run_id").notNull(),
+    judgedAt: timestamp("judged_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("conversation_verdicts_org_brand_key_uq").on(table.orgId, table.brandId, table.conversationKey),
+  ],
 );
 
 /**

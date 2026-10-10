@@ -51,6 +51,7 @@ import {
   peopleFacts,
   personIds,
   personIdAliases,
+  conversationVerdicts,
 } from "../db/schema.js";
 
 export const TRANSFER_TABLES: PgTable[] = [
@@ -85,6 +86,8 @@ export const TRANSFER_TABLES: PgTable[] = [
   // The person-id memory follows too, so a moved person keeps their id.
   personIds,
   personIdAliases,
+  // Jev's business / brand / offer verdicts on the brand's conversations.
+  conversationVerdicts,
 ];
 
 export interface TransferBrandInput {
