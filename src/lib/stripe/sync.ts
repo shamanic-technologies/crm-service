@@ -41,7 +41,15 @@ import {
   type DerivedTransaction,
 } from "./records.js";
 
+/** The key-service provider of a brand's FIRST Stripe account (every connection made before several existed). */
 export const STRIPE_PROVIDER = "stripe";
+/**
+ * Every Stripe key of a brand is stored in key-service under its own provider
+ * name: `stripe` for the first account, `stripe-<label>` for each further one
+ * (the caller picks the label). key-service registers any provider name on
+ * first store, so N keys coexist with no change there.
+ */
+export const STRIPE_PROVIDER_PATTERN = /^stripe(-[a-z0-9][a-z0-9_-]{0,47})?$/;
 export const STRIPE_RECENT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 export const STRIPE_FULL_RESYNC_MS = 24 * 60 * 60 * 1000;
 
@@ -228,7 +236,7 @@ export async function syncStripeConnection(conn: StripeConnection): Promise<Stri
   });
   const identity = { orgId: conn.orgId, userId: conn.createdByUserId, runId: run.id, brandIds: [conn.brandId] };
   try {
-    const key = await resolveBrandCredential(STRIPE_PROVIDER, "Stripe", conn.brandId, {
+    const key = await resolveBrandCredential(conn.credentialProvider, "Stripe", conn.brandId, {
       orgId: conn.orgId,
       userId: conn.createdByUserId,
       runId: run.id,

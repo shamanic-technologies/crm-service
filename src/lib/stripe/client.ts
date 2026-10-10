@@ -95,11 +95,45 @@ async function stripeGet(key: string, path: string, params: Record<string, strin
  * each. A key missing a permission is refused by Stripe naming the permission
  * it lacks — that message is what tells the customer what to tick.
  */
-export async function verifyStripeAccess(key: string): Promise<void> {
+export async function verifyStripeAccess(key: string): Promise<Record<StripeKind, string[]>> {
+  const seen = {} as Record<StripeKind, string[]>;
   for (const kind of STRIPE_KINDS) {
     const r = STRIPE_RESOURCES[kind];
-    await stripeGet(key, r.path, { ...r.params, limit: "1" });
+    const body = await stripeGet(key, r.path, { ...r.params, limit: "1" });
+    // The newest object of each kind: what tells two keys of ONE account apart from two accounts.
+    seen[kind] = body.data.map((o) => o.id);
   }
+  return seen;
+}
+
+export interface StripeAccountIdentity {
+  id: string;
+  name: string | null;
+}
+
+/**
+ * Which Stripe account the key reads, in Stripe's words (`GET /v1/account`):
+ * its id and the name its owner gave it. A restricted key may lack the
+ * permission to read the account; Stripe then refuses (401/403) and the
+ * identity is unknown (null), which is not a reason to refuse the connection.
+ * Any other failure is thrown.
+ */
+export async function readStripeAccount(key: string): Promise<StripeAccountIdentity | null> {
+  let body: Record<string, unknown>;
+  try {
+    body = (await stripeGet(key, "/v1/account", {})) as unknown as Record<string, unknown>;
+  } catch (err) {
+    if (err instanceof StripeError && (err.status === 401 || err.status === 403)) return null;
+    throw err;
+  }
+  if (typeof body.id !== "string") return null;
+  const settings = body.settings as { dashboard?: { display_name?: unknown } } | undefined;
+  const profile = body.business_profile as { name?: unknown } | undefined;
+  const name =
+    (typeof settings?.dashboard?.display_name === "string" && settings.dashboard.display_name) ||
+    (typeof profile?.name === "string" && profile.name) ||
+    null;
+  return { id: body.id, name };
 }
 
 /** Every object of a kind, newest first, optionally only those created since `since`. */

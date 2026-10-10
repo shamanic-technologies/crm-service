@@ -612,7 +612,45 @@ registry.registerPath({
 
 // ─── Matrix self-serve linking (/orgs/matrix/links) ─────────────────────────
 
-const LinkMethodSchema = z.enum(["qr", "phone"]);
+const LinkMethodSchema = z.enum(["qr", "phone", "password", "cookies"]).openapi({
+  description:
+    "WhatsApp: 'qr' (scan in WhatsApp › Linked devices) or 'phone' (8-character pairing code). " +
+    "LinkedIn: 'password' (email or phone + password; LinkedIn may then email a 6-digit code) or " +
+    "'cookies' (values read from a logged-in browser). A channel's `methods` lists what it offers.",
+});
+
+const LinkInputSchema = z
+  .object({
+    type: z.string().openapi({ description: "'user_input' (a form of `fields`) or 'cookies' (see `cookies`)." }),
+    stepId: z.string(),
+    instructions: z.string().nullable(),
+    fields: z.array(
+      z.object({
+        id: z.string().openapi({ description: "The key to send the value under in `input`." }),
+        type: z.string().openapi({ description: "bridgev2 field type: email, phone_number, password, 2fa_code, select, …" }),
+        name: z.string().nullable(),
+        description: z.string().nullable(),
+        pattern: z.string().nullable(),
+        options: z.array(z.string()).nullable(),
+      }),
+    ),
+    cookies: z
+      .object({
+        url: z.string().nullable(),
+        userAgent: z.string().nullable(),
+        extractJs: z.string().nullable(),
+        fields: z.array(
+          z.object({
+            id: z.string(),
+            required: z.boolean(),
+            sources: z.array(z.object({ type: z.string(), name: z.string(), cookieDomain: z.string().nullable() })),
+            pattern: z.string().nullable(),
+          }),
+        ),
+      })
+      .nullable(),
+  })
+  .openapi("MatrixLinkInput");
 
 export const MatrixLinkStartRequestSchema = registry.register(
   "MatrixLinkStartRequest",
@@ -620,14 +658,19 @@ export const MatrixLinkStartRequestSchema = registry.register(
     .object({
       brandId: z.string().uuid(),
       channel: MatrixChannelSchema,
-      method: LinkMethodSchema.openapi({
-        description:
-          "'qr' = scan a QR code in WhatsApp › Linked devices. 'phone' = get an 8-character pairing " +
-          "code to type under Linked devices › Link with phone number instead.",
-      }),
+      method: LinkMethodSchema.optional().openapi({ description: "Required to start or relink. Absent when answering `input`." }),
       phoneNumber: z.string().optional().openapi({
         description: "Required for 'phone'. International format.",
         example: "+33612345678",
+      }),
+      linkId: z.string().uuid().optional().openapi({
+        description:
+          "With `input`: the link whose waiting step is answered. With `method` alone: relink THAT account " +
+          "(expired session, same mirror). Absent: ADD a new account (a fresh flow; linked accounts untouched).",
+      }),
+      input: z.record(z.string(), z.string()).optional().openapi({
+        description: "Answer to the link's waiting step (`link.input`): field id → value. Relayed to the bridge, never stored.",
+        example: { identifier: "me@example.com", password: "…" },
       }),
     })
     .openapi("MatrixLinkStartRequest"),
@@ -638,6 +681,7 @@ export const MatrixLinkSchema = registry.register(
   z
     .object({
       channel: MatrixChannelSchema,
+      linkId: z.string().uuid().nullable().openapi({ description: "This account's link. Null on a channel with nothing linked or attempted." }),
       available: z.boolean().openapi({
         description: "False while the channel's bridge is not running (Telegram today).",
       }),
@@ -656,6 +700,9 @@ export const MatrixLinkSchema = registry.register(
         .string()
         .nullable()
         .openapi({ description: "Present while waiting on a pairing code entry.", example: "ABCD-EFGH" }),
+      input: LinkInputSchema.nullable().openapi({
+        description: "Present while the bridge waits for the USER (LinkedIn login form, emailed code, cookies): answer with POST {linkId, input}.",
+      }),
       instructions: z.string().nullable(),
       codeIssuedAt: z.string().nullable(),
       account: z
@@ -667,6 +714,10 @@ export const MatrixLinkSchema = registry.register(
         .nullable()
         .openapi({ description: "Linked only: the bridge's live state, e.g. CONNECTED or BAD_CREDENTIALS." }),
       bridgeStateError: z.string().nullable(),
+      needsRelink: z.boolean().openapi({
+        description: "The bridge says the session is gone (BAD_CREDENTIALS / LOGGED_OUT): POST {channel, method, linkId} to relink it.",
+      }),
+      linkedAccounts: z.number().int().openapi({ description: "Accounts currently linked on this channel for the brand." }),
       connection: z
         .object({
           id: z.string().uuid(),
@@ -689,16 +740,18 @@ export const MatrixLinkSchema = registry.register(
 registry.registerPath({
   method: "post",
   path: "/orgs/matrix/links",
-  summary: "Start linking a brand's WhatsApp (or Telegram) account, self-serve",
+  summary: "Link an account (WhatsApp, LinkedIn), answer its login step, or relink it — self-serve",
   description:
-    "Creates the brand's dedicated bridge account and starts a login. Answers with the first QR code " +
-    "or pairing code; poll GET /orgs/matrix/links for refreshed codes and completion. Once linked, the " +
-    "brand's Matrix connection exists and syncs with no further step. Read-only: nothing is ever sent " +
-    "on the linked account. Needs x-user-id.",
+    "Without `linkId`: ADDS an account — a dedicated bridge account and a fresh login (a brand links N " +
+    "accounts per channel; accounts already linked are untouched). With `linkId` + `method`: relinks that " +
+    "account. With `linkId` + `input`: answers the step it waits on. Answers `{ link }` = that account: " +
+    "a QR, a pairing code, or `input` (a form to fill). Poll GET /orgs/matrix/links for refreshed codes, " +
+    "the next step and completion. The same remote account linked twice fails with ACCOUNT_ALREADY_LINKED. " +
+    "Read-only: nothing is ever sent on a linked account. Needs x-user-id.",
   request: { body: { content: { "application/json": { schema: MatrixLinkStartRequestSchema } } } },
   responses: {
     200: {
-      description: "Link started (or already linked)",
+      description: "The account's link",
       content: { "application/json": { schema: z.object({ link: MatrixLinkSchema }) } },
     },
     400: { description: "Bad request", content: { "application/json": { schema: ErrorResponseSchema } } },
@@ -710,7 +763,8 @@ registry.registerPath({
         },
       },
     },
-    422: { description: "The bridge (or WhatsApp) refused, in its own words; `link` shows the failed state" },
+    404: { description: "linkId names no link of this brand + channel", content: { "application/json": { schema: ErrorResponseSchema } } },
+    422: { description: "The bridge (or WhatsApp / LinkedIn) refused, in its own words; `link` shows the failed state" },
     502: { description: "The bridge is unreachable or broke" },
   },
 });
@@ -722,8 +776,12 @@ registry.registerPath({
   request: { query: z.object({ brandId: z.string().uuid() }) },
   responses: {
     200: {
-      description: "One entry per channel",
-      content: { "application/json": { schema: z.object({ links: z.array(MatrixLinkSchema) }) } },
+      description: "`links` = one entry per channel (its tile); `accounts` = every account linked or in progress",
+      content: {
+        "application/json": {
+          schema: z.object({ links: z.array(MatrixLinkSchema), accounts: z.array(MatrixLinkSchema) }),
+        },
+      },
     },
   },
 });
@@ -731,8 +789,14 @@ registry.registerPath({
 registry.registerPath({
   method: "delete",
   path: "/orgs/matrix/links/{channel}",
-  summary: "Unlink a channel: logout, stop syncing, drop what was mirrored",
-  request: { params: z.object({ channel: MatrixChannelSchema }), query: z.object({ brandId: z.string().uuid() }) },
+  summary: "Unlink ONE account: logout, stop syncing, drop what was mirrored for it",
+  description:
+    "`linkId` names the account; every other account is untouched. Without it the channel's only account " +
+    "is meant, and a channel holding several answers 409 `link_id_required` with their `linkIds`.",
+  request: {
+    params: z.object({ channel: MatrixChannelSchema }),
+    query: z.object({ brandId: z.string().uuid(), linkId: z.string().uuid().optional() }),
+  },
   responses: {
     200: {
       description: "Unlinked",
@@ -740,6 +804,7 @@ registry.registerPath({
         "application/json": {
           schema: z.object({
             unlinked: z.literal(true),
+            linkId: z.string().uuid(),
             contactsRemoved: z.number().int(),
             connectionRemoved: z.boolean(),
             link: MatrixLinkSchema,
@@ -748,6 +813,7 @@ registry.registerPath({
       },
     },
     404: { description: "No link", content: { "application/json": { schema: ErrorResponseSchema } } },
+    409: { description: "Several accounts on this channel and no linkId (`type: link_id_required`, `linkIds`)" },
     502: { description: "The bridge could not log the account out" },
   },
 });
@@ -1856,6 +1922,14 @@ export const StripeConnectionSchema = registry.register(
       id: z.string().uuid(),
       brandId: z.string().uuid(),
       keyMode: z.enum(["live", "test"]).openapi({ description: "Read off the restricted key's own prefix (rk_live_ / rk_test_)." }),
+      credentialProvider: z.string().openapi({
+        description: "The key-service provider this account's key is stored under: 'stripe' (first account) or 'stripe-<label>'.",
+        example: "stripe",
+      }),
+      account: z
+        .object({ id: z.string(), name: z.string().nullable() })
+        .nullable()
+        .openapi({ description: "The Stripe account the key reads (GET /v1/account). Null when the key may not read it." }),
       status: VendorConnectionStatus,
       synced: z.boolean(),
       lastSyncedAt: z.string().nullable(),
@@ -1888,10 +1962,18 @@ for (const v of [
     slug: "stripe",
     label: "Stripe",
     schema: StripeConnectionSchema,
-    body: z.object({ brandId: z.string().uuid() }),
+    body: z.object({
+      brandId: z.string().uuid(),
+      credentialProvider: z.string().regex(/^stripe(-[a-z0-9][a-z0-9_-]{0,47})?$/).optional().openapi({
+        description:
+          "Which key-service provider holds THIS account's key. Default 'stripe' (the first account). Store each further " +
+          "account's key under its own name ('stripe-<label>') and pass it here: a brand connects N accounts.",
+        example: "stripe-eu",
+      }),
+    }),
     extra: {},
     description:
-      "Resolves the brand's Stripe key from key-service (provider `stripe`, brand-scoped, no org fallback). Only a RESTRICTED key (rk_live_… / rk_test_…) with READ permission on Customers, Charges, Refunds and Subscriptions is accepted: a secret key can move money and is refused before any call. The key is proven by one read of each resource; a missing permission comes back 400 with Stripe's own status and message. Read-only: nothing is ever written to Stripe. Requires x-api-key, x-org-id, x-user-id.",
+      "A brand connects N Stripe accounts, one connection per key-service provider name (`stripe`, `stripe-<label>`); every Stripe read (payments, customers matched to people) covers all of them. The same account connected twice answers 409 `stripe_account_already_connected`. Resolves the account's Stripe key from key-service (brand-scoped, no org fallback). Only a RESTRICTED key (rk_live_… / rk_test_…) with READ permission on Customers, Charges, Refunds and Subscriptions is accepted: a secret key can move money and is refused before any call. The key is proven by one read of each resource; a missing permission comes back 400 with Stripe's own status and message. Read-only: nothing is ever written to Stripe. Requires x-api-key, x-org-id, x-user-id.",
   },
 ] as const) {
   registry.registerPath({

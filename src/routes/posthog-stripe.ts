@@ -12,10 +12,10 @@
  */
 
 import { Router, type Response } from "express";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, ne } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../db/index.js";
-import { contacts, posthogConnections, stripeConnections } from "../db/schema.js";
+import { contacts, posthogConnections, stripeConnections, stripeRawRecords } from "../db/schema.js";
 import {
   apiKeyAuth,
   requireOrg,
@@ -28,9 +28,14 @@ import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { countIdentifiedPersons, PosthogError, POSTHOG_REGIONS } from "../lib/posthog/client.js";
 import { POSTHOG_SOURCE } from "../lib/posthog/records.js";
 import { POSTHOG_PROVIDER, rebuildPosthogFromBronze, runPosthogSyncPass, targetOf } from "../lib/posthog/sync.js";
-import { restrictedKeyMode, StripeError, verifyStripeAccess } from "../lib/stripe/client.js";
+import { readStripeAccount, restrictedKeyMode, StripeError, verifyStripeAccess } from "../lib/stripe/client.js";
 import { STRIPE_SOURCE } from "../lib/stripe/records.js";
-import { rebuildStripeFromBronze, runStripeSyncPass, STRIPE_PROVIDER } from "../lib/stripe/sync.js";
+import {
+  rebuildStripeFromBronze,
+  runStripeSyncPass,
+  STRIPE_PROVIDER,
+  STRIPE_PROVIDER_PATTERN,
+} from "../lib/stripe/sync.js";
 
 const router = Router();
 const uuid = z.string().uuid();
@@ -56,6 +61,8 @@ function stripeView(row: typeof stripeConnections.$inferSelect) {
     id: row.id,
     brandId: row.brandId,
     keyMode: row.keyMode,
+    credentialProvider: row.credentialProvider,
+    account: row.accountId ? { id: row.accountId, name: row.accountName } : null,
     status: row.status,
     synced: row.lastSyncedAt !== null,
     lastSyncedAt: row.lastSyncedAt,
@@ -222,22 +229,38 @@ router.delete(
 // ─── Stripe connections ──────────────────────────────────────────────────────
 
 /**
- * Connect a brand's Stripe account. The brand's RESTRICTED key (stored in
- * key-service under provider `stripe`, read permission on Customers, Charges,
- * Refunds and Subscriptions) is required: a secret key `sk_…` can move money
- * and is refused before any call. The key is then proven by one read of each
- * resource the sync needs; a missing permission comes back in Stripe's words.
+ * Connect one of a brand's Stripe accounts. A brand connects N accounts, each
+ * with its own RESTRICTED key stored in key-service under its own provider name
+ * (`credentialProvider`: `stripe` for the first, the default, `stripe-<label>`
+ * for each further one). Re-posting the same `credentialProvider` re-proves and
+ * re-activates THAT connection; another name adds an account.
+ *
+ * The key needs READ permission on Customers, Charges, Refunds and
+ * Subscriptions; a secret key `sk_…` can move money and is refused before any
+ * call. It is proven by one read of each resource; a missing permission comes
+ * back in Stripe's words. The account it reads is named from Stripe
+ * (`GET /v1/account`) when the key may read it. The same account connected
+ * twice would count every payment twice: refused (409) on the account id, or
+ * when the key's newest objects are already mirrored by another connection.
  */
 router.post(
   "/orgs/stripe/connections",
   apiKeyAuth,
   requireOrgAndUser("stripe.connections.create"),
   async (req: AuthenticatedRequest, res, next) => {
-    const parsed = z.object({ brandId: uuid }).safeParse(req.body ?? {});
-    if (!parsed.success) return res.status(400).json({ type: "validation", error: "brandId (uuid) is required" });
+    const parsed = z
+      .object({ brandId: uuid, credentialProvider: z.string().regex(STRIPE_PROVIDER_PATTERN).optional() })
+      .safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        type: "validation",
+        error: "brandId (uuid) is required; credentialProvider, when given, is 'stripe' or 'stripe-<label>' (a-z, 0-9, - _)",
+      });
+    }
     const { brandId } = parsed.data;
+    const credentialProvider = parsed.data.credentialProvider ?? STRIPE_PROVIDER;
     try {
-      const key = await credentialOr4xx(req, res, STRIPE_PROVIDER, "Stripe", brandId);
+      const key = await credentialOr4xx(req, res, credentialProvider, "Stripe", brandId);
       if (key === null) return;
       const keyMode = restrictedKeyMode(key);
       if (!keyMode) {
@@ -247,18 +270,68 @@ router.post(
             "the stored Stripe key is not a restricted key (rk_live_… / rk_test_…). Create a restricted key with READ permission on Customers, Charges, Refunds and Subscriptions and store that one: a secret key can move money and is never accepted.",
         });
       }
+      let newest: Record<string, string[]>;
+      let account: Awaited<ReturnType<typeof readStripeAccount>>;
       try {
-        await verifyStripeAccess(key);
+        newest = await verifyStripeAccess(key);
+        account = await readStripeAccount(key);
       } catch (err) {
         if (err instanceof StripeError) return vendorRefusal(res, "Stripe", err.status, err.vendorMessage);
         throw err;
       }
+
+      const others = await db
+        .select()
+        .from(stripeConnections)
+        .where(
+          and(
+            eq(stripeConnections.orgId, req.orgId!),
+            eq(stripeConnections.brandId, brandId),
+            ne(stripeConnections.credentialProvider, credentialProvider),
+          ),
+        );
+      const sameAccount = account ? others.find((o) => o.accountId === account!.id) : undefined;
+      const sampleIds = Object.values(newest).flat();
+      const [overlap] =
+        !sameAccount && others.length && sampleIds.length
+          ? await db
+              .select({ connectionId: stripeRawRecords.connectionId })
+              .from(stripeRawRecords)
+              .where(
+                and(
+                  inArray(
+                    stripeRawRecords.connectionId,
+                    others.map((o) => o.id),
+                  ),
+                  inArray(stripeRawRecords.externalId, sampleIds),
+                ),
+              )
+              .limit(1)
+          : [];
+      const twin = sameAccount?.id ?? overlap?.connectionId;
+      if (twin) {
+        return res.status(409).json({
+          type: "stripe_account_already_connected",
+          error: "This Stripe account is already connected to this brand.",
+          connectionId: twin,
+        });
+      }
+
+      const identity = { accountId: account?.id ?? null, accountName: account?.name ?? null };
       const [row] = await db
         .insert(stripeConnections)
-        .values({ orgId: req.orgId!, brandId, keyMode, createdByUserId: req.userId!, status: "active" })
+        .values({
+          orgId: req.orgId!,
+          brandId,
+          credentialProvider,
+          keyMode,
+          ...identity,
+          createdByUserId: req.userId!,
+          status: "active",
+        })
         .onConflictDoUpdate({
-          target: [stripeConnections.orgId, stripeConnections.brandId],
-          set: { keyMode, createdByUserId: req.userId!, status: "active", lastError: null },
+          target: [stripeConnections.orgId, stripeConnections.brandId, stripeConnections.credentialProvider],
+          set: { keyMode, ...identity, createdByUserId: req.userId!, status: "active", lastError: null },
         })
         .returning();
       res.json({ connection: stripeView(row) });

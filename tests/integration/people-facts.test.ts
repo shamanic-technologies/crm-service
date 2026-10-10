@@ -427,6 +427,37 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
     expect(await maxSeq()).toBe(before);
   });
 
+  it("a counterpart on two linked accounts of one channel never re-mints on every pass", async () => {
+    const s = await seed();
+    // The brand links a second WhatsApp; Alice writes to it too (same bridge handle, its own contact row).
+    const [mx2] = await db
+      .insert(matrixConnections)
+      .values({ orgId: ORG, brandId: BRAND, channel: "whatsapp", matrixUserId: "@rep:hs", counterpartPrefix: "@whatsapp_", createdByUserId: USER })
+      .returning();
+    const [aliceWa2] = await db
+      .insert(contacts)
+      .values({ orgId: ORG, brandId: BRAND, source: "matrix", channel: "whatsapp", channelHandle: "@whatsapp_33612345678:hs", phoneE164: "+33612345678", fullName: "Alice", rawAttributes: {}, sourceConnectionId: mx2.id })
+      .returning();
+    await db.insert(conversations).values({
+      orgId: ORG, brandId: BRAND, connectionId: mx2.id, contactId: aliceWa2.id, channel: "whatsapp", roomId: "!room2",
+      firstMessageAt: new Date("2026-09-05T12:00:00Z"), lastMessageAt: new Date("2026-09-05T12:00:00Z"),
+      messageCount: 1, inboundCount: 1, outboundCount: 0, lastEventId: "$e3",
+    });
+    await db.insert(matrixRawEvents).values({
+      orgId: ORG, brandId: BRAND, connectionId: mx2.id, eventId: "$e3", roomId: "!room2", sender: "@whatsapp_33612345678:hs",
+      eventType: "m.room.message", originServerTs: new Date("2026-09-05T12:00:00Z"), payload: { content: { body: "Hello rep", msgtype: "m.text" } },
+    });
+    await emitScopeFacts(s.scope);
+    const facts = await allFacts();
+    expect(facts.find((f) => f.sourceRef === "$e3")).toMatchObject({ crmContactId: aliceWa2.id });
+    expect(facts.find((f) => f.sourceRef === "$e1")).toMatchObject({ crmContactId: s.aliceWa });
+    const before = await maxSeq();
+    const again = await emitScopeFacts(s.scope);
+    expect(again.reminted).toBe(0);
+    expect(again.emitted).toBe(0);
+    expect(await maxSeq()).toBe(before);
+  });
+
   it("a changed vendor record is withdrawn and re-stated; a vanished snapshot record is withdrawn", async () => {
     const s = await seed();
     await emitScopeFacts(s.scope);

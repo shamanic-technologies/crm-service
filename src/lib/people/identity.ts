@@ -142,6 +142,18 @@ export function clusterPeople(presences: Presence[], evidence: Evidence[]): Pers
 
   const presenceKeys = presences.map((p) => keysOf(p, presenceFallbackKey(p)));
   presenceKeys.forEach(union);
+  // A brand linking two accounts on one channel (two WhatsApp numbers) holds one
+  // Matrix contact per account for a counterpart who wrote to both. The bridge
+  // names that counterpart with ONE handle on both accounts: that handle is the
+  // positive evidence they are one person (WhatsApp LID handles carry no phone).
+  const byHandle = new Map<string, number>();
+  presences.forEach((p, i) => {
+    const handle = p.source === "matrix" && typeof p.detail.channelHandle === "string" ? p.detail.channelHandle : null;
+    if (!handle) return;
+    const first = byHandle.get(handle);
+    if (first === undefined) byHandle.set(handle, i);
+    else union([presenceKeys[first][0], presenceKeys[i][0]]);
+  });
   const evidenceKeys = evidence.map((e) => keysOf(e, null));
   evidenceKeys.forEach((keys) => {
     if (keys.length > 0) union(keys);

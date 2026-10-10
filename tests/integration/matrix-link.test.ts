@@ -26,6 +26,8 @@ process.env.MATRIX_HOMESERVER_URL = "http://hs.test";
 process.env.MATRIX_APPSERVICE_TOKEN = AS_TOKEN;
 process.env.MATRIX_WHATSAPP_PROVISIONING_URL = "http://wa.test";
 process.env.MATRIX_WHATSAPP_PROVISIONING_SECRET = SECRET;
+process.env.MATRIX_LINKEDIN_PROVISIONING_URL = "http://li.test";
+process.env.MATRIX_LINKEDIN_PROVISIONING_SECRET = SECRET;
 delete process.env.MATRIX_TELEGRAM_PROVISIONING_URL;
 delete process.env.MATRIX_TELEGRAM_PROVISIONING_SECRET;
 process.env.MATRIX_INGESTION_FLOOR = "2026-08-01";
@@ -44,6 +46,8 @@ let syncAuth: string[] = [];
 let pendingWaits: Deferred[] = [];
 let logouts: string[] = [];
 let processSeq = 0;
+/** The bridge login each Matrix account holds (whoami), by account. Absent = the default number. */
+let logins: Record<string, { id: string; name: string; state: string }> = {};
 
 function qrStep(processId: string, data: string) {
   return {
@@ -62,6 +66,7 @@ function installFetchStub() {
   syncAuth = [];
   pendingWaits = [];
   logouts = [];
+  logins = {};
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     const auth = new Headers(init?.headers).get("authorization");
@@ -88,6 +93,51 @@ function installFetchStub() {
         syncAuth.push(auth ?? "");
         return json({ next_batch: "s1", rooms: { join: {} } });
       }
+    }
+    if (url.host === "li.test") {
+      // mautrix-linkedin: password flow = credentials form, then the code LinkedIn emails.
+      const userId = url.searchParams.get("user_id")!;
+      const path = url.pathname.replace("/_matrix/provision/v3", "");
+      bridgeCalls.push({ path, userId, auth, body });
+      if (auth !== `Bearer ${SECRET}`) return json({ errcode: "M_UNKNOWN_TOKEN", error: "Invalid auth token" }, 401);
+      if (path === "/login/start/password") {
+        return json({
+          login_id: `li-${++processSeq}`,
+          type: "user_input",
+          step_id: "fi.mau.linkedin.login.credentials",
+          instructions: "Enter your LinkedIn email or phone and password",
+          user_input: {
+            fields: [
+              { type: "email", id: "identifier", name: "Email or phone" },
+              { type: "password", id: "password", name: "Password" },
+            ],
+          },
+        });
+      }
+      if (path.endsWith("/fi.mau.linkedin.login.credentials/user_input")) {
+        if (body.password === "wrong") {
+          return json({ errcode: "FI.MAU.LINKEDIN.BAD_CREDENTIALS", error: "Wrong email or password" }, 400);
+        }
+        return json({
+          login_id: path.split("/")[3],
+          type: "user_input",
+          step_id: "fi.mau.linkedin.login.email_code",
+          instructions: "LinkedIn emailed you a code",
+          user_input: { fields: [{ type: "2fa_code", id: "code", name: "Code", pattern: "^[0-9]{6}$" }] },
+        });
+      }
+      if (path.endsWith("/fi.mau.linkedin.login.email_code/user_input")) {
+        return json({
+          login_id: path.split("/")[3],
+          type: "complete",
+          step_id: "fi.mau.linkedin.login.complete",
+          instructions: "Logged in as Jane Doe",
+          complete: { user_login_id: "ACoAAjane" },
+        });
+      }
+      if (path.startsWith("/login/cancel/")) return json({});
+      if (path === "/logout/all") return json({});
+      if (path === "/whoami") return json({ logins: [{ id: "ACoAAjane", name: "Jane Doe", state: { state_event: "CONNECTED" } }] });
     }
     if (url.host === "wa.test") {
       const userId = url.searchParams.get("user_id")!;
@@ -121,9 +171,8 @@ function installFetchStub() {
       if (path.startsWith("/login/cancel/")) return json({});
       if (path === "/logout/all") return json({});
       if (path === "/whoami") {
-        return json({
-          logins: [{ id: "33612345678", name: "+33 6 12 34 56 78", state: { state_event: "CONNECTED" } }],
-        });
+        const l = logins[userId] ?? { id: "33612345678", name: "+33 6 12 34 56 78", state: "CONNECTED" };
+        return json({ logins: [{ id: l.id, name: l.name, state: { state_event: l.state } }] });
       }
     }
     throw new Error(`unexpected fetch ${url.toString()}`);
@@ -367,5 +416,253 @@ describe.skipIf(!RUN)("self-serve Matrix linking", () => {
 
     // A second unlink has nothing to do.
     expect((await request(app()).delete(`/orgs/matrix/links/whatsapp?brandId=${BRAND}`).set(headers)).status).toBe(404);
+  });
+
+  // ─── Several accounts per channel ─────────────────────────────────────────
+
+  async function linkWhatsApp(remoteId: string) {
+    const res = await request(app())
+      .post("/orgs/matrix/links")
+      .set(headers)
+      .send({ brandId: BRAND, channel: "whatsapp", method: "qr" });
+    expect(res.status).toBe(200);
+    const link = res.body.link;
+    expect(link.status).toBe("waiting");
+    const account = registered[registered.length - 1];
+    logins[account] = { id: remoteId, name: `+${remoteId}`, state: "CONNECTED" };
+    (await nextWait()).resolve(
+      json({ login_id: `proc-${processSeq}`, type: "complete", step_id: "c", complete: { user_login_id: remoteId } }),
+    );
+    for (let i = 0; i < 100; i++) {
+      const [row] = await db.select().from(matrixLinks).where(eq(matrixLinks.id, link.linkId));
+      if (row.status === "linked") break;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    return { linkId: link.linkId as string, account };
+  }
+
+  async function accounts() {
+    const res = await request(app()).get(`/orgs/matrix/links?brandId=${BRAND}`).set(headers);
+    expect(res.status).toBe(200);
+    return res.body.accounts.filter((a: { channel: string }) => a.channel === "whatsapp");
+  }
+
+  it("a second WhatsApp: a fresh QR on its own account, the first stays linked; unlink one leaves the other", async () => {
+    const first = await linkWhatsApp("33611111111");
+
+    // Starting again while one account is linked ADDS an account.
+    const res = await request(app())
+      .post("/orgs/matrix/links")
+      .set(headers)
+      .send({ brandId: BRAND, channel: "whatsapp", method: "qr" });
+    expect(res.status).toBe(200);
+    expect(res.body.link).toMatchObject({ status: "waiting", qr: { data: "2@first-qr" } });
+    expect(res.body.link.linkId).not.toBe(first.linkId);
+    expect(registered).toHaveLength(2);
+    const during = await accounts();
+    expect(during.map((a: { status: string }) => a.status).sort()).toEqual(["linked", "waiting"]);
+    expect(during.find((a: { linkId: string }) => a.linkId === first.linkId)).toMatchObject({
+      status: "linked",
+      account: { id: "33611111111" },
+      linkedAccounts: 1,
+    });
+
+    const secondAccount = registered[1];
+    logins[secondAccount] = { id: "33622222222", name: "+33622222222", state: "CONNECTED" };
+    (await nextWait()).resolve(
+      json({ login_id: `proc-${processSeq}`, type: "complete", step_id: "c", complete: { user_login_id: "33622222222" } }),
+    );
+    await settle();
+    const both = await accounts();
+    expect(both).toHaveLength(2);
+    expect(both.every((a: { status: string }) => a.status === "linked")).toBe(true);
+    expect(both.map((a: { account: { id: string } }) => a.account.id).sort()).toEqual(["33611111111", "33622222222"]);
+    expect(both[0].linkedAccounts).toBe(2);
+    const conns = await db.select().from(matrixConnections).where(eq(matrixConnections.orgId, ORG));
+    expect(new Set(conns.map((c) => c.matrixUserId))).toEqual(new Set(registered));
+
+    // Which account to unlink is never guessed.
+    const ambiguous = await request(app()).delete(`/orgs/matrix/links/whatsapp?brandId=${BRAND}`).set(headers);
+    expect(ambiguous.status).toBe(409);
+    expect(ambiguous.body.type).toBe("link_id_required");
+    expect(ambiguous.body.linkIds).toHaveLength(2);
+
+    const second = both.find((a: { account: { id: string } }) => a.account.id === "33622222222");
+    const del = await request(app())
+      .delete(`/orgs/matrix/links/whatsapp?brandId=${BRAND}&linkId=${second.linkId}`)
+      .set(headers);
+    expect(del.status).toBe(200);
+    expect(del.body).toMatchObject({ unlinked: true, linkId: second.linkId, connectionRemoved: true });
+    expect(bridgeCalls.filter((b) => b.path === "/logout/all").map((b) => b.userId)).toEqual([secondAccount]);
+    const left = await accounts();
+    expect(left).toHaveLength(1);
+    expect(left[0]).toMatchObject({ linkId: first.linkId, status: "linked", account: { id: "33611111111" } });
+    const connsLeft = await db.select().from(matrixConnections).where(eq(matrixConnections.orgId, ORG));
+    expect(connsLeft.map((c) => c.matrixUserId)).toEqual([first.account]);
+  });
+
+  it("the same counterpart writing to two linked accounts is one contact per account", async () => {
+    const a = await linkWhatsApp("33611111111");
+    const b = await linkWhatsApp("33622222222");
+    const conns = await db.select().from(matrixConnections).where(eq(matrixConnections.orgId, ORG));
+    expect(conns).toHaveLength(2);
+    for (const c of conns) {
+      await db.insert(contacts).values({
+        orgId: ORG,
+        brandId: BRAND,
+        source: "matrix",
+        channel: "whatsapp",
+        channelHandle: "@whatsapp_lid-1:matrix.test",
+        sourceConnectionId: c.id,
+        rawAttributes: {},
+      });
+    }
+    expect(a.linkId).not.toBe(b.linkId);
+    expect(await db.select().from(contacts).where(eq(contacts.orgId, ORG))).toHaveLength(2);
+  });
+
+  it("the same WhatsApp number linked twice is refused, the first link untouched", async () => {
+    const first = await linkWhatsApp("33611111111");
+    await request(app()).post("/orgs/matrix/links").set(headers).send({ brandId: BRAND, channel: "whatsapp", method: "qr" });
+    (await nextWait()).resolve(
+      json({ login_id: `proc-${processSeq}`, type: "complete", step_id: "c", complete: { user_login_id: "33611111111" } }),
+    );
+    await settle();
+    const all = await accounts();
+    expect(all.find((x: { linkId: string }) => x.linkId === first.linkId).status).toBe("linked");
+    const dup = all.find((x: { linkId: string }) => x.linkId !== first.linkId);
+    expect(dup).toMatchObject({ status: "failed", error: { code: "ACCOUNT_ALREADY_LINKED" } });
+    expect(await db.select().from(matrixConnections).where(eq(matrixConnections.orgId, ORG))).toHaveLength(1);
+  });
+
+  it("an expired session says so, and relinking keeps the same account and mirror", async () => {
+    const first = await linkWhatsApp("33611111111");
+    logins[first.account] = { id: "33611111111", name: "+33611111111", state: "BAD_CREDENTIALS" };
+    const [view] = await accounts();
+    expect(view).toMatchObject({ status: "linked", needsRelink: true, bridgeState: { state: "BAD_CREDENTIALS" } });
+    const [connBefore] = await db.select().from(matrixConnections).where(eq(matrixConnections.orgId, ORG));
+
+    const res = await request(app())
+      .post("/orgs/matrix/links")
+      .set(headers)
+      .send({ brandId: BRAND, channel: "whatsapp", method: "qr", linkId: first.linkId });
+    expect(res.status).toBe(200);
+    expect(res.body.link).toMatchObject({ linkId: first.linkId, status: "waiting" });
+    expect(registered).toHaveLength(1);
+    logins[first.account] = { id: "33611111111", name: "+33611111111", state: "CONNECTED" };
+    (await nextWait()).resolve(
+      json({ login_id: `proc-${processSeq}`, type: "complete", step_id: "c", complete: { user_login_id: "33611111111" } }),
+    );
+    await settle();
+    const [after] = await accounts();
+    expect(after).toMatchObject({ linkId: first.linkId, status: "linked", needsRelink: false });
+    const [connAfter] = await db.select().from(matrixConnections).where(eq(matrixConnections.orgId, ORG));
+    expect(connAfter.id).toBe(connBefore.id);
+    expect(connAfter.accessToken).toBe(connBefore.accessToken);
+  });
+
+  // ─── LinkedIn ──────────────────────────────────────────────────────────────
+
+  it("LinkedIn: password form, then the emailed code, then linked; methods say so", async () => {
+    const tile = (await request(app()).get(`/orgs/matrix/links?brandId=${BRAND}`).set(headers)).body.links.find(
+      (l: { channel: string }) => l.channel === "linkedin",
+    );
+    expect(tile).toMatchObject({ available: true, methods: ["password", "cookies"], status: "not_linked" });
+
+    const start = await request(app())
+      .post("/orgs/matrix/links")
+      .set(headers)
+      .send({ brandId: BRAND, channel: "linkedin", method: "password" });
+    expect(start.status).toBe(200);
+    const linkId = start.body.link.linkId;
+    expect(start.body.link).toMatchObject({
+      status: "waiting",
+      qr: null,
+      input: {
+        type: "user_input",
+        stepId: "fi.mau.linkedin.login.credentials",
+        fields: [
+          { id: "identifier", type: "email" },
+          { id: "password", type: "password" },
+        ],
+      },
+    });
+
+    // A missing field is refused before the bridge sees anything.
+    const missing = await request(app())
+      .post("/orgs/matrix/links")
+      .set(headers)
+      .send({ brandId: BRAND, channel: "linkedin", linkId, input: { identifier: "jane@x.com" } });
+    expect(missing.status).toBe(400);
+
+    const creds = await request(app())
+      .post("/orgs/matrix/links")
+      .set(headers)
+      .send({ brandId: BRAND, channel: "linkedin", linkId, input: { identifier: "jane@x.com", password: "s3cret" } });
+    expect(creds.status).toBe(200);
+    expect(creds.body.link.input).toMatchObject({ stepId: "fi.mau.linkedin.login.email_code", fields: [{ id: "code" }] });
+    // What the user typed is relayed, never stored.
+    const [row] = await db.select().from(matrixLinks).where(eq(matrixLinks.id, linkId));
+    expect(JSON.stringify(row)).not.toContain("s3cret");
+
+    // A second submit of an answered step cannot reach the bridge twice.
+    const replay = await request(app())
+      .post("/orgs/matrix/links")
+      .set(headers)
+      .send({ brandId: BRAND, channel: "linkedin", linkId, input: { identifier: "jane@x.com", password: "s3cret" } });
+    expect(replay.status).toBe(400);
+
+    const code = await request(app())
+      .post("/orgs/matrix/links")
+      .set(headers)
+      .send({ brandId: BRAND, channel: "linkedin", linkId, input: { code: "123456" } });
+    expect(code.status).toBe(200);
+    await settle();
+    expect(code.body.link).toMatchObject({
+      status: "linked",
+      input: null,
+      account: { id: "ACoAAjane", name: "Jane Doe" },
+      connection: { status: "active" },
+    });
+    const [conn] = await db.select().from(matrixConnections).where(eq(matrixConnections.orgId, ORG));
+    expect(conn).toMatchObject({ channel: "linkedin", counterpartPrefix: "@linkedin_" });
+  });
+
+  it("LinkedIn: a refused password is answered in the bridge's words and the link reads failed", async () => {
+    const start = await request(app())
+      .post("/orgs/matrix/links")
+      .set(headers)
+      .send({ brandId: BRAND, channel: "linkedin", method: "password" });
+    const linkId = start.body.link.linkId;
+    const res = await request(app())
+      .post("/orgs/matrix/links")
+      .set(headers)
+      .send({ brandId: BRAND, channel: "linkedin", linkId, input: { identifier: "jane@x.com", password: "wrong" } });
+    expect(res.status).toBe(422);
+    expect(res.body.bridgeError).toEqual({ code: "FI.MAU.LINKEDIN.BAD_CREDENTIALS", message: "Wrong email or password" });
+    expect(res.body.link).toMatchObject({ linkId, status: "failed", input: null });
+  });
+
+  it("LinkedIn says 'not available yet' while its bridge is not configured", async () => {
+    const url = process.env.MATRIX_LINKEDIN_PROVISIONING_URL;
+    delete process.env.MATRIX_LINKEDIN_PROVISIONING_URL;
+    try {
+      const res = await request(app())
+        .post("/orgs/matrix/links")
+        .set(headers)
+        .send({ brandId: BRAND, channel: "linkedin", method: "password" });
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe("Linking LinkedIn is not available yet.");
+    } finally {
+      process.env.MATRIX_LINKEDIN_PROVISIONING_URL = url;
+    }
+  });
+
+  it("a method the channel does not offer is refused", async () => {
+    const res = await request(app())
+      .post("/orgs/matrix/links")
+      .set(headers)
+      .send({ brandId: BRAND, channel: "whatsapp", method: "password" });
+    expect(res.status).toBe(400);
   });
 });

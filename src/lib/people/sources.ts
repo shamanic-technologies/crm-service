@@ -402,12 +402,20 @@ function connectionHealth(conns: { status: string; lastError: string | null; las
   | { status: "failed"; error: string }
   | { status: "ok"; error: string | null } {
   if (conns.length === 0) return { status: "not_connected" };
-  const c = conns[0];
-  if (c.lastSyncedAt === null) {
-    if (c.status === "error") return { status: "failed", error: c.lastError ?? "first sync failed" };
-    return { status: "failed", error: "connected, first sync not finished yet" };
-  }
-  return { status: "ok", error: c.status === "error" ? c.lastError : null };
+  // A brand may connect several accounts of one source (two Stripe accounts):
+  // the source reads ok once ANY of them has synced, and every account still
+  // failing or not yet synced is named in `error` rather than hidden.
+  const pending = (c: (typeof conns)[number]) =>
+    c.lastSyncedAt === null
+      ? c.status === "error"
+        ? (c.lastError ?? "first sync failed")
+        : "connected, first sync not finished yet"
+      : c.status === "error"
+        ? c.lastError
+        : null;
+  const errors = conns.map(pending).filter((e): e is string => !!e);
+  if (!conns.some((c) => c.lastSyncedAt !== null)) return { status: "failed", error: errors[0] };
+  return { status: "ok", error: errors.length ? errors.join("; ") : null };
 }
 
 // ─── crm-service silver: PostHog identified persons ─────────────────────────
