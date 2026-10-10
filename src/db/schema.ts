@@ -1081,6 +1081,9 @@ export const peopleMessageTexts = pgTable(
   },
   (table) => [
     uniqueIndex("people_message_texts_unit_message_uq").on(table.scopeId, table.source, table.unit, table.messageKey),
+    // One message is stored ONCE per address, whichever unit read it: instantly-service answers a
+    // campaign's whole family, so two campaign units of one lead return the same thread.
+    uniqueIndex("people_message_texts_address_message_uq").on(table.scopeId, table.source, table.address, table.messageKey),
     index("people_message_texts_scope_address_idx").on(table.scopeId, table.address),
   ],
 );

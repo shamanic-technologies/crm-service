@@ -210,9 +210,8 @@ async function readUnit(identity: SiblingIdentity, u: Unit): Promise<StoredMessa
       `instantly-service conversation ${u.campaignId}/${u.address} returned ${r.status}: ${JSON.stringify(r.body).slice(0, 300)}`,
     );
   }
-  // instantly-service gives no message id: position + time + direction is stable for an append-only thread.
-  return (r.body as InstantlyConversation).conversation.messages.map((m, i) => ({
-    messageKey: `${i}:${m.at}:${m.direction}`,
+  return (r.body as InstantlyConversation).conversation.messages.map((m) => ({
+    messageKey: instantlyMessageKey(m),
     item: {
       at: m.at || null,
       source: "instantly" as const,
@@ -229,6 +228,21 @@ async function readUnit(identity: SiblingIdentity, u: Unit): Promise<StoredMessa
       event: null,
     },
   }));
+}
+
+/**
+ * A cold email's identity, independent of the unit that read it. instantly-service
+ * answers a campaign's WHOLE family (campaign-service mints a campaign row per
+ * workflow change), so two campaign units of one lead return the same thread; a
+ * key carrying the unit (or the message's position in it) stored and served each
+ * email once per unit. instantly-service gives no message id, and one email is one
+ * (direction, send time, sender, recipient): measured in prod 2026-10-10, this key
+ * and the outreach fact's `subjectKey` split the 99,223 stored sends identically
+ * (81,395 each). A genuine resend has its own send time, so it stays its own message.
+ * drizzle/0020 computes the same key in SQL from the stored item: keep them equal.
+ */
+export function instantlyMessageKey(m: { direction: string; at: string; from: string; to: string }): string {
+  return `${m.direction}|${m.at || ""}|${m.from ?? ""}|${m.to || ""}`;
 }
 
 const validDate = (s: string | null) => {
@@ -283,16 +297,24 @@ export async function refreshUnits(scopeId: string, units: Unit[], identity: Sib
         };
       });
     await db.transaction(async (tx) => {
+      // One message is stored once per address (people_message_texts_address_message_uq): a message
+      // another unit of the address already holds stays there. Units of one address are written one
+      // at a time, so two concurrent reads of the same thread never both skip it.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`people-message-texts|${scopeId}|${u.source}|${u.address}`}, 0))`);
       await tx
         .delete(peopleMessageTexts)
         .where(and(eq(peopleMessageTexts.scopeId, scopeId), eq(peopleMessageTexts.source, u.source), eq(peopleMessageTexts.unit, u.unit)));
-      for (let i = 0; i < rows.length; i += 500) await tx.insert(peopleMessageTexts).values(rows.slice(i, i + 500));
+      let stored = 0;
+      for (let i = 0; i < rows.length; i += 500) {
+        const ins = await tx.insert(peopleMessageTexts).values(rows.slice(i, i + 500)).onConflictDoNothing().returning({ id: peopleMessageTexts.id });
+        stored += ins.length;
+      }
       await tx
         .insert(peopleMessageUnits)
-        .values({ scopeId, source: u.source, unit: u.unit, address: u.address, activityAt: u.activityAt, status: "ok", messages: rows.length, runId: identity.runId, format: STORE_FORMAT })
+        .values({ scopeId, source: u.source, unit: u.unit, address: u.address, activityAt: u.activityAt, status: "ok", messages: stored, runId: identity.runId, format: STORE_FORMAT })
         .onConflictDoUpdate({
           target: [peopleMessageUnits.scopeId, peopleMessageUnits.source, peopleMessageUnits.unit],
-          set: { status: "ok", error: null, activityAt: u.activityAt, messages: rows.length, indexedAt: new Date(), runId: identity.runId, format: STORE_FORMAT },
+          set: { status: "ok", error: null, activityAt: u.activityAt, messages: stored, indexedAt: new Date(), runId: identity.runId, format: STORE_FORMAT },
         });
     });
   });
@@ -448,8 +470,9 @@ export async function readStoredTimeline(
     const items: TimelineItem[] = [];
     for (const r of rows) {
       if (r.source !== source || !r.item) continue;
-      // A Gmail message to two of the person's addresses is one message.
-      const key = source === "gmail" ? r.messageKey : `${r.unit}|${r.messageKey}`;
+      // One message, one item: a Gmail message to two of the person's addresses, a cold email
+      // read through two campaign units of one family (keys are unit-independent).
+      const key = r.messageKey;
       if (seen.has(key)) continue;
       seen.add(key);
       // A row stored before format 3 has no outreachFact yet (re-read in the background): served as null.

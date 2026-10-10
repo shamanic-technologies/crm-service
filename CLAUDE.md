@@ -757,6 +757,14 @@ owner had written to. A recorded fact, never an address-shape guess.
   (`PEOPLE_TIMELINE_REFRESH_MS`) is re-read in the background after the answer;
   lead-service campaign discovery runs there too. Sources carry
   `servedFrom: store|mirror` + `readAt`.
+  ⚠️ **One message is stored ONCE per (scope, source, address)**
+  (`people_message_texts_address_message_uq`): instantly-service answers a
+  campaign's WHOLE family, so two campaign units of one lead read the same
+  thread (18% of stored cold emails were twins, the Unibox showed each send
+  twice, 2026-10-10). A cold email's key is `direction|at|from|to`
+  (`instantlyMessageKey`, never the unit or the position), which splits prod
+  exactly as the outreach fact's `subjectKey` does; the unit read second skips
+  what another unit of the address already holds (advisory lock per address).
 - **The freshness watch keeps the store current BEFORE an open** (`freshness.ts`,
   in-process, every 60s, first pass 60s after boot). Per scope it reads what MOVED:
   instantly-service's outreach fact feed (cursor `people_scopes.outreach_facts_cursor`,
