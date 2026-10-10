@@ -162,6 +162,15 @@ describe.skipIf(!RUN)("several Stripe accounts on one brand", () => {
     expect(st).toMatchObject({ status: "ok", sourceCount: 2 });
   });
 
+  it("a connection made before accounts were named learns its account on the next sync", async () => {
+    keys = { stripe: "rk_live_us" };
+    const conn = (await connect()).body.connection;
+    await db.update(stripeConnections).set({ accountId: null, accountName: null }).where(eq(stripeConnections.id, conn.id));
+    await runStripeSyncPass(conn.id);
+    const [row] = await db.select().from(stripeConnections).where(eq(stripeConnections.id, conn.id));
+    expect(row).toMatchObject({ accountId: "acct_US", accountName: "Brand US" });
+  });
+
   it("refuses the same account twice: by its account id, or by its objects when the account cannot be read", async () => {
     keys = { stripe: "rk_live_us", "stripe-us2": "rk_live_us_again", "stripe-eu": "rk_live_eu", "stripe-eu2": "rk_live_eu_again" };
     expect((await connect()).status).toBe(200);

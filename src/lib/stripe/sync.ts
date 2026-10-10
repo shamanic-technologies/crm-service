@@ -31,7 +31,14 @@ import { createRun, updateRun } from "../runs-client.js";
 import { resolveBrandCredential } from "../gohighlevel/credentials.js";
 import { canonicalHash } from "../gohighlevel/records.js";
 import { normalizePhone } from "../people/identity.js";
-import { listStripe, STRIPE_KINDS, STRIPE_MAX_PAGES, type StripeKind, type StripeObject } from "./client.js";
+import {
+  listStripe,
+  readStripeAccount,
+  STRIPE_KINDS,
+  STRIPE_MAX_PAGES,
+  type StripeKind,
+  type StripeObject,
+} from "./client.js";
 import {
   deriveCharge,
   deriveRefund,
@@ -258,6 +265,10 @@ export async function syncStripeConnection(conn: StripeConnection): Promise<Stri
         `[crm-service][stripe] connection ${conn.id}: listing capped at ${STRIPE_MAX_PAGES} pages for ${truncated.join(", ")}; older objects were not re-read this pass`,
       );
     }
+    // A connection made before accounts were named (or whose key may not read
+    // the account) learns which account it is on its next pass, so a brand
+    // holding several accounts can tell them apart. Free read; once known, never re-asked.
+    const account = conn.accountId ? null : await readStripeAccount(key);
     const contactsDerived = await deriveContacts(conn, changed.customer);
     const transactionsDerived = await deriveTransactions(conn, changed);
     const transactionsLinked = await linkTransactions(conn);
@@ -270,6 +281,7 @@ export async function syncStripeConnection(conn: StripeConnection): Promise<Stri
         lastRunId: run.id,
         lastSyncedAt: new Date(),
         ...(full ? { lastFullSyncAt: startedAt } : {}),
+        ...(account ? { accountId: account.id, accountName: account.name } : {}),
       })
       .where(eq(stripeConnections.id, conn.id));
     await updateRun(run.id, "completed", identity);
