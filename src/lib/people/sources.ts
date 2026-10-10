@@ -13,7 +13,7 @@
 
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { contacts, ghlConnections, matrixConnections, posthogConnections, stripeConnections } from "../../db/schema.js";
+import { authConnections, contacts, ghlConnections, matrixConnections, posthogConnections, stripeConnections } from "../../db/schema.js";
 import { GHL_SOURCE } from "../gohighlevel/records.js";
 import { POSTHOG_SOURCE } from "../posthog/records.js";
 import { STRIPE_SOURCE } from "../stripe/records.js";
@@ -421,15 +421,17 @@ function connectionHealth(conns: { status: string; lastError: string | null; las
 // ─── crm-service silver: PostHog identified persons ─────────────────────────
 
 /**
- * Every identified PostHog person (one PostHog holds an email for) — someone
- * who signed up or otherwise told the brand who they are. Their visits and key
- * events are the activity span; anonymous visitors are never mirrored.
+ * Every identified PostHog person — someone who signed up or otherwise told the
+ * brand who they are (see posthog/client.ts). Their visits and key events are
+ * the activity span; anonymous visitors are never mirrored. A person PostHog
+ * holds no email for still carries their distinct ids (`userIds`), which is how
+ * they join the signed-up user of the brand's auth provider.
  */
 export async function readPosthog(orgId: string, brandId: string): Promise<SourceRead> {
   const base = {
     source: "posthog" as const,
     scope: "brand" as const,
-    sourceCountBasis: "crm-service mirrored PostHog identified persons (PostHog holds their email)",
+    sourceCountBasis: "crm-service mirrored PostHog identified persons (identified, an email, or named by an auth user id)",
   };
   const conns = await db
     .select({ status: posthogConnections.status, lastError: posthogConnections.lastError, lastSyncedAt: posthogConnections.lastSyncedAt })
@@ -440,6 +442,7 @@ export async function readPosthog(orgId: string, brandId: string): Promise<Sourc
   if (health.status === "failed") return { ...base, status: "failed", presences: [], sourceCount: null, error: health.error };
   const rows = (await db.execute(sql`
     SELECT c.id, c.external_id, c.full_name, c.primary_email, c.source_created_at,
+           c.raw_attributes->'distinctIds' AS distinct_ids,
            min(a.occurred_at) AS first_at, max(coalesce(a.ended_at, a.occurred_at)) AS last_at,
            count(a.id) FILTER (WHERE a.kind = 'visit')::int AS visits,
            count(a.id) FILTER (WHERE a.kind = 'event')::int AS events
@@ -454,6 +457,7 @@ export async function readPosthog(orgId: string, brandId: string): Promise<Sourc
     full_name: string | null;
     primary_email: string | null;
     source_created_at: string | Date | null;
+    distinct_ids: string[] | null;
     first_at: string | Date | null;
     last_at: string | Date | null;
     visits: number;
@@ -466,6 +470,7 @@ export async function readPosthog(orgId: string, brandId: string): Promise<Sourc
     company: null,
     emails: r.primary_email ? [r.primary_email] : [],
     phones: [],
+    userIds: Array.isArray(r.distinct_ids) ? r.distinct_ids : [],
     firstActivityAt: minIso([iso(r.first_at), iso(r.source_created_at)]),
     lastActivityAt: maxIso([iso(r.last_at), iso(r.source_created_at)]),
     messageCount: null,
@@ -551,6 +556,58 @@ export async function readStripe(orgId: string, brandId: string): Promise<Source
       inboundCount: null,
       outboundCount: null,
       detail: { contactId: r.id, externalId: r.external_id, stripe: standing },
+    };
+  });
+  return { ...base, status: "ok", presences, sourceCount: rows.length, error: health.error };
+}
+
+// ─── crm-service silver: auth-provider users (Clerk) ────────────────────────
+
+/**
+ * Every user of the brand's auth provider: someone who SIGNED UP to the brand's
+ * product. Their email(s), phone(s) and the provider's user id (`userIds`, the
+ * key PostHog persons join on). Activity span = signup → last sign-in.
+ */
+export async function readAuthUsers(orgId: string, brandId: string, provider: "clerk"): Promise<SourceRead> {
+  const base = {
+    source: provider,
+    scope: "brand" as const,
+    sourceCountBasis: `crm-service mirrored ${provider} users (every account of the brand's product)`,
+  };
+  const conns = await db
+    .select({ status: authConnections.status, lastError: authConnections.lastError, lastSyncedAt: authConnections.lastSyncedAt })
+    .from(authConnections)
+    .where(and(eq(authConnections.orgId, orgId), eq(authConnections.brandId, brandId), eq(authConnections.provider, provider)));
+  const health = connectionHealth(conns);
+  if (health.status === "not_connected") return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
+  if (health.status === "failed") return { ...base, status: "failed", presences: [], sourceCount: null, error: health.error };
+  const rows = await db
+    .select({
+      id: contacts.id,
+      externalId: contacts.externalId,
+      fullName: contacts.fullName,
+      rawAttributes: contacts.rawAttributes,
+      createdAt: contacts.sourceCreatedAt,
+    })
+    .from(contacts)
+    .where(and(eq(contacts.orgId, orgId), eq(contacts.brandId, brandId), eq(contacts.source, provider)))
+    .orderBy(contacts.externalId, contacts.id);
+  const presences: Presence[] = rows.map((r) => {
+    const raw = r.rawAttributes as { emails?: string[]; phones?: string[]; lastActiveAt?: string | null };
+    return {
+      source: provider,
+      sourceRef: r.id,
+      displayName: r.fullName,
+      company: null,
+      emails: raw.emails ?? [],
+      phones: raw.phones ?? [],
+      userIds: r.externalId ? [r.externalId] : [],
+      firstActivityAt: iso(r.createdAt),
+      lastActivityAt: maxIso([iso(r.createdAt), raw.lastActiveAt ?? null]),
+      messageCount: null,
+      inboundCount: null,
+      outboundCount: null,
+      detail: { contactId: r.id, externalId: r.externalId },
     };
   });
   return { ...base, status: "ok", presences, sourceCount: rows.length, error: health.error };

@@ -101,6 +101,12 @@ async function seedBrand(org: string, brand: string, tag: string) {
   await db.execute(sql`
     INSERT INTO stripe_transactions (org_id, brand_id, connection_id, kind, external_id, contact_id, occurred_at, amount_minor, currency, status, detail)
     VALUES (${org}, ${brand}, ${st.id}, 'payment', 'ch_1', ${contact.id}, now(), 9900, 'usd', 'succeeded', '{}')`);
+  const [au] = await db.execute<{ id: string }>(sql`
+    INSERT INTO auth_connections (org_id, brand_id, provider, created_by_user_id)
+    VALUES (${org}, ${brand}, 'clerk', 'user') RETURNING id`);
+  await db.execute(sql`
+    INSERT INTO auth_raw_records (org_id, brand_id, connection_id, kind, external_id, content_hash, payload)
+    VALUES (${org}, ${brand}, ${au.id}, 'user', 'user_1', 'h', '{}')`);
   await db.execute(sql`
     INSERT INTO people_facts (org_id, brand_id, person_key, emails, phones, type, date_basis, source, source_ref, payload, natural_key)
     VALUES (${org}, ${brand}, 'email:a@b.co', '[]', '[]', 'payment', 'created', 'stripe', 'ch_1', '{}', 'stripe|payment|ch_1')`);

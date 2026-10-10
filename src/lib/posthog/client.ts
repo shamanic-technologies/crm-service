@@ -7,9 +7,16 @@
  * read: it needs only the `query:read` scope of a personal API key and changes
  * nothing in the project. Do not add a write.
  *
- * Only IDENTIFIED people are read: a person PostHog knows an email for
- * (`properties.email`). Anonymous visitors are out of scope and are filtered
- * inside PostHog's own query, so they never reach this service.
+ * Only IDENTIFIED people are read: a person PostHog was told who they are —
+ * `is_identified` (the brand called `identify`) or an email it holds — plus a
+ * person carrying, as a distinct id, the user id of one of the brand's
+ * connected auth providers (a server-side capture keyed on the Clerk user id
+ * never sets `is_identified`). Anonymous visitors are out of scope and are
+ * filtered inside PostHog's own query, so they never reach this service.
+ *
+ * Why not "has an email" alone (the rule until 2026-10-11): measured on
+ * distribute.you's own project, 151 persons, 136 carrying a Clerk user id, only
+ * 56 with an email property — 80 signed-up users were never mirrored.
  *
  * Pagination is keyset, never OFFSET: PostHog refuses OFFSET on queries made
  * with a personal API key (measured 2026-10-01: 400 "OFFSET is not supported on
@@ -99,16 +106,30 @@ export const lit = (value: string) => `'${value.replace(/\\/g, "\\\\").replace(/
 /** A HogQL DateTime literal from a JS Date (UTC, millisecond precision). */
 export const ts = (d: Date) => `toDateTime64(${lit(d.toISOString().replace("T", " ").replace("Z", ""))}, 3, 'UTC')`;
 
-const IDENTIFIED_PERSON = "notEmpty(toString(person.properties.email))";
+/** A person PostHog was told who they are, on the `persons` table. */
+// ⚠️ A missing email property is NULL and `notEmpty(toString(NULL))` is NULL, so
+// `NOT (is_identified OR notEmpty(...))` silently drops every such person:
+// both halves are made strictly boolean.
+const HAS_EMAIL = (alias: string) => `ifNull(toString(${alias}properties.email), '') != ''`;
+const IS_IDENTIFIED = (alias: string) => `(ifNull(${alias}is_identified, 0) = 1 OR ${HAS_EMAIL(alias)})`;
+export const IDENTIFIED = IS_IDENTIFIED("");
+
+/** Which persons an activity read covers: the identified ones, or an explicit id list. */
+export type PersonScope = { kind: "identified" } | { kind: "ids"; ids: string[] };
+
+const personScopeSql = (scope: PersonScope) =>
+  scope.kind === "identified"
+    ? `person.id IN (SELECT id FROM persons WHERE ${IDENTIFIED})`
+    : `toString(person.id) IN (${scope.ids.map(lit).join(", ")})`;
 
 /**
  * Prove the key reads THIS project with the scope the sync needs, in one call:
- * the count of identified persons (it is also PostHog's own count, served back
+ * the count of identified persons (`IDENTIFIED`) (it is also PostHog's own count, served back
  * for reconciliation). A key without `query:read`, a wrong project or a wrong
  * region is refused by PostHog itself, in its own words.
  */
 export async function countIdentifiedPersons(target: PosthogTarget): Promise<number> {
-  const rows = await hogql(target, "SELECT count() AS n FROM persons WHERE notEmpty(toString(properties.email))");
+  const rows = await hogql(target, `SELECT count() AS n FROM persons WHERE ${IDENTIFIED}`);
   return Number(rows[0]?.n ?? 0);
 }
 
@@ -125,17 +146,48 @@ async function* keysetPages(
   }
 }
 
-/** Every identified person: id, email, name fields, creation date. */
+const PERSON_COLUMNS = `
+  toString(p.id) AS id, toString(p.properties.email) AS email,
+  toString(p.properties.name) AS name, toString(p.properties.first_name) AS first_name,
+  toString(p.properties.last_name) AS last_name, p.created_at AS created_at,
+  p.is_identified AS is_identified, d.ids AS distinct_ids`;
+
+/** Up to 50 distinct ids per person: the ids another tool of the brand may name them by. */
+const distinctIdsOf = (personFilter: string) => `
+  LEFT JOIN (
+    SELECT person_id, groupArray(50)(distinct_id) AS ids FROM person_distinct_ids
+    WHERE person_id IN (SELECT id FROM persons WHERE ${personFilter})
+    GROUP BY person_id
+  ) AS d ON d.person_id = p.id`;
+
+/** Every identified person: id, email, name fields, creation date, distinct ids. */
 export function listIdentifiedPersons(target: PosthogTarget) {
   return keysetPages(
     target,
     (after) => `
-      SELECT toString(id) AS id, toString(properties.email) AS email,
-             toString(properties.name) AS name, toString(properties.first_name) AS first_name,
-             toString(properties.last_name) AS last_name, created_at
-      FROM persons
-      WHERE notEmpty(toString(properties.email))
-        ${after ? `AND toString(id) > ${lit(String(after.id))}` : ""}
+      SELECT ${PERSON_COLUMNS}
+      FROM persons AS p ${distinctIdsOf(IDENTIFIED)}
+      WHERE ${IS_IDENTIFIED("p.")}
+        ${after ? `AND toString(p.id) > ${lit(String(after.id))}` : ""}
+      ORDER BY id
+      LIMIT ${POSTHOG_PAGE_SIZE}`,
+  );
+}
+
+/**
+ * The NOT-identified persons carrying one of these distinct ids (the brand's
+ * auth user ids). Call with at most a few hundred ids at a time.
+ */
+export async function listPersonsByDistinctIds(target: PosthogTarget, distinctIds: string[]) {
+  if (distinctIds.length === 0) return [];
+  const match = `id IN (SELECT person_id FROM person_distinct_ids WHERE distinct_id IN (${distinctIds.map(lit).join(", ")}))`;
+  return hogql(
+    target,
+    `
+      SELECT ${PERSON_COLUMNS}
+      FROM persons AS p ${distinctIdsOf(match)}
+      WHERE NOT ${IS_IDENTIFIED("p.")}
+        AND p.${match}
       ORDER BY id
       LIMIT ${POSTHOG_PAGE_SIZE}`,
   );
@@ -147,7 +199,7 @@ export function listIdentifiedPersons(target: PosthogTarget) {
  * those inside the window, so a session straddling the window boundary is never
  * mirrored half-read (PostHog caps a session at 24 h, hence the 1-day lookback).
  */
-export function listVisits(target: PosthogTarget, since: Date) {
+export function listVisits(target: PosthogTarget, since: Date, scope: PersonScope) {
   return keysetPages(
     target,
     (after) => `
@@ -159,7 +211,7 @@ export function listVisits(target: PosthogTarget, since: Date) {
              groupUniqArray(20)(toString(properties.$pathname)) AS paths,
              argMin(toString(properties.$referrer), timestamp) AS referrer
       FROM events
-      WHERE event = '$pageview' AND ${IDENTIFIED_PERSON} AND notEmpty(toString($session_id))
+      WHERE event = '$pageview' AND ${personScopeSql(scope)} AND notEmpty(toString($session_id))
         AND timestamp >= ${ts(since)} - INTERVAL 1 DAY
         AND $session_id IN (SELECT $session_id FROM events WHERE event = '$pageview' AND timestamp >= ${ts(since)})
       GROUP BY session_id, person_id
@@ -174,7 +226,7 @@ export function listVisits(target: PosthogTarget, since: Date) {
  * brand named itself). PostHog's own `$`-prefixed events (pageview, autocapture,
  * pageleave…) are not key events; pageviews arrive as visits.
  */
-export function listKeyEvents(target: PosthogTarget, since: Date) {
+export function listKeyEvents(target: PosthogTarget, since: Date, scope: PersonScope) {
   return keysetPages(
     target,
     (after) => `
@@ -182,7 +234,7 @@ export function listKeyEvents(target: PosthogTarget, since: Date) {
              toString(properties.$current_url) AS url, toString(properties.$pathname) AS path,
              toString($session_id) AS session_id
       FROM events
-      WHERE event NOT LIKE '$%' AND ${IDENTIFIED_PERSON} AND timestamp >= ${ts(since)}
+      WHERE event NOT LIKE '$%' AND ${personScopeSql(scope)} AND timestamp >= ${ts(since)}
         ${after ? `AND (timestamp, toString(uuid)) > (${ts(new Date(String(after.timestamp)))}, ${lit(String(after.id))})` : ""}
       ORDER BY timestamp, id
       LIMIT ${POSTHOG_PAGE_SIZE}`,

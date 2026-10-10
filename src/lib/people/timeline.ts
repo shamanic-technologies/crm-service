@@ -14,11 +14,13 @@
  *                pageviews) and key events, by name
  *  - stripe      crm-service's Stripe mirror: payments, refunds, subscriptions,
  *                with amount (minor unit, verbatim), currency and status
+ *  - clerk       crm-service's auth-provider mirror: the signup, nothing else
  *
  * Every source record that brought the person in also adds ONE entry event,
  * dated by the source (`entryItems`): GoHighLevel `added_to_crm` (contact
  * created), CSV `added_to_crm` (file uploaded), PostHog `signup` (person
- * created), Stripe `became_customer` (customer created). A record whose source
+ * created), Stripe `became_customer` (customer created), Clerk `signup` (user
+ * created). A record whose source
  * gives no date adds nothing: a date is never invented, never the build time.
  * So a person is never an empty thread while any of their records is dated.
  *
@@ -200,10 +202,11 @@ async function matrixItems(presences: Presence[]): Promise<SourceResult> {
 
 // ─── entry events: how the person entered each source record ───────────────
 
-const ENTRY: Record<"gohighlevel" | "posthog" | "stripe", { step: string; dateBasis: string; channel: string }> = {
+const ENTRY: Record<"gohighlevel" | "posthog" | "stripe" | "clerk", { step: string; dateBasis: string; channel: string }> = {
   gohighlevel: { step: "added_to_crm", dateBasis: "contact_created_at", channel: "crm" },
   posthog: { step: "signup", dateBasis: "person_created_at", channel: "web" },
   stripe: { step: "became_customer", dateBasis: "customer_created_at", channel: "payment" },
+  clerk: { step: "signup", dateBasis: "user_created_at", channel: "web" },
 };
 
 const entryEvent = (
@@ -364,6 +367,16 @@ async function posthogItems(presences: Presence[]): Promise<SourceResult> {
   return { status: items.length ? "ok" : "empty", items, error: null, asked: contactIds };
 }
 
+// ─── auth providers (Clerk) ─────────────────────────────────────────────────
+
+/** An auth provider states one thing about a person: when they signed up. */
+async function authItems(source: "clerk", presences: Presence[]): Promise<SourceResult> {
+  const contactIds = presences.map((p) => p.sourceRef);
+  if (contactIds.length === 0) return { status: "empty", items: [], error: null, asked: [] };
+  const items = await entryItems(source, presences);
+  return { status: items.length ? "ok" : "empty", items, error: null, asked: contactIds };
+}
+
 // ─── stripe ─────────────────────────────────────────────────────────────────
 
 const STRIPE_STEP: Record<string, string> = { payment: "payment", refund: "refund", subscription: "subscription_started" };
@@ -463,7 +476,7 @@ export async function readTimeline(
   const fromStore = (pick: (t: StoredTimeline) => StoredTimeline["gmail"]) =>
     storedRead.then((t): SourceResult => pick(t)).catch((e) => toFailed(e, emails));
 
-  const [gmail, instantly, matrix, gohighlevel, posthog, stripe] = await Promise.all([
+  const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk] = await Promise.all([
     connected("gmail") ? fromStore((t) => t.gmail) : Promise.resolve(notConnected()),
     fromStore((t) => t.instantly),
     connected("matrix") ? matrixItems(of("matrix")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
@@ -472,8 +485,9 @@ export async function readTimeline(
       : Promise.resolve(notConnected()),
     connected("posthog") ? posthogItems(of("posthog")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
     connected("stripe") ? stripeItems(of("stripe")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
+    connected("clerk") ? authItems("clerk", of("clerk")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
   ]);
-  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe };
+  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk };
   // CSV is no people source (it has no status row); its import dates ride in the thread.
   const csv = await csvEntryItems(person);
 

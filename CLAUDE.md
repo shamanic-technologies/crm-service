@@ -13,6 +13,7 @@ feed the same registry, both layered bronze/silver/gold:
 | `gohighlevel` | MIRROR | the client's live GoHighLevel CRM: their contacts, sales pipeline and calendar appointments, read-only | NEVER — these are the client's own people, already theirs |
 | `posthog` | MIRROR | the brand's PostHog project: IDENTIFIED persons (email known), their visits and custom events, read-only | NEVER |
 | `stripe` | MIRROR | the brand's Stripe account (restricted key): customers, charges, refunds, subscriptions, read-only | NEVER |
+| `clerk` | MIRROR | the brand's AUTH PROVIDER: every user who signed up to its product, history included, read-only | NEVER |
 
 As a CSV lead-provider it is a sibling of `apollo-service` / `apify-service`.
 
@@ -956,6 +957,52 @@ re-derives silver with no vendor call. API reads are free → no cost declared.
   (restricted key in key-service under its brand), NOT read from
   stripe-service: one path for every brand.
 
+## Auth providers — every signup of the brand's product (`src/lib/auth/`)
+
+Clerk today; Supabase Auth / Auth0 / Firebase Auth are siblings to come: ONE
+adapter file implementing `AuthProviderAdapter` (`provider.ts`: `countUsers`,
+`listUsers`, `derive`, `rejectKey`) + one line in `AUTH_PROVIDERS`. Routes
+(`/orgs/<p>/connections` POST/GET/PATCH/DELETE, `/internal/<p>/sync|rebuild`),
+sync, people source and fact feed iterate the registry; the people source /
+fact source literal (`"clerk"`) is the one per-provider line in `identity.ts` /
+`facts.ts` / `build.ts` / `timeline.ts`.
+
+- Same contract as PostHog/Stripe: secret key in key-service (provider = the
+  provider's name, brand-scoped, NO org fallback), connection written only once
+  the key PROVED it can count the users, refusal in the vendor's words. Connect
+  kicks the first sync at once; cron `*/15` on `/internal/clerk/sync`.
+- Bronze `auth_connections` (one per (org, brand, provider)) + `auth_raw_records`
+  (user verbatim, content-hash no-churn). ⚠️ Clerk `private_metadata` is NEVER
+  stored (brands keep server secrets there). Silver = `contacts` (source = the
+  provider), `raw_attributes.emails` = every VERIFIED address (unverified =
+  possibly a typo = never a merge key), primary first.
+- Full re-list every pass (500/page, oldest first). A pass that listed at least
+  the provider's own count is COMPLETE: users it did not list are deleted from
+  bronze + silver (a deleted account is no signup; its fact is withdrawn).
+  Fewer listed (page cap, mid-pass delete) removes nothing.
+- People: source `clerk`, presence `userIds = [Clerk user id]`. Fact: `signup`,
+  dateBasis `user_created_at`, family `clerk_user` (snapshot) — the vocabulary
+  PostHog signups use; lead-service reads `source` as a free string.
+- **The `uid:` identity key** (`identity.ts`): the brand's own user id. Clerk
+  states it; a PostHog person states every distinct id. Two tools of one brand
+  naming the same id is positive evidence — it is what ties a PostHog person
+  PostHog holds no email for to the signed-up user. A cluster of PostHog
+  presences alone with no email and no phone is nobody (`isUnnamedPosthogOnly`),
+  its facts are held until the auth provider names it.
+
+### PostHog "identified" (fixed 2026-10-11)
+
+The PostHog mirror used to read persons WITH an email property only: on
+distribute.you's own project that was 56 of 136 signed-up users (151 persons,
+136 carrying a Clerk `user_…` distinct id). Now: `is_identified` OR an email
+(107), plus every NOT-identified person carrying one of the brand's auth user
+ids as a distinct id (29: server-side captures keyed on the Clerk id never set
+`is_identified`), plus up to 50 distinct ids per person. ⚠️ HogQL:
+`notEmpty(toString(NULL))` is NULL, so `NOT (a OR notEmpty(...))` silently drops
+every email-less person — `IDENTIFIED` is built strictly boolean. ⚠️ A HogQL
+query without LIMIT answers 100 rows. A person mirrored for the FIRST time on a
+later pass gets its whole activity history read (the window would miss it).
+
 ## Brand transfer (`POST /internal/transfer-brand`, fleet contract)
 
 brand-service moves a brand to another org by calling this route on every
@@ -963,7 +1010,7 @@ service. Body `{sourceBrandId, sourceOrgId, targetOrgId, targetBrandId?}`,
 apiKeyAuth, response `{ updatedTables: [{ tableName, count }] }`
 (`src/lib/transfer-brand.ts`).
 
-- **Every table carrying `brand_id` moves** (all 29: CSV, serves, Matrix,
+- **Every table carrying `brand_id` moves** (all 31: CSV, serves, Matrix,
   GoHighLevel incl. history + stage meanings, PostHog, Stripe, the fact feed). Only `org_id` / `brand_id` change;
   FKs are on row ids so the graph stays wired. Provenance (`run_id`,
   `created_by_user_id`) stays as recorded.

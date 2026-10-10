@@ -1537,6 +1537,69 @@ export const stripeTransactions = pgTable(
   ],
 );
 
+/**
+ * BRONZE — the source artifact for a brand's AUTH PROVIDER (Clerk today;
+ * Supabase Auth, Auth0, Firebase are future siblings under their own
+ * `provider`): the tool that holds every person who signed up to the brand's
+ * product. Mirrored READ-ONLY. One row per (org, brand, provider).
+ *
+ * No credential column: the brand's secret key lives in key-service under the
+ * provider's name, scoped to (org, brand); every sync resolves it at call time.
+ * `provider_user_count` is the provider's OWN count of its users at the last
+ * pass, served beside what was mirrored so the two can be reconciled.
+ */
+export const authConnections = pgTable(
+  "auth_connections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    // 'clerk'
+    provider: text("provider").notNull(),
+    createdByUserId: text("created_by_user_id").notNull(),
+    // 'active' | 'paused' | 'error'
+    status: text("status").notNull().default("active"),
+    lastError: text("last_error"),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    // The provider's own user count at the last pass, beside what was listed.
+    providerUserCount: integer("provider_user_count"),
+    lastRunId: text("last_run_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("auth_connections_org_brand_provider_uq").on(table.orgId, table.brandId, table.provider),
+    index("auth_connections_status_idx").on(table.status),
+  ],
+);
+
+/**
+ * BRONZE — one row per user of the auth provider, verbatim minus the
+ * provider's server-only secrets (Clerk `private_metadata` is never stored).
+ * The provider's user id is the idempotency key, `content_hash` the no-churn
+ * guard, as for every other mirror.
+ */
+export const authRawRecords = pgTable(
+  "auth_raw_records",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => authConnections.id, { onDelete: "cascade" }),
+    // 'user'
+    kind: text("kind").notNull(),
+    externalId: text("external_id").notNull(),
+    contentHash: text("content_hash").notNull(),
+    payload: jsonb("payload").notNull(),
+    mirroredAt: timestamp("mirrored_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("auth_raw_records_conn_kind_external_uq").on(table.connectionId, table.kind, table.externalId),
+    index("auth_raw_records_org_brand_kind_idx").on(table.orgId, table.brandId, table.kind),
+  ],
+);
+
 export type ContactUpload = typeof contactUploads.$inferSelect;
 export type NewContactUpload = typeof contactUploads.$inferInsert;
 export type ContactRowRaw = typeof contactRowsRaw.$inferSelect;
@@ -1574,3 +1637,4 @@ export type StripeConnection = typeof stripeConnections.$inferSelect;
 export type StripeTransaction = typeof stripeTransactions.$inferSelect;
 export type PeopleFact = typeof peopleFacts.$inferSelect;
 export type NewPeopleFact = typeof peopleFacts.$inferInsert;
+export type AuthConnection = typeof authConnections.$inferSelect;

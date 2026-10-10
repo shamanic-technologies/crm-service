@@ -162,12 +162,6 @@ const STRIPE: Record<string, Record<string, unknown>[]> = {
 function hogqlAnswer(query: string) {
   const rows = (cols: string[], data: Record<string, unknown>[]) =>
     json({ columns: cols, results: data.map((d) => cols.map((c) => d[c] ?? null)) });
-  if (query.includes("count() AS n FROM persons")) return rows(["n"], [{ n: PERSONS.length }]);
-  if (query.includes("FROM persons"))
-    return rows(
-      ["id", "email", "name", "first_name", "last_name", "created_at"],
-      query.includes("toString(id) >") ? [] : PERSONS,
-    );
   if (query.includes("event = '$pageview'"))
     return rows(
       [
@@ -185,6 +179,13 @@ function hogqlAnswer(query: string) {
     );
   if (query.includes("NOT LIKE '$%'"))
     return rows(["id", "event", "timestamp", "person_id", "url", "path", "session_id"], EVENTS);
+  // Activity reads carry a persons sub-query: persons are matched after them.
+  if (query.includes("count() AS n FROM persons")) return rows(["n"], [{ n: PERSONS.length }]);
+  if (query.includes("FROM persons AS p"))
+    return rows(
+      ["id", "email", "name", "first_name", "last_name", "created_at"],
+      query.includes("toString(p.id) >") ? [] : PERSONS,
+    );
   throw new Error(`unexpected HogQL ${query}`);
 }
 

@@ -74,7 +74,7 @@ function stripeView(row: typeof stripeConnections.$inferSelect) {
 }
 
 /** Resolve the brand's credential; on refusal answer the request and return null. */
-async function credentialOr4xx(
+export async function credentialOr4xx(
   req: AuthenticatedRequest,
   res: Response,
   provider: string,
@@ -96,7 +96,7 @@ async function credentialOr4xx(
   }
 }
 
-const vendorRefusal = (res: Response, label: string, status: number, message: string) =>
+export const vendorRefusal = (res: Response, label: string, status: number, message: string) =>
   res.status(400).json({
     type: "vendor",
     error: `${label} refused the credential: ${message}`,
@@ -411,7 +411,7 @@ router.delete(
 
 const internalBody = z.object({ connectionId: uuid.optional() });
 
-function internalTrigger(
+export function internalTrigger(
   taskName: string,
   log: string,
   work: (connectionId?: string) => Promise<{ results: unknown[]; failures: unknown[] }>,

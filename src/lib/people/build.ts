@@ -37,6 +37,7 @@ import {
   readOwnAddresses,
   readPosthog,
   readStripe,
+  readAuthUsers,
   withoutOwnAddresses,
   type EvidenceRead,
   type StripeStanding,
@@ -72,6 +73,7 @@ const NAME_PRECEDENCE: (PeopleSource | Evidence["kind"])[] = [
   "google_contact",
   "stripe",
   "stripe_customer",
+  "clerk",
   "matrix",
   "gmail",
   "csv_contact",
@@ -212,6 +214,11 @@ async function observeStandings(
   return { observations, asked: toAsk.length, reused, failed };
 }
 
+/** PURE: a cluster of PostHog presences alone, holding no email and no phone. */
+export function isUnnamedPosthogOnly(c: PersonCluster): boolean {
+  return c.emails.length === 0 && c.phones.length === 0 && c.presences.every((p) => p.source === "posthog");
+}
+
 /** Read, merge, resolve, write. Returns what the build saw, per source. */
 export async function buildScopePeople(scope: PeopleScope, runId: string): Promise<BuildSummary> {
   const identity: SiblingIdentity = {
@@ -221,16 +228,17 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     brandId: scope.brandId,
   };
 
-  const [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, own] = await Promise.all([
+  const [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, rawClerk, own] = await Promise.all([
     readGmail(identity),
     readInstantly(identity),
     readMatrix(scope.orgId, scope.brandId),
     readGoHighLevel(scope.orgId, scope.brandId),
     readPosthog(scope.orgId, scope.brandId),
     readStripe(scope.orgId, scope.brandId),
+    readAuthUsers(scope.orgId, scope.brandId, "clerk"),
     readOwnAddresses(identity),
   ]);
-  const filtered = [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe].map((r) => withoutOwnAddresses(r, own));
+  const filtered = [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, rawClerk].map((r) => withoutOwnAddresses(r, own));
   const reads: SourceRead[] = filtered.map((f) => f.read);
   const [gmail, , , gohighlevel, , stripe] = reads;
 
@@ -269,10 +277,13 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       phones: p.phones,
     }));
 
+  // A PostHog person PostHog holds no email for, whom no other record names by
+  // their user id, says nothing about who they are: nobody to show (their
+  // facts are held). Once the brand's auth provider names them, they join.
   const clusters = clusterPeople(
     reads.flatMap((r) => r.presences),
     [...ghlEvidence, ...stripeEvidence, ...evidenceReads.flatMap((e) => e.evidence)],
-  );
+  ).filter((c) => !isUnnamedPosthogOnly(c));
 
   // lead-service is asked about every address of every person.
   const wanted = new Map<string, string | null>();
