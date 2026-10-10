@@ -1,11 +1,11 @@
 /**
- * Is a conversation from the owner's PERSONAL channels about THIS brand?
+ * Is a conversation from the owner's PERSONAL channels with a SALES LEAD of THIS brand?
  *
  * A brand owner connects their own Gmail and their own WhatsApp (any
  * Matrix-bridged channel). Those inboxes hold family, friends, doctors,
- * landlords, and the owner's OTHER companies. The owner wants to see only the
- * conversations about this brand, and never wants their private life read as
- * sales data. So every such conversation is judged on three levels, in ONE Jev
+ * landlords, suppliers, the accountant, and the owner's OTHER companies. The
+ * owner wants to see only the brand's sales leads (prospects, clients, users,
+ * referral partners), and never wants their private life read as sales data. So every such conversation is judged on three levels, in ONE Jev
  * call (chat-service `POST /orgs/judgments`, input tokens only, billed to the
  * org run the caller forwards):
  *
@@ -66,22 +66,28 @@ const CONCURRENCY = 4;
 const MAX_MESSAGES = 10;
 const MESSAGE_CHARS = 400;
 
+/**
+ * The owner keeps ONE kind of conversation: a SALES LEAD of the brand (owner,
+ * 2026-10-10: "je veux que mes sales lead"). Every other work thread (supplier,
+ * accountant, mentor, investor, press, candidate) is `other_business` and is
+ * hidden like private life. This replaces v0.29.2's rule that kept suppliers,
+ * the accountant and mentors visible. The keys stay as served (`this_brand`
+ * now reads "a sales lead of this brand").
+ */
 const TOPIC_CRITERIA: Record<Topic, string> = {
   personal:
-    "the owner acts for their PRIVATE life: family, partner, friends, dating, health, housing, personal " +
-    "shopping and admin, personal travel, social plans, small talk.",
+    "the owner's PRIVATE life: family, partner, friends, dating, health, housing, personal shopping and " +
+    "admin, personal travel, social plans, small talk, community or hobby groups.",
   other_business:
-    "the owner acts on behalf of a DIFFERENT business than the brand, visible in the thread: another company " +
-    "or project the owner runs, coaches for or used to run, or a client whose sales or press the owner handles " +
-    "for them (\"my client\", \"I work with X\"). The counterpart's own company never counts: a supplier, a " +
-    "prospect or an accountant is a different company but the owner is not acting FOR it.",
+    "work, but the counterpart is NOT a sales lead of the brand: a supplier, software tool or vendor the owner " +
+    "buys from, asks for support, or that pitches its own services to the owner; the accountant, lawyer, bank " +
+    "and the company's own admin; mentors, advisors, investors, journalists and press, candidates, networking " +
+    "contacts; and any work for another company the owner runs or serves.",
   this_brand:
-    "the WORDS show the owner working for the brand, or on work that names no other business: the brand's prospects, " +
-    "clients, users, partners, investors, advisors and mentors, journalists, candidates; the suppliers, " +
-    "software tools and vendors the owner pays or asks for support; the accountant, lawyer, bank and the " +
-    "company's own admin (bookkeeping, tax filings, annual meeting, loans, invoices), unless the thread names " +
-    "a company other than the brand or the company operating it. Work must show in the words: a thread with " +
-    "nothing about work in it (greetings, emojis, \"ok\", plans between friends) is not the brand's.",
+    "the counterpart is a SALES LEAD of the brand: someone the owner sells the brand's offers to, or who buys, " +
+    "uses, asks about, tries or negotiates them: a prospect, a client, a user, or a partner who refers or " +
+    "resells clients to the brand. It must show in the words: a thread with nothing about buying or using " +
+    "the brand (greetings, emojis, \"ok\") is not a sales lead.",
 };
 
 export interface BrandContext {
@@ -121,8 +127,8 @@ export async function readBrandContext(identity: SiblingIdentity): Promise<Brand
   return {
     ...ctx,
     brand: { ...ctx.brand, description: typeof overview === "string" && overview.trim() ? overview.trim() : null },
-    // v5 (2026-10-10): bridge notices dropped + the 0.50 line: every conversation re-judged once.
-    hash: createHash("sha256").update(JSON.stringify(["v5", ctx])).digest("hex").slice(0, 32),
+    // v6 (2026-10-10): sales leads only: every conversation re-judged once.
+    hash: createHash("sha256").update(JSON.stringify(["v6", ctx])).digest("hex").slice(0, 32),
   };
 }
 
@@ -193,8 +199,9 @@ export async function judgeConversation(
 ): Promise<Verdict & { model: string }> {
   const state = {
     task:
-      "A business owner connected their own inbox. It mixes their private life, their other businesses, and " +
-      "conversations for the brand below. Judge on whose behalf the owner is acting in this one conversation.",
+      "A business owner connected their own inbox. It mixes their private life, their other work, and " +
+      "conversations with the sales leads of the brand below. Judge whether the counterpart in this one " +
+      "conversation is a sales lead of the brand.",
     brand: context.brand,
     offers: context.offers.map((o, k) => ({ key: `o${k}`, name: o.name, description: o.description })),
     otherBrandsOfTheSameOwner: context.otherBrandsOfTheSameOwner,
@@ -208,9 +215,10 @@ export async function judgeConversation(
     topic: {
       type: "choice",
       instructions:
-        "Read the conversation between the owner (outbound) and the counterpart (inbound). On whose behalf is " +
-        `the owner acting: their private life, a different business, or the brand ${context.brand.name}? Judge ` +
-        "the whole conversation, not one polite or logistical message.",
+        "Read the conversation between the owner (outbound) and the counterpart (inbound). Is the counterpart " +
+        `a sales lead of ${context.brand.name} (a prospect, client, user or referral partner of its offers), ` +
+        "other work (supplier, accountant, mentor, investor, press, another company), or the owner's private " +
+        "life? Judge the whole conversation, not one polite or logistical message.",
       criteria: TOPIC_CRITERIA,
     },
   };
