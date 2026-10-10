@@ -34,10 +34,10 @@ const verdict = (topic: RecordedVerdict["topic"], brandProbability: number, offe
 
 describe("hidesConversation", () => {
   it("hides only below the bar: a hesitant verdict stays visible", () => {
-    expect(BRAND_MIN_PROBABILITY).toBe(0.25);
+    expect(BRAND_MIN_PROBABILITY).toBe(0.15);
     expect(hidesConversation({ brandProbability: 0.05 })).toBe(true);
-    expect(hidesConversation({ brandProbability: 0.249 })).toBe(true);
-    expect(hidesConversation({ brandProbability: 0.25 })).toBe(false);
+    expect(hidesConversation({ brandProbability: 0.149 })).toBe(true);
+    expect(hidesConversation({ brandProbability: 0.15 })).toBe(false);
     expect(hidesConversation({ brandProbability: 0.6 })).toBe(false);
   });
 });

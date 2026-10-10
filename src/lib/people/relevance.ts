@@ -44,11 +44,13 @@ export type Topic = (typeof TOPICS)[number];
 
 /**
  * A conversation is hidden only when Jev puts "about this brand" BELOW this
- * probability, i.e. Jev is at least 75% sure it is personal or another
+ * probability, i.e. Jev is at least 85% sure it is personal or another
  * business. Hiding a real prospect is the expensive mistake, so a hesitant
- * verdict keeps the conversation visible.
+ * verdict keeps the conversation visible. Measured on the first prod brand:
+ * suppliers and the accountant sat at 0.20-0.70, personal threads and work done
+ * for another company mostly below 0.10.
  */
-export const BRAND_MIN_PROBABILITY = 0.25;
+export const BRAND_MIN_PROBABILITY = 0.15;
 /** An offer is tagged when Jev's yes-probability reaches this. */
 export const OFFER_MIN_PROBABILITY = 0.5;
 
@@ -58,19 +60,19 @@ const MESSAGE_CHARS = 400;
 
 const TOPIC_CRITERIA: Record<Topic, string> = {
   personal:
-    "the owner's private life, nothing a company does: family, partner, friends, dating, health and doctors, " +
-    "housing and landlords, personal shopping and admin, personal travel, social plans and small talk.",
+    "the owner acts for their PRIVATE life: family, partner, friends, dating, health, housing, personal " +
+    "shopping and admin, personal travel, social plans, small talk.",
   other_business:
-    "work that VISIBLY belongs to a different company or project than the brand: the conversation names that " +
-    "other company or project (one of otherBrandsOfTheSameOwner, a client the owner works FOR, a coaching " +
-    "practice, a former company), or what it discusses is plainly not what brand.description says the brand " +
-    "does. Only pick this when the thread itself points at that other company.",
+    "the owner acts on behalf of a DIFFERENT business than the brand, visible in the thread: another company " +
+    "or project the owner runs, coaches for or used to run, or a client whose sales or press the owner handles " +
+    "for them (\"my client\", \"I work with X\"). The counterpart's own company never counts: a supplier, a " +
+    "prospect or an accountant is a different company but the owner is not acting FOR it.",
   this_brand:
-    "the brand's business (brand.description), AND any work conversation that does not visibly belong to " +
-    "another company: prospects, clients, users, partners, investors, advisors and mentors, journalists, " +
-    "job candidates; the suppliers, software tools and vendors the owner pays or gets support from; the " +
-    "accountant, lawyer, bank and the company's own admin and invoices. The owner runs the brand, so a " +
-    "work thread that names no other company is the brand's.",
+    "the owner acts for the brand, or for their work with no sign of another business: the brand's prospects, " +
+    "clients, users, partners, investors, advisors and mentors, journalists, candidates; the suppliers, " +
+    "software tools and vendors the owner pays or asks for support; the accountant, lawyer, bank and the " +
+    "company's own admin (bookkeeping, tax filings, annual meeting, loans, invoices), unless the thread names " +
+    "a company other than the brand or the company operating it.",
 };
 
 export interface BrandContext {
@@ -110,7 +112,7 @@ export async function readBrandContext(identity: SiblingIdentity): Promise<Brand
   return {
     ...ctx,
     brand: { ...ctx.brand, description: typeof overview === "string" && overview.trim() ? overview.trim() : null },
-    hash: createHash("sha256").update(JSON.stringify(["v3", ctx])).digest("hex").slice(0, 32),
+    hash: createHash("sha256").update(JSON.stringify(["v4", ctx])).digest("hex").slice(0, 32),
   };
 }
 
@@ -173,7 +175,7 @@ export async function judgeConversation(
   const state = {
     task:
       "A business owner connected their own inbox. It mixes their private life, their other businesses, and " +
-      "conversations about the brand below. Judge what this one conversation is about.",
+      "conversations for the brand below. Judge on whose behalf the owner is acting in this one conversation.",
     brand: context.brand,
     offers: context.offers.map((o, k) => ({ key: `o${k}`, name: o.name, description: o.description })),
     otherBrandsOfTheSameOwner: context.otherBrandsOfTheSameOwner,
@@ -187,9 +189,9 @@ export async function judgeConversation(
     topic: {
       type: "choice",
       instructions:
-        `Read the conversation between the owner (outbound) and the counterpart (inbound). Is it about the brand ` +
-        `${context.brand.name}, about another business, or about the owner's private life? Judge the relationship ` +
-        "the whole conversation shows, not one polite or logistical message.",
+        "Read the conversation between the owner (outbound) and the counterpart (inbound). On whose behalf is " +
+        `the owner acting: their private life, a different business, or the brand ${context.brand.name}? Judge ` +
+        "the whole conversation, not one polite or logistical message.",
       criteria: TOPIC_CRITERIA,
     },
   };

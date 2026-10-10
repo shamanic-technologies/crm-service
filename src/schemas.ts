@@ -1519,7 +1519,7 @@ const PersonSchema = registry.register(
         .openapi({ description: "Jev's verdict per address (null verdict = not judged yet, read as human). Null for a person with no email." }),
       notBusiness: z.boolean().openapi({
         description:
-          "True when the person is known from the owner's personal channels ALONE (Gmail, Matrix-bridged WhatsApp / Telegram / ...: no cold email, lead, CRM, CSV, Stripe or PostHog record) and Jev (chat-service judgments) judged EVERY one of their conversations not about this brand (personal life or another business) with P(about this brand) < 0.25. Hidden from GET /orgs/people unless includeNotBusiness=true.",
+          "True when the person is known from the owner's personal channels ALONE (Gmail, Matrix-bridged WhatsApp / Telegram / ...: no cold email, lead, CRM, CSV, Stripe or PostHog record) and Jev (chat-service judgments) judged EVERY one of their conversations not about this brand (personal life or another business) with P(about this brand) < 0.15. Hidden from GET /orgs/people unless includeNotBusiness=true.",
       }),
       offerIds: z.array(z.string()).openapi({
         description: "The brand's offers (brand-service offer ids) Jev tied this person's personal-channel conversations to (yes-probability >= 0.5, on a conversation about the brand). Empty when none or not judged.",
