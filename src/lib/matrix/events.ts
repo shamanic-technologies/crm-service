@@ -187,17 +187,72 @@ export interface ThreadLine {
   body: string;
 }
 
-/** Render a room's messages as an ordered transcript for the gold LLM read. */
+/**
+ * The words a HUMAN wrote in one message's content, or "" when there are none.
+ *
+ * Input hygiene, decided on the event's STRUCTURE, never on its topic:
+ * - `m.notice` is the bridge's own voice (Matrix spec: automated, never typed by
+ *   a person; WhatsApp has no way to send one). Its first paragraph is the
+ *   bridge's line ("Old photo. Media will be requested from your phone…",
+ *   "Failed to bridge voice message…", "Sent an album with 9 images:"); a
+ *   caption the person wrote follows after a blank line and is kept.
+ * - media sent without a caption carries an empty body, or its file name.
+ */
+export function humanText(content: Record<string, unknown> | undefined): string {
+  const body = typeof content?.body === "string" ? content.body : "";
+  if (content?.msgtype === "m.notice") {
+    const cut = body.search(/\n\s*\n/);
+    return cut < 0 ? "" : body.slice(cut).trim();
+  }
+  if (typeof content?.filename === "string" && body.trim() === content.filename.trim()) return "";
+  return body.trim();
+}
+
+/** The event an edit (`m.replace`) rewrites, or null when the event is not an edit. */
+function editTarget(e: MatrixEvent): string | null {
+  const rel = e.content?.["m.relates_to"] as { rel_type?: unknown; event_id?: unknown } | undefined;
+  return rel?.rel_type === "m.replace" && typeof rel.event_id === "string" ? rel.event_id : null;
+}
+
+/**
+ * Render a room's messages as an ordered transcript, for the readers (the gold
+ * lead reading, the business-relevance judgment): human words only.
+ *
+ * An edit is folded into the message it rewrites (its `m.new_content`, latest
+ * edit wins) instead of being a second line; an edit whose original was never
+ * mirrored stands at its own place. A message left with no human words (a
+ * bridge notice, an uncaptioned photo) is dropped BEFORE the window, so the
+ * last `maxLines` are the last lines a person wrote. An empty result means the
+ * room holds nothing a person wrote that we can read.
+ */
 export function renderThread(
   messageEvents: MatrixEvent[],
   ownMxid: string,
   maxLines: number,
 ): ThreadLine[] {
   const messages = messageEvents.filter((e) => e.type === "m.room.message").sort(compareEvents);
-  const window = messages.length > maxLines ? messages.slice(messages.length - maxLines) : messages;
-  return window.map((m) => ({
-    direction: m.sender === ownMxid ? "outbound" : "inbound",
-    at: new Date(m.origin_server_ts).toISOString(),
-    body: typeof m.content?.body === "string" ? m.content.body : "",
-  }));
+  const ids = new Set(messages.map((m) => m.event_id));
+  const edited = new Map<string, Record<string, unknown> | undefined>();
+  for (const m of messages) {
+    const target = editTarget(m);
+    if (target && ids.has(target)) edited.set(target, m.content?.["m.new_content"] as Record<string, unknown> | undefined);
+  }
+  const lines: ThreadLine[] = [];
+  for (const m of messages) {
+    const target = editTarget(m);
+    if (target && ids.has(target)) continue;
+    const content = edited.has(m.event_id)
+      ? edited.get(m.event_id)
+      : target
+        ? ((m.content?.["m.new_content"] as Record<string, unknown> | undefined) ?? m.content)
+        : m.content;
+    const body = humanText(content);
+    if (!body) continue;
+    lines.push({
+      direction: m.sender === ownMxid ? "outbound" : "inbound",
+      at: new Date(m.origin_server_ts).toISOString(),
+      body,
+    });
+  }
+  return lines.length > maxLines ? lines.slice(lines.length - maxLines) : lines;
 }

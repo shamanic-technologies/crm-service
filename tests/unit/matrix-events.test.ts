@@ -191,4 +191,62 @@ describe("renderThread", () => {
     expect(lines.map((l) => l.body)).toEqual(["two", "three"]);
     expect(lines.map((l) => l.direction)).toEqual(["outbound", "inbound"]);
   });
+
+  const ev = (id: string, sender: string, ts: number, content: Record<string, unknown>): MatrixEvent => ({
+    event_id: id,
+    type: "m.room.message",
+    sender,
+    origin_server_ts: ts,
+    content,
+  });
+
+  it("drops the bridge's own notices and uncaptioned media, keeps a caption (prod shapes, 2026-10-10)", () => {
+    const lines = renderThread(
+      [
+        ev("$1", GHOST, 1000, { msgtype: "m.notice", body: "Old photo. Media will be requested from your phone automatically soon.", "fi.mau.whatsapp.failed_media": {} }),
+        ev("$2", GHOST, 2000, { msgtype: "m.notice", body: "Sent an album with 9 images and 4 videos:" }),
+        ev("$3", GHOST, 3000, { msgtype: "m.image", body: "", filename: "IMG.jpg", url: "mxc://x" }),
+        ev("$4", GHOST, 4000, { msgtype: "m.audio", body: "voice.ogg", filename: "voice.ogg", url: "mxc://x" }),
+        ev("$5", GHOST, 5000, { msgtype: "m.notice", body: "Failed to bridge photo, please view it on the WhatsApp app\n\nPrices are capped at $25" }),
+        ev("$6", OWN, 6000, { msgtype: "m.text", body: "   " }),
+        ev("$7", OWN, 7000, { msgtype: "m.image", body: "look at this", filename: "IMG2.jpg" }),
+      ],
+      OWN,
+      10,
+    );
+    expect(lines.map((l) => l.body)).toEqual(["Prices are capped at $25", "look at this"]);
+  });
+
+  it("folds an edit into the message it rewrites; a notice edited into a failure stays dropped", () => {
+    const lines = renderThread(
+      [
+        ev("$1", GHOST, 1000, { msgtype: "m.notice", body: "Old voice message. Media will be requested from your phone automatically soon." }),
+        ev("$2", GHOST, 2000, {
+          msgtype: "m.notice",
+          body: "* Failed to bridge voice message, please view it on the WhatsApp app",
+          "m.new_content": { msgtype: "m.notice", body: "Failed to bridge voice message, please view it on the WhatsApp app" },
+          "m.relates_to": { rel_type: "m.replace", event_id: "$1" },
+        }),
+        ev("$3", OWN, 3000, { msgtype: "m.text", body: "helo" }),
+        ev("$4", OWN, 4000, {
+          msgtype: "m.text",
+          body: "* hello",
+          "m.new_content": { msgtype: "m.text", body: "hello" },
+          "m.relates_to": { rel_type: "m.replace", event_id: "$3" },
+        }),
+      ],
+      OWN,
+      10,
+    );
+    expect(lines).toEqual([{ direction: "outbound", at: new Date(3000).toISOString(), body: "hello" }]);
+  });
+
+  it("windows over the lines a person wrote, and a notice-only room renders nothing", () => {
+    const notices = Array.from({ length: 10 }, (_, i) =>
+      ev(`$n${i}`, GHOST, 10_000 + i, { msgtype: "m.notice", body: "Old photo. Media will be requested from your phone automatically soon." }),
+    );
+    expect(renderThread(notices, OWN, 10)).toEqual([]);
+    const lines = renderThread([message("$0", GHOST, 1, "real words"), ...notices], OWN, 10);
+    expect(lines.map((l) => l.body)).toEqual(["real words"]);
+  });
 });

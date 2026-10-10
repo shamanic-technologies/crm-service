@@ -204,12 +204,13 @@ router.get(
     ];
     if (status) filters.push(eq(matrixLeads.status, status));
     // A conversation Jev judged not about this brand (personal life, another
-    // business: people/relevance.ts) is not a lead, whatever an older reading said.
+    // business: people/relevance.ts), or holding nothing a person wrote, is not
+    // a lead, whatever an older reading said.
     filters.push(sql`NOT EXISTS (
       SELECT 1 FROM conversation_verdicts cv
       WHERE cv.org_id = ${matrixLeads.orgId} AND cv.brand_id = ${matrixLeads.brandId}
         AND cv.conversation_key = 'matrix:' || ${matrixLeads.conversationId}::text
-        AND cv.brand_probability < ${BRAND_MIN_PROBABILITY}
+        AND (cv.content = 'none' OR cv.brand_probability < ${BRAND_MIN_PROBABILITY})
     )`);
 
     const rows = await db

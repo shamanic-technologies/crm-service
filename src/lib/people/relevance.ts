@@ -21,8 +21,18 @@
  * changed (`context_hash`: an offer added or renamed).
  *
  * HIDDEN = Jev gives "about this brand" a probability below
- * BRAND_MIN_PROBABILITY. A conversation never judged (Jev down, its messages
- * unreadable) is SHOWN: nothing disappears without Jev saying so.
+ * BRAND_MIN_PROBABILITY. A conversation never judged (Jev down, brand-service
+ * down) is SHOWN: nothing disappears because a sibling failed.
+ *
+ * A third case is recorded, not judged: NO CONTENT. Once the bridge's own
+ * notices ("Old photo. Media will be requested…", "Failed to bridge voice
+ * message…") and uncaptioned media are dropped (matrix/events.ts `humanText`,
+ * on the event's structure) and empty mails are dropped, nothing a person
+ * wrote is left. Shown to Jev, such a thread came back "this brand" at
+ * 0.47-0.83 for lack of anything else to say (2026-10-10: ~9 of 15 sampled
+ * WhatsApp threads between 0.15 and 0.85). Nothing to read is no evidence the
+ * conversation is about the brand, so it is recorded `content = 'none'`
+ * without a Jev call and never keeps a personal-channel-only person visible.
  *
  * WHO is hidden is decided in people/build.ts: only a person known from
  * personal channels ALONE. A person also known from a business source (our
@@ -43,14 +53,12 @@ export const TOPICS = ["personal", "other_business", "this_brand"] as const;
 export type Topic = (typeof TOPICS)[number];
 
 /**
- * A conversation is hidden only when Jev puts "about this brand" BELOW this
- * probability, i.e. Jev is at least 85% sure it is personal or another
- * business. Hiding a real prospect is the expensive mistake, so a hesitant
- * verdict keeps the conversation visible. Measured on the first prod brand:
- * suppliers and the accountant sat at 0.20-0.70, personal threads and work done
- * for another company mostly below 0.10.
+ * A conversation is hidden when Jev puts "about this brand" BELOW this
+ * probability: Jev finds personal life or another business more likely.
+ * Owner, 2026-10-10: "Seuil Jev a 50% non?" (was 0.15 in v0.29.2, which kept
+ * 113 of 268 WhatsApp-only people of the first brand visible on thin threads).
  */
-export const BRAND_MIN_PROBABILITY = 0.15;
+export const BRAND_MIN_PROBABILITY = 0.5;
 /** An offer is tagged when Jev's yes-probability reaches this. */
 export const OFFER_MIN_PROBABILITY = 0.5;
 
@@ -68,11 +76,12 @@ const TOPIC_CRITERIA: Record<Topic, string> = {
     "for them (\"my client\", \"I work with X\"). The counterpart's own company never counts: a supplier, a " +
     "prospect or an accountant is a different company but the owner is not acting FOR it.",
   this_brand:
-    "the owner acts for the brand, or for their work with no sign of another business: the brand's prospects, " +
+    "the WORDS show the owner working for the brand, or on work that names no other business: the brand's prospects, " +
     "clients, users, partners, investors, advisors and mentors, journalists, candidates; the suppliers, " +
     "software tools and vendors the owner pays or asks for support; the accountant, lawyer, bank and the " +
     "company's own admin (bookkeeping, tax filings, annual meeting, loans, invoices), unless the thread names " +
-    "a company other than the brand or the company operating it.",
+    "a company other than the brand or the company operating it. Work must show in the words: a thread with " +
+    "nothing about work in it (greetings, emojis, \"ok\", plans between friends) is not the brand's.",
 };
 
 export interface BrandContext {
@@ -112,7 +121,8 @@ export async function readBrandContext(identity: SiblingIdentity): Promise<Brand
   return {
     ...ctx,
     brand: { ...ctx.brand, description: typeof overview === "string" && overview.trim() ? overview.trim() : null },
-    hash: createHash("sha256").update(JSON.stringify(["v4", ctx])).digest("hex").slice(0, 32),
+    // v5 (2026-10-10): bridge notices dropped + the 0.50 line: every conversation re-judged once.
+    hash: createHash("sha256").update(JSON.stringify(["v5", ctx])).digest("hex").slice(0, 32),
   };
 }
 
@@ -130,7 +140,7 @@ export interface ConversationInput {
   judgedThrough: string;
   channel: string;
   counterpart: { names: string[]; email: string | null; phone: string | null };
-  /** Oldest first, the latest MAX_MESSAGES. */
+  /** Oldest first, the latest MAX_MESSAGES holding words a person wrote. Empty = nothing to judge. */
   messages: ConversationMessage[];
 }
 
@@ -143,16 +153,25 @@ export interface Verdict {
   offerIds: string[];
 }
 
+export type Content = "readable" | "none";
+
+/** `content = 'none'`: nothing a person wrote to judge, so no topic, confidence or probability. */
 export interface RecordedVerdict {
-  topic: Topic;
-  confidence: number;
-  brandProbability: number;
+  content: Content;
+  topic: Topic | null;
+  confidence: number | null;
+  brandProbability: number | null;
   offerIds: string[];
 }
 
-/** PURE: the conversation is about something else than the brand, confidently. */
-export function hidesConversation(v: { brandProbability: number }): boolean {
-  return v.brandProbability < BRAND_MIN_PROBABILITY;
+/**
+ * PURE: the conversation is no evidence the person is about the brand: Jev
+ * judged it more likely personal or another business, or there is nothing a
+ * person wrote in it to judge.
+ */
+export function hidesConversation(v: { content?: Content; brandProbability: number | null }): boolean {
+  if (v.content === "none") return true;
+  return v.brandProbability !== null && v.brandProbability < BRAND_MIN_PROBABILITY;
 }
 
 /**
@@ -259,7 +278,11 @@ export interface GmailPlan {
   judgedThrough: string;
 }
 
-/** The latest messages of the org's mailbox with `email`, via google-service. Null = no message to read. */
+/**
+ * The latest messages of the org's mailbox with `email`, via google-service.
+ * Null = google-service holds no message; a message with neither subject nor
+ * text is dropped, so `messages: []` = messages exist, no words in them.
+ */
 export async function gmailConversationInput(identity: SiblingIdentity, plan: GmailPlan): Promise<ConversationInput | null> {
   const r = await siblingGet("google", `/orgs/google/conversation?email=${encodeURIComponent(plan.email)}&limit=20`, identity);
   const reason = (r.body as { reason?: string } | null)?.reason;
@@ -267,17 +290,18 @@ export async function gmailConversationInput(identity: SiblingIdentity, plan: Gm
   if (r.status !== 200) {
     throw new Error(`google-service conversation for ${plan.email} returned ${r.status}: ${JSON.stringify(r.body).slice(0, 200)}`);
   }
-  const messages = (r.body as GmailConversation).threads
-    .flatMap((t) => t.messages)
+  const all = (r.body as GmailConversation).threads.flatMap((t) => t.messages);
+  if (all.length === 0) return null;
+  const messages = all
     .sort((a, b) => ((a.sentAt ?? "") < (b.sentAt ?? "") ? -1 : 1))
-    .slice(-MAX_MESSAGES)
     .map((m) => ({
       at: m.sentAt,
       direction: m.direction,
       subject: m.subject,
-      text: (m.bodyStatus === "ok" && m.bodyText ? m.bodyText : m.snippet) ?? "",
-    }));
-  if (messages.length === 0) return null;
+      text: ((m.bodyStatus === "ok" && m.bodyText ? m.bodyText : m.snippet) ?? "").trim(),
+    }))
+    .filter((m) => m.text || m.subject?.trim())
+    .slice(-MAX_MESSAGES);
   return {
     key: `gmail:${plan.email}`,
     source: "gmail",
@@ -356,7 +380,8 @@ export async function storedVerdicts(orgId: string, brandId: string, keys: strin
       );
     for (const r of rows) {
       out.set(r.conversationKey, {
-        topic: r.topic as Topic,
+        content: r.content as Content,
+        topic: r.topic as Topic | null,
         confidence: r.confidence,
         brandProbability: r.brandProbability,
         offerIds: r.offerIds as string[],
@@ -384,6 +409,8 @@ export interface JudgePassSummary {
   status: "ok" | "failed";
   reused: number;
   judged: number;
+  /** Of `judged`'s pass: conversations recorded with nothing a person wrote (no Jev call). */
+  noContent: number;
   /** Conversations still without a verdict (shown until judged). */
   pending: number;
   model: string | null;
@@ -423,12 +450,46 @@ export async function judgeAndRecord<P>(
   };
   const errors: string[] = [];
   let judged = 0;
+  let noContent = 0;
   let model: string | null = null;
   await mapLimit(todo, CONCURRENCY, async (p) => {
     try {
       const input = await load(p.plan);
       if (!input) {
         nothingToRead.set(`${identity.orgId}|${identity.brandId}|${p.key}`, p.judgedThrough);
+        return;
+      }
+      if (input.messages.length === 0) {
+        // Nothing a person wrote: recorded as such, no Jev call (see the header).
+        const values = {
+          orgId: identity.orgId,
+          brandId: identity.brandId,
+          conversationKey: p.key,
+          source: input.source,
+          content: "none" as const,
+          topic: null,
+          confidence: null,
+          probabilities: null,
+          brandProbability: null,
+          offerScores: null,
+          offerIds: [],
+          contextHash: context.hash,
+          judgedThrough: p.judgedThrough,
+          input,
+          model: null,
+          runId: identity.runId,
+          judgedAt: new Date(),
+        };
+        const { orgId: _o, brandId: _b, conversationKey: _k, ...set } = values;
+        await db
+          .insert(conversationVerdicts)
+          .values(values)
+          .onConflictDoUpdate({
+            target: [conversationVerdicts.orgId, conversationVerdicts.brandId, conversationVerdicts.conversationKey],
+            set,
+          });
+        verdicts.set(p.key, { content: "none", topic: null, confidence: null, brandProbability: null, offerIds: [] });
+        noContent++;
         return;
       }
       const v = await judgeConversation(input, context, tracking);
@@ -438,6 +499,7 @@ export async function judgeAndRecord<P>(
         brandId: identity.brandId,
         conversationKey: p.key,
         source: input.source,
+        content: "readable" as const,
         topic: v.topic,
         confidence: v.confidence,
         probabilities: v.probabilities,
@@ -459,7 +521,13 @@ export async function judgeAndRecord<P>(
           target: [conversationVerdicts.orgId, conversationVerdicts.brandId, conversationVerdicts.conversationKey],
           set,
         });
-      verdicts.set(p.key, { topic: v.topic, confidence: v.confidence, brandProbability: v.brandProbability, offerIds: v.offerIds });
+      verdicts.set(p.key, {
+        content: "readable",
+        topic: v.topic,
+        confidence: v.confidence,
+        brandProbability: v.brandProbability,
+        offerIds: v.offerIds,
+      });
       judged++;
     } catch (err) {
       if (errors.length < 3) errors.push(`${p.key}: ${(err as Error).message}`);
@@ -472,6 +540,7 @@ export async function judgeAndRecord<P>(
       status: errors.length ? "failed" : "ok",
       reused,
       judged,
+      noContent,
       pending,
       model,
       error: errors.length ? errors.join(" | ").slice(0, 1000) : null,
@@ -517,6 +586,8 @@ export interface PersonRelevance {
   offerIds: string[];
   relevance: {
     conversation: string;
+    /** null = not judged yet. */
+    content: Content | null;
     topic: Topic | null;
     confidence: number | null;
     brandProbability: number | null;
@@ -525,9 +596,9 @@ export interface PersonRelevance {
 }
 
 /**
- * PURE: hidden when the person is personal-channel-only and Jev judged EVERY
- * one of their conversations not about the brand. One unjudged conversation
- * keeps them visible.
+ * PURE: hidden when the person is personal-channel-only and EVERY one of their
+ * conversations is either judged not about the brand or holds nothing a person
+ * wrote. One unjudged conversation keeps them visible.
  */
 export function personRelevance(person: PersonLike, verdicts: Map<string, RecordedVerdict>, isOurLead: boolean): PersonRelevance {
   const keys = conversationKeysOf(person);
@@ -535,8 +606,8 @@ export function personRelevance(person: PersonLike, verdicts: Map<string, Record
   const relevance = keys.map((k) => {
     const v = verdicts.get(k);
     return v
-      ? { conversation: k, topic: v.topic, confidence: v.confidence, brandProbability: v.brandProbability, offerIds: v.offerIds }
-      : { conversation: k, topic: null, confidence: null, brandProbability: null, offerIds: [] };
+      ? { conversation: k, content: v.content, topic: v.topic, confidence: v.confidence, brandProbability: v.brandProbability, offerIds: v.offerIds }
+      : { conversation: k, content: null, topic: null, confidence: null, brandProbability: null, offerIds: [] };
   });
   const notBusiness =
     isPersonalChannelOnly(person, isOurLead) &&
@@ -551,6 +622,8 @@ export function personRelevance(person: PersonLike, verdicts: Map<string, Record
 export interface RelevanceSummary extends JudgePassSummary {
   conversations: number;
   topics: Record<Topic, number>;
+  /** Recorded verdicts with nothing a person wrote in the conversation (all of them, not only this pass). */
+  contentFree: number;
   /** People hidden as not about the brand by this build. */
   notBusinessPeople: number;
   contextHash: string | null;
@@ -583,13 +656,26 @@ export async function resolvePeopleRelevance(
   const keys = [...[...gmail.keys()].map((e) => `gmail:${e}`), ...[...matrixIds].map((id) => `matrix:${id}`)];
   const topicsOf = (verdicts: Map<string, RecordedVerdict>) => {
     const topics = Object.fromEntries(TOPICS.map((t) => [t, 0])) as Record<Topic, number>;
-    for (const v of verdicts.values()) topics[v.topic] += 1;
+    for (const v of verdicts.values()) if (v.topic) topics[v.topic] += 1;
     return topics;
   };
+  const contentFreeOf = (verdicts: Map<string, RecordedVerdict>) => [...verdicts.values()].filter((v) => v.content === "none").length;
   if (keys.length === 0) {
     return {
       verdicts: new Map(),
-      summary: { status: "ok", reused: 0, judged: 0, pending: 0, model: null, error: null, conversations: 0, topics: topicsOf(new Map()), contextHash: null },
+      summary: {
+        status: "ok",
+        reused: 0,
+        judged: 0,
+        noContent: 0,
+        pending: 0,
+        model: null,
+        error: null,
+        conversations: 0,
+        topics: topicsOf(new Map()),
+        contentFree: 0,
+        contextHash: null,
+      },
     };
   }
 
@@ -604,11 +690,13 @@ export async function resolvePeopleRelevance(
         status: "failed",
         reused: verdicts.size,
         judged: 0,
+        noContent: 0,
         pending: keys.length - verdicts.size,
         model: null,
         error: `brand context: ${(err as Error).message}`.slice(0, 1000),
         conversations: keys.length,
         topics: topicsOf(verdicts),
+        contentFree: contentFreeOf(verdicts),
         contextHash: null,
       },
     };
@@ -633,6 +721,12 @@ export async function resolvePeopleRelevance(
   }
   return {
     verdicts,
-    summary: { ...summary, conversations: keys.length, topics: topicsOf(verdicts), contextHash: context.hash },
+    summary: {
+      ...summary,
+      conversations: keys.length,
+      topics: topicsOf(verdicts),
+      contentFree: contentFreeOf(verdicts),
+      contextHash: context.hash,
+    },
   };
 }

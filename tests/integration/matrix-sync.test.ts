@@ -245,6 +245,31 @@ describe.skipIf(!RUN)("matrix ingestion", () => {
     expect(chatCalls).toBe(1);
   });
 
+  it("records a thread of bridge notices as content-free: no Jev call, no lead reading", async () => {
+    const connectionId = await seedConnection();
+    const notice = (id: string, at: string) => ({
+      ...message(id, GHOST, at, "Old photo. Media will be requested from your phone automatically soon."),
+      content: { msgtype: "m.notice", body: "Old photo. Media will be requested from your phone automatically soon." },
+    });
+    syncPages = [page("s2", [notice("$n1", "2026-08-02T10:00:00Z"), notice("$n2", "2026-08-02T10:01:00Z")]), emptyPage("s3")];
+    const [first] = (await runSyncPass(connectionId)).results;
+    expect(judgeCalls).toBe(0);
+    expect(chatCalls).toBe(0);
+    expect(first.leadsSkippedNotBusiness).toBe(1);
+    expect(first.relevance.noContent).toBe(1);
+    const [v] = (await db.execute(sql`SELECT content, topic, brand_probability, model FROM conversation_verdicts`)) as unknown as Record<string, unknown>[];
+    expect(v).toEqual({ content: "none", topic: null, brand_probability: null, model: null });
+
+    // Unchanged → not asked again; a person writes words → judged then.
+    syncPages = [page("s3", []), emptyPage("s4")];
+    await runSyncPass(connectionId);
+    expect(judgeCalls).toBe(0);
+    syncPages = [page("s4", [message("$m1", GHOST, "2026-08-03T09:00:00Z", "my company needs a quote")]), emptyPage("s5")];
+    await runSyncPass(connectionId);
+    expect(judgeCalls).toBe(1);
+    expect(chatCalls).toBe(1);
+  });
+
   it("hides from the leads read a conversation read before Jev judged it personal", async () => {
     const connectionId = await seedConnection();
     syncPages = [page("s2", [message("$m1", GHOST, "2026-08-02T10:00:00Z", "hi")]), emptyPage("s3")];
