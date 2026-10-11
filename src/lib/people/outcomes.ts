@@ -23,10 +23,23 @@
  *   sale            ← sale (a CRM deal won) | payment that STANDS (succeeded and
  *                     not wholly refunded — lead-service's own `paymentStands`)
  *
- * Pure SQL over our own table: no model, no metered call, no cost.
+ * PLUS the people OUR campaigns brought to each step (source `campaigns`):
+ * lead-service's own bucket of that token (`GET /orgs/leads?bucket=`, the rows
+ * its bucket-counts count), matched onto our people by email. All sources is
+ * therefore a superset of "from our campaigns" for every step, one person once:
+ * a lead who clicked our email but never identified on PostHog is a visit too
+ * (owner 2026-10-11: « tous mes outcomes »). lead-service states no date for a
+ * bucket, so a campaigns-only reach is undated.
+ *
+ * lead-service unreachable fails the read (502): a count without our campaigns'
+ * people would be a lower figure posing as all sources.
+ *
+ * No model, no metered call, no cost.
  */
 import { sql, type SQL } from "drizzle-orm";
 import { db } from "../../db/index.js";
+import { normalizeEmail } from "./identity.js";
+import { mapLimit, siblingGetOk, type SiblingIdentity } from "./siblings.js";
 
 export const OUTCOME_STEPS = [
   "website_visit",
@@ -52,15 +65,70 @@ async function rows<T>(query: SQL): Promise<T[]> {
   return (await db.execute(query)) as unknown as T[];
 }
 
+/** The source name for people our campaigns brought to a step (lead-service's buckets). */
+export const CAMPAIGNS_SOURCE = "campaigns";
+
+/** One person lead-service holds in a step's bucket: their address and the name it serves. */
+export interface CampaignReach {
+  step: OutcomeStep;
+  email: string;
+  name: string | null;
+}
+
+const LEAD_PAGE = 2000;
+
+interface CompactLeadRow {
+  email: string;
+  lead: { firstName: string | null; lastName: string | null } | null;
+}
+
+/**
+ * lead-service's bucket of each step for the brand, every page, one row per
+ * address (a lead in two campaigns is one address). Same population as its
+ * `/orgs/leads/bucket-counts` (default statuses).
+ */
+export async function readCampaignReach(identity: SiblingIdentity, steps: readonly OutcomeStep[]): Promise<CampaignReach[]> {
+  const perStep = await mapLimit([...steps], 3, async (step) => {
+    const byEmail = new Map<string, CampaignReach>();
+    for (let offset = 0; ; offset += LEAD_PAGE) {
+      const page = await siblingGetOk<{ leads: CompactLeadRow[] }>(
+        "lead",
+        `/orgs/leads?brandId=${encodeURIComponent(identity.brandId)}&bucket=${step}&view=compact&limit=${LEAD_PAGE}&offset=${offset}`,
+        identity,
+      );
+      const leads = page.leads ?? [];
+      for (const row of leads) {
+        const email = normalizeEmail(row.email);
+        if (!email || byEmail.has(email)) continue;
+        const name = [row.lead?.firstName, row.lead?.lastName].filter((x) => x && x.trim()).join(" ") || null;
+        byEmail.set(email, { step, email, name });
+      }
+      if (leads.length < LEAD_PAGE) break;
+    }
+    return [...byEmail.values()];
+  });
+  return perStep.flat();
+}
+
 /**
  * The live step evidence of one brand: one row per fact, its step and its owner.
  * A payment counts only when it stands: status `succeeded` AND net of refunds > 0
  * (no amount → stands unless flagged refunded). Same rule as lead-service.
  */
-function evidence(orgId: string, brandId: string, step: OutcomeStep | null): SQL {
+function evidence(orgId: string, brandId: string, step: OutcomeStep | null, campaigns: CampaignReach[]): SQL {
   const steps = step ? [step] : [...OUTCOME_STEPS];
   const types = [...new Set(steps.flatMap((s) => STEP_FACT_TYPES[s]))];
+  const reach = JSON.stringify(campaigns.filter((c) => steps.includes(c.step)));
+  // A campaigns reach is the person whose identity holds that address, else a
+  // person of its own (`email:<addr>`, the key the people index would give them).
   return sql`
+    SELECT COALESCE(p.person_key, 'email:' || l.email) AS person_key, l.step, ${CAMPAIGNS_SOURCE}::text AS source,
+           NULL::timestamptz AS occurred_at, 0::bigint AS feed_seq,
+           jsonb_build_array(l.email) AS emails, l.name AS full_name
+    FROM jsonb_to_recordset(${reach}::jsonb) AS l(step text, email text, name text)
+    LEFT JOIN people p ON p.org_id = ${orgId} AND p.brand_id = ${brandId}
+      AND p.identity_keys @> jsonb_build_array('email:' || l.email)
+    UNION ALL
     SELECT f.owner_person_key AS person_key,
            CASE f.type WHEN 'form_submitted' THEN 'form_submission'
                        WHEN 'payment' THEN 'sale'
@@ -93,17 +161,18 @@ export interface OutcomeStepCount {
   people: number;
   /** Distinct people per source stating the step. Overlaps: the same person on two sources counts in both. */
   sources: { source: string; people: number }[];
-  /** Of `people`, those our campaigns contacted. */
+  /** Of `people`, those our campaigns contacted (the `campaigns` source included). */
   contactedByUs: number;
 }
 
-export async function readOutcomeCounts(orgId: string, brandId: string): Promise<OutcomeStepCount[]> {
-  const ev = evidence(orgId, brandId, null);
+export async function readOutcomeCounts(orgId: string, brandId: string, campaigns: CampaignReach[]): Promise<OutcomeStepCount[]> {
+  const ev = evidence(orgId, brandId, null, campaigns);
   const [totals, bySource] = await Promise.all([
     rows<{ step: OutcomeStep; people: number; contacted: number }>(sql`
-      WITH e AS (${ev}), r AS (SELECT DISTINCT step, person_key FROM e)
+      WITH e AS (${ev}),
+      r AS (SELECT step, person_key, bool_or(source = ${CAMPAIGNS_SOURCE}) AS ours FROM e GROUP BY step, person_key)
       SELECT r.step, count(*)::int AS people,
-             count(*) FILTER (WHERE ${CONTACTED})::int AS contacted
+             count(*) FILTER (WHERE r.ours OR ${CONTACTED})::int AS contacted
       FROM r LEFT JOIN people p ON p.org_id = ${orgId} AND p.brand_id = ${brandId} AND p.person_key = r.person_key
       GROUP BY r.step
     `),
@@ -151,8 +220,9 @@ export async function readOutcomePeople(
   step: OutcomeStep,
   limit: number,
   offset: number,
+  campaigns: CampaignReach[],
 ): Promise<{ total: number; people: OutcomePerson[] }> {
-  const ev = evidence(orgId, brandId, step);
+  const ev = evidence(orgId, brandId, step, campaigns);
   const list = await rows<{
     person_key: string;
     person_id: string | null;
@@ -174,7 +244,7 @@ export async function readOutcomePeople(
       SELECT person_key, source, min(occurred_at) AS reached_at FROM e GROUP BY person_key, source
     ),
     who AS (
-      SELECT person_key, min(reached_at) AS reached_at,
+      SELECT person_key, min(reached_at) AS reached_at, bool_or(source = ${CAMPAIGNS_SOURCE}) AS ours,
              jsonb_agg(jsonb_build_object('source', source, 'reachedAt', reached_at)
                        ORDER BY reached_at ASC NULLS LAST, source) AS sources
       FROM s GROUP BY person_key
@@ -185,7 +255,7 @@ export async function readOutcomePeople(
     )
     SELECT w.person_key, p.person_id, p.display_name, p.company, p.emails, p.phones,
            l.fact_emails, l.fact_name, w.reached_at, w.sources,
-           COALESCE(${CONTACTED}, false) AS contacted, p.state, p.state_source,
+           (w.ours OR COALESCE(${CONTACTED}, false)) AS contacted, p.state, p.state_source,
            count(*) OVER ()::int AS total
     FROM who w
     JOIN latest l ON l.person_key = w.person_key

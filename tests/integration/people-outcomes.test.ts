@@ -17,6 +17,13 @@ const ORG = "acacacac-1111-4111-8111-000000000001";
 const BRAND = "acacacac-1111-4111-8111-000000000002";
 const USER = "user-outcomes-1";
 const API_KEY = process.env.CRM_SERVICE_API_KEY || "test-crm-key";
+process.env.LEAD_SERVICE_URL = "http://lead.test";
+process.env.LEAD_SERVICE_API_KEY = "test-lead-key";
+
+const lead = (email: string, firstName: string | null = null) => ({ email, lead: firstName ? { firstName, lastName: null } : null });
+// lead-service's bucket of each step: the people OUR campaigns brought there.
+let BUCKETS: Record<string, ReturnType<typeof lead>[]> = {};
+let LEAD_DOWN = false;
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -26,6 +33,15 @@ function stubRuns() {
     const url = new URL(String(input));
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
       return json({ id: "run-" + Math.random().toString(16).slice(2) });
+    }
+    if (url.host === "lead.test" && url.pathname === "/orgs/leads") {
+      if (LEAD_DOWN) return json({ error: "boom" }, 500);
+      expect(url.searchParams.get("brandId")).toBe(BRAND);
+      expect(url.searchParams.get("view")).toBe("compact");
+      const all = BUCKETS[url.searchParams.get("bucket")!] ?? [];
+      const limit = Number(url.searchParams.get("limit"));
+      const offset = Number(url.searchParams.get("offset"));
+      return json({ leads: all.slice(offset, offset + limit) });
     }
     throw new Error(`unexpected fetch ${url}`);
   });
@@ -132,6 +148,8 @@ describe.skipIf(!RUN)("people outcomes (all sources)", () => {
     await db.delete(peopleScopes).where(eq(peopleScopes.orgId, ORG));
   };
   beforeEach(async () => {
+    BUCKETS = {};
+    LEAD_DOWN = false;
     stubRuns();
     await wipe();
   });
@@ -198,6 +216,49 @@ describe.skipIf(!RUN)("people outcomes (all sources)", () => {
 
     const visits = await asOrg(request(app()).get("/orgs/people/outcomes/people").query({ brandId: BRAND, step: "website_visit" }));
     expect(visits.body.people.map((p: { personKey: string }) => p.personKey)).toEqual(["email:bob@x.com", "email:ann@x.com"]);
+  });
+
+  it("adds the people our campaigns brought to each step: all sources is a superset, one person once", async () => {
+    await seed();
+    BUCKETS = {
+      // Ann (already a PostHog visitor) + Gus, who clicked our email but never identified on PostHog.
+      website_visit: [lead("ANN@x.com"), lead("gus@x.com", "Gus"), lead("gus@x.com", "Gus")],
+      signup: [lead("ann@x.com")],
+      // Dan's Stripe payment was refunded, but lead-service holds a sale for him.
+      sale: [lead("dan@x.com")],
+    };
+    const r = await asOrg(request(app()).get("/orgs/people/outcomes").query({ brandId: BRAND }));
+    expect(r.status).toBe(200);
+    const by = Object.fromEntries(r.body.steps.map((s: { step: string }) => [s.step, s]));
+    expect(by.website_visit).toEqual({
+      step: "website_visit",
+      people: 3,
+      sources: [
+        { source: "campaigns", people: 2 },
+        { source: "posthog", people: 2 },
+      ],
+      contactedByUs: 2,
+    });
+    expect(by.signup.people).toBe(1);
+    expect(by.sale.people).toBe(3);
+    expect(by.sale.contactedByUs).toBe(1);
+
+    const visits = await asOrg(request(app()).get("/orgs/people/outcomes/people").query({ brandId: BRAND, step: "website_visit" }));
+    expect(visits.body.total).toBe(3);
+    const gus = visits.body.people.find((p: { personKey: string }) => p.personKey === "email:gus@x.com");
+    expect(gus).toMatchObject({ personId: null, displayName: "Gus", emails: ["gus@x.com"], reachedAt: null, contactedByUs: true, sources: [{ source: "campaigns", reachedAt: null }] });
+    // Undated (campaigns-only) last.
+    expect(visits.body.people.map((p: { personKey: string }) => p.personKey)).toEqual(["email:bob@x.com", "email:ann@x.com", "email:gus@x.com"]);
+  });
+
+  it("fails loud when lead-service cannot be read: never a count without our campaigns", async () => {
+    await seed();
+    LEAD_DOWN = true;
+    const r = await asOrg(request(app()).get("/orgs/people/outcomes").query({ brandId: BRAND }));
+    expect(r.status).toBe(502);
+    expect(r.body.reason).toBe("campaign_outcomes_unavailable");
+    const l = await asOrg(request(app()).get("/orgs/people/outcomes/people").query({ brandId: BRAND, step: "signup" }));
+    expect(l.status).toBe(502);
   });
 
   it("refuses an unknown step and an unauthenticated call", async () => {

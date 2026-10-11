@@ -934,6 +934,13 @@ this answers the same steps for everyone the brand's own tools state.
 - Read off LIVE `people_facts`, person = `owner_person_key` (re-owned on merge /
   split), so Clerk + PostHog signups of one human count once and withdrawn facts
   count for nothing. `contactedByUs` = Instantly presence or lead-service state.
+- **PLUS source `campaigns`**: lead-service's bucket of the same token
+  (`GET /orgs/leads?bucket=&view=compact`, every page), matched onto people by
+  email (else its own `email:<addr>` person). All sources ⊇ "from our
+  campaigns" on every step (prod 2026-10-11: PostHog knew 83 visitors,
+  lead-service 189 clickers). Undated (lead-service states no bucket date).
+  lead-service unreadable → 502 `campaign_outcomes_unavailable`, never a lower
+  figure posing as all sources.
 - Gateway: api-service `/v1/orgs/people/outcomes[/people]` (explicit proxies).
 
 ## PostHog + Stripe — what a person DID and what they PAID (`src/lib/posthog/`, `src/lib/stripe/`)
