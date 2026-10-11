@@ -17,6 +17,7 @@ import type { PersonRelevance } from "../lib/people/relevance.js";
 import { findPerson, readTimeline } from "../lib/people/timeline.js";
 import { readFacts } from "../lib/people/facts.js";
 import { findPersonById } from "../lib/people/person-id.js";
+import { OUTCOME_STEPS, readOutcomeCounts, readOutcomePeople } from "../lib/people/outcomes.js";
 import { familyOf, LEAD_FAMILIES, readBrandFamilies, type FamilyVerdict, type LeadFamily } from "../lib/people/families.js";
 import {
   matchesOf,
@@ -381,6 +382,69 @@ router.get(
         itemCount: timeline.items.length,
         items: timeline.items,
       });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ─── GET /orgs/people/outcomes ───────────────────────────────────────────────
+
+/** Opens the scope on a brand's first read (like GET /orgs/people), so the fact feed starts filling. */
+async function openScope(req: AuthenticatedRequest, brandId: string) {
+  const { scope, created } = await ensureScope(req.orgId!, brandId, req.userId!);
+  if (created) {
+    setImmediate(() => {
+      runScopeBuild(scope).catch((e) => console.error("[crm-service] first people build crashed:", e));
+    });
+  }
+  return scopeView(scope, created || scope.status === "pending");
+}
+
+/** Per outcome step, distinct people of the brand who reached it, any source (people/outcomes.ts). */
+router.get(
+  "/orgs/people/outcomes",
+  apiKeyAuth,
+  requireOrgAndUser("people.outcomes"),
+  async (req: AuthenticatedRequest, res, next) => {
+    const parsed = z.object({ brandId: brandIdSchema }).safeParse(req.query);
+    if (!parsed.success) {
+      return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
+    }
+    try {
+      const scope = await openScope(req, parsed.data.brandId);
+      const steps = await readOutcomeCounts(req.orgId!, parsed.data.brandId);
+      res.json({ brandId: parsed.data.brandId, scope, steps });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+const outcomePeopleQuerySchema = z.object({
+  brandId: brandIdSchema,
+  step: z.enum(OUTCOME_STEPS),
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+  offset: z.coerce.number().int().min(0).optional(),
+});
+
+/** The people who reached one step, earliest first; pages to exactly that step's count. */
+router.get(
+  "/orgs/people/outcomes/people",
+  apiKeyAuth,
+  requireOrgAndUser("people.outcomes.people"),
+  async (req: AuthenticatedRequest, res, next) => {
+    const parsed = outcomePeopleQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      return res.status(400).json({ type: "validation", error: `invalid query: ${parsed.error.message}` });
+    }
+    const { brandId, step } = parsed.data;
+    const limit = parsed.data.limit ?? 100;
+    const offset = parsed.data.offset ?? 0;
+    try {
+      await openScope(req, brandId);
+      const page = await readOutcomePeople(req.orgId!, brandId, step, limit, offset);
+      res.json({ brandId, step, total: page.total, limit, offset, people: page.people });
     } catch (err) {
       next(err);
     }
