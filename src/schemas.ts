@@ -1883,7 +1883,7 @@ export const OutcomesResponseSchema = registry.register(
         people: z.number().int().openapi({ description: "Distinct people who reached the step, any source; one person once even when two sources state it." }),
         sources: z
           .array(z.object({ source: z.string(), people: z.number().int() }))
-          .openapi({ description: "Distinct people per source stating the step (posthog, clerk, stripe, gohighlevel). Overlaps: one person on two sources counts in both." }),
+          .openapi({ description: "Distinct people per source stating the step (posthog, clerk, stripe, gohighlevel, and campaigns = the people our campaigns brought there, lead-service's bucket). Overlaps: one person on two sources counts in both." }),
         contactedByUs: z.number().int().openapi({ description: "Of `people`, those our campaigns contacted (our cold email wrote to them, or lead-service holds them as our lead)." }),
       }),
     ).openapi({ description: "Always all six steps, in funnel order, zeros included." }),
@@ -1923,7 +1923,9 @@ registry.registerPath({
   description:
     "Website visits, signups, form submissions, meetings booked / attended, paid clients: everyone the brand's own tools " +
     "(PostHog, Clerk, Stripe, GoHighLevel) state, not only the leads our campaigns contacted. Read off the live people fact " +
-    "feed (withdrawn facts excluded, persons merged across sources). Anonymous visitors are not people and are not counted.",
+    "feed (withdrawn facts excluded, persons merged across sources), UNION the people our campaigns brought to the step " +
+    "(lead-service's bucket of the same token, source `campaigns`, undated): all sources is a superset of our campaigns on every step. " +
+    "Anonymous visitors are not people and are not counted. 502 reason=campaign_outcomes_unavailable when lead-service cannot be read.",
   request: { headers: IDENTITY_HEADERS, query: z.object({ brandId: z.string().uuid() }) },
   responses: {
     200: { description: "Per-step counts", content: { "application/json": { schema: OutcomesResponseSchema } } },

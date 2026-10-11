@@ -1,4 +1,4 @@
-import { Router } from "express";
+import { Router, type Response } from "express";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../db/index.js";
@@ -17,7 +17,7 @@ import type { PersonRelevance } from "../lib/people/relevance.js";
 import { findPerson, readTimeline } from "../lib/people/timeline.js";
 import { readFacts } from "../lib/people/facts.js";
 import { findPersonById } from "../lib/people/person-id.js";
-import { OUTCOME_STEPS, readOutcomeCounts, readOutcomePeople } from "../lib/people/outcomes.js";
+import { OUTCOME_STEPS, readCampaignReach, readOutcomeCounts, readOutcomePeople, type CampaignReach, type OutcomeStep } from "../lib/people/outcomes.js";
 import { familyOf, LEAD_FAMILIES, readBrandFamilies, type FamilyVerdict, type LeadFamily } from "../lib/people/families.js";
 import {
   matchesOf,
@@ -401,6 +401,24 @@ async function openScope(req: AuthenticatedRequest, brandId: string) {
   return scopeView(scope, created || scope.status === "pending");
 }
 
+/**
+ * The people OUR campaigns brought to these steps (lead-service's buckets).
+ * Unreadable → null after answering 502: all sources without our campaigns
+ * would be a lower figure posing as the whole.
+ */
+async function campaignReachOr502(req: AuthenticatedRequest, res: Response, brandId: string, steps: readonly OutcomeStep[]): Promise<CampaignReach[] | null> {
+  try {
+    return await readCampaignReach({ orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId }, steps);
+  } catch (err) {
+    res.status(502).json({
+      type: "upstream",
+      reason: "campaign_outcomes_unavailable",
+      error: `cannot read the people our campaigns brought to each step: ${(err as Error).message}`,
+    });
+    return null;
+  }
+}
+
 /** Per outcome step, distinct people of the brand who reached it, any source (people/outcomes.ts). */
 router.get(
   "/orgs/people/outcomes",
@@ -413,7 +431,9 @@ router.get(
     }
     try {
       const scope = await openScope(req, parsed.data.brandId);
-      const steps = await readOutcomeCounts(req.orgId!, parsed.data.brandId);
+      const campaigns = await campaignReachOr502(req, res, parsed.data.brandId, OUTCOME_STEPS);
+      if (!campaigns) return;
+      const steps = await readOutcomeCounts(req.orgId!, parsed.data.brandId, campaigns);
       res.json({ brandId: parsed.data.brandId, scope, steps });
     } catch (err) {
       next(err);
@@ -443,7 +463,9 @@ router.get(
     const offset = parsed.data.offset ?? 0;
     try {
       await openScope(req, brandId);
-      const page = await readOutcomePeople(req.orgId!, brandId, step, limit, offset);
+      const campaigns = await campaignReachOr502(req, res, brandId, [step]);
+      if (!campaigns) return;
+      const page = await readOutcomePeople(req.orgId!, brandId, step, limit, offset, campaigns);
       res.json({ brandId, step, total: page.total, limit, offset, people: page.people });
     } catch (err) {
       next(err);
