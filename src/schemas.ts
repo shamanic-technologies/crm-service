@@ -8,6 +8,7 @@ import { STATE_SOURCES } from "./lib/people/state.js";
 import { SOURCE_STATUSES } from "./lib/people/sources.js";
 import { TEXT_CLEAN_STATUSES, TIMELINE_SOURCE_STATUSES } from "./lib/people/timeline.js";
 import { FACT_SOURCES, FACT_TYPES } from "./lib/people/facts.js";
+import { OUTCOME_STEPS } from "./lib/people/outcomes.js";
 
 extendZodWithOpenApi(z);
 
@@ -1855,6 +1856,97 @@ registry.registerPath({
     200: { description: "The merged thread", content: { "application/json": { schema: PersonTimelineResponseSchema } } },
     400: { description: "Neither or both of personId / personKey, or a personId that is not a uuid" },
     404: { description: "reason=person_not_found: no person of this brand holds that key / id" },
+  },
+});
+
+// ─── Outcomes: every person who reached a step, any source ───────────────────
+
+const OutcomeStepSchema = z.enum(OUTCOME_STEPS).openapi({
+  description:
+    "lead-service's bucket tokens. website_visit / signup / form_submission (crm fact form_submitted) / meeting_booked / " +
+    "meeting_attended / sale (a CRM deal won, or a Stripe payment that succeeded and was not wholly refunded).",
+});
+const ScopeViewSchema = z.object({
+  status: z.string().openapi({ description: "building on the first read for a brand (the people index is being built), then the build status." }),
+  lastBuiltAt: z.string().nullable(),
+  lastError: z.string().nullable(),
+});
+
+export const OutcomesResponseSchema = registry.register(
+  "PeopleOutcomes",
+  z.object({
+    brandId: z.string().uuid(),
+    scope: ScopeViewSchema,
+    steps: z.array(
+      z.object({
+        step: OutcomeStepSchema,
+        people: z.number().int().openapi({ description: "Distinct people who reached the step, any source; one person once even when two sources state it." }),
+        sources: z
+          .array(z.object({ source: z.string(), people: z.number().int() }))
+          .openapi({ description: "Distinct people per source stating the step (posthog, clerk, stripe, gohighlevel). Overlaps: one person on two sources counts in both." }),
+        contactedByUs: z.number().int().openapi({ description: "Of `people`, those our campaigns contacted (our cold email wrote to them, or lead-service holds them as our lead)." }),
+      }),
+    ).openapi({ description: "Always all six steps, in funnel order, zeros included." }),
+  }),
+);
+
+export const OutcomePeopleResponseSchema = registry.register(
+  "PeopleOutcomePeople",
+  z.object({
+    brandId: z.string().uuid(),
+    step: OutcomeStepSchema,
+    total: z.number().int().openapi({ description: "Equals that step's `people` in GET /orgs/people/outcomes." }),
+    limit: z.number().int(),
+    offset: z.number().int(),
+    people: z.array(
+      z.object({
+        personId: z.string().uuid().nullable().openapi({ description: "Opaque person id (pass to GET /orgs/people/timeline). Null only when the person has left the people index since." }),
+        personKey: z.string(),
+        displayName: z.string().nullable(),
+        company: z.string().nullable(),
+        emails: z.array(z.string()),
+        phones: z.array(z.string()),
+        reachedAt: z.string().nullable().openapi({ description: "Earliest dated statement of the step; null when no source dated it." }),
+        sources: z.array(z.object({ source: z.string(), reachedAt: z.string().nullable() })),
+        contactedByUs: z.boolean(),
+        state: z.string().nullable(),
+        stateSource: z.string().nullable(),
+      }),
+    ).openapi({ description: "Earliest reachedAt first (undated last), then personKey: a total order, safe to page." }),
+  }),
+);
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/people/outcomes",
+  summary: "Per outcome step, how many distinct people of the brand reached it, from any source",
+  description:
+    "Website visits, signups, form submissions, meetings booked / attended, paid clients: everyone the brand's own tools " +
+    "(PostHog, Clerk, Stripe, GoHighLevel) state, not only the leads our campaigns contacted. Read off the live people fact " +
+    "feed (withdrawn facts excluded, persons merged across sources). Anonymous visitors are not people and are not counted.",
+  request: { headers: IDENTITY_HEADERS, query: z.object({ brandId: z.string().uuid() }) },
+  responses: {
+    200: { description: "Per-step counts", content: { "application/json": { schema: OutcomesResponseSchema } } },
+    400: { description: "Invalid query", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/people/outcomes/people",
+  summary: "The people who reached one outcome step, paged",
+  request: {
+    headers: IDENTITY_HEADERS,
+    query: z.object({
+      brandId: z.string().uuid(),
+      step: OutcomeStepSchema,
+      limit: z.coerce.number().int().min(1).max(500).optional().openapi({ description: "Default 100." }),
+      offset: z.coerce.number().int().min(0).optional(),
+    }),
+  },
+  responses: {
+    200: { description: "People page", content: { "application/json": { schema: OutcomePeopleResponseSchema } } },
+    400: { description: "Invalid query", content: { "application/json": { schema: ErrorResponseSchema } } },
   },
 });
 

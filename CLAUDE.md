@@ -916,6 +916,26 @@ lead-service serves the overall tag, then go.
   `crmContactId` in place before lead-service read the feed; lead-service had to
   empty and re-pull. Allowed once, never again.)
 
+## Outcomes — every person who reached a step, any source (`src/lib/people/outcomes.ts`)
+
+Dashboard v2 Outcomes page. lead-service's buckets cover only leads WE contacted;
+this answers the same steps for everyone the brand's own tools state.
+
+- `GET /orgs/people/outcomes?brandId=` → `steps[]` (all six, funnel order):
+  `{ step, people, sources: [{source, people}], contactedByUs }`.
+  `GET /orgs/people/outcomes/people?brandId=&step=&limit=&offset=` → `{ total,
+  people: [{ personId, personKey, displayName, company, emails, phones,
+  reachedAt, sources: [{source, reachedAt}], contactedByUs, state, stateSource }] }`,
+  earliest first, total order on person key; `total` == that step's `people`.
+- Step tokens = lead-service's buckets: `website_visit`, `signup`,
+  `form_submission` (fact `form_submitted`), `meeting_booked`,
+  `meeting_attended`, `sale` (fact `sale` OR a `payment` that STANDS: succeeded,
+  net of refunds > 0 — lead-service's `paymentStands`).
+- Read off LIVE `people_facts`, person = `owner_person_key` (re-owned on merge /
+  split), so Clerk + PostHog signups of one human count once and withdrawn facts
+  count for nothing. `contactedByUs` = Instantly presence or lead-service state.
+- Gateway: api-service `/v1/orgs/people/outcomes[/people]` (explicit proxies).
+
 ## PostHog + Stripe — what a person DID and what they PAID (`src/lib/posthog/`, `src/lib/stripe/`)
 
 Same contract as GoHighLevel: credential in key-service (provider `posthog` /
