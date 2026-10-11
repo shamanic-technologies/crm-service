@@ -15,6 +15,7 @@ import gohighlevelRoutes from "./routes/gohighlevel.js";
 import peopleRoutes from "./routes/people.js";
 import posthogStripeRoutes from "./routes/posthog-stripe.js";
 import authProviderRoutes from "./routes/auth-providers.js";
+import copilotRoutes from "./routes/copilot.js";
 import { startFreshnessWatch } from "./lib/people/freshness.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -60,6 +61,7 @@ app.use(gohighlevelRoutes);
 app.use(peopleRoutes);
 app.use(posthogStripeRoutes);
 app.use(authProviderRoutes);
+app.use(copilotRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ type: "not_found", error: "Not found" });

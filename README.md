@@ -17,6 +17,14 @@ api-service proxy, and the dashboard UI are separate later tasks.
 | `POST` | `/orgs/contacts/upload` | org | `x-api-key` + `x-org-id` + `x-user-id` |
 | `GET` | `/orgs/contacts?brandId=` | org | `x-api-key` + `x-org-id` |
 | `GET` | `/orgs/contacts/uploads?brandId=` | org | `x-api-key` + `x-org-id` |
+| `POST` | `/internal/copilot/messages` | internal | `x-api-key` |
+
+`POST /internal/copilot/messages` is how chat-service files each Copilot chat turn
+(user message + answer) on the staff Unibox: body `{ orgId, userId, email,
+displayName?, sessionId, messages: [{ messageId, role: "user"|"assistant", text, at }] }`,
+idempotent on `messageId`, filed ONLY under `COPILOT_UNIBOX_ORG_ID` /
+`COPILOT_UNIBOX_BRAND_ID` (never the chatting org). Full contract in `CLAUDE.md`
+("Copilot chat") and `openapi.json`.
 
 `POST /orgs/contacts/upload` is `multipart/form-data`: `file` (CSV), `brandId`
 (required), `columnMapping` (optional JSON override). Bronze is written in chunked

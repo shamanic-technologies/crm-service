@@ -38,6 +38,7 @@ import {
   readPosthog,
   readStripe,
   readAuthUsers,
+  readCopilot,
   withoutOwnAddresses,
   type EvidenceRead,
   type StripeStanding,
@@ -74,6 +75,7 @@ const NAME_PRECEDENCE: (PeopleSource | Evidence["kind"])[] = [
   "stripe",
   "stripe_customer",
   "clerk",
+  "copilot",
   "matrix",
   "gmail",
   "csv_contact",
@@ -228,7 +230,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     brandId: scope.brandId,
   };
 
-  const [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, rawClerk, own] = await Promise.all([
+  const [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, rawClerk, rawCopilot, own] = await Promise.all([
     readGmail(identity),
     readInstantly(identity),
     readMatrix(scope.orgId, scope.brandId),
@@ -236,9 +238,10 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     readPosthog(scope.orgId, scope.brandId),
     readStripe(scope.orgId, scope.brandId),
     readAuthUsers(scope.orgId, scope.brandId, "clerk"),
+    readCopilot(scope.orgId, scope.brandId),
     readOwnAddresses(identity),
   ]);
-  const filtered = [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, rawClerk].map((r) => withoutOwnAddresses(r, own));
+  const filtered = [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, rawClerk, rawCopilot].map((r) => withoutOwnAddresses(r, own));
   const reads: SourceRead[] = filtered.map((f) => f.read);
   const [gmail, , , gohighlevel, , stripe] = reads;
 

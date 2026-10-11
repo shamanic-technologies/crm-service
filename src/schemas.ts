@@ -384,6 +384,55 @@ registry.registerPath({
   },
 });
 
+// ─── Copilot chat turns (the staff Unibox's chat source) ─────────────────────
+
+export const CopilotTurnRequestSchema = z
+  .object({
+    orgId: z.string().uuid().openapi({ description: "chat-service's org id of the user who chatted (internal uuid). Recorded, never used as the filing scope." }),
+    userId: z.string().uuid().openapi({ description: "chat-service's user id of the user who chatted (internal uuid)." }),
+    email: z.string().email().openapi({ description: "The user's email: the key that matches them to their person, like any source." }),
+    displayName: z.string().max(500).nullable().optional().openapi({ description: "The user's name, when known." }),
+    sessionId: z.string().min(1).max(200).openapi({ description: "chat-service's chat session id." }),
+    messages: z
+      .array(
+        z.object({
+          messageId: z.string().min(1).max(200).openapi({ description: "chat-service's message id. The idempotency key: a message pushed twice is stored once." }),
+          role: z.enum(["user", "assistant"]).openapi({ description: "user = the person wrote (inbound); assistant = the Copilot answered (outbound, shown from \"AI Copilot\")." }),
+          text: z.string().min(1).max(200_000).openapi({ description: "The message text, verbatim (the answer the user saw)." }),
+          at: z.string().datetime({ offset: true }).openapi({ description: "When the message was written (ISO 8601)." }),
+        }),
+      )
+      .min(1)
+      .max(50),
+  })
+  .openapi("CopilotTurnRequest");
+
+const CopilotTurnResponseSchema = z
+  .object({
+    stored: z.number().int().openapi({ description: "Messages stored by this call." }),
+    duplicates: z.number().int().openapi({ description: "Messages already stored (same messageId): ignored, never shown twice." }),
+  })
+  .openapi("CopilotTurnResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/copilot/messages",
+  summary: "Store one Copilot chat turn on the staff Unibox",
+  description:
+    "chat-service calls this after each Copilot turn with the user's message and the Copilot's answer (both, or whichever is new). " +
+    "The turn is filed ONLY under the staff Unibox scope configured on crm-service (COPILOT_UNIBOX_ORG_ID + COPILOT_UNIBOX_BRAND_ID), never under the chatting org: " +
+    "it then shows on that person's thread (`GET /orgs/people/timeline`, source `copilot`, channel `chat`), the user's messages inbound, the Copilot's outbound from \"AI Copilot\". " +
+    "Idempotent on messageId. A chat the user deletes on chat-service stays here (staff record). No cost, no customer org billed.",
+  request: { body: { content: { "application/json": { schema: CopilotTurnRequestSchema } }, required: true } },
+  responses: {
+    200: { description: "Stored", content: { "application/json": { schema: CopilotTurnResponseSchema } } },
+    400: { description: "Validation error" },
+    401: { description: "Missing or wrong x-api-key" },
+    502: { description: "Run tracking unavailable (nothing stored; retry)" },
+    503: { description: "The staff Unibox scope is not configured on crm-service (nothing stored)" },
+  },
+});
+
 // ─── Matrix (direct-message ingestion) ───────────────────────────────────────
 
 export const MatrixChannelSchema = z.enum(MATRIX_CHANNELS);
@@ -1722,7 +1771,8 @@ const TimelineItemSchema = z
           "Events only. Besides the funnel / web / payment steps, every source record that brought the person in adds ONE entry event, " +
           "only when the source dates it (never invented, never the build time): " +
           "gohighlevel `added_to_crm` (dateBasis `contact_created_at`), csv `added_to_crm` (dateBasis `uploaded_at`, detail filename + uploadId), " +
-          "posthog `signup` (dateBasis `person_created_at`), stripe `became_customer` (dateBasis `customer_created_at`).",
+          "posthog `signup` (dateBasis `person_created_at`), stripe `became_customer` (dateBasis `customer_created_at`). " +
+          "Source `copilot` (channel `chat`) carries messages only: the person's chat with the distribute.you Copilot, served on the staff Unibox scope alone, inbound = the user wrote, outbound = the Copilot answered (`from` \"AI Copilot\").",
       }),
     textClean: z
       .object({

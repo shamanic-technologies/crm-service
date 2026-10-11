@@ -1600,6 +1600,41 @@ export const authRawRecords = pgTable(
   ],
 );
 
+/**
+ * The distribute.you Copilot's chat turns, pushed by chat-service (bronze,
+ * append-only). The Copilot is a member of OUR staff, so each turn is a staff
+ * conversation with the person, stored ONLY under the staff Unibox scope
+ * (`COPILOT_UNIBOX_ORG_ID` / `COPILOT_UNIBOX_BRAND_ID`), never under the
+ * chatting user's own org. One row per chat-service message, keyed on its id:
+ * a turn pushed twice is stored once.
+ */
+export const copilotMessages = pgTable(
+  "copilot_messages",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // The staff Unibox scope the turn is filed under (never the chatting org).
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    // Who chatted: chat-service's org / user ids and the user's email (the match key).
+    chatOrgId: uuid("chat_org_id").notNull(),
+    chatUserId: uuid("chat_user_id").notNull(),
+    email: text("email").notNull(),
+    displayName: text("display_name"),
+    sessionId: text("session_id").notNull(),
+    messageId: text("message_id").notNull(),
+    // 'user' (the person wrote) | 'assistant' (the Copilot answered)
+    role: text("role").notNull(),
+    text: text("text").notNull(),
+    sentAt: timestamp("sent_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    runId: text("run_id"),
+  },
+  (table) => [
+    uniqueIndex("copilot_messages_message_uq").on(table.messageId),
+    index("copilot_messages_scope_email_idx").on(table.orgId, table.brandId, table.email, table.sentAt),
+  ],
+);
+
 export type ContactUpload = typeof contactUploads.$inferSelect;
 export type NewContactUpload = typeof contactUploads.$inferInsert;
 export type ContactRowRaw = typeof contactRowsRaw.$inferSelect;
@@ -1638,3 +1673,4 @@ export type StripeTransaction = typeof stripeTransactions.$inferSelect;
 export type PeopleFact = typeof peopleFacts.$inferSelect;
 export type NewPeopleFact = typeof peopleFacts.$inferInsert;
 export type AuthConnection = typeof authConnections.$inferSelect;
+export type CopilotMessage = typeof copilotMessages.$inferSelect;

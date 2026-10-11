@@ -54,6 +54,7 @@ import {
   personIds,
   personIdAliases,
   conversationVerdicts,
+  copilotMessages,
 } from "../db/schema.js";
 
 export const TRANSFER_TABLES: PgTable[] = [
@@ -92,6 +93,8 @@ export const TRANSFER_TABLES: PgTable[] = [
   personIdAliases,
   // Jev's business / brand / offer verdicts on the brand's conversations.
   conversationVerdicts,
+  // The Copilot chat turns filed under the staff Unibox scope.
+  copilotMessages,
 ];
 
 export interface TransferBrandInput {

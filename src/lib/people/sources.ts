@@ -25,6 +25,7 @@ import {
 } from "./identity.js";
 import { siblingGet, siblingGetOk, type SiblingIdentity } from "./siblings.js";
 import type { GhlDeal, LeadStanding } from "./state.js";
+import { copilotPresences, isCopilotDestination, readCopilotRows } from "../copilot/messages.js";
 
 export const SOURCE_STATUSES = ["not_connected", "ok", "failed"] as const;
 export type SourceStatus = (typeof SOURCE_STATUSES)[number];
@@ -611,6 +612,26 @@ export async function readAuthUsers(orgId: string, brandId: string, provider: "c
     };
   });
   return { ...base, status: "ok", presences, sourceCount: rows.length, error: health.error };
+}
+
+// ─── crm-service bronze: the Copilot's chat turns (staff Unibox only) ─────────
+
+/**
+ * Everyone who chatted with the distribute.you Copilot. Only the staff Unibox
+ * scope holds any (`lib/copilot/messages.ts`); every other (org, brand) is
+ * `not_connected`, whatever brand id it carries.
+ */
+export async function readCopilot(orgId: string, brandId: string): Promise<SourceRead> {
+  const base = {
+    source: "copilot" as const,
+    scope: "brand" as const,
+    sourceCountBasis: "crm-service stored Copilot chat addresses (staff Unibox only)",
+  };
+  if (!isCopilotDestination(orgId, brandId)) {
+    return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
+  }
+  const presences = copilotPresences(await readCopilotRows(orgId, brandId));
+  return { ...base, status: "ok", presences, sourceCount: presences.length, error: null };
 }
 
 // ─── merge evidence ─────────────────────────────────────────────────────────

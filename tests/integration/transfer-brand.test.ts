@@ -120,6 +120,9 @@ async function seedBrand(org: string, brand: string, tag: string) {
     INSERT INTO conversation_verdicts (org_id, brand_id, conversation_key, source, topic, confidence, probabilities,
       brand_probability, offer_scores, offer_ids, context_hash, judged_through, input, model, run_id)
     VALUES (${org}, ${brand}, 'gmail:a@b.co', 'gmail', 'this_brand', 0.9, '{}', 0.9, '{}', '[]', 'h', 'm', '{}', 'jev', 'run-1')`);
+  await db.execute(sql`
+    INSERT INTO copilot_messages (org_id, brand_id, chat_org_id, chat_user_id, email, session_id, message_id, role, text, sent_at)
+    VALUES (${org}, ${brand}, gen_random_uuid(), gen_random_uuid(), 'a@b.co', 's1', gen_random_uuid()::text, 'user', 'hi', now())`);
 }
 
 /** Rows per table for (org, brand). */
