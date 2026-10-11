@@ -183,6 +183,13 @@
       "when": 1791659176433,
       "tag": "0025_auth_connections",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1791730281215,
+      "tag": "0026_copilot_messages",
+      "breakpoints": true
     }
   ]
 }

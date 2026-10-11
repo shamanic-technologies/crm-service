@@ -14,6 +14,7 @@ feed the same registry, both layered bronze/silver/gold:
 | `posthog` | MIRROR | the brand's PostHog project: IDENTIFIED persons (email known), their visits and custom events, read-only | NEVER |
 | `stripe` | MIRROR | the brand's Stripe account (restricted key): customers, charges, refunds, subscriptions, read-only | NEVER |
 | `clerk` | MIRROR | the brand's AUTH PROVIDER: every user who signed up to its product, history included, read-only | NEVER |
+| `copilot` | PUSHED | each distribute.you Copilot chat turn (user message + answer), pushed by chat-service, filed ONLY under the staff Unibox scope | NEVER |
 
 As a CSV lead-provider it is a sibling of `apollo-service` / `apify-service`.
 
@@ -1030,6 +1031,36 @@ every email-less person — `IDENTIFIED` is built strictly boolean. ⚠️ A Hog
 query without LIMIT answers 100 rows. A person mirrored for the FIRST time on a
 later pass gets its whole activity history read (the window would miss it).
 
+## Copilot chat — the staff Unibox's chat source (`src/lib/copilot/messages.ts`)
+
+The distribute.you Copilot (chat-service's agent) is a member of OUR staff (owner
+2026-10-11: « l'AI Chat fait partie de notre staff »): every chat turn is a staff
+conversation with that person, shown on their Unibox thread like a staff Gmail.
+
+**Contract (chat-service conforms to it):** `POST /internal/copilot/messages`,
+`x-api-key: CRM_SERVICE_API_KEY`, after each Copilot turn, body
+`{ orgId, userId, email, displayName?, sessionId, messages: [{ messageId, role: "user"|"assistant", text, at }] }`
+(org/user = chat-service's internal uuids of who chatted; `email` = the match key;
+`messageId` = chat-service's message id; `at` = ISO time it was written; 1-50 messages).
+200 `{ stored, duplicates }`; 400 validation; 401 key; 502 run tracking down (nothing
+stored, retry); 503 `not_configured` (staff scope unset, nothing stored). Retrying is
+always safe.
+
+- **PRIVACY is structural:** the filing scope is NOT in the request. It is
+  `COPILOT_UNIBOX_ORG_ID` + `COPILOT_UNIBOX_BRAND_ID` (staff org f0420eb5… +
+  distribute.you brand f4d73dab…). `readCopilot` / `copilotItems` answer
+  `not_connected` for every other (org, brand), org AND brand compared (the brand id
+  is also attached to test orgs). Never add a scope field to the request.
+- **Idempotent on `messageId`** (unique index): a turn pushed twice shows once; the
+  first text wins. A chat the user deletes on chat-service STAYS (staff record).
+- **Thread:** source `copilot`, channel `chat`, `role=user` → inbound `from` the
+  user's email, `role=assistant` → outbound `from` `"AI Copilot"`. Read on the spot by
+  the person's addresses, so a turn shows on the next open; the people LIST picks up a
+  brand-new chatter at the next build (cron 15 min). Chatters on the brand's own
+  domain (staff) are own addresses: nobody, like any source.
+- No cost (DB only, platform run), no customer org billed, no facts emitted (not in
+  the lead-service fact feed yet), not in the message search index yet.
+
 ## Brand transfer (`POST /internal/transfer-brand`, fleet contract)
 
 brand-service moves a brand to another org by calling this route on every
@@ -1172,6 +1203,7 @@ once CI is green, then tag the next version by hand at the merge commit
 `KEY_SERVICE_URL`, `KEY_SERVICE_API_KEY`, `GOOGLE_SERVICE_URL`, `GOOGLE_SERVICE_API_KEY`,
 `INSTANTLY_SERVICE_URL`, `INSTANTLY_SERVICE_API_KEY`, `LEAD_SERVICE_URL`, `LEAD_SERVICE_API_KEY`,
 `BRAND_SERVICE_URL`, `BRAND_SERVICE_API_KEY`, `FEATURES_SERVICE_URL`, `FEATURES_SERVICE_API_KEY`, `MATRIX_APPSERVICE_TOKEN`,
+`COPILOT_UNIBOX_ORG_ID`, `COPILOT_UNIBOX_BRAND_ID` (the staff Unibox scope Copilot turns are filed under; unset = 503),
 `MATRIX_WHATSAPP_PROVISIONING_URL`, `MATRIX_WHATSAPP_PROVISIONING_SECRET`
 (+ `MATRIX_TELEGRAM_*` once its bridge runs).
 See `.env.example`. The four Matrix ones are REQUIRED for the sync to run at all —

@@ -15,6 +15,9 @@
  *  - stripe      crm-service's Stripe mirror: payments, refunds, subscriptions,
  *                with amount (minor unit, verbatim), currency and status
  *  - clerk       crm-service's auth-provider mirror: the signup, nothing else
+ *  - copilot     the person's chat with the distribute.you Copilot (a member of
+ *                OUR staff, named "AI Copilot"), pushed by chat-service and
+ *                stored ONLY under the staff Unibox scope (lib/copilot/messages.ts)
  *
  * Every source record that brought the person in also adds ONE entry event,
  * dated by the source (`entryItems`): GoHighLevel `added_to_crm` (contact
@@ -55,6 +58,12 @@ import { PEOPLE_SOURCES, type PeopleSource, type Presence } from "./identity.js"
 import type { SiblingIdentity } from "./siblings.js";
 import { readStoredTimeline, type StoredTimeline } from "./search.js";
 import { lookupLeadStanding } from "./sources.js";
+import {
+  COPILOT_CHANNEL,
+  COPILOT_SENDER_NAME,
+  isCopilotDestination,
+  readCopilotThread,
+} from "../copilot/messages.js";
 
 export const TIMELINE_SOURCE_STATUSES = ["ok", "empty", "not_connected", "failed"] as const;
 export type TimelineSourceStatus = (typeof TIMELINE_SOURCE_STATUSES)[number];
@@ -377,6 +386,39 @@ async function authItems(source: "clerk", presences: Presence[]): Promise<Source
   return { status: items.length ? "ok" : "empty", items, error: null, asked: contactIds };
 }
 
+// ─── copilot ────────────────────────────────────────────────────────────────
+
+/**
+ * The person's chat with the Copilot, matched on their addresses (read on the
+ * spot, so a turn shows on the next open, before any rebuild). The user wrote =
+ * inbound; the Copilot answered = outbound, from "AI Copilot", like any staff
+ * member. Every scope but the staff Unibox is `not_connected`.
+ */
+export async function copilotItems(person: Pick<Person, "orgId" | "brandId" | "emails">): Promise<SourceResult> {
+  if (!isCopilotDestination(person.orgId, person.brandId)) return notConnected();
+  const emails = person.emails as string[];
+  const rows = await readCopilotThread(person.orgId, person.brandId, emails);
+  const items = rows.map((m): TimelineItem => {
+    const inbound = m.role === "user";
+    return {
+      at: m.sentAt.toISOString(),
+      source: "copilot",
+      channel: COPILOT_CHANNEL,
+      kind: "message",
+      direction: inbound ? "inbound" : "outbound",
+      subject: null,
+      text: m.text,
+      from: inbound ? m.email : COPILOT_SENDER_NAME,
+      to: [inbound ? COPILOT_SENDER_NAME : m.email],
+      ref: { messageId: m.messageId, sessionId: m.sessionId, chatOrgId: m.chatOrgId, chatUserId: m.chatUserId },
+      textClean: null,
+      outreachFact: null,
+      event: null,
+    };
+  });
+  return { status: items.length ? "ok" : "empty", items, error: null, asked: emails };
+}
+
 // ─── stripe ─────────────────────────────────────────────────────────────────
 
 const STRIPE_STEP: Record<string, string> = { payment: "payment", refund: "refund", subscription: "subscription_started" };
@@ -476,7 +518,7 @@ export async function readTimeline(
   const fromStore = (pick: (t: StoredTimeline) => StoredTimeline["gmail"]) =>
     storedRead.then((t): SourceResult => pick(t)).catch((e) => toFailed(e, emails));
 
-  const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk] = await Promise.all([
+  const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot] = await Promise.all([
     connected("gmail") ? fromStore((t) => t.gmail) : Promise.resolve(notConnected()),
     fromStore((t) => t.instantly),
     connected("matrix") ? matrixItems(of("matrix")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
@@ -486,8 +528,9 @@ export async function readTimeline(
     connected("posthog") ? posthogItems(of("posthog")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
     connected("stripe") ? stripeItems(of("stripe")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
     connected("clerk") ? authItems("clerk", of("clerk")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
+    copilotItems(person).catch((e) => toFailed(e, emails)),
   ]);
-  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk };
+  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot };
   // CSV is no people source (it has no status row); its import dates ride in the thread.
   const csv = await csvEntryItems(person);
 
