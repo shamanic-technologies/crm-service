@@ -9,6 +9,7 @@ import { SOURCE_STATUSES } from "./lib/people/sources.js";
 import { TEXT_CLEAN_STATUSES, TIMELINE_SOURCE_STATUSES } from "./lib/people/timeline.js";
 import { FACT_SOURCES, FACT_TYPES } from "./lib/people/facts.js";
 import { OUTCOME_STEPS } from "./lib/people/outcomes.js";
+import { SEGMENT_STEPS } from "./lib/people/segment.js";
 import { LEG_STEPS } from "./lib/people/leg-reach.js";
 
 extendZodWithOpenApi(z);
@@ -114,6 +115,42 @@ export const UploadsListResponseSchema = registry.register(
   z.object({ uploads: z.array(UploadSummarySchema) }).openapi("UploadsListResponse"),
 );
 
+
+// ─── Segment (a part of the brand's own CRM, lib/people/segment.ts) ─────────
+
+const segmentName = z.string().min(1).max(200);
+export const SegmentSchema = registry.register(
+  "PeopleSegment",
+  z
+    .object({
+      dealStages: z
+        .array(z.object({ stage: segmentName, pipeline: segmentName.optional() }))
+        .min(1)
+        .max(50)
+        .optional()
+        .openapi({
+          description:
+            "CRM pipeline stage: the person has a deal CURRENTLY at one of these stages (the customer's own stage name, optionally its pipeline name; trimmed, case-insensitive). Names come from GET /orgs/contacts/segments.",
+          example: [{ pipeline: "Sales Pipeline", stage: "Form Filled - No Appointment" }],
+        }),
+      dealStatuses: z.array(segmentName).min(1).max(10).optional().openapi({
+        description: "The deal's CRM status, verbatim (GoHighLevel: open, won, lost, abandoned). With dealStages, the SAME deal must match both.",
+        example: ["open"],
+      }),
+      tags: z.array(segmentName).min(1).max(50).optional().openapi({ description: "The person's CRM contact carries one of these tags (case-insensitive)." }),
+      reached: z.array(z.enum(SEGMENT_STEPS)).min(1).optional().openapi({
+        description: "The person reached one of these funnel steps, any source the brand connected (form submitted, appointment booked / showed / no-show, signup, website visit, sale).",
+      }),
+      notReached: z.array(z.enum(SEGMENT_STEPS)).min(1).optional().openapi({ description: "The person reached none of these steps." }),
+      includeClients: z.boolean().optional().openapi({ description: "Default false: people who reached `sale` (a deal won, a payment that stands) are out." }),
+      includeOptedOut: z.boolean().optional().openapi({ description: "Default false: people the CRM marks do-not-contact are out." }),
+    })
+    .openapi({
+      description:
+        "A part of the brand's own CRM. Inside a list any one entry matches; across keys all must match. Clients and opted-out people are always out unless stated.",
+    }),
+);
+
 // ─── Serve ─────────────────────────────────────────────────────────────────
 
 export const ServeNextRequestSchema = registry.register(
@@ -152,11 +189,14 @@ export const ServeNextRequestSchema = registry.register(
             .union([z.enum(["phone", "email"]), z.array(z.enum(["phone", "email"]))])
             .optional()
             .openapi({ description: "Only people holding a phone / an email (a list = all)." }),
+          segment: SegmentSchema.optional().openapi({
+            description: "Only people in this part of the brand's own CRM (pipeline stage, tag, funnel step...). Scopes a CRM sourcing to a segment.",
+          }),
         })
         .optional()
         .openapi({
           description:
-            "Serve from the brand's merged PEOPLE (one row per human, every source) instead of its CSV rows. Exclusive with uploadIds. Always excludes automated senders, people not about this brand, and anyone without an email. Same brand-wide no-re-serve: every address of a served person is suppressed, and a person any address of whom was served before is never served.",
+            "Serve from the brand's merged PEOPLE (one row per human, every source) instead of its CSV rows. Exclusive with uploadIds. Always excludes automated senders, people not about this brand, anyone without an email, and anyone the CRM marks do-not-contact (unless segment.includeOptedOut). Same brand-wide no-re-serve: every address of a served person is suppressed, and a person any address of whom was served before is never served.",
         }),
       reachableBy: z
         .union([z.enum(["phone", "email"]), z.array(z.enum(["phone", "email"]))])
@@ -213,6 +253,21 @@ export const ServeStatsResponseSchema = registry.register(
         .number()
         .int()
         .openapi({ description: "All sendable contacts in the requested scope." }),
+      byStage: z
+        .array(
+          z.object({
+            pipeline: z.string().nullable(),
+            stage: z.string(),
+            served: z.number().int(),
+            remainingSendable: z.number().int(),
+            totalSendable: z.number().int(),
+          }),
+        )
+        .optional()
+        .openapi({
+          description:
+            "People pool with a segment naming dealStages: the same counts per stated stage. Entries overlap when a person holds deals at two of them; the top-level counts count them once.",
+        }),
     })
     .openapi("ServeStatsResponse"),
 );
@@ -344,6 +399,9 @@ registry.registerPath({
       pool: z.enum(["csv", "people"]).optional().openapi({ description: "people = count the people pool (see ServeNextRequest.people) with the filters below." }),
       signedUp: z.enum(["true", "false"]).optional(),
       replied: z.enum(["true", "false"]).optional(),
+      segment: z.string().optional().openapi({
+        description: "pool=people only: a PeopleSegment as URL-encoded JSON, e.g. {\"dealStages\":[{\"stage\":\"No-Show for Appointment\"}]}. Adds `byStage` when it names dealStages.",
+      }),
       reachableBy: z.string().optional().openapi({
         description: "phone, email, or phone,email: count only what a pipe writing on those channels can reach (both pools).",
       }),
@@ -354,6 +412,30 @@ registry.registerPath({
       description: "Serve stats",
       content: { "application/json": { schema: ServeStatsResponseSchema } },
     },
+  },
+});
+
+const SegmentCount = { people: z.number().int().openapi({ description: "Merged people holding it." }), inPool: z.number().int().openapi({ description: "Of them, those a segment serve could hand out now: email held, not automated, not off-topic, not opted out, not a client, never served." }) };
+export const SegmentCatalogueSchema = registry.register(
+  "PeopleSegmentCatalogue",
+  z.object({
+    brandId: z.string().uuid(),
+    dealStages: z.array(z.object({ pipeline: z.string().nullable(), stage: z.string().nullable(), status: z.string().nullable(), ...SegmentCount })),
+    tags: z.array(z.object({ tag: z.string(), ...SegmentCount })),
+    steps: z.array(z.object({ step: z.enum(SEGMENT_STEPS), ...SegmentCount })),
+  }),
+);
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/contacts/segments",
+  summary: "CRM segments of a brand: pipeline stages, tags and funnel steps, with how many people each holds",
+  description:
+    "What a people-pool `segment` (ServeNextRequest.people.segment, serve-stats `segment`) can name for this brand, read from its own connected tools: every CRM pipeline stage + deal status, every contact tag, every funnel step reached. Counts are merged people. Read-only, no cost. Requires x-api-key, x-org-id.",
+  request: { query: z.object({ brandId: z.string().uuid() }) },
+  responses: {
+    200: { description: "Segment catalogue", content: { "application/json": { schema: SegmentCatalogueSchema } } },
+    400: { description: "Bad request", content: { "application/json": { schema: ErrorResponseSchema } } },
   },
 });
 

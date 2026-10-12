@@ -20,11 +20,14 @@ import {
   ColumnMapping,
 } from "../lib/column-typing.js";
 import { promoteUpload } from "../lib/promote.js";
+import { segmentSchema } from "../lib/people/segment.js";
 import {
   serveNext,
   serveNextPeople,
   serveStats,
   serveStatsPeople,
+  serveStatsPeopleByStage,
+  readPeopleSegments,
   normalizeUploadIdsQuery,
   normalizeReachQuery,
   REACH_CHANNELS,
@@ -235,6 +238,7 @@ const peopleFilterSchema = z
     signedUp: z.boolean().optional(),
     replied: z.boolean().optional(),
     reachableBy: reachSchema.optional(),
+    segment: segmentSchema.optional(),
   })
   .strict();
 
@@ -250,15 +254,27 @@ const serveNextBodySchema = z
 
 const boolQuery = z.enum(["true", "false"]).transform((v) => v === "true");
 
-/** `?pool=people&signedUp=&replied=&reachableBy=` → the people filter; null = the CSV pool. */
+/** `?pool=people&signedUp=&replied=&segment=<json>` → the people filter; null = the CSV pool. */
 function peopleFilterFromQuery(q: Record<string, unknown>): { filter: PeopleFilter | null; error?: string } {
-  if (q.pool === undefined || q.pool === "csv") return { filter: null };
+  if (q.pool === undefined || q.pool === "csv") {
+    if (q.segment !== undefined) return { filter: null, error: "segment needs pool=people" };
+    return { filter: null };
+  }
   if (q.pool !== "people") return { filter: null, error: "pool must be csv or people" };
   const parsed = z
     .object({ signedUp: boolQuery.optional(), replied: boolQuery.optional() })
     .safeParse({ signedUp: q.signedUp, replied: q.replied });
   if (!parsed.success) return { filter: null, error: "signedUp / replied must be true|false" };
-  return { filter: parsed.data };
+  if (q.segment === undefined) return { filter: parsed.data };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(String(q.segment));
+  } catch {
+    return { filter: null, error: "segment must be a JSON object (URL-encoded)" };
+  }
+  const segment = segmentSchema.safeParse(raw);
+  if (!segment.success) return { filter: null, error: `segment invalid: ${segment.error.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}` };
+  return { filter: { ...parsed.data, segment: segment.data } };
 }
 
 router.post(
@@ -270,7 +286,7 @@ router.post(
     if (!parsed.success) {
       return res.status(400).json({
         type: "validation",
-        error: `brandId (uuid) required; limit optional 1..5000; uploadIds optional array of 1..${MAX_UPLOAD_IDS} uuids; people optional {signedUp?, replied?, reachableBy?}, exclusive with uploadIds; reachableBy optional phone|email or a list`,
+        error: `brandId (uuid) required; limit optional 1..5000; uploadIds optional array of 1..${MAX_UPLOAD_IDS} uuids; people optional {signedUp?, replied?, reachableBy?, segment?}, exclusive with uploadIds; reachableBy optional phone|email or a list: ${parsed.error.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`,
       });
     }
     const { brandId, uploadIds, people } = parsed.data;
@@ -283,6 +299,24 @@ router.post(
     }
     const result = await serveNext(req.orgId!, brandId, limit, req.runId!, uploadIds, reach);
     res.json(result);
+  },
+);
+
+// ─── GET /orgs/contacts/segments?brandId= ────────────────────────────────────
+
+// The parts of the brand's own CRM a people-pool `segment` can name (deal stages,
+// tags, funnel steps), each counted: what a customer or an agent picks from
+// before scoping a CRM sourcing. Read-only, no cost.
+router.get(
+  "/orgs/contacts/segments",
+  apiKeyAuth,
+  requireOrg("contacts.segments"),
+  async (req: AuthenticatedRequest, res) => {
+    const brandParse = brandIdSchema.safeParse(req.query.brandId);
+    if (!brandParse.success) {
+      return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
+    }
+    res.json({ brandId: brandParse.data, ...(await readPeopleSegments(req.orgId!, brandParse.data)) });
   },
 );
 
@@ -310,7 +344,11 @@ router.get(
       if (req.query.uploadIds !== undefined) {
         return res.status(400).json({ type: "validation", error: "uploadIds and pool=people are exclusive" });
       }
-      return res.json(await serveStatsPeople(req.orgId!, brandParse.data, pool.filter, reach));
+      const [stats, byStage] = await Promise.all([
+        serveStatsPeople(req.orgId!, brandParse.data, pool.filter, reach),
+        serveStatsPeopleByStage(req.orgId!, brandParse.data, pool.filter, reach),
+      ]);
+      return res.json(pool.filter.segment?.dealStages ? { ...stats, byStage } : stats);
     }
 
     // Optional per-file scope: ?uploadIds=a,b or repeated ?uploadIds=a&uploadIds=b.

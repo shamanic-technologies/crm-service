@@ -1,7 +1,8 @@
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { AUTH_PROVIDER_NAMES } from "./auth/providers.js";
 import { PERSON_REPLIED_SQL } from "./people/conversation.js";
+import { perStageSegments, personOptedOut, readSegmentCatalogue, segmentWhere, type Segment, type SegmentCatalogue } from "./people/segment.js";
 
 /**
  * SERVE — hand out the next batch of not-yet-served sendable contacts for a
@@ -337,9 +338,15 @@ async function serveStatsForFiles(
  *    our cold email). Never written to AND written to without an answer both
  *    qualify. `true` → only people who did answer.
  *  - `reachableBy`     → only people holding a `phone` / an `email`.
+ *  - `segment`         → only people in that part of the brand's own CRM (a
+ *    deal stage, a tag, a funnel step reached...; lib/people/segment.ts). Clients
+ *    are out of a segment unless it says `includeClients`.
  *
  * Always out: people Jev holds as automated senders or as not about this
- * brand, and anyone without an email (an email is the durable no-re-serve key).
+ * brand, anyone without an email (an email is the durable no-re-serve key), and
+ * anyone the brand's CRM marks do-not-contact (a CSV opt-out, a GoHighLevel DND),
+ * exactly as the CSV pool's `sendable_contacts` already excludes them; only a
+ * segment stating `includeOptedOut` lifts it.
  *
  * No re-serve is the SAME brand-wide guard as the CSV pool: `contact_serves`
  * keyed (brand, email). Serving a person suppresses EVERY address they hold, and
@@ -350,6 +357,7 @@ export interface PeopleFilter {
   signedUp?: boolean;
   replied?: boolean;
   reachableBy?: Reach | Reach[];
+  segment?: Segment;
 }
 
 const reachList = (r: PeopleFilter["reachableBy"]): Reach[] => (r === undefined ? [] : Array.isArray(r) ? r : [r]);
@@ -450,6 +458,8 @@ export function peoplePoolWhere(orgId: string, brandId: string, filter: PeopleFi
   if (filter.replied !== undefined) parts.push(filter.replied ? PERSON_REPLIED_SQL : sql`NOT ${PERSON_REPLIED_SQL}`);
   // Email is always required (the no-re-serve key); phone when the audience or the pipe asks.
   if ([...reachList(filter.reachableBy), ...reach].includes("phone")) parts.push(sql`jsonb_array_length(p.phones) > 0`);
+  if (!filter.segment?.includeOptedOut) parts.push(sql`NOT ${personOptedOut(orgId, brandId)}`);
+  parts.push(...segmentWhere(orgId, brandId, filter.segment));
   return sql.join(parts, sql` AND `);
 }
 
@@ -508,4 +518,40 @@ export async function serveStatsPeople(
   `)) as unknown as { total: number; remaining: number }[];
   const row = res[0] ?? { total: 0, remaining: 0 };
   return { served: row.total - row.remaining, remainingSendable: row.remaining, totalSendable: row.total };
+}
+
+export interface StageCount extends ServeStats {
+  pipeline: string | null;
+  stage: string;
+}
+
+/**
+ * The same counts per stated deal stage of a segment (`byStage`): what each
+ * stage brings. Entries overlap when a person holds deals at two of them; the
+ * segment's own total counts that person once. Empty when the segment names no
+ * stage.
+ */
+export async function serveStatsPeopleByStage(
+  orgId: string,
+  brandId: string,
+  filter: PeopleFilter,
+  reach: readonly Reach[] = [],
+): Promise<StageCount[]> {
+  if (!filter.segment) return [];
+  const out: StageCount[] = [];
+  for (const one of perStageSegments(filter.segment)) {
+    const stats = await serveStatsPeople(orgId, brandId, { ...filter, segment: one.segment }, reach);
+    out.push({ pipeline: one.pipeline, stage: one.stage, ...stats });
+  }
+  return out;
+}
+
+/** What the brand's CRM holds that a segment can name, counted over the people pool (lib/people/segment.ts). */
+export function readPeopleSegments(orgId: string, brandId: string): Promise<SegmentCatalogue> {
+  return readSegmentCatalogue(
+    async <T>(q: SQL) => (await db.execute(q)) as unknown as T[],
+    orgId,
+    brandId,
+    peoplePoolWhere(orgId, brandId, {}),
+  );
 }
