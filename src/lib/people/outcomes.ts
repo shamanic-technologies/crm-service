@@ -111,6 +111,20 @@ export async function readCampaignReach(identity: SiblingIdentity, steps: readon
 }
 
 /**
+ * A `people_facts f` row counts unless it is a payment that does not STAND:
+ * status `succeeded` AND net of refunds > 0 (no amount → stands unless flagged
+ * refunded). Same rule as lead-service's `paymentStands`.
+ */
+export const PAYMENT_STANDS = sql`(f.type <> 'payment' OR (
+        f.payload->>'status' = 'succeeded'
+        AND CASE WHEN jsonb_typeof(f.payload->'amountMinor') = 'number'
+                 THEN (f.payload->>'amountMinor')::numeric
+                      - COALESCE(CASE WHEN jsonb_typeof(f.payload->'amountRefunded') = 'number'
+                                      THEN (f.payload->>'amountRefunded')::numeric END, 0) > 0
+                 ELSE COALESCE(f.payload->>'refunded', 'false') <> 'true' END
+      ))`;
+
+/**
  * The live step evidence of one brand: one row per fact, its step and its owner.
  * A payment counts only when it stands: status `succeeded` AND net of refunds > 0
  * (no amount → stands unless flagged refunded). Same rule as lead-service.
@@ -138,14 +152,7 @@ function evidence(orgId: string, brandId: string, step: OutcomeStep | null, camp
     WHERE f.org_id = ${orgId} AND f.brand_id = ${brandId}
       AND f.live AND f.owner_person_key IS NOT NULL
       AND f.type IN (${sql.join(types.map((t) => sql`${t}`), sql`, `)})
-      AND (f.type <> 'payment' OR (
-        f.payload->>'status' = 'succeeded'
-        AND CASE WHEN jsonb_typeof(f.payload->'amountMinor') = 'number'
-                 THEN (f.payload->>'amountMinor')::numeric
-                      - COALESCE(CASE WHEN jsonb_typeof(f.payload->'amountRefunded') = 'number'
-                                      THEN (f.payload->>'amountRefunded')::numeric END, 0) > 0
-                 ELSE COALESCE(f.payload->>'refunded', 'false') <> 'true' END
-      ))
+      AND ${PAYMENT_STANDS}
   `;
 }
 
@@ -153,7 +160,7 @@ function evidence(orgId: string, brandId: string, step: OutcomeStep | null, camp
  * "We contacted them": our cold email wrote to them (an Instantly presence = at
  * least one real send) or lead-service holds them as one of our leads.
  */
-const CONTACTED = sql`(p.sources @> '["instantly"]'::jsonb OR p.state_source = 'lead_service')`;
+export const CONTACTED = sql`(p.sources @> '["instantly"]'::jsonb OR p.state_source = 'lead_service')`;
 
 export interface OutcomeStepCount {
   step: OutcomeStep;
