@@ -183,6 +183,9 @@ describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
       ],
       sources: [{ source: "gohighlevel", people: 3 }],
       toBeforeFrom: 1,
+      // Cohort: a and b first filled the form on 09-01; d's form is undated.
+      byFromDay: [{ day: "2026-09-01", people: 2 }],
+      undatedFrom: 1,
     });
     expect(r.body.excluded).toEqual({ contactedByUs: 2, automated: 0, notBusiness: 0 });
   });
