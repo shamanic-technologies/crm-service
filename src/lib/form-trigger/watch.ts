@@ -302,7 +302,12 @@ async function settle(
     .where(eq(formTriggerReports.id, r.id));
 }
 
-async function deliverOne(
+/**
+ * Deliver ONE recorded report under a run the caller opened. The loop goes
+ * through `deliverDue`; exported for a replay of a recorded submission (the prod
+ * proof on a staff brand with no CRM connection).
+ */
+export async function deliverOne(
   r: FormTriggerReport,
   identity: { orgId: string; brandId: string; userId: string; runId: string },
   now: number,
