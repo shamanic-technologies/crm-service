@@ -155,6 +155,20 @@ async function ingestBronze(
   // hand-registered one as the platform account. Two kinds of row, not a fallback.
   const token = conn.accessToken ?? platformAccessToken();
 
+  // Rooms this connection already mirrors. An INCREMENTAL /sync page carries a
+  // room's new messages without its member state, so routing on the page alone
+  // dropped every message of a known room that arrived without a membership
+  // change (a message we sent, 2026-10-12, and incoming DMs alike). A room
+  // routed once stays this connection's; its counterpart is re-read from bronze.
+  const knownRooms = new Set(
+    (
+      await db
+        .selectDistinct({ roomId: matrixRawEvents.roomId })
+        .from(matrixRawEvents)
+        .where(eq(matrixRawEvents.connectionId, conn.id))
+    ).map((r) => r.roomId),
+  );
+
   for (let page = 0; page < MAX_PAGES; page++) {
     const response = await sync(cursor, token);
     pages += 1;
@@ -166,7 +180,9 @@ async function ingestBronze(
     for (const [roomId, room] of Object.entries(joined)) {
       const events = collectRoomEvents(room);
       const counterpart = resolveCounterpart(events, conn.matrixUserId, conn.counterpartPrefix);
-      if (!counterpart) continue; // another bridge's room — not this connection's
+      // Neither routed by this page's members nor known: another bridge's room.
+      if (!counterpart && !knownRooms.has(roomId)) continue;
+      knownRooms.add(roomId);
 
       pageRooms.push(roomId);
       for (const ev of events) {

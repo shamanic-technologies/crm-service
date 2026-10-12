@@ -412,6 +412,42 @@ describe.skipIf(!RUN)("matrix ingestion", () => {
     expect(served.exhausted).toBe(true);
   });
 
+  it("keeps a known room's new messages when the sync page carries no member state", async () => {
+    const connectionId = await seedConnection();
+    const bare = (next: string, roomId: string, events: MatrixEvent[]): MatrixSyncResponse => ({
+      next_batch: next,
+      rooms: { join: { [roomId]: { timeline: { events } } } },
+    });
+    syncPages = [
+      page("s2", [message("$k1", GHOST, "2026-08-02T10:00:00Z", "hi")]),
+      emptyPage("s3"),
+    ];
+    await runSyncPass(connectionId);
+    // An incremental page: our message, no member event. A room this connection
+    // never saw, with no members either, stays someone else's.
+    syncPages = [
+      {
+        next_batch: "s4",
+        rooms: {
+          join: {
+            ...bare("x", ROOM, [message("$k2", OWN, "2026-08-03T10:00:00Z", "sent from the campaign")]).rooms!.join,
+            ...bare("x", "!other:hs.example", [message("$k3", "@someone:hs.example", "2026-08-03T10:00:00Z", "not ours")]).rooms!.join,
+          },
+        },
+      },
+      emptyPage("s5"),
+    ];
+    await runSyncPass(connectionId);
+
+    const ids = (await db.select().from(matrixRawEvents).where(eq(matrixRawEvents.connectionId, connectionId))).map((r) => r.eventId);
+    expect(ids).toContain("$k2");
+    expect(ids).not.toContain("$k3");
+    const [conv] = await db.select().from(conversations).where(eq(conversations.orgId, ORG));
+    expect(conv.messageCount).toBe(2);
+    expect(conv.outboundCount).toBe(1);
+    expect(conv.lastEventId).toBe("$k2");
+  });
+
   it("still resolves a room whose membership predates the floor", async () => {
     const connectionId = await seedConnection();
     // A DM opened in 2019: its member events carry that old timestamp, but they

@@ -409,7 +409,12 @@ router.delete(
 
 // ─── POST /internal/matrix/sync ──────────────────────────────────────────────
 
-const internalBodySchema = z.object({ connectionId: z.string().uuid().optional() });
+const internalBodySchema = z.object({
+  connectionId: z.string().uuid().optional(),
+  // Re-read from an INITIAL sync (each room's latest timeline + full state):
+  // recovers messages an earlier pass skipped. Bronze is idempotent on event id.
+  resync: z.boolean().optional(),
+});
 
 /**
  * Run a sync pass — the endpoint the 5-minute cron on the box hits.
@@ -442,6 +447,12 @@ router.post("/internal/matrix/sync", apiKeyAuth, async (req, res) => {
 
   setImmediate(async () => {
     try {
+      if (parsed.data.resync) {
+        await db
+          .update(matrixConnections)
+          .set({ sinceToken: null })
+          .where(parsed.data.connectionId ? eq(matrixConnections.id, parsed.data.connectionId) : sql`true`);
+      }
       const result = await runSyncPass(parsed.data.connectionId);
       console.log(
         `[crm-service][matrix] sync pass: ${result.results.length} ok, ${result.failures.length} failed`,
