@@ -25,8 +25,10 @@ export interface DerivedAuthUser {
   externalId: string;
   /** Addresses the provider holds as the user's own (verified), primary first. */
   emails: string[];
-  /** Phone numbers the provider holds as the user's own (verified), primary first, verbatim. */
+  /** Phone numbers the provider holds as the user's own (verified, or typed on their profile), primary first, verbatim. */
   phones: string[];
+  /** Where each phone was read (`clerk_phone_number`, `clerk_public_metadata.phone`…). */
+  phoneSources: { phone: string; via: string }[];
   firstName: string | null;
   lastName: string | null;
   fullName: string | null;

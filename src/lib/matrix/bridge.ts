@@ -4,8 +4,11 @@
  * deployed mautrix-whatsapp v26.07 on the box, 2026-10-01.
  *
  * Auth is the bridge's shared secret plus `?user_id=<the brand's account>`; the
- * secret never leaves this service. Every call here manages a LOGIN — there is
- * no message, room or contact call in this module, by design.
+ * secret never leaves this service. Every call here manages a LOGIN, except the
+ * two a WhatsApp SEND needs (`resolveIdentifier`, `createDm`: owner 2026-10-12,
+ * a campaign writes first from the brand's linked number). Neither sends
+ * anything: the message itself goes through the Matrix client-server API
+ * (`client.ts` `sendText`).
  *
  * A channel is linkable only when its bridge's provisioning URL + secret are
  * configured. Telegram's bridge needs a platform Telegram app credential
@@ -147,12 +150,14 @@ async function call<T>(
   path: string,
   body: unknown,
   timeoutMs: number,
+  extraQuery: Record<string, string> = {},
 ): Promise<T> {
   const cfg = bridgeConfig(channel);
   if (!cfg) throw new BridgeError(503, "CHANNEL_UNAVAILABLE", channelAvailability(channel).unavailableReason!);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const url = `${cfg.url}/_matrix/provision/v3${path}?user_id=${encodeURIComponent(userId)}`;
+  const query = new URLSearchParams({ user_id: userId, ...extraQuery }).toString();
+  const url = `${cfg.url}/_matrix/provision/v3${path}?${query}`;
   try {
     const res = await fetch(url, {
       method,
@@ -261,4 +266,77 @@ export async function bridgeLogins(channel: MatrixChannel, userId: string): Prom
     CALL_TIMEOUT_MS,
   );
   return (resp.logins ?? []).map((l) => ({ id: l.id, name: l.name ?? "", state: l.state ?? null }));
+}
+
+/** Who a phone number is on the network, as the bridge resolves it for one login. */
+export interface ResolvedIdentifier {
+  /** The network's own id (WhatsApp: `lid-…` or the phone digits). */
+  id: string;
+  name: string | null;
+  /** The bridge ghost standing for that person in Matrix rooms. */
+  mxid: string;
+  /** The existing DM room with that person, when there is one. */
+  dmRoomId: string | null;
+}
+
+interface RawResolved {
+  id?: string;
+  name?: string;
+  mxid?: string;
+  dm_room_mxid?: string;
+}
+
+function toResolved(raw: RawResolved, identifier: string): ResolvedIdentifier {
+  if (typeof raw.mxid !== "string" || typeof raw.id !== "string") {
+    throw new BridgeError(502, "BRIDGE_BAD_RESOLVE", `the bridge resolved ${identifier} without an id or ghost`);
+  }
+  return {
+    id: raw.id,
+    name: typeof raw.name === "string" ? raw.name : null,
+    mxid: raw.mxid,
+    dmRoomId: typeof raw.dm_room_mxid === "string" && raw.dm_room_mxid ? raw.dm_room_mxid : null,
+  };
+}
+
+/**
+ * Ask the bridge who `identifier` (an international phone, `+<digits>`) is on
+ * the network, through the account's login `loginId`. WhatsApp answers 404
+ * `M_NOT_FOUND` "… is not on WhatsApp" for a number with no account (checked on
+ * the deployed bridge, 2026-10-12). Reads only, sends nothing.
+ */
+export async function resolveIdentifier(
+  channel: MatrixChannel,
+  userId: string,
+  loginId: string,
+  identifier: string,
+): Promise<ResolvedIdentifier> {
+  const raw = await call<RawResolved>(
+    channel,
+    userId,
+    "GET",
+    `/resolve_identifier/${encodeURIComponent(identifier)}`,
+    undefined,
+    CALL_TIMEOUT_MS,
+    { login_id: loginId },
+  );
+  return toResolved(raw, identifier);
+}
+
+/** Open (or find) the DM room with `identifier`; the bridge invites the account. */
+export async function createDm(
+  channel: MatrixChannel,
+  userId: string,
+  loginId: string,
+  identifier: string,
+): Promise<ResolvedIdentifier> {
+  const raw = await call<RawResolved>(
+    channel,
+    userId,
+    "POST",
+    `/create_dm/${encodeURIComponent(identifier)}`,
+    {},
+    CALL_TIMEOUT_MS,
+    { login_id: loginId },
+  );
+  return toResolved(raw, identifier);
 }

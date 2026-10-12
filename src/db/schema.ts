@@ -1727,6 +1727,73 @@ export const conversationPings = pgTable(
   ],
 );
 
+/**
+ * OPERATIONAL + BRONZE — one row per WhatsApp message crm-service SENT for a
+ * brand (owner 2026-10-12: a campaign writes first, from the brand's linked
+ * number). The message itself comes back through the Matrix mirror like any
+ * message of the account (sender == account → outbound); this row is what
+ * WE did: who it was meant for (email / phone as the caller named them), which
+ * linked account sent it, the room and event, and the outcome.
+ *
+ * `idempotency_key` is the caller's (one per person per step): a retry with the
+ * same key answers the first outcome and never sends twice.
+ * `email` + `phone` stated together are merge evidence (`whatsapp_send`): the
+ * caller sent to THIS person at THIS number.
+ */
+export const whatsappSends = pgTable(
+  "whatsapp_sends",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    email: text("email"),
+    // International, `+<digits>`.
+    phone: text("phone"),
+    // Where the phone came from: 'request' | the CRM person source ('clerk', …).
+    phoneSource: text("phone_source"),
+    connectionId: uuid("connection_id"),
+    // The sending account's own WhatsApp number (the bridge login id).
+    fromAccount: text("from_account"),
+    roomId: text("room_id"),
+    ghostMxid: text("ghost_mxid"),
+    eventId: text("event_id"),
+    text: text("text").notNull(),
+    // 'sending' | 'sent' | 'refused' | 'failed'
+    status: text("status").notNull(),
+    // Named refusal code (`no_phone_known`, `not_on_whatsapp`, …) or failure text.
+    errorCode: text("error_code"),
+    error: text("error"),
+    runId: text("run_id"),
+    campaignId: text("campaign_id"),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("whatsapp_sends_idem_uq").on(table.orgId, table.brandId, table.idempotencyKey),
+    index("whatsapp_sends_brand_email_idx").on(table.brandId, table.email),
+    index("whatsapp_sends_brand_phone_idx").on(table.brandId, table.phone),
+  ],
+);
+
+/**
+ * BRONZE — who a bridge ghost IS, as the bridge itself resolved it. WhatsApp
+ * now names counterparts by an opaque LID (`@whatsapp_lid-…`), so a mirrored
+ * contact carries no phone; when a send resolves a phone, the bridge answers
+ * the ghost standing for it, and that pairing is recorded here. The Matrix
+ * silver reads it back so the contact carries its phone (and merges with the
+ * person who owns that number). Keyed on the ghost: one ghost, one number.
+ */
+export const matrixGhostPhones = pgTable(
+  "matrix_ghost_phones",
+  {
+    ghostMxid: text("ghost_mxid").primaryKey(),
+    phone: text("phone").notNull(),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+);
+
 export type ContactUpload = typeof contactUploads.$inferSelect;
 export type NewContactUpload = typeof contactUploads.$inferInsert;
 export type ContactRowRaw = typeof contactRowsRaw.$inferSelect;

@@ -98,7 +98,7 @@ async function deriveContacts(conn: AuthConnection, externalIds?: string[]): Pro
       fullName: u.fullName,
       firstName: u.firstName,
       lastName: u.lastName,
-      rawAttributes: { emails: u.emails, phones: u.phones, lastActiveAt: u.lastActiveAt?.toISOString() ?? null },
+      rawAttributes: { emails: u.emails, phones: u.phones, phoneSources: u.phoneSources, lastActiveAt: u.lastActiveAt?.toISOString() ?? null },
       sourceCreatedAt: u.createdAt,
       sourceUpdatedAt: u.updatedAt,
       sourceConnectionId: conn.id,

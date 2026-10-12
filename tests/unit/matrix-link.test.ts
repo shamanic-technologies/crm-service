@@ -38,14 +38,37 @@ describe("channel availability", () => {
   });
 });
 
-describe("read-only by design", () => {
-  // The linked accounts are customers' PERSONAL WhatsApp/Telegram. Nothing in the
-  // Matrix code may send a message, react, or mark anything read.
-  it("no Matrix module calls a send / redact / receipt endpoint", () => {
-    const dir = join(__dirname, "../../src/lib/matrix");
-    const offenders = readdirSync(dir)
-      .filter((f) => f.endsWith(".ts"))
-      .filter((f) => /\/send\/|\/redact\/|\/receipt\/|\/read_markers|create_dm|create_group/.test(readFileSync(join(dir, f), "utf8")));
-    expect(offenders).toEqual([]);
+describe("read-only by design, one send path", () => {
+  // The linked accounts are customers' PERSONAL WhatsApp/Telegram. Nothing may
+  // redact, react, mark read or open a group. The ONE write is a text message
+  // (owner 2026-10-12): `sendText` + the bridge's `create_dm`, called from the
+  // WhatsApp send module only.
+  const dir = join(__dirname, "../../src/lib/matrix");
+  const read = (f: string) => readFileSync(join(dir, f), "utf8");
+  const files = readdirSync(dir).filter((f) => f.endsWith(".ts"));
+
+  it("no Matrix module redacts, sends receipts or read markers, or opens a group", () => {
+    expect(files.filter((f) => /\/redact\/|\/receipt\/|\/read_markers|create_group/.test(read(f)))).toEqual([]);
+  });
+
+  it("only client.ts sends and only bridge.ts opens a DM", () => {
+    expect(files.filter((f) => /\/send\//.test(read(f)))).toEqual(["client.ts"]);
+    expect(files.filter((f) => /create_dm/.test(read(f)))).toEqual(["bridge.ts"]);
+  });
+
+  it("only the WhatsApp send module calls them", () => {
+    const src = join(__dirname, "../../src");
+    const callers: string[] = [];
+    const walk = (d: string) => {
+      for (const e of readdirSync(d, { withFileTypes: true })) {
+        const p = join(d, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (p.endsWith(".ts") && /\b(sendText|createDm)\(/.test(readFileSync(p, "utf8")) && !p.endsWith("matrix/client.ts") && !p.endsWith("matrix/bridge.ts")) {
+          callers.push(p.slice(src.length + 1));
+        }
+      }
+    };
+    walk(src);
+    expect(callers).toEqual(["lib/whatsapp/send.ts"]);
   });
 });

@@ -54,12 +54,14 @@ import {
   personIds,
   personIdAliases,
   conversationVerdicts,
+  whatsappSends,
   copilotMessages,
   apiCalls,
 } from "../db/schema.js";
 
 export const TRANSFER_TABLES: PgTable[] = [
   contactUploads,
+  whatsappSends,
   contactRowsRaw,
   contacts,
   contactServes,

@@ -70,3 +70,27 @@ describe("the brand's own user id joins people", () => {
     expect(people.map(isUnnamedPosthogOnly)).toEqual([false, true]);
   });
 });
+
+describe("Clerk phones the product stored on the profile", () => {
+  it("reads public / unsafe metadata phones after Clerk's own, tagged, deduplicated", () => {
+    const u = deriveClerkUser({
+      id: "user_1",
+      email_addresses: [{ id: "e1", email_address: "A@x.com", verification: { status: "verified" } }],
+      primary_email_address_id: "e1",
+      phone_numbers: [{ id: "p1", phone_number: "+33611111111", verification: { status: "verified" } }],
+      public_metadata: { phone: "+33622222222", phoneCountryCode: "FR" },
+      unsafe_metadata: { phoneNumber: "+33 6 11 11 11 11" },
+    })!;
+    expect(u.phones).toEqual(["+33611111111", "+33622222222"]);
+    expect(u.phoneSources).toEqual([
+      { phone: "+33611111111", via: "clerk_phone_number" },
+      { phone: "+33622222222", via: "clerk_public_metadata.phone" },
+    ]);
+  });
+
+  it("reads nothing when the profile holds no phone", () => {
+    const u = deriveClerkUser({ id: "user_2", public_metadata: { plan: "pro" } })!;
+    expect(u.phones).toEqual([]);
+    expect(u.phoneSources).toEqual([]);
+  });
+});

@@ -13,7 +13,7 @@
 
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { authConnections, contacts, ghlConnections, matrixConnections, posthogConnections, stripeConnections } from "../../db/schema.js";
+import { authConnections, contacts, ghlConnections, matrixConnections, posthogConnections, stripeConnections, whatsappSends } from "../../db/schema.js";
 import { GHL_SOURCE } from "../gohighlevel/records.js";
 import { POSTHOG_SOURCE } from "../posthog/records.js";
 import { STRIPE_SOURCE } from "../stripe/records.js";
@@ -138,6 +138,9 @@ export function writtenToPresences(leads: WrittenToLead[]): Presence[] {
         platformSends: rows.filter((r) => !r.campaignId).length,
         engaged: engaged.length > 0,
         replied: engaged.some((r) => r.replied),
+        // ANY answer, a reply asking to stop included (never engaged): the
+        // person answered us, so outreach treats them as having replied.
+        anyReply: rows.some((r) => r.replied),
         clicked: engaged.some((r) => r.clicked),
         replyClassification: latestReply?.replyClassification ?? null,
         replyKind: latestReply?.replyKind ?? null,
@@ -595,7 +598,12 @@ export async function readAuthUsers(orgId: string, brandId: string, provider: "c
     .where(and(eq(contacts.orgId, orgId), eq(contacts.brandId, brandId), eq(contacts.source, provider)))
     .orderBy(contacts.externalId, contacts.id);
   const presences: Presence[] = rows.map((r) => {
-    const raw = r.rawAttributes as { emails?: string[]; phones?: string[]; lastActiveAt?: string | null };
+    const raw = r.rawAttributes as {
+      emails?: string[];
+      phones?: string[];
+      phoneSources?: { phone: string; via: string }[];
+      lastActiveAt?: string | null;
+    };
     return {
       source: provider,
       sourceRef: r.id,
@@ -609,7 +617,7 @@ export async function readAuthUsers(orgId: string, brandId: string, provider: "c
       messageCount: null,
       inboundCount: null,
       outboundCount: null,
-      detail: { contactId: r.id, externalId: r.externalId },
+      detail: { contactId: r.id, externalId: r.externalId, phoneSources: raw.phoneSources ?? [] },
     };
   });
   return { ...base, status: "ok", presences, sourceCount: rows.length, error: health.error };
@@ -656,6 +664,39 @@ export async function readApiCalls(orgId: string, brandId: string): Promise<Sour
 }
 
 // ─── merge evidence ─────────────────────────────────────────────────────────
+
+/**
+ * A WhatsApp message we SENT naming the person by email AND phone: the caller
+ * stated "this person, at this number", and the number answered on WhatsApp.
+ * It is what joins the thread the send opened (a Matrix contact holding only
+ * the phone) to the person it was meant for.
+ */
+export async function readWhatsappSendEvidence(orgId: string, brandId: string): Promise<EvidenceRead> {
+  const rows = await db
+    .select({ id: whatsappSends.id, email: whatsappSends.email, phone: whatsappSends.phone })
+    .from(whatsappSends)
+    .where(
+      and(
+        eq(whatsappSends.orgId, orgId),
+        eq(whatsappSends.brandId, brandId),
+        eq(whatsappSends.status, "sent"),
+        sql`${whatsappSends.email} IS NOT NULL AND ${whatsappSends.phone} IS NOT NULL`,
+      ),
+    );
+  return {
+    kind: "whatsapp_send",
+    status: "ok",
+    error: null,
+    evidence: rows.map((r) => ({
+      kind: "whatsapp_send",
+      ref: r.id,
+      displayName: null,
+      company: null,
+      emails: [r.email!],
+      phones: [r.phone!],
+    })),
+  };
+}
 
 /** CSV rows carrying an email AND a phone tie the two together. */
 export async function readCsvEvidence(orgId: string, brandId: string): Promise<EvidenceRead> {

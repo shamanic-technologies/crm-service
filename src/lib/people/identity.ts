@@ -69,6 +69,7 @@ export const EVIDENCE_KINDS = [
   "csv_contact",
   "lead_pairing",
   "stripe_customer",
+  "whatsapp_send",
 ] as const;
 export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
 

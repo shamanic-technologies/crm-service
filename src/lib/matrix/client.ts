@@ -1,12 +1,13 @@
 /**
- * Matrix client-server API client — READ ONLY.
+ * Matrix client-server API client.
  *
  * crm-service CONSUMES a homeserver (conduwuit + mautrix bridges) that runs
- * outside this repo. It never builds, configures or deploys it, and it NEVER
- * writes a message back: there is no send path in this module, by design. That
- * is what makes the Discord channel read-only.
+ * outside this repo. It never builds, configures or deploys it.
  *
- * The only call is `GET /_matrix/client/v3/sync` with a `since` cursor.
+ * Two calls: `GET /_matrix/client/v3/sync` with a `since` cursor (the mirror),
+ * and `sendText`, the ONE write: a text message into a DM room, used only by
+ * the WhatsApp send (`lib/whatsapp/send.ts`, owner 2026-10-12). Nothing else
+ * writes, so every other channel (Discord, LinkedIn, Telegram) stays read-only.
  * Account creation for self-serve links lives in `account.ts`; it creates and
  * logs in accounts, and it sends nothing either.
  */
@@ -96,6 +97,64 @@ export async function sync(since: string | null, token: string): Promise<MatrixS
       throw new Error(`[crm-service][matrix] GET /sync aborted after ${SYNC_TIMEOUT_MS}ms`);
     }
     throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+const SEND_TIMEOUT_MS = 30_000;
+
+/**
+ * Send a plain text message into `roomId` as the account owning `token`.
+ * `txnId` is Matrix's own idempotency key: the homeserver answers the SAME event
+ * id for a repeated (token, txnId), so a retry never sends twice.
+ * Fails loud: any non-2xx or transport error throws.
+ */
+export async function sendText(token: string, roomId: string, txnId: string, text: string): Promise<string> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
+  const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`;
+  try {
+    const res = await fetch(`${homeserverUrl()}${path}`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ msgtype: "m.text", body: text }),
+      signal: controller.signal,
+    });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`[crm-service][matrix] PUT send returned ${res.status}: ${body.slice(0, 300)}`);
+    const eventId = (JSON.parse(body) as { event_id?: unknown }).event_id;
+    if (typeof eventId !== "string") throw new Error(`[crm-service][matrix] send answered no event_id: ${body.slice(0, 300)}`);
+    return eventId;
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`[crm-service][matrix] PUT send aborted after ${SEND_TIMEOUT_MS}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Join `roomId` as the account owning `token` (a no-op when already joined).
+ * The bridge invites the account to a DM it opens; joining first makes the
+ * send independent of whether the bridge's double-puppet join landed yet.
+ */
+export async function joinRoom(token: string, roomId: string): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${homeserverUrl()}/_matrix/client/v3/join/${encodeURIComponent(roomId)}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: "{}",
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`[crm-service][matrix] POST join returned ${res.status}: ${text.slice(0, 300)}`);
+    }
   } finally {
     clearTimeout(timer);
   }
