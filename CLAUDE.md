@@ -1012,6 +1012,13 @@ opens a scope or builds, no vendor call, no model, no cost.
   WROTE to the brand), `website_visit`, `signup`, `form_submission`, `meeting_booked`,
   `meeting_attended`, `sale` (same evidence as Outcomes, payment must stand). Aliases
   `form_submitted`, `paid_client`. Recording sources per step = `STEP_SOURCES`.
+- **A calendar's own booking form is the BOOKING, never `form_submission`**
+  (`NOT_CALENDAR_BOOKING_FORM`, outcomes.ts, used by leg reach AND Outcomes): a
+  `form_submitted` fact whose `formId` a mirrored calendar states as its `formId`
+  is dropped. Structural, every brand; never a form name. `form_origin` (a contact
+  a form / survey created, no form named) stays a form step: GoHighLevel tags a
+  contact a calendar created with medium `calendar`, never `form` (Doc Dinners:
+  304 of 308 form_origin = the Meta Ads form's own mediumId, 3 a survey).
 - **Population** = people (fact owner) who reached FROM, minus `CONTACTED` (Instantly
   presence / lead-service lead), minus `automated` and `not_business` people. A fact
   owner no longer in `people` is kept. TO counts only on or after the UTC DAY of the

@@ -17,7 +17,7 @@
  * mapped onto them:
  *   website_visit   ← website_visit
  *   signup          ← signup
- *   form_submission ← form_submitted
+ *   form_submission ← form_submitted, minus a calendar's own booking form
  *   meeting_booked  ← meeting_booked
  *   meeting_attended← meeting_attended
  *   sale            ← sale (a CRM deal won) | payment that STANDS (succeeded and
@@ -125,6 +125,22 @@ export const PAYMENT_STANDS = sql`(f.type <> 'payment' OR (
       ))`;
 
 /**
+ * A `people_facts f` row counts unless it is a submission of a CALENDAR'S OWN
+ * booking form: the form a GoHighLevel calendar collects its bookers' details
+ * with (the mirrored calendar record states it as `formId`). Filling that form IS
+ * booking the meeting (the appointment is its `meeting_booked`), so counting it
+ * as `form_submission` too would put every booker on both steps the same minute.
+ * Structural: read off the brand's mirrored calendars, never a form name.
+ * A `form_origin` fact names no form and is unaffected: GoHighLevel attributes a
+ * contact a calendar created to medium `calendar`, never `form` / `survey`.
+ */
+export const NOT_CALENDAR_BOOKING_FORM = sql`(f.type <> 'form_submitted' OR f.payload->>'formId' IS NULL OR NOT EXISTS (
+        SELECT 1 FROM ghl_raw_records cal
+        WHERE cal.org_id = f.org_id AND cal.brand_id = f.brand_id AND cal.kind = 'calendar'
+          AND cal.payload->>'formId' = f.payload->>'formId'
+      ))`;
+
+/**
  * The live step evidence of one brand: one row per fact, its step and its owner.
  * A payment counts only when it stands: status `succeeded` AND net of refunds > 0
  * (no amount → stands unless flagged refunded). Same rule as lead-service.
@@ -153,6 +169,7 @@ function evidence(orgId: string, brandId: string, step: OutcomeStep | null, camp
       AND f.live AND f.owner_person_key IS NOT NULL
       AND f.type IN (${sql.join(types.map((t) => sql`${t}`), sql`, `)})
       AND ${PAYMENT_STANDS}
+      AND ${NOT_CALENDAR_BOOKING_FORM}
   `;
 }
 

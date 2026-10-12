@@ -3,7 +3,7 @@ import express from "express";
 import request from "supertest";
 import { inArray } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
-import { people, peopleFacts, peopleScopes } from "../../src/db/schema.js";
+import { ghlConnections, ghlRawRecords, people, peopleFacts, peopleScopes } from "../../src/db/schema.js";
 import peopleRoutes from "../../src/routes/people.js";
 
 /**
@@ -139,6 +139,7 @@ async function seedGhl() {
 describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
   const wipe = async () => {
     await db.delete(peopleFacts).where(inArray(peopleFacts.orgId, [ORG, ORG2]));
+    await db.delete(ghlConnections).where(inArray(ghlConnections.orgId, [ORG, ORG2]));
     await db.delete(peopleScopes).where(inArray(peopleScopes.orgId, [ORG, ORG2]));
   };
   beforeEach(async () => {
@@ -184,6 +185,54 @@ describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
       toBeforeFrom: 1,
     });
     expect(r.body.excluded).toEqual({ contactedByUs: 2, automated: 0, notBusiness: 0 });
+  });
+
+  it("a submission of a calendar's own booking form is the booking, never a form step", async () => {
+    await seedGhl();
+    const [conn] = await db
+      .insert(ghlConnections)
+      .values({ orgId: ORG, brandId: BRAND, locationId: "loc", createdByUserId: "u" })
+      .returning();
+    // The calendar collects its bookers' details with form CAL-FORM; LEAD-FORM is a lead form.
+    await db.insert(ghlRawRecords).values({
+      orgId: ORG,
+      brandId: BRAND,
+      connectionId: conn.id,
+      kind: "calendar",
+      externalId: "cal-1",
+      contentHash: "c1",
+      payload: { id: "cal-1", name: "Event Calendar", formId: "CAL-FORM" },
+    });
+    await db.insert(peopleFacts).values([
+      // h: only ever filled the calendar's form = only ever booked: not a form filler.
+      fact(ORG, "email:h@x.com", "form_submitted", "gohighlevel", "2026-09-06T10:00:00Z", { via: "form_submission", formId: "CAL-FORM" }),
+      fact(ORG, "email:h@x.com", "meeting_booked", "gohighlevel", "2026-09-06T10:00:01Z"),
+      // i: lead form first, then the calendar's form a week later: FROM on the lead form's day.
+      fact(ORG, "email:i@x.com", "form_submitted", "gohighlevel", "2026-09-10T10:00:00Z", { via: "form_submission", formId: "LEAD-FORM" }),
+      fact(ORG, "email:i@x.com", "form_submitted", "gohighlevel", "2026-09-17T10:00:00Z", { via: "form_submission", formId: "CAL-FORM" }),
+      fact(ORG, "email:i@x.com", "meeting_booked", "gohighlevel", "2026-09-17T10:00:01Z"),
+      // j: a contact a form created (no form named): a form step.
+      fact(ORG, "email:j@x.com", "form_submitted", "gohighlevel", "2026-09-12T10:00:00Z", { via: "form_origin", formId: null }),
+    ]);
+    const r = await get({ brandId: BRAND, from: "form_submitted", to: "meeting_booked" });
+    expect(r.status).toBe(200);
+    // seedGhl's 5 + i + j; h is out.
+    expect(r.body.reachedFrom.people).toBe(7);
+    expect(r.body.reachedFrom.byDay).toEqual(
+      expect.arrayContaining([
+        { day: "2026-09-10", people: 1 },
+        { day: "2026-09-12", people: 1 },
+      ]),
+    );
+    expect(r.body.reachedFrom.byDay.map((d: { day: string }) => d.day)).not.toContain("2026-09-06");
+    expect(r.body.reachedFrom.byDay.map((d: { day: string }) => d.day)).not.toContain("2026-09-17");
+    expect(r.body.reachedTo.people).toBe(4);
+    expect(r.body.reachedTo.byDay).toEqual(expect.arrayContaining([{ day: "2026-09-17", people: 1 }]));
+
+    // Without the calendar record, h's submission is a form step like any other.
+    await db.delete(ghlRawRecords).where(inArray(ghlRawRecords.connectionId, [conn.id]));
+    const raw = await get({ brandId: BRAND, from: "form_submitted", to: "meeting_booked" });
+    expect(raw.body.reachedFrom.people).toBe(8);
   });
 
   it("conversation -> booked on a CRM-only brand: a named reason, never 0", async () => {
