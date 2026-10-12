@@ -29,6 +29,7 @@
 import { and, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import {
+  contacts,
   conversations,
   matrixConnections,
   matrixRawEvents,
@@ -52,6 +53,8 @@ import {
   recordTriggerEvent,
   type DoorIdentity,
 } from "../trigger-door.js";
+import { phoneFromMxid } from "../matrix/events.js";
+import { ownTeamMatch, readOwnTeam, type OwnTeam } from "./own-team.js";
 import { readThreadForReply, type BurstMessage, type RoomSend } from "./thread.js";
 
 const SERVICE_NAME = "crm-service";
@@ -70,6 +73,8 @@ export const REPLY_STATUS = { PENDING: "pending", REPORTED: "reported", SKIPPED:
 export const REPLY_REASONS = {
   /** A person of ours typed in the thread by hand after the campaign wrote: theirs for good. */
   HUMAN_TOOK_OVER: "human_took_over",
+  /** The other side is the brand's own team (a linked account or its sales rep phone): never a prospect. */
+  OWN_TEAM: "own_team",
   /** Jev: no person wrote it (away message, greeting, auto-reply). */
   AUTOMATED_REPLY: "automated_reply",
   /** Every message of the burst was mirrored before the watch started. */
@@ -185,9 +190,14 @@ export async function detectReplies(conn: MatrixConnection, runId: string, now: 
       campaignId: whatsappSends.campaignId,
       status: whatsappSends.status,
       sentAt: whatsappSends.sentAt,
+      phone: whatsappSends.phone,
     })
     .from(whatsappSends)
     .where(and(eq(whatsappSends.connectionId, conn.id), inArray(whatsappSends.roomId, roomIds)));
+  // Read once, only when a burst is about to be recorded (brand-service owns the rep phone).
+  let ownTeam: OwnTeam | null = null;
+  const team = async () =>
+    (ownTeam ??= await readOwnTeam({ orgId: conn.orgId, userId: conn.createdByUserId, runId, brandId: conn.brandId }));
   // A send still in flight carries no room yet: any of ours for this brand in flight holds the pass back
   // (its message, mirrored before the send recorded its event id, would read as typed by hand).
   const inFlight = await db
@@ -208,7 +218,12 @@ export async function detectReplies(conn: MatrixConnection, runId: string, now: 
     const roomSends: RoomSend[] = sends.filter((s) => s.roomId === roomId);
     if (inFlight.length > 0) roomSends.push({ eventId: null, campaignId: null, status: "sending", sentAt: null });
     const rows = await db
-      .select({ payload: matrixRawEvents.payload, eventId: matrixRawEvents.eventId, ingestedAt: matrixRawEvents.ingestedAt })
+      .select({
+        payload: matrixRawEvents.payload,
+        eventId: matrixRawEvents.eventId,
+        ingestedAt: matrixRawEvents.ingestedAt,
+        sender: matrixRawEvents.sender,
+      })
       .from(matrixRawEvents)
       .where(
         and(
@@ -246,9 +261,18 @@ export async function detectReplies(conn: MatrixConnection, runId: string, now: 
     const ingested = new Map(rows.map((r) => [r.eventId, r.ingestedAt.getTime()]));
     const fresh = uncovered.some((m) => (ingested.get(m.eventId) ?? 0) >= since);
     const [conversation] = await db
-      .select({ id: conversations.id })
+      .select({ id: conversations.id, contactPhone: contacts.phoneE164 })
       .from(conversations)
+      .leftJoin(contacts, eq(contacts.id, conversations.contactId))
       .where(and(eq(conversations.connectionId, conn.id), eq(conversations.roomId, roomId)));
+
+    // Who is on the other side: the numbers our sends addressed, the mirrored contact, the bridge's ghost.
+    const otherSide = [
+      ...sends.filter((s) => s.roomId === roomId).map((s) => s.phone),
+      conversation?.contactPhone,
+      ...rows.filter((r) => r.sender !== conn.matrixUserId).map((r) => phoneFromMxid(r.sender, conn.counterpartPrefix)),
+    ];
+    const own = fresh ? ownTeamMatch(otherSide, await team()) : null;
 
     let status: string = REPLY_STATUS.PENDING;
     let reason: string | null = null;
@@ -256,6 +280,9 @@ export async function detectReplies(conn: MatrixConnection, runId: string, now: 
     if (!fresh) {
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.BEFORE_WATCH;
+    } else if (own) {
+      status = REPLY_STATUS.SKIPPED;
+      reason = REPLY_REASONS.OWN_TEAM;
     } else if (reading.kind === "taken_over") {
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.HUMAN_TOOK_OVER;
@@ -299,7 +326,8 @@ export async function detectReplies(conn: MatrixConnection, runId: string, now: 
       `[crm-service][reply-trigger] ${status === REPLY_STATUS.PENDING ? "detected" : `skipped (${reason})`} a reply burst of ` +
         `${uncovered.length} message(s) in ${conn.channel} room ${roomId} (brand ${conn.brandId}, campaign ${campaignId || "-"}), ` +
         `first ${uncovered[0].at}` +
-        (reading.kind === "taken_over" ? `: the thread was taken over by hand at ${reading.takenOverBy.at}` : ""),
+        (own ? `: ${own.phone} is ${own.role}, never a prospect` : "") +
+        (!own && reading.kind === "taken_over" ? `: the thread was taken over by hand at ${reading.takenOverBy.at}` : ""),
     );
   }
   return out;

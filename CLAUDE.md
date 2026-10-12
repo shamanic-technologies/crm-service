@@ -1002,6 +1002,12 @@ offer of the campaign that wrote (`GET /campaigns/{id}` `offerId`). Same door as
   "reply", source, channel, campaignId, personId, conversationId, roomId, firstMessageAt,
   lastMessageAt, messages [{eventId, at, text}]}` (burst re-read at delivery, 2000 chars/message).
   Retries 1→60 min for 24h; 400/422 final `campaign_refused`. Read: `GET /orgs/matrix/reply-triggers?brandId=`.
+- **The brand's own team is never a prospect** (`own-team.ts`, 2026-10-13): a burst whose other side
+  (numbers our sends addressed, the mirrored contact, the ghost MXID) is one of the brand's linked
+  WhatsApp accounts (`matrix_links.remote_login_id`) or its sales rep phone (READ from brand-service
+  `GET /orgs/brands/{id}/sales-rep`, never copied) = skipped `own_team`, named in the log, no Jev.
+  Digits compared. brand-service unreadable = detection throws, nothing recorded, next pass re-reads.
+  Why: workflow-service alerts the rep on WhatsApp when the AI escalates; their "ok" was a "reply".
 - A LinkedIn (or any) send route only has to land its sends in the lookup `thread.ts` reads.
 
 ## Boot: the port binds BEFORE migrations
