@@ -443,7 +443,7 @@ const ApiCallSchema = z
     mcpTool: z.string().max(200).nullable().optional().openapi({ description: "The MCP tool the call served, when the MCP server says (`x-distribute-mcp-tool`)." }),
     orgId: z.string().uuid().nullable().openapi({ description: "The org the call acted in (internal uuid); null when it named none. Recorded, never the filing scope." }),
     userId: z.string().uuid().openapi({ description: "The key's user (internal uuid)." }),
-    email: z.string().max(320).openapi({ description: "The key's user's email: the key that matches the call to their person. A call without a usable email is skipped (counted)." }),
+    email: z.string().max(320).nullable().openapi({ description: "The key's user's email: the key that matches the call to their person. null (api-service could not resolve the user) or unusable: the call is skipped and counted, the rest of the batch is stored." }),
     displayName: z.string().max(500).nullable().optional(),
     keyFingerprint: z.string().max(64).nullable().optional().openapi({ description: "One-way fingerprint of the key (first 16 hex of sha256). Never the key." }),
     brandIds: z.array(z.string().max(100)).max(50).optional().openapi({ description: "Brand ids the call named (query, header, body, path)." }),

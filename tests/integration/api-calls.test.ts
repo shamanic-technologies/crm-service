@@ -111,6 +111,14 @@ describe.skipIf(!RUN)("API / MCP calls on the staff Unibox", () => {
   });
   afterAll(wipe);
 
+  it("a call with no email (api-service could not resolve its user) is skipped and counted, never refusing its batch", async () => {
+    // prod 2026-10-12: one such call made crm refuse the whole batch (400) and drop the good calls beside it.
+    const mixed = await push([call({ callId: "call-null-email", email: null }), call({ callId: "call-next" })]);
+    expect(mixed.status).toBe(200);
+    expect(mixed.body).toEqual({ stored: 1, duplicates: 0, skippedNoEmail: 1 });
+    expect((await db.select().from(apiCalls).where(eq(apiCalls.brandId, BRAND))).map((r) => r.callId)).toEqual(["call-next"]);
+  }, 30_000);
+
   it("files calls under the staff scope only, shows ask + answer on the person's thread, never twice", async () => {
     const first = await push([
       call(),
