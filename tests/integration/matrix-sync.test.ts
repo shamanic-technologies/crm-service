@@ -245,6 +245,31 @@ describe.skipIf(!RUN)("matrix ingestion", () => {
     expect(chatCalls).toBe(1);
   });
 
+  it("a second ghost joining the DM never moves the thread: one conversation, on the first counterpart", async () => {
+    const connectionId = await seedConnection();
+    syncPages = [page("s2", [message("$a1", GHOST, "2026-08-02T10:00:00Z", "hello")]), emptyPage("s3")];
+    await runSyncPass(connectionId);
+    const SECOND = "@whatsapp_lid-152128261730337:hs.example";
+    // What the old rule (latest ghost wins) left behind: a second contact + conversation for the room.
+    const [stale] = await db
+      .insert(contacts)
+      .values({ orgId: ORG, brandId: BRAND, fullName: "James (WA)", rawAttributes: {}, source: "matrix", channel: "whatsapp", channelHandle: SECOND, sourceConnectionId: connectionId })
+      .returning({ id: contacts.id });
+    await db.insert(conversations).values({
+      orgId: ORG, brandId: BRAND, connectionId, contactId: stale.id, channel: "whatsapp", roomId: ROOM,
+      firstMessageAt: new Date("2026-08-02T10:00:00Z"), lastMessageAt: new Date("2026-08-02T10:00:00Z"), messageCount: 1, inboundCount: 1, outboundCount: 0, lastEventId: "$a1",
+    });
+    const second = { ...member(SECOND, "2026-08-03T09:00:00Z", "James (WA)"), event_id: "$member-second" };
+    syncPages = [page("s3", [second, message("$a2", SECOND, "2026-08-03T09:00:01Z", "what is this bro")]), emptyPage("s4")];
+    await runSyncPass(connectionId);
+    const rows = await db
+      .select({ handle: contacts.channelHandle, count: conversations.messageCount })
+      .from(conversations)
+      .innerJoin(contacts, eq(contacts.id, conversations.contactId))
+      .where(eq(conversations.roomId, ROOM));
+    expect(rows).toEqual([{ handle: GHOST, count: 2 }]);
+  });
+
   it("records a thread of bridge notices as content-free: no Jev call, no lead reading", async () => {
     const connectionId = await seedConnection();
     const notice = (id: string, at: string) => ({

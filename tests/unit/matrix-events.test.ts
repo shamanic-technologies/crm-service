@@ -111,6 +111,23 @@ describe("resolveCounterpart", () => {
     expect(resolveCounterpart(events, OWN, PREFIX)?.displayName).toBe("New Name");
   });
 
+  it("keeps the ghost that joined FIRST when a second ghost joins the DM (the thread never moves)", () => {
+    const SECOND = "@whatsapp_lid-152128261730337:hs.example";
+    const events = [
+      member(OWN, "join", 1000),
+      member(GHOST, "join", 1001, "Kevin Lourd (WA)"),
+      member(SECOND, "invite", 9000, "James (WA)"),
+      member(SECOND, "join", 9001, "James (WA)"),
+    ];
+    expect(resolveCounterpart(events, OWN, PREFIX)).toEqual({ mxid: GHOST, displayName: "Kevin Lourd (WA)", phoneE164: "+33612345678" });
+  });
+
+  it("a first ghost that LEFT hands the room to the one still in it", () => {
+    const SECOND = "@whatsapp_lid-152128261730337:hs.example";
+    const events = [member(GHOST, "join", 1000, "Old"), member(SECOND, "join", 2000, "New"), member(GHOST, "leave", 3000, "Old")];
+    expect(resolveCounterpart(events, OWN, PREFIX)?.mxid).toBe(SECOND);
+  });
+
   it("ignores members who left and never joined", () => {
     const events = [member(GHOST, "leave", 1000, "Gone")];
     expect(resolveCounterpart(events, OWN, PREFIX)).toBeNull();
