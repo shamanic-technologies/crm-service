@@ -74,9 +74,16 @@ export interface Counterpart {
  * A bridged DM room has two members: the user's own bridged account and the
  * bridge ghost representing the other person. This is state-event work, not
  * guesswork: it reads `m.room.member` events, drops the user's own MXID, and
- * keeps the member whose MXID sits in the bridge's ghost namespace
- * (`counterpartPrefix`, e.g. `@whatsapp_`). The most recent member event wins,
- * so a display-name change is picked up.
+ * keeps the members whose MXID sits in the bridge's ghost namespace
+ * (`counterpartPrefix`, e.g. `@whatsapp_`) and who are still in the room.
+ *
+ * The counterpart is the ghost that joined FIRST, and it stays so: WhatsApp
+ * can put a second ghost into a DM (2026-10-12, a "James (WA)" LID ghost joined
+ * a campaign thread mid-conversation), and "the latest member event wins" moved
+ * the WHOLE thread, history included, onto a new contact with no phone and no
+ * email: every fact of the real person was withdrawn and re-stated under an
+ * anonymous one. The display name is the chosen ghost's latest, so a rename is
+ * still picked up.
  *
  * Returns null when no such member exists — the room does not belong to this
  * connection (a sync batch from one access token carries every bridge's rooms).
@@ -86,28 +93,37 @@ export function resolveCounterpart(
   ownMxid: string,
   counterpartPrefix: string,
 ): Counterpart | null {
-  let best: MatrixEvent | null = null;
+  const ghosts = new Map<string, { first: MatrixEvent; latest: MatrixEvent }>();
   for (const ev of memberEvents) {
     if (ev.type !== "m.room.member") continue;
     const stateKey = ev.state_key;
     if (!stateKey || stateKey === ownMxid) continue;
     if (!stateKey.startsWith(counterpartPrefix)) continue;
     const membership = String(ev.content?.membership ?? "");
-    if (membership !== "join" && membership !== "invite") continue;
-    if (!best || compareEvents(best, ev) < 0) best = ev;
+    const g = ghosts.get(stateKey);
+    if (!g) {
+      if (membership === "join" || membership === "invite") ghosts.set(stateKey, { first: ev, latest: ev });
+      continue;
+    }
+    if (compareEvents(g.first, ev) > 0 && (membership === "join" || membership === "invite")) g.first = ev;
+    if (compareEvents(g.latest, ev) < 0) g.latest = ev;
   }
-  if (!best || !best.state_key) return null;
+  let best: { mxid: string; first: MatrixEvent; latest: MatrixEvent } | null = null;
+  for (const [mxid, g] of ghosts) {
+    const now = String(g.latest.content?.membership ?? "");
+    if (now !== "join" && now !== "invite") continue; // left / kicked / banned: no longer the counterpart
+    if (!best || compareEvents(g.first, best.first) < 0) best = { mxid, ...g };
+  }
+  if (!best) return null;
 
-  const displayNameRaw = best.content?.displayname;
+  const displayNameRaw = best.latest.content?.displayname;
   const displayName =
-    typeof displayNameRaw === "string" && displayNameRaw.trim() !== ""
-      ? displayNameRaw.trim()
-      : null;
+    typeof displayNameRaw === "string" && displayNameRaw.trim() !== "" ? displayNameRaw.trim() : null;
 
   return {
-    mxid: best.state_key,
+    mxid: best.mxid,
     displayName,
-    phoneE164: phoneFromMxid(best.state_key, counterpartPrefix),
+    phoneE164: phoneFromMxid(best.mxid, counterpartPrefix),
   };
 }
 

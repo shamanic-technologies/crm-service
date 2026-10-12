@@ -17,7 +17,7 @@
  * table and re-running reproduces it.
  */
 
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, ne, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import {
   contacts,
@@ -340,6 +340,19 @@ async function rebuildRoom(
       },
     })
     .returning({ id: conversations.id });
+
+  // A room is ONE conversation. A row of this room on another contact is what an
+  // earlier counterpart rule left behind (the latest ghost won, 2026-10-12): two
+  // rows would emit every message twice and split the thread between two people.
+  await db
+    .delete(conversations)
+    .where(
+      and(
+        eq(conversations.connectionId, conn.id),
+        eq(conversations.roomId, roomId),
+        ne(conversations.id, conversation.id),
+      ),
+    );
 
   return { conversationId: conversation.id };
 }

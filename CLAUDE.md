@@ -333,7 +333,11 @@ Deterministic, **zero per-row LLM** — knowing who wrote to you needs no model.
 
 - Counterpart resolution is STATE-EVENT work, not guesswork: `m.room.member`
   events, minus the connection's own MXID, keep the member in the bridge ghost
-  namespace, most recent event wins (so a display-name change is picked up). No
+  namespace still in the room; the ghost that joined FIRST is the counterpart and
+  stays so (its latest event names it, so a rename is picked up). WhatsApp can put
+  a SECOND ghost into a DM: "latest wins" moved a whole campaign thread onto an
+  anonymous contact and withdrew every fact of the real person (2026-10-12). A
+  room is ONE conversation: a rebuild deletes any other row of the room. No
   match → the room belongs to another bridge and is skipped. One access token
   yields one sync stream carrying every bridge's rooms, which is why each
   connection keeps its OWN cursor and filters by prefix.
