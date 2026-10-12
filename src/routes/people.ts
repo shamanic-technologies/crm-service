@@ -18,6 +18,7 @@ import { findPerson, readTimeline } from "../lib/people/timeline.js";
 import { readFacts } from "../lib/people/facts.js";
 import { findPersonById } from "../lib/people/person-id.js";
 import { OUTCOME_STEPS, readCampaignReach, readOutcomeCounts, readOutcomePeople, type CampaignReach, type OutcomeStep } from "../lib/people/outcomes.js";
+import { LEG_STEPS, listLegReachBrands, parseLegStep, readLegReach } from "../lib/people/leg-reach.js";
 import { familyOf, LEAD_FAMILIES, readBrandFamilies, type FamilyVerdict, type LeadFamily } from "../lib/people/families.js";
 import {
   matchesOf,
@@ -570,6 +571,73 @@ router.get("/internal/people/facts", apiKeyAuth, async (req, res) => {
     );
     res.status(500).json({ type: "internal", error: (err as Error).message });
   }
+});
+
+// ─── GET /internal/people/leg-reach (features-service: the brand's own team per leg) ──
+
+/** One platform run around a read-only internal handler; failures answer 500 and fail the run. */
+async function withPlatformRun(res: Response, taskName: string, handler: () => Promise<void>) {
+  let platformRunId: string;
+  try {
+    platformRunId = (await createPlatformRun({ serviceName: SERVICE_NAME, taskName })).id;
+  } catch (err) {
+    res.status(502).json({ type: "upstream", error: `run tracking unavailable: ${(err as Error).message}` });
+    return;
+  }
+  try {
+    await handler();
+    await updatePlatformRun(platformRunId, "completed", SERVICE_NAME);
+  } catch (err) {
+    console.error(`[crm-service] ${taskName} failed:`, err);
+    await updatePlatformRun(platformRunId, "failed", SERVICE_NAME).catch((e) =>
+      console.error(`[crm-service] failed to close ${taskName} run:`, e),
+    );
+    if (!res.headersSent) res.status(500).json({ type: "internal", error: (err as Error).message });
+  }
+}
+
+/**
+ * Of the brand's people who reached FROM and whom our campaigns never
+ * contacted, how many reached TO, dated per UTC day (people/leg-reach.ts).
+ * Never opens a scope; DB-only, no cost.
+ */
+router.get("/internal/people/leg-reach", apiKeyAuth, async (req, res) => {
+  const brand = brandIdSchema.safeParse(req.query.brandId);
+  if (!brand.success) {
+    return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
+  }
+  let orgId: string | null = null;
+  if (req.query.orgId !== undefined) {
+    const org = z.string().uuid().safeParse(req.query.orgId);
+    if (!org.success) return res.status(400).json({ type: "validation", error: "orgId must be a uuid" });
+    orgId = org.data;
+  }
+  const from = parseLegStep(req.query.from);
+  const to = parseLegStep(req.query.to);
+  if (!from || !to) {
+    return res.status(400).json({ type: "validation", error: `from and to are required, one of: ${LEG_STEPS.join(", ")}` });
+  }
+  if (from === to) return res.status(400).json({ type: "validation", error: "from and to must differ" });
+  await withPlatformRun(res, "people.leg-reach.read", async () => {
+    const out = await readLegReach(brand.data, orgId, from, to);
+    if (out.status === "ambiguous") {
+      res.status(409).json({
+        type: "ambiguous",
+        error: `${out.orgIds.length} orgs hold people for brand ${brand.data}; pass orgId`,
+        orgIds: out.orgIds,
+      });
+      return;
+    }
+    const { status: _status, ...body } = out;
+    res.json({ brandId: brand.data, fromStep: from, toStep: to, ...body });
+  });
+});
+
+/** Every (org, brand) the leg read can be asked about, with the steps each can answer. */
+router.get("/internal/people/leg-reach/brands", apiKeyAuth, async (_req, res) => {
+  await withPlatformRun(res, "people.leg-reach.brands", async () => {
+    res.json({ steps: LEG_STEPS, brands: await listLegReachBrands() });
+  });
 });
 
 export default router;
