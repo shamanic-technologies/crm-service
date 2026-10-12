@@ -9,6 +9,7 @@ import { SOURCE_STATUSES } from "./lib/people/sources.js";
 import { TEXT_CLEAN_STATUSES, TIMELINE_SOURCE_STATUSES } from "./lib/people/timeline.js";
 import { FACT_SOURCES, FACT_TYPES } from "./lib/people/facts.js";
 import { OUTCOME_STEPS } from "./lib/people/outcomes.js";
+import { LEG_STEPS } from "./lib/people/leg-reach.js";
 
 extendZodWithOpenApi(z);
 
@@ -2194,6 +2195,112 @@ registry.registerPath({
       },
     },
     400: { description: "Invalid cursor / limit / ids" },
+    502: { description: "Run tracking unavailable" },
+  },
+});
+
+// ─── Leg reach (the brand's own team, per funnel leg) ───────────────────────
+
+const LegStepSchema = z.enum(LEG_STEPS);
+
+const LegEndSchema = z.object({
+  people: z.number().int().openapi({ description: "Distinct people who reached this end (TO: a subset of FROM's people)." }),
+  undated: z.number().int().openapi({ description: "Of `people`, those no source dated (not in `byDay`)." }),
+  byDay: z
+    .array(z.object({ day: z.string().openapi({ example: "2026-09-24" }), people: z.number().int() }))
+    .openapi({ description: "Dated people per UTC day they FIRST reached this end, ascending. Sum + `undated` = `people`." }),
+  sources: z
+    .array(z.object({ source: z.string(), people: z.number().int() }))
+    .openapi({ description: "Distinct people per source evidencing this end (overlaps: one person on two sources counts in both)." }),
+});
+
+const LegReachReasonSchema = z.object({
+  code: z.enum(["no_people_scope", "not_synced", "no_connected_source", "from_step_not_recorded", "to_step_not_recorded"]),
+  message: z.string(),
+  step: LegStepSchema.optional(),
+  recordedBy: z.array(z.string()).optional().openapi({ description: "The sources that would record `step`." }),
+});
+
+const LegReachResponseSchema = z.object({
+  brandId: z.string().uuid(),
+  orgId: z.string().uuid().nullable(),
+  fromStep: LegStepSchema,
+  toStep: LegStepSchema,
+  scope: z.object({ status: z.string(), lastBuiltAt: z.string().nullable() }).nullable(),
+  connectedSources: z.array(z.string()),
+  stepSources: z.object({ from: z.array(z.string()), to: z.array(z.string()) }).openapi({
+    description: "The sources that can record each end (connected or not).",
+  }),
+  available: z.boolean(),
+  reason: LegReachReasonSchema.shape.code.nullable().openapi({ description: "The first of `reasons`; null when available." }),
+  reasons: z.array(LegReachReasonSchema),
+  reachedFrom: LegEndSchema.optional().openapi({ description: "Present when available." }),
+  reachedTo: LegEndSchema.extend({
+    toBeforeFrom: z.number().int().openapi({ description: "Population members who reached TO only on a UTC day BEFORE reaching FROM: not counted." }),
+  })
+    .optional()
+    .openapi({ description: "Present when available. TO counted on or after the UTC day of first reaching FROM (an undated end counts)." }),
+  excluded: z
+    .object({ contactedByUs: z.number().int(), automated: z.number().int(), notBusiness: z.number().int() })
+    .optional()
+    .openapi({ description: "People who reached FROM but are out of the population, each counted once (first matching reason)." }),
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/people/leg-reach",
+  summary: "How the brand's OWN team converts on one funnel leg (FROM -> TO), from its own tools",
+  description:
+    "Population: the brand's people (one person once across sources) who reached `from` on any source we mirror, MINUS " +
+    "those our campaigns contacted (at least one real cold email, or held by lead-service as our lead) and those the people " +
+    "layer holds as nobody (automated senders, threads judged not about the business). Of them, how many reached `to` on or " +
+    "after the UTC day they first reached `from` (an undated end counts). Steps: conversation (the person WROTE to the brand " +
+    "on Gmail / Matrix and the thread was kept as business), website_visit (PostHog), signup (PostHog, auth providers), " +
+    "form_submission (GoHighLevel), meeting_booked, meeting_attended (GoHighLevel), sale (GoHighLevel deal won, Stripe payment " +
+    "that stands). Aliases accepted: form_submitted, paid_client. `available: false` + `reason` is distinct from zeros. " +
+    "Never opens a people scope, no vendor call, no model, no cost. Org-less: pass `orgId` only if several orgs hold " +
+    "answerable people for the brand (409 otherwise).",
+  request: {
+    query: z.object({
+      brandId: z.string().uuid(),
+      from: LegStepSchema,
+      to: LegStepSchema,
+      orgId: z.string().uuid().optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Counts, or why they are not available", content: { "application/json": { schema: LegReachResponseSchema } } },
+    400: { description: "Invalid brandId / orgId / step, or from == to" },
+    409: { description: "Several orgs hold answerable people for this brand; pass orgId" },
+    502: { description: "Run tracking unavailable" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/people/leg-reach/brands",
+  summary: "Every (org, brand) the leg-reach read can be asked about, with the steps each can answer",
+  responses: {
+    200: {
+      description: "All people scopes",
+      content: {
+        "application/json": {
+          schema: z.object({
+            steps: z.array(LegStepSchema),
+            brands: z.array(
+              z.object({
+                orgId: z.string().uuid(),
+                brandId: z.string().uuid(),
+                scopeStatus: z.string(),
+                lastBuiltAt: z.string().nullable(),
+                connectedSources: z.array(z.string()),
+                recordedSteps: z.array(LegStepSchema).openapi({ description: "Steps a leg can start or end on. Empty = nothing answerable." }),
+              }),
+            ),
+          }),
+        },
+      },
+    },
     502: { description: "Run tracking unavailable" },
   },
 });

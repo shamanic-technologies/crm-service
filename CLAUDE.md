@@ -945,6 +945,38 @@ this answers the same steps for everyone the brand's own tools state.
   figure posing as all sources.
 - Gateway: api-service `/v1/orgs/people/outcomes[/people]` (explicit proxies).
 
+## Leg reach — how the brand's OWN team converts on one leg (`src/lib/people/leg-reach.ts`)
+
+features-service fills every "your team" pipe (meeting booking, attendance, closing,
+signup conversion...) off this. Service-auth, org-less, read-only on our gold: NEVER
+opens a scope or builds, no vendor call, no model, no cost.
+
+- `GET /internal/people/leg-reach?brandId=&from=&to=[&orgId=]` → `{ brandId, orgId,
+  fromStep, toStep, scope, connectedSources, stepSources {from,to}, available, reason,
+  reasons[], reachedFrom, reachedTo (+ toBeforeFrom), excluded {contactedByUs,
+  automated, notBusiness} }`. Each end = `{ people, undated, byDay [{day (UTC),
+  people}], sources [{source, people}] }`; `byDay` sum + `undated` = `people`.
+- `GET /internal/people/leg-reach/brands` → every people scope with `connectedSources`
+  + `recordedSteps` (the steps a leg can start or end on): the fleet scope.
+- Steps: `conversation` (NEW: a live `message_in` fact, Gmail / Matrix = the person
+  WROTE to the brand), `website_visit`, `signup`, `form_submission`, `meeting_booked`,
+  `meeting_attended`, `sale` (same evidence as Outcomes, payment must stand). Aliases
+  `form_submitted`, `paid_client`. Recording sources per step = `STEP_SOURCES`.
+- **Population** = people (fact owner) who reached FROM, minus `CONTACTED` (Instantly
+  presence / lead-service lead), minus `automated` and `not_business` people. A fact
+  owner no longer in `people` is kept. TO counts only on or after the UTC DAY of the
+  first FROM (same day either order counts; undated end counts); TO only before =
+  `toBeforeFrom`, not counted.
+- **Reasons, never 0**: `no_people_scope` | `not_synced` (scope never built, or every
+  recording source of an end connected but never read OK) | `no_connected_source` |
+  `from_step_not_recorded` | `to_step_not_recorded` (with `step` + `recordedBy`).
+  "Connected" = the scope's last build `source_reads` status `ok|failed`.
+- A brand with several org scopes (Doc Dinners has an empty second one): the scope
+  whose sources record a step answers; two such → 409 `orgIds`, pass `orgId`.
+- `conversation` is NOT on `/orgs/people/outcomes`: that read keys lead-service's
+  bucket tokens, whose campaigns twin is `positive_reply` (a reply to OUR email),
+  a narrower thing; the dashboard maps it on its own.
+
 ## PostHog + Stripe — what a person DID and what they PAID (`src/lib/posthog/`, `src/lib/stripe/`)
 
 Same contract as GoHighLevel: credential in key-service (provider `posthog` /
