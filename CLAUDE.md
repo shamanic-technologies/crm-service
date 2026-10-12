@@ -329,8 +329,11 @@ Materialized (not a view) because the value is an LLM reading, not SQL: `status`
 
 ### Ingestion trigger + cron
 
-`POST /internal/matrix/sync` (apiKeyAuth, optional `connectionId`) runs a pass in
-the background and 202s. Cron on the box, every 5 minutes:
+`POST /internal/matrix/sync` (apiKeyAuth, optional `connectionId`, `resync: true` =
+restart from an initial sync to recover skipped messages) runs a pass in the
+background and 202s. ⚠️ An INCREMENTAL page carries a room's new messages WITHOUT its
+member state: a room already in this connection's bronze stays routed to it (before
+2026-10-12 such messages were dropped, a sent message included). Cron on the box, every 5 minutes:
 
 ```
 */5 * * * * curl -fsS -X POST "$CRM_SERVICE_URL/internal/matrix/sync" \

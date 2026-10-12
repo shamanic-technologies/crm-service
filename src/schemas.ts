@@ -681,6 +681,9 @@ export const MatrixSyncRequestSchema = registry.register(
         .uuid()
         .optional()
         .openapi({ description: "Sync a single connection. Omit for every active connection." }),
+      resync: z.boolean().optional().openapi({
+        description: "Start from an initial sync (each room's latest timeline + full state) to recover messages an earlier pass skipped. Idempotent.",
+      }),
     })
     .openapi("MatrixSyncRequest"),
 );
