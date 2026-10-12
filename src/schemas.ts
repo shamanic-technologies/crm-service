@@ -2520,7 +2520,8 @@ registry.registerPath({
     "Population: the brand's people (one person once across sources) who reached `from` on any source we mirror, MINUS " +
     "those our campaigns contacted (at least one real cold email, or held by lead-service as our lead) and those the people " +
     "layer holds as nobody (automated senders, threads judged not about the business). Of them, how many reached `to` on or " +
-    "after the UTC day they first reached `from` (an undated end counts). Steps: conversation (the person WROTE to the brand " +
+    "after the UTC day they first reached `from` (an undated end counts). Steps: lead_found (FROM only: every person the brand " +
+    "holds in its tools, any source, dated on their earliest live fact = when they first appeared, else undated), conversation (the person WROTE to the brand " +
     "on Gmail / Matrix and the thread was kept as business), website_visit (PostHog), signup (PostHog, auth providers), " +
     "form_submission (GoHighLevel), meeting_booked, meeting_attended (GoHighLevel), sale (GoHighLevel deal won, Stripe payment " +
     "that stands). Aliases accepted: form_submitted, paid_client. `available: false` + `reason` is distinct from zeros. " +

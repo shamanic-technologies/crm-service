@@ -331,15 +331,83 @@ describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
     await seedGhl();
     const r = await request(app()).get("/internal/people/leg-reach/brands").set("x-api-key", API_KEY);
     expect(r.status).toBe(200);
-    expect(r.body.steps[0]).toBe("conversation");
+    expect(r.body.steps.slice(0, 2)).toEqual(["lead_found", "conversation"]);
     expect(r.body.brands.find((b: { orgId: string }) => b.orgId === ORG)).toEqual({
       orgId: ORG,
       brandId: BRAND,
       scopeStatus: "built",
       lastBuiltAt: "2026-10-12T00:00:00.000Z",
       connectedSources: ["instantly", "gohighlevel"],
-      recordedSteps: ["form_submission", "meeting_booked", "meeting_attended", "sale"],
+      recordedSteps: ["lead_found", "form_submission", "meeting_booked", "meeting_attended", "sale"],
     });
+  });
+
+  it("a scope holding nobody does not list lead_found", async () => {
+    await scope(ORG, { gohighlevel: "ok" });
+    const r = await request(app()).get("/internal/people/leg-reach/brands").set("x-api-key", API_KEY);
+    expect(r.body.brands.find((b: { orgId: string }) => b.orgId === ORG).recordedSteps).toEqual([
+      "form_submission",
+      "meeting_booked",
+      "meeting_attended",
+      "sale",
+    ]);
+    const q = await get({ brandId: BRAND, from: "lead_found", to: "sale" });
+    expect(q.body).toMatchObject({ available: false, reason: "from_step_not_recorded" });
+  });
+
+  it("lead_found -> sale: every person the brand holds, dated on their first appearance", async () => {
+    await seedGhl();
+    const s = (await db.select().from(peopleScopes).where(inArray(peopleScopes.orgId, [ORG])))[0];
+    await db.insert(people).values([
+      // k: held, no fact at all: undated.
+      { scopeId: s.id, orgId: ORG, brandId: BRAND, personKey: "email:k@x.com", identityKeys: ["email:k@x.com"], emails: [], phones: [],
+        sources: ["gohighlevel"], presences: [], mergeEvidence: [], state: "in_conversation", stateSource: "gohighlevel" },
+      // l: our campaigns only: out.
+      { scopeId: s.id, orgId: ORG, brandId: BRAND, personKey: "email:l@x.com", identityKeys: ["email:l@x.com"], emails: [], phones: [],
+        sources: ["instantly"], presences: [], mergeEvidence: [], state: "contacted", stateSource: "instantly" },
+    ]);
+    await db.insert(peopleFacts).values([
+      // a: in the CRM since 08-15, bought 09-20.
+      fact(ORG, "email:a@x.com", "added_to_crm", "gohighlevel", "2026-08-15T10:00:00Z"),
+      fact(ORG, "email:a@x.com", "sale", "gohighlevel", "2026-09-20T10:00:00Z"),
+      // b: a refunded payment never counts.
+      fact(ORG, "email:b@x.com", "payment", "gohighlevel", "2026-09-21T10:00:00Z", { status: "succeeded", amountMinor: 500, amountRefunded: 500 }),
+      // a merge bookkeeping fact is no presence (undated anyway).
+      { ...fact(ORG, "email:k@x.com", "person_merged", "crm", null) },
+    ]);
+    const r = await get({ brandId: BRAND, from: "lead_found", to: "paid_client" });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ fromStep: "lead_found", toStep: "sale", available: true, reason: null });
+    // a b c d (seedGhl people) + g (fact owner left the index) + k; e f l contacted by us.
+    expect(r.body.reachedFrom).toEqual({
+      people: 6,
+      undated: 1,
+      byDay: [
+        { day: "2026-08-15", people: 1 },
+        { day: "2026-08-20", people: 1 },
+        { day: "2026-09-01", people: 1 },
+        { day: "2026-09-04", people: 1 },
+        { day: "2026-09-05", people: 1 },
+      ],
+      sources: [{ source: "gohighlevel", people: 6 }],
+    });
+    expect(r.body.reachedTo).toEqual({
+      people: 1,
+      undated: 0,
+      byDay: [{ day: "2026-09-20", people: 1 }],
+      sources: [{ source: "gohighlevel", people: 1 }],
+      toBeforeFrom: 0,
+      byFromDay: [{ day: "2026-08-15", people: 1 }],
+      undatedFrom: 0,
+    });
+    expect(r.body.excluded).toEqual({ contactedByUs: 3, automated: 0, notBusiness: 0 });
+
+    // Never a TO step.
+    const back = await get({ brandId: BRAND, from: "form_submission", to: "lead_found" });
+    expect(back.body).toMatchObject({ available: false, reason: "to_step_not_recorded" });
+    // The existing legs are untouched by the new step.
+    const legacy = await get({ brandId: BRAND, from: "form_submitted", to: "meeting_booked" });
+    expect(legacy.body.reachedFrom.people).toBe(5);
   });
 
   it("refuses bad input and an unauthenticated call", async () => {

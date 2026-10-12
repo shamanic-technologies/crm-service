@@ -22,7 +22,13 @@
  * `byFromDay` on the day they first reached FROM (the cohort: a period's TO is
  * then always a subset of that period's FROM).
  *
- * Steps (lead-service's bucket tokens, plus `conversation`):
+ * Steps (lead-service's bucket tokens, plus `conversation` and `lead_found`):
+ *   lead_found      ← every person the brand HOLDS in its tools (the people
+ *                     index, any source), dated on the earliest live fact of the
+ *                     person (when they first appeared: a CRM contact's
+ *                     creation, a CSV upload, a first message...), else undated.
+ *                     Recorded whenever the brand has people; FROM only ever
+ *                     (nothing "reaches" being held after another step).
  *   conversation    ← message_in (Gmail / Matrix: the person WROTE to the brand,
  *                     and the people layer kept the thread as business)
  *   website_visit   ← website_visit (PostHog)
@@ -47,6 +53,7 @@ import { AUTH_PROVIDER_NAMES } from "../auth/providers.js";
 import { CONTACTED, NOT_CALENDAR_BOOKING_FORM, PAYMENT_STANDS } from "./outcomes.js";
 
 export const LEG_STEPS = [
+  "lead_found",
   "conversation",
   "website_visit",
   "signup",
@@ -72,6 +79,7 @@ export function parseLegStep(raw: unknown): LegStep | null {
 
 /** Which crm fact types state each step. */
 const STEP_FACTS: Record<LegStep, readonly string[]> = {
+  lead_found: [],
   conversation: ["message_in"],
   website_visit: ["website_visit"],
   signup: ["signup"],
@@ -83,6 +91,8 @@ const STEP_FACTS: Record<LegStep, readonly string[]> = {
 
 /** Which people sources can state each step (what the fact feed derives per source). */
 export const STEP_SOURCES: Record<LegStep, readonly string[]> = {
+  // Any source the people index holds a person from (our own outreach excluded: those people are out of every population).
+  lead_found: ["gohighlevel", "csv", "gmail", "matrix", "posthog", "stripe", ...AUTH_PROVIDER_NAMES],
   conversation: ["gmail", "matrix"],
   website_visit: ["posthog"],
   signup: ["posthog", ...AUTH_PROVIDER_NAMES],
@@ -95,6 +105,7 @@ export const STEP_SOURCES: Record<LegStep, readonly string[]> = {
 type SourceStatus = "ok" | "failed" | "not_connected";
 
 interface ScopeRow {
+  id: string;
   orgId: string;
   brandId: string;
   status: string;
@@ -115,13 +126,29 @@ function connectedSources(scope: ScopeRow): string[] {
   return [...sourceStatuses(scope)].filter(([, st]) => st !== "not_connected").map(([s]) => s);
 }
 
-/** Steps some connected source of the scope can state. */
-function recordedSteps(scope: ScopeRow): LegStep[] {
+/** Fact-recorded steps some connected source of the scope can state (`lead_found` aside: it is recorded by the people index). */
+function factRecordedSteps(scope: ScopeRow): LegStep[] {
   const connected = new Set(connectedSources(scope));
-  return LEG_STEPS.filter((step) => STEP_SOURCES[step].some((s) => connected.has(s)));
+  return LEG_STEPS.filter((step) => step !== "lead_found" && STEP_SOURCES[step].some((s) => connected.has(s)));
+}
+
+/** Steps a leg of the scope can start or end on: `lead_found` whenever the brand holds people. */
+function recordedSteps(scope: ScopeRow, hasPeople: boolean): LegStep[] {
+  return hasPeople ? ["lead_found", ...factRecordedSteps(scope)] : factRecordedSteps(scope);
+}
+
+/** Scope ids holding at least one person. */
+async function scopesWithPeople(scopeIds: string[]): Promise<Set<string>> {
+  if (scopeIds.length === 0) return new Set();
+  const found = await rows<{ scope_id: string }>(sql`
+    SELECT s.id AS scope_id FROM people_scopes s
+    WHERE s.id IN (${sql.join(scopeIds.map((id) => sql`${id}::uuid`), sql`, `)})
+      AND EXISTS (SELECT 1 FROM people p WHERE p.scope_id = s.id)`);
+  return new Set(found.map((r) => r.scope_id));
 }
 
 const SCOPE_COLUMNS = {
+  id: peopleScopes.id,
   orgId: peopleScopes.orgId,
   brandId: peopleScopes.brandId,
   status: peopleScopes.status,
@@ -142,13 +169,14 @@ export interface LegReachBrand {
 /** Every (org, brand) whose people layer exists, with the steps it can answer. */
 export async function listLegReachBrands(): Promise<LegReachBrand[]> {
   const scopes = await db.select(SCOPE_COLUMNS).from(peopleScopes).orderBy(peopleScopes.brandId, peopleScopes.orgId);
+  const withPeople = await scopesWithPeople(scopes.map((s) => s.id));
   return scopes.map((s) => ({
     orgId: s.orgId,
     brandId: s.brandId,
     scopeStatus: s.status,
     lastBuiltAt: s.lastBuiltAt ? s.lastBuiltAt.toISOString() : null,
     connectedSources: connectedSources(s),
-    recordedSteps: recordedSteps(s),
+    recordedSteps: recordedSteps(s, withPeople.has(s.id)),
   }));
 }
 
@@ -201,7 +229,7 @@ async function rows<T>(query: SQL): Promise<T[]> {
   return (await db.execute(query)) as unknown as T[];
 }
 
-function reasonsFor(scope: ScopeRow | null, from: LegStep, to: LegStep): LegReachReason[] {
+function reasonsFor(scope: ScopeRow | null, from: LegStep, to: LegStep, hasPeople: boolean): LegReachReason[] {
   if (!scope) {
     return [{ code: "no_people_scope", message: "this brand's people layer was never opened (no one has read its people yet)" }];
   }
@@ -210,11 +238,29 @@ function reasonsFor(scope: ScopeRow | null, from: LegStep, to: LegStep): LegReac
   }
   const statuses = sourceStatuses(scope);
   const connected = connectedSources(scope);
-  if (!LEG_STEPS.some((step) => STEP_SOURCES[step].some((s) => connected.includes(s)))) {
+  if (factRecordedSteps(scope).length === 0 && !(hasPeople && from === "lead_found")) {
     return [{ code: "no_connected_source", message: "no source that records a funnel step is connected for this brand" }];
   }
   const out: LegReachReason[] = [];
   for (const [end, step] of [["from", from], ["to", to]] as const) {
+    if (step === "lead_found") {
+      if (end === "to") {
+        out.push({
+          code: "to_step_not_recorded",
+          message: "lead_found is where a person starts (held in the brand's tools), never a step reached after another",
+          step,
+          recordedBy: [],
+        });
+      } else if (!hasPeople) {
+        out.push({
+          code: "from_step_not_recorded",
+          message: "lead_found = a person the brand holds in its tools; this brand's people layer holds nobody",
+          step,
+          recordedBy: [...STEP_SOURCES.lead_found],
+        });
+      }
+      continue;
+    }
     const recordedBy = [...STEP_SOURCES[step]];
     const states = recordedBy.map((s) => statuses.get(s) ?? "not_connected");
     if (states.every((st) => st === "not_connected")) {
@@ -245,7 +291,7 @@ async function resolveScope(brandId: string, orgId: string | null): Promise<{ sc
   const where = orgId ? and(eq(peopleScopes.brandId, brandId), eq(peopleScopes.orgId, orgId)) : eq(peopleScopes.brandId, brandId);
   const scopes = await db.select(SCOPE_COLUMNS).from(peopleScopes).where(where).orderBy(desc(peopleScopes.lastBuiltAt));
   if (scopes.length <= 1) return { scope: scopes[0] ?? null };
-  const answering = scopes.filter((s) => recordedSteps(s).length > 0);
+  const answering = scopes.filter((s) => factRecordedSteps(s).length > 0);
   if (answering.length > 1) return { ambiguous: answering.map((s) => s.orgId) };
   return { scope: answering[0] ?? scopes[0] };
 }
@@ -261,7 +307,8 @@ export async function readLegReach(brandId: string, orgId: string | null, from: 
     connectedSources: scope ? connectedSources(scope) : [],
     stepSources: { from: STEP_SOURCES[from], to: STEP_SOURCES[to] },
   };
-  const reasons = reasonsFor(scope, from, to);
+  const hasPeople = scope ? (await scopesWithPeople([scope.id])).has(scope.id) : false;
+  const reasons = reasonsFor(scope, from, to, hasPeople);
   if (reasons.length > 0 || !scope) {
     return { ...base, available: false, reason: reasons[0].code, reasons };
   }
@@ -274,10 +321,43 @@ function stepCase(from: LegStep, to: LegStep): SQL {
   return sql`CASE WHEN f.type IN (${types(from)}) THEN 'from' WHEN f.type IN (${types(to)}) THEN 'to' END`;
 }
 
+/** crm's own bookkeeping facts: no presence of the person in the brand's tools. */
+const META_FACT_TYPES = ["person_merged", "person_split", "withdrawn"];
+
+/**
+ * `lead_found` evidence: every person the people index holds (one row per
+ * source they appear on, undated), plus every live fact owner (dated: the
+ * earliest one is when the person first appeared in the brand's tools; an owner
+ * that left the index since is kept, as for every other step), plus the TO
+ * step's own facts.
+ */
+function leadFoundEvidence(orgId: string, brandId: string, to: LegStep): SQL {
+  const toTypes = sql.join(STEP_FACTS[to].map((t) => sql`${t}`), sql`, `);
+  return sql`
+    SELECT p.person_key AS pk, 'from' AS end_, src.source, NULL::timestamptz AS occurred_at
+    FROM people p CROSS JOIN LATERAL jsonb_array_elements_text(p.sources) AS src(source)
+    WHERE p.org_id = ${orgId} AND p.brand_id = ${brandId}
+    UNION ALL
+    SELECT f.owner_person_key AS pk, 'from' AS end_, f.source, f.occurred_at
+    FROM people_facts f
+    WHERE f.org_id = ${orgId} AND f.brand_id = ${brandId}
+      AND f.live AND f.owner_person_key IS NOT NULL
+      AND f.type NOT IN (${sql.join(META_FACT_TYPES.map((t) => sql`${t}`), sql`, `)})
+    UNION ALL
+    SELECT f.owner_person_key AS pk, 'to' AS end_, f.source, f.occurred_at
+    FROM people_facts f
+    WHERE f.org_id = ${orgId} AND f.brand_id = ${brandId}
+      AND f.live AND f.owner_person_key IS NOT NULL
+      AND f.type IN (${toTypes})
+      AND ${PAYMENT_STANDS}
+      AND ${NOT_CALENDAR_BOOKING_FORM}
+  `;
+}
+
 async function countLeg(orgId: string, brandId: string, from: LegStep, to: LegStep) {
   const allTypes = [...new Set([...STEP_FACTS[from], ...STEP_FACTS[to]])];
   // One row per (person, end, source, UTC day | null) of the live evidence.
-  const evidence = sql`
+  const evidence = from === "lead_found" ? leadFoundEvidence(orgId, brandId, to) : sql`
     SELECT f.owner_person_key AS pk, ${stepCase(from, to)} AS end_, f.source, f.occurred_at
     FROM people_facts f
     WHERE f.org_id = ${orgId} AND f.brand_id = ${brandId}

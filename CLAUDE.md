@@ -1091,6 +1091,13 @@ opens a scope or builds, no vendor call, no model, no cost.
   people}], sources [{source, people}] }`; `byDay` sum + `undated` = `people`.
 - `GET /internal/people/leg-reach/brands` → every people scope with `connectedSources`
   + `recordedSteps` (the steps a leg can start or end on): the fleet scope.
+- **`lead_found`** (FROM only; TO = `to_step_not_recorded`): every person the people
+  index HOLDS for the brand (any source; the "Your CRM Contacts" origin), plus live fact
+  owners no longer indexed; dated on the person's EARLIEST live non-meta fact (CRM
+  creation, CSV upload, first message...), else undated; same exclusions and TO rule.
+  In `recordedSteps` whenever the scope holds a person; NOT used to pick the answering
+  org of a multi-org brand (that stays on fact-recorded steps). Doc Dinners: the base of
+  its "Lead found -> Paid client" team leg.
 - Steps: `conversation` (NEW: a live `message_in` fact, Gmail / Matrix = the person
   WROTE to the brand), `website_visit`, `signup`, `form_submission`, `meeting_booked`,
   `meeting_attended`, `sale` (same evidence as Outcomes, payment must stand). Aliases
