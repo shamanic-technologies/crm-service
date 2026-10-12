@@ -2,7 +2,7 @@ import { Router } from "express";
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../db/index.js";
-import { contacts, conversations, matrixConnections, matrixLeads } from "../db/schema.js";
+import { contacts, conversations, matrixConnections, matrixLeads, matrixLinks } from "../db/schema.js";
 import {
   apiKeyAuth,
   requireOrg,
@@ -363,6 +363,43 @@ router.get(
       return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
     }
     res.json(await brandLinks(req.orgId!, brandParse.data));
+  },
+);
+
+/**
+ * Mark ONE linked account as the brand's outreach default for its channel: a
+ * first message to someone no account already talks with goes out from it
+ * (lib/whatsapp/send.ts). Exactly one per (brand, channel): the others lose it.
+ */
+router.patch(
+  "/orgs/matrix/links/:linkId",
+  apiKeyAuth,
+  requireOrg("matrix.links.outreach-default"),
+  async (req: AuthenticatedRequest, res) => {
+    const parsed = z
+      .object({ brandId: z.string().uuid(), outreachDefault: z.literal(true) })
+      .safeParse(req.body ?? {});
+    const linkParse = z.string().uuid().safeParse(req.params.linkId);
+    if (!parsed.success || !linkParse.success) {
+      return res.status(400).json({ type: "validation", error: "linkId (uuid) path, body {brandId (uuid), outreachDefault: true}" });
+    }
+    const { brandId } = parsed.data;
+    const [link] = await db
+      .select()
+      .from(matrixLinks)
+      .where(and(eq(matrixLinks.id, linkParse.data), eq(matrixLinks.orgId, req.orgId!), eq(matrixLinks.brandId, brandId)));
+    if (!link) return res.status(404).json({ type: "not_found", error: "no such link for this brand" });
+    if (link.status !== "linked") {
+      return res.status(409).json({ type: "conflict", error: `the account is ${link.status}, not linked` });
+    }
+    await db.transaction(async (tx) => {
+      await tx
+        .update(matrixLinks)
+        .set({ outreachDefault: false, updatedAt: new Date() })
+        .where(and(eq(matrixLinks.orgId, req.orgId!), eq(matrixLinks.brandId, brandId), eq(matrixLinks.channel, link.channel)));
+      await tx.update(matrixLinks).set({ outreachDefault: true, updatedAt: new Date() }).where(eq(matrixLinks.id, link.id));
+    });
+    res.json({ link: await getLinkViewById(req.orgId!, brandId, link.id) });
   },
 );
 

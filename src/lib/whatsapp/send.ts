@@ -20,10 +20,12 @@
  */
 
 import { createHash } from "node:crypto";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { matrixConnections, matrixGhostPhones, matrixLinks, people, whatsappSends } from "../../db/schema.js";
-import { BridgeError, bridgeLogins, createDm, resolveIdentifier } from "../matrix/bridge.js";
+import { people, whatsappSends } from "../../db/schema.js";
+import { BridgeError, createDm, resolveIdentifier } from "../matrix/bridge.js";
+import { connectedOnly, linkedWhatsappAccounts, type WhatsappAccount } from "./accounts.js";
+import { recordGhostPhone } from "./phone-resolution.js";
 import { joinRoom, sendText } from "../matrix/client.js";
 import { emailKey, normalizeEmail, normalizePhone, phoneKey, type Presence } from "../people/identity.js";
 import { personReplied } from "../people/conversation.js";
@@ -193,39 +195,13 @@ function phoneSourceOf(person: PersonView, phone: string): string {
   return holder ? `crm:${holder.source}` : "crm:evidence";
 }
 
-interface SendingAccount {
-  connectionId: string;
-  matrixUserId: string;
-  accessToken: string;
-  loginId: string;
-}
-
-/** The brand's linked WhatsApp accounts that are CONNECTED right now, oldest link first. */
-async function connectedAccounts(req: SendRequest): Promise<SendingAccount[]> {
-  const rows = await db
-    .select({
-      connectionId: matrixConnections.id,
-      matrixUserId: matrixConnections.matrixUserId,
-      accessToken: matrixConnections.accessToken,
-      connStatus: matrixConnections.status,
-      loginId: matrixLinks.remoteLoginId,
-    })
-    .from(matrixLinks)
-    .innerJoin(matrixConnections, eq(matrixConnections.id, matrixLinks.connectionId))
-    .where(
-      and(
-        eq(matrixLinks.orgId, req.orgId),
-        eq(matrixLinks.brandId, req.brandId),
-        eq(matrixLinks.channel, "whatsapp"),
-        eq(matrixLinks.status, "linked"),
-      ),
-    )
-    .orderBy(asc(matrixLinks.linkedAt), asc(matrixLinks.id));
+/**
+ * The brand's linked WhatsApp accounts allowed for this send (`fromAccount`
+ * narrows to one), CONNECTED right now. Refuses with a named code otherwise.
+ */
+async function sendableAccounts(req: SendRequest): Promise<WhatsappAccount[]> {
   const wanted = req.fromAccount ? digitsOf(req.fromAccount) : null;
-  const linked = rows.filter(
-    (r): r is typeof r & { accessToken: string; loginId: string } =>
-      !!r.accessToken && !!r.loginId && r.connStatus !== "paused" && (!wanted || digitsOf(r.loginId) === wanted),
-  );
+  const linked = (await linkedWhatsappAccounts(req.orgId, req.brandId)).filter((a) => !wanted || digitsOf(a.loginId) === wanted);
   if (linked.length === 0) {
     throw new SendRefusal(
       "whatsapp_not_linked",
@@ -234,14 +210,7 @@ async function connectedAccounts(req: SendRequest): Promise<SendingAccount[]> {
         : "The brand has no linked WhatsApp account. Link one from the dashboard first.",
     );
   }
-  const connected: SendingAccount[] = [];
-  for (const r of linked) {
-    const logins = await bridgeLogins("whatsapp", r.matrixUserId);
-    const login = logins.find((l) => l.id === r.loginId);
-    if (login?.state?.state_event === "CONNECTED") {
-      connected.push({ connectionId: r.connectionId, matrixUserId: r.matrixUserId, accessToken: r.accessToken, loginId: r.loginId });
-    }
-  }
+  const connected = await connectedOnly(linked);
   if (connected.length === 0) {
     throw new SendRefusal(
       "whatsapp_not_connected",
@@ -249,6 +218,31 @@ async function connectedAccounts(req: SendRequest): Promise<SendingAccount[]> {
     );
   }
   return connected;
+}
+
+/**
+ * WHICH ACCOUNT WRITES (owner 2026-10-12: « envoie sur le canal WA professionnel,
+ * pas mon perso, sauf si on a déjà une conversation commencée dessus »):
+ *  1. the account that already has a conversation WITH MESSAGES with this person
+ *     (the latest one), so a thread is never restarted from another number;
+ *  2. else the account the brand marked as its outreach default;
+ *  3. else the oldest linked account.
+ * A DM room with no message (WhatsApp opens some on its own) is not a conversation.
+ */
+export async function chooseAccount(accounts: WhatsappAccount[], ghostMxid: string): Promise<WhatsappAccount> {
+  const ids = sql.join(accounts.map((a) => sql`${a.connectionId}::uuid`), sql`, `);
+  const [talking] = (await db.execute(sql`
+    SELECT v.connection_id FROM conversations v
+    JOIN contacts c ON c.id = v.contact_id
+    WHERE c.channel_handle = ${ghostMxid} AND v.connection_id IN (${ids}) AND v.message_count > 0
+    ORDER BY v.last_message_at DESC NULLS LAST, v.id
+    LIMIT 1
+  `)) as unknown as { connection_id: string }[];
+  return (
+    (talking && accounts.find((a) => a.connectionId === talking.connection_id)) ||
+    accounts.find((a) => a.outreachDefault) ||
+    accounts[0]
+  );
 }
 
 /** Has the person written to the brand: any channel (people), or on WhatsApp since the last mirror read. */
@@ -313,42 +307,33 @@ export async function sendWhatsApp(req: SendRequest): Promise<SendResult> {
       throw new SendRefusal("person_replied", "This person has already written to the brand; no follow-up is sent.");
     }
 
-    // 3. From which account, into which room. An account already in a DM with
-    //    the person keeps the conversation in one thread.
-    const accounts = await connectedAccounts(req);
-    let chosen: { account: SendingAccount; roomId: string | null; ghost: string } | null = null;
-    for (const account of accounts) {
-      let resolved;
-      try {
-        resolved = await resolveIdentifier("whatsapp", account.matrixUserId, account.loginId, phone);
-      } catch (err) {
-        if (err instanceof BridgeError && err.status === 404) {
-          throw new SendRefusal("not_on_whatsapp", `${phone} is not on WhatsApp.`);
-        }
-        throw err;
+    // 3. Who the number is on WhatsApp (the same answer from every account),
+    //    then which account writes, into which room.
+    const accounts = await sendableAccounts(req);
+    let who;
+    try {
+      who = await resolveIdentifier("whatsapp", accounts[0].matrixUserId, accounts[0].loginId, phone);
+    } catch (err) {
+      if (err instanceof BridgeError && err.status === 404) {
+        throw new SendRefusal("not_on_whatsapp", `${phone} is not on WhatsApp.`);
       }
-      if (!chosen) chosen = { account, roomId: resolved.dmRoomId, ghost: resolved.mxid };
-      if (resolved.dmRoomId) {
-        chosen = { account, roomId: resolved.dmRoomId, ghost: resolved.mxid };
-        break;
-      }
+      throw err;
     }
-    const { account } = chosen!;
-    let roomId = chosen!.roomId;
-    let ghost = chosen!.ghost;
+    // 4. The bridge said this ghost IS this number: recorded, so the mirrored
+    //    thread carries the phone and merges with the person.
+    await recordGhostPhone(who.mxid, phone, req.orgId, req.brandId);
+
+    const account = await chooseAccount(accounts, who.mxid);
+    const onAccount =
+      account === accounts[0] ? who : await resolveIdentifier("whatsapp", account.matrixUserId, account.loginId, phone);
+    let roomId = onAccount.dmRoomId;
+    let ghost = onAccount.mxid;
     if (!roomId) {
       const dm = await createDm("whatsapp", account.matrixUserId, account.loginId, phone);
       if (!dm.dmRoomId) throw new Error(`[crm-service][whatsapp] create_dm for ${phone} answered no room`);
       roomId = dm.dmRoomId;
       ghost = dm.mxid;
     }
-
-    // 4. The bridge said this ghost IS this number: recorded, so the mirrored
-    //    thread carries the phone and merges with the person.
-    await db
-      .insert(matrixGhostPhones)
-      .values({ ghostMxid: ghost, phone })
-      .onConflictDoUpdate({ target: matrixGhostPhones.ghostMxid, set: { phone, resolvedAt: new Date() } });
 
     // 5. Send.
     await joinRoom(account.accessToken, roomId);

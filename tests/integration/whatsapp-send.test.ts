@@ -6,6 +6,8 @@ import { db } from "../../src/db/index.js";
 import {
   contacts,
   contactServes,
+  conversations,
+  whatsappPhoneLookups,
   matrixConnections,
   matrixGhostPhones,
   matrixLinks,
@@ -15,6 +17,8 @@ import {
 } from "../../src/db/schema.js";
 import whatsappRoutes from "../../src/routes/whatsapp.js";
 import contactsRoutes from "../../src/routes/contacts.js";
+import matrixRoutes from "../../src/routes/matrix.js";
+import { resolveBrandWhatsappPhones } from "../../src/lib/whatsapp/phone-resolution.js";
 
 /**
  * The WhatsApp send and the people-pool serve, end to end against a real
@@ -46,6 +50,9 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 const ACCOUNT = "@crm_wa_a:matrix.test";
+const ACCOUNT_PRO = "@crm_wa_pro:matrix.test";
+const LOGIN_OF: Record<string, string> = { [ACCOUNT]: "33611111111", [ACCOUNT_PRO]: "33622222222" };
+let lookups: string[] = [];
 const KNOWN_ROOM = "!known:matrix.test";
 let sends: { room: string; txn: string; body: string; auth: string | null }[] = [];
 let createdDms: string[] = [];
@@ -59,6 +66,7 @@ const NETWORK: Record<string, { lid: string; room: string | null }> = {
 function installFetchStub() {
   sends = [];
   createdDms = [];
+  lookups = [];
   loginState = "CONNECTED";
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
@@ -70,11 +78,13 @@ function installFetchStub() {
       expect(auth).toBe(`Bearer ${SECRET}`);
       const path = url.pathname.replace("/_matrix/provision/v3", "");
       if (path === "/whoami") {
-        return json({ logins: [{ id: "33611111111", name: "+33 6 11 11 11 11", state: { state_event: loginState } }] });
+        const login = LOGIN_OF[url.searchParams.get("user_id")!] ?? "33611111111";
+        return json({ logins: [{ id: login, name: login, state: { state_event: loginState } }] });
       }
       const m = path.match(/^\/(resolve_identifier|create_dm)\/(.+)$/);
       if (m) {
-        expect(url.searchParams.get("login_id")).toBe("33611111111");
+        expect(url.searchParams.get("login_id")).toBe(LOGIN_OF[url.searchParams.get("user_id")!] ?? "33611111111");
+        lookups.push(decodeURIComponent(m[2]));
         const digits = decodeURIComponent(m[2]).replace(/\D/g, "");
         const who = NETWORK[digits];
         if (!who) return json({ errcode: "M_NOT_FOUND", error: `the server said +${digits} is not on WhatsApp` }, 404);
@@ -106,6 +116,7 @@ function app() {
   a.use(express.json());
   a.use(whatsappRoutes);
   a.use(contactsRoutes);
+  a.use(matrixRoutes);
   return a;
 }
 
@@ -113,6 +124,8 @@ const headers = { "x-api-key": API_KEY, "x-org-id": ORG, "x-user-id": USER };
 
 async function wipe() {
   await db.delete(whatsappSends).where(eq(whatsappSends.orgId, ORG));
+  await db.delete(conversations).where(eq(conversations.orgId, ORG));
+  await db.delete(whatsappPhoneLookups).where(inArray(whatsappPhoneLookups.phone, ["+33600000001", "+33600000002", "+33699999999"]));
   await db.delete(matrixLinks).where(eq(matrixLinks.orgId, ORG));
   await db.delete(matrixConnections).where(eq(matrixConnections.orgId, ORG));
   await db.delete(contactServes).where(eq(contactServes.orgId, ORG));
@@ -122,32 +135,71 @@ async function wipe() {
   await db.delete(matrixGhostPhones).where(inArray(matrixGhostPhones.ghostMxid, ["@whatsapp_lid-1:matrix.test", "@whatsapp_lid-2:matrix.test"]));
 }
 
-async function linkAccount() {
+async function linkAccount(matrixUserId = ACCOUNT, opts: { linkedAt?: Date } = {}) {
   const [conn] = await db
     .insert(matrixConnections)
     .values({
       orgId: ORG,
       brandId: BRAND,
       channel: "whatsapp",
-      matrixUserId: ACCOUNT,
+      matrixUserId,
       createdByUserId: USER,
       counterpartPrefix: "@whatsapp_",
-      accessToken: "tok-a",
+      accessToken: `tok-${LOGIN_OF[matrixUserId]}`,
       sinceToken: "s1",
     })
     .returning();
-  await db.insert(matrixLinks).values({
+  const [link] = await db
+    .insert(matrixLinks)
+    .values({
+      orgId: ORG,
+      brandId: BRAND,
+      channel: "whatsapp",
+      createdByUserId: USER,
+      matrixUserId,
+      status: "linked",
+      method: "qr",
+      remoteLoginId: LOGIN_OF[matrixUserId],
+      connectionId: conn.id,
+      linkedAt: opts.linkedAt ?? new Date(),
+    })
+    .returning();
+  return { connectionId: conn.id, linkId: link.id };
+}
+
+/** A mirrored WhatsApp conversation of `connectionId` with the ghost, phone unknown (a LID ghost). */
+async function mirroredThread(connectionId: string, ghost: string, messages: number) {
+  const [c] = await db
+    .insert(contacts)
+    .values({
+      orgId: ORG,
+      brandId: BRAND,
+      primaryEmail: null,
+      phoneE164: null,
+      rawAttributes: {},
+      consentStatus: "unknown",
+      unsubscribed: false,
+      source: "matrix",
+      channel: "whatsapp",
+      channelHandle: ghost,
+      sourceConnectionId: connectionId,
+    })
+    .returning();
+  await db.insert(conversations).values({
     orgId: ORG,
     brandId: BRAND,
+    connectionId,
+    contactId: c.id,
     channel: "whatsapp",
-    createdByUserId: USER,
-    matrixUserId: ACCOUNT,
-    status: "linked",
-    method: "qr",
-    remoteLoginId: "33611111111",
-    connectionId: conn.id,
-    linkedAt: new Date(),
+    roomId: `!room-${connectionId}`,
+    firstMessageAt: new Date("2026-09-01T00:00:00Z"),
+    lastMessageAt: new Date("2026-09-02T00:00:00Z"),
+    messageCount: messages,
+    inboundCount: messages,
+    outboundCount: 0,
+    lastEventId: "$x",
   });
+  return c.id;
 }
 
 type P = { source: string; phones?: string[]; inboundCount?: number | null; outboundCount?: number | null; detail?: Record<string, unknown> };
@@ -218,7 +270,7 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
       previousSends: 0,
     });
     expect(sends).toHaveLength(1);
-    expect(sends[0]).toMatchObject({ room: KNOWN_ROOM, body: "Hi Ann", auth: "Bearer tok-a" });
+    expect(sends[0]).toMatchObject({ room: KNOWN_ROOM, body: "Hi Ann", auth: "Bearer tok-33611111111" });
     expect(createdDms).toEqual([]);
 
     // The bridge's ghost for that number now carries the phone.
@@ -249,6 +301,32 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ to: "+33600000002", phoneSource: "request", roomId: "!dm-33600000002:matrix.test" });
     expect(createdDms).toEqual(["33600000002"]);
+  });
+
+  it("writes from the account already in conversation, else from the brand's outreach default", async () => {
+    const personal = await linkAccount(ACCOUNT, { linkedAt: new Date("2026-10-01T00:00:00Z") });
+    const pro = await linkAccount(ACCOUNT_PRO, { linkedAt: new Date("2026-10-02T00:00:00Z") });
+    const mark = await request(app())
+      .patch(`/orgs/matrix/links/${pro.linkId}`)
+      .set(headers)
+      .send({ brandId: BRAND, outreachDefault: true });
+    expect(mark.status).toBe(200);
+    expect(mark.body.link.outreachDefault).toBe(true);
+
+    // Nobody talks with +33600000002 yet: the pro (default) account writes.
+    const fresh = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000002", text: "Hi", idempotencyKey: "k-fresh" });
+    expect(fresh.body.fromAccount).toBe("+33622222222");
+
+    // A real conversation with +33600000001 exists on the personal account: it keeps the thread.
+    await mirroredThread(personal.connectionId, "@whatsapp_lid-1:matrix.test", 12);
+    const known = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000001", text: "Hi again", idempotencyKey: "k-known" });
+    expect(known.body.fromAccount).toBe("+33611111111");
   });
 
   it("refuses with named codes the workflow can record", async () => {
@@ -301,6 +379,34 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
     expect(offline.status).toBe(422);
     expect(offline.body.code).toBe("whatsapp_not_connected");
     expect(sends).toHaveLength(0);
+  });
+});
+
+describe.skipIf(!RUN)("WhatsApp threads merge into the person by phone (DB)", () => {
+  beforeEach(async () => {
+    await wipe();
+    installFetchStub();
+  });
+  afterAll(wipe);
+
+  it("asks the bridge once per CRM phone and puts the phone on the mirrored LID thread", async () => {
+    const { connectionId } = await linkAccount();
+    const contactId = await mirroredThread(connectionId, "@whatsapp_lid-1:matrix.test", 40);
+    await seedPeople([
+      { key: "email:ann@x.com", phones: ["+33600000001"], presences: [clerk(["+33600000001"])], at: "2026-09-01T00:00:00Z" },
+      { key: "email:zed@x.com", phones: ["+33699999999"], presences: [clerk(["+33699999999"])], at: "2026-09-02T00:00:00Z" },
+    ]);
+
+    const first = await resolveBrandWhatsappPhones(ORG, BRAND);
+    expect(first).toMatchObject({ status: "ok", asked: 2, found: 1, notOnWhatsapp: 1, contactsUpdated: 1 });
+    const [c] = await db.select().from(contacts).where(eq(contacts.id, contactId));
+    expect(c.phoneE164).toBe("+33600000001");
+
+    // Asked once: a second pass asks nobody.
+    lookups = [];
+    const second = await resolveBrandWhatsappPhones(ORG, BRAND);
+    expect(second.asked).toBe(0);
+    expect(lookups).toEqual([]);
   });
 });
 

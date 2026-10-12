@@ -1012,6 +1012,9 @@ export const MatrixLinkSchema = registry.register(
         description: "The bridge says the session is gone (BAD_CREDENTIALS / LOGGED_OUT): POST {channel, method, linkId} to relink it.",
       }),
       linkedAccounts: z.number().int().openapi({ description: "Accounts currently linked on this channel for the brand." }),
+      outreachDefault: z.boolean().openapi({
+        description: "First messages go out from this account when no linked account already has a conversation with the person. Set with PATCH /orgs/matrix/links/{linkId}.",
+      }),
       connection: z
         .object({
           id: z.string().uuid(),
@@ -1077,6 +1080,24 @@ registry.registerPath({
         },
       },
     },
+  },
+});
+
+registry.registerPath({
+  method: "patch",
+  path: "/orgs/matrix/links/{linkId}",
+  summary: "Mark a linked account as the brand's outreach default for its channel",
+  description:
+    "A first WhatsApp message to a person no linked account already talks with goes out from this account (an existing conversation always keeps its account). One per brand and channel: the others lose it. Requires x-api-key, x-org-id.",
+  request: {
+    params: z.object({ linkId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: z.object({ brandId: z.string().uuid(), outreachDefault: z.literal(true) }) } }, required: true },
+  },
+  responses: {
+    200: { description: "The account's view", content: { "application/json": { schema: z.object({ link: MatrixLinkSchema }) } } },
+    400: { description: "Bad request", content: { "application/json": { schema: ErrorResponseSchema } } },
+    404: { description: "No such link for this brand", content: { "application/json": { schema: ErrorResponseSchema } } },
+    409: { description: "The account is not linked", content: { "application/json": { schema: ErrorResponseSchema } } },
   },
 });
 
@@ -2737,7 +2758,7 @@ export const WhatsappSendRequestSchema = registry.register(
       phone: z.string().optional().openapi({ description: "The number to write to, international form (+<country><number>). Wins over the CRM's." }),
       text: z.string().min(1).max(4096),
       idempotencyKey: z.string().min(1).max(200).openapi({ description: "One per person per step. A retry with the same key answers the first outcome and never sends twice." }),
-      fromAccount: z.string().optional().openapi({ description: "Send from this linked account (its own number). Default: an account already in a WhatsApp conversation with the person, else the first linked one." }),
+      fromAccount: z.string().optional().openapi({ description: "Send from this linked account (its own number). Default: the account that already has a conversation (with messages) with the person, else the brand's outreach default account (PATCH /orgs/matrix/links/{linkId}), else the oldest linked." }),
       skipIfReplied: z.boolean().optional().openapi({ description: "Refuse with `person_replied` when the person has written to the brand on any channel (use on follow-ups)." }),
     })
     .openapi("WhatsappSendRequest"),

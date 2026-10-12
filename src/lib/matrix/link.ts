@@ -607,6 +607,8 @@ export interface LinkView {
   needsRelink: boolean;
   /** Accounts currently linked on this channel for the brand (every link, not only this one). */
   linkedAccounts: number;
+  /** First messages go out from this account when no account already talks with the person. */
+  outreachDefault: boolean;
   connection: {
     id: string;
     status: string;
@@ -818,6 +820,7 @@ export async function toView(
     bridgeStateError,
     needsRelink: status === "linked" && !!bridgeState?.state && RELINK_STATES.has(bridgeState.state),
     linkedAccounts,
+    outreachDefault: link?.outreachDefault ?? false,
     connection: conn
       ? {
           id: conn.id,

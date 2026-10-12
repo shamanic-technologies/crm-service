@@ -394,6 +394,10 @@ export const matrixLinks = pgTable(
       onDelete: "set null",
     }),
     runId: text("run_id"),
+    // The account a FIRST message is sent from when no account already talks
+    // with the person (lib/whatsapp/send.ts). One per (org, brand, channel), set
+    // by the brand (owner 2026-10-12: write from the pro number, not the personal one).
+    outreachDefault: boolean("outreach_default").notNull().default(false),
     startedAt: timestamp("started_at", { withTimezone: true }),
     linkedAt: timestamp("linked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1828,6 +1832,21 @@ export const matrixGhostPhones = pgTable(
     resolvedAt: timestamp("resolved_at", { withTimezone: true }).notNull().defaultNow(),
   },
 );
+
+/**
+ * Every phone crm-service asked the WhatsApp bridge about ("who is this on
+ * WhatsApp", `resolve_identifier`), once: found → its ghost (also written to
+ * `matrix_ghost_phones`), or not on WhatsApp. WhatsApp ids are global (the same
+ * LID from every account), so the answer is not per brand. A not-found number is
+ * asked again after 30 days (someone can join WhatsApp).
+ */
+export const whatsappPhoneLookups = pgTable("whatsapp_phone_lookups", {
+  phone: text("phone").primaryKey(),
+  ghostMxid: text("ghost_mxid"),
+  // 'found' | 'not_on_whatsapp'
+  outcome: text("outcome").notNull(),
+  lookedUpAt: timestamp("looked_up_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 export type ContactUpload = typeof contactUploads.$inferSelect;
 export type NewContactUpload = typeof contactUploads.$inferInsert;
