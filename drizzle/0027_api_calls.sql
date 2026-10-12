@@ -1,0 +1,35 @@
+CREATE TABLE IF NOT EXISTS "api_calls" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"org_id" uuid NOT NULL,
+	"brand_id" uuid NOT NULL,
+	"call_id" text NOT NULL,
+	"channel" text NOT NULL,
+	"mcp_tool" text,
+	"caller_org_id" uuid,
+	"caller_user_id" uuid NOT NULL,
+	"email" text NOT NULL,
+	"display_name" text,
+	"key_fingerprint" text,
+	"brand_ids" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	"method" text NOT NULL,
+	"path" text NOT NULL,
+	"query" jsonb DEFAULT '{}'::jsonb NOT NULL,
+	"request_headers" jsonb DEFAULT '{}'::jsonb NOT NULL,
+	"request_body" text,
+	"request_body_bytes" integer DEFAULT 0 NOT NULL,
+	"request_body_truncated" boolean DEFAULT false NOT NULL,
+	"status" integer NOT NULL,
+	"response_content_type" text,
+	"response_body" text,
+	"response_body_bytes" integer DEFAULT 0 NOT NULL,
+	"response_body_truncated" boolean DEFAULT false NOT NULL,
+	"duration_ms" integer NOT NULL,
+	"called_at" timestamp with time zone NOT NULL,
+	"received_at" timestamp with time zone DEFAULT now() NOT NULL,
+	"request_id" text,
+	"gateway_run_id" text,
+	"run_id" text
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX IF NOT EXISTS "api_calls_call_uq" ON "api_calls" USING btree ("call_id");--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "api_calls_scope_email_idx" ON "api_calls" USING btree ("org_id","brand_id","email","called_at");

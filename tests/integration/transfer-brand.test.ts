@@ -123,6 +123,9 @@ async function seedBrand(org: string, brand: string, tag: string) {
   await db.execute(sql`
     INSERT INTO copilot_messages (org_id, brand_id, chat_org_id, chat_user_id, email, session_id, message_id, role, text, sent_at)
     VALUES (${org}, ${brand}, gen_random_uuid(), gen_random_uuid(), 'a@b.co', 's1', gen_random_uuid()::text, 'user', 'hi', now())`);
+  await db.execute(sql`
+    INSERT INTO api_calls (org_id, brand_id, call_id, channel, caller_user_id, email, method, path, status, duration_ms, called_at)
+    VALUES (${org}, ${brand}, gen_random_uuid()::text, 'api', gen_random_uuid(), 'a@b.co', 'GET', '/v1/me', 200, 5, now())`);
 }
 
 /** Rows per table for (org, brand). */

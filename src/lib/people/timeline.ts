@@ -18,6 +18,10 @@
  *  - copilot     the person's chat with the distribute.you Copilot (a member of
  *                OUR staff, named "AI Copilot"), pushed by chat-service and
  *                stored ONLY under the staff Unibox scope (lib/copilot/messages.ts)
+ *  - api         the person's calls to our API (channel `api`) or through our MCP
+ *                server (channel `mcp`) with their own key, pushed by api-service,
+ *                staff Unibox scope only (lib/api-calls/calls.ts): each call is
+ *                what they asked (inbound) and what we answered (outbound)
  *
  * Every source record that brought the person in also adds ONE entry event,
  * dated by the source (`entryItems`): GoHighLevel `added_to_crm` (contact
@@ -64,6 +68,14 @@ import {
   isCopilotDestination,
   readCopilotThread,
 } from "../copilot/messages.js";
+import {
+  API_SENDER_NAME,
+  describeRequest,
+  describeResponse,
+  readApiCallThread,
+  sessionsOf,
+} from "../api-calls/calls.js";
+import { siblingGetOk } from "./siblings.js";
 
 export const TIMELINE_SOURCE_STATUSES = ["ok", "empty", "not_connected", "failed"] as const;
 export type TimelineSourceStatus = (typeof TIMELINE_SOURCE_STATUSES)[number];
@@ -419,6 +431,106 @@ export async function copilotItems(person: Pick<Person, "orgId" | "brandId" | "e
   return { status: items.length ? "ok" : "empty", items, error: null, asked: emails };
 }
 
+// ─── api / mcp calls ────────────────────────────────────────────────────────
+
+/** Brand names seen recently (brand-service), so a thread names "AscendQE", not an id. */
+const BRAND_NAME_TTL_MS = 60 * 60 * 1000;
+const brandNameCache = new Map<string, { name: string; at: number }>();
+
+export async function brandNamesFor(ids: string[], identity: SiblingIdentity): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const now = Date.now();
+  const missing: string[] = [];
+  for (const id of ids) {
+    const hit = brandNameCache.get(id);
+    if (hit && now - hit.at < BRAND_NAME_TTL_MS) out.set(id, hit.name);
+    else missing.push(id);
+  }
+  await Promise.all(
+    missing.slice(0, 20).map(async (id) => {
+      try {
+        const r = await siblingGetOk<{ brand: { name: string | null } }>("brand", `/internal/brands/${encodeURIComponent(id)}`, identity);
+        if (r.brand?.name) {
+          brandNameCache.set(id, { name: r.brand.name, at: now });
+          out.set(id, r.brand.name);
+        }
+      } catch (err) {
+        // The summary then names the brand by its id; the call itself still shows.
+        console.error(`[crm-service] api-call thread: brand ${id} name unreadable:`, (err as Error).message);
+      }
+    }),
+  );
+  return out;
+}
+
+/**
+ * The person's calls to our API / MCP server, matched on their addresses (read
+ * on the spot, so a call shows on the next open). Each call is two messages:
+ * what they asked (inbound, from their email) and what we answered (outbound,
+ * from "distribute.you API"), both on channel `api` or `mcp`, both carrying the
+ * call id in `ref.callId` (the whole request and response:
+ * `GET /orgs/people/api-calls/{callId}`) and the session it belongs to.
+ * Every scope but the staff Unibox is `not_connected`.
+ */
+export async function apiCallItems(
+  person: Pick<Person, "orgId" | "brandId" | "emails">,
+  identity: SiblingIdentity,
+): Promise<SourceResult> {
+  if (!isCopilotDestination(person.orgId, person.brandId)) return notConnected();
+  const emails = person.emails as string[];
+  const rows = await readApiCallThread(person.orgId, person.brandId, emails);
+  const sessions = sessionsOf(rows);
+  const brandNames = await brandNamesFor([...new Set(rows.flatMap((r) => (r.brandIds as string[]) ?? []))], identity);
+  const items = rows.flatMap((c): TimelineItem[] => {
+    const ref = {
+      callId: c.callId,
+      sessionId: sessions.get(c.callId) ?? c.callId,
+      method: c.method,
+      path: c.path,
+      status: String(c.status),
+      mcpTool: c.mcpTool,
+      callerOrgId: c.callerOrgId,
+      callerUserId: c.callerUserId,
+      keyFingerprint: c.keyFingerprint,
+    };
+    const answeredAt = new Date(c.calledAt.getTime() + c.durationMs).toISOString();
+    const asked = describeRequest(c, brandNames);
+    return [
+      {
+        at: c.calledAt.toISOString(),
+        source: "api",
+        channel: c.channel,
+        kind: "message",
+        direction: "inbound",
+        subject: null,
+        text: c.mcpTool ? `${asked} (MCP tool ${c.mcpTool})` : asked,
+        from: c.email,
+        to: [API_SENDER_NAME],
+        ref,
+        textClean: null,
+        outreachFact: null,
+        event: null,
+      },
+      {
+        at: answeredAt,
+        source: "api",
+        channel: c.channel,
+        kind: "message",
+        direction: "outbound",
+        subject: null,
+        text: describeResponse(c),
+        from: API_SENDER_NAME,
+        to: [c.email],
+        ref,
+        textClean: null,
+        outreachFact: null,
+        event: null,
+      },
+    ];
+  });
+  return { status: items.length ? "ok" : "empty", items, error: null, asked: emails };
+}
+
 // ─── stripe ─────────────────────────────────────────────────────────────────
 
 const STRIPE_STEP: Record<string, string> = { payment: "payment", refund: "refund", subscription: "subscription_started" };
@@ -518,7 +630,7 @@ export async function readTimeline(
   const fromStore = (pick: (t: StoredTimeline) => StoredTimeline["gmail"]) =>
     storedRead.then((t): SourceResult => pick(t)).catch((e) => toFailed(e, emails));
 
-  const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot] = await Promise.all([
+  const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api] = await Promise.all([
     connected("gmail") ? fromStore((t) => t.gmail) : Promise.resolve(notConnected()),
     fromStore((t) => t.instantly),
     connected("matrix") ? matrixItems(of("matrix")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
@@ -529,8 +641,9 @@ export async function readTimeline(
     connected("stripe") ? stripeItems(of("stripe")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
     connected("clerk") ? authItems("clerk", of("clerk")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
     copilotItems(person).catch((e) => toFailed(e, emails)),
+    apiCallItems(person, identity).catch((e) => toFailed(e, emails)),
   ]);
-  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot };
+  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api };
   // CSV is no people source (it has no status row); its import dates ride in the thread.
   const csv = await csvEntryItems(person);
 

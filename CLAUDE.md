@@ -15,6 +15,7 @@ feed the same registry, both layered bronze/silver/gold:
 | `stripe` | MIRROR | the brand's Stripe account (restricted key): customers, charges, refunds, subscriptions, read-only | NEVER |
 | `clerk` | MIRROR | the brand's AUTH PROVIDER: every user who signed up to its product, history included, read-only | NEVER |
 | `copilot` | PUSHED | each distribute.you Copilot chat turn (user message + answer), pushed by chat-service, filed ONLY under the staff Unibox scope | NEVER |
+| `api` | PUSHED | each call a client made to our API / MCP server with their own key (request + answer), pushed by api-service, filed ONLY under the staff Unibox scope | NEVER |
 
 As a CSV lead-provider it is a sibling of `apollo-service` / `apify-service`.
 
@@ -1060,6 +1061,31 @@ always safe.
   domain (staff) are own addresses: nobody, like any source.
 - No cost (DB only, platform run), no customer org billed, no facts emitted (not in
   the lead-service fact feed yet), not in the message search index yet.
+
+## API / MCP calls — the staff Unibox's API source (`src/lib/api-calls/calls.ts`)
+
+A client talking to us in person, through the Copilot, or through their own
+assistant calling our API / MCP server is ONE kind of exchange: a conversation
+(owner 2026-10-12). api-service pushes every call made with a client's own key.
+
+**Contract (api-service conforms to it):** `POST /internal/api-calls`, `x-api-key`,
+body `{ calls: [ApiCall] }` (1-100, see openapi; the route has its own 16 MB JSON
+limit, the sender keeps batches under 8 MB). api-service has ALREADY redacted every
+secret (no auth header, no key: a sha256 fingerprint; secret-named fields and
+key-looking values replaced) and cut each body at 256 KB. 200 `{ stored, duplicates,
+skippedNoEmail }`; 503 when the staff scope is unset. Idempotent on `callId`.
+
+- **Same structural privacy as the Copilot:** filed ONLY under `COPILOT_UNIBOX_ORG_ID`
+  + `COPILOT_UNIBOX_BRAND_ID`; every other (org, brand) reads `not_connected` / 404.
+- **Thread:** source `api`, channel `api` (their code/assistant) or `mcp` (our MCP
+  server, it sends `x-distribute-client: mcp`). Each call = 2 messages: inbound from
+  the caller's email with a plain-words summary (`describeRequest`: "Listed emails for
+  brand AscendQE", brand names read from brand-service, cached 1 h), outbound from
+  `"distribute.you API"` (`describeResponse`: "Answered: 12 emails (200, 120 ms)",
+  "Refused (403): …"). `ref.callId` opens the whole call
+  (`GET /orgs/people/api-calls/{callId}?brandId=`), `ref.sessionId` = first call of a
+  burst (same channel, gaps under 30 min).
+- No cost (platform run), no facts, not in the message search index.
 
 ## Brand transfer (`POST /internal/transfer-brand`, fleet contract)
 
