@@ -204,6 +204,13 @@
       "when": 1791801598022,
       "tag": "0028_conversation_pings",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1791809469850,
+      "tag": "0029_whatsapp_sends",
+      "breakpoints": true
     }
   ]
 }

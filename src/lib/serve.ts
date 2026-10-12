@@ -1,5 +1,7 @@
 import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
+import { AUTH_PROVIDER_NAMES } from "./auth/providers.js";
+import { PERSON_REPLIED_SQL } from "./people/conversation.js";
 
 /**
  * SERVE — hand out the next batch of not-yet-served sendable contacts for a
@@ -290,4 +292,184 @@ async function serveStatsForFiles(
     remainingSendable: row.total_sendable - row.served,
     totalSendable: row.total_sendable,
   };
+}
+
+// ─── PEOPLE pool — serve merged persons, not CSV rows ────────────────────────
+
+/**
+ * A serve can draw from the brand's merged PEOPLE (lib/people) instead of its
+ * CSV rows: everyone the brand's own tools know (its product's signups, its
+ * CRM, its mailbox, its WhatsApp…), one row per human. The filter says WHICH
+ * people, in the same words for every brand and every channel:
+ *
+ *  - `signedUp: true`  → only people who signed up to the brand's product (a
+ *    presence on one of its auth providers, Clerk today). `false` → only people
+ *    who did not.
+ *  - `replied: false`  → only people who NEVER wrote to the brand on any
+ *    conversation channel (Gmail / WhatsApp / LinkedIn inbound, any answer to
+ *    our cold email). Never written to AND written to without an answer both
+ *    qualify. `true` → only people who did answer.
+ *  - `reachableBy`     → only people holding a `phone` / an `email`.
+ *
+ * Always out: people Jev holds as automated senders or as not about this
+ * brand, and anyone without an email (an email is the durable no-re-serve key).
+ *
+ * No re-serve is the SAME brand-wide guard as the CSV pool: `contact_serves`
+ * keyed (brand, email). Serving a person suppresses EVERY address they hold, and
+ * a person any of whose addresses was served (from a CSV file or this pool) is
+ * never served again.
+ */
+export interface PeopleFilter {
+  signedUp?: boolean;
+  replied?: boolean;
+  reachableBy?: "phone" | "email";
+}
+
+/** A served person — the CSV `ServedContact` shape plus the person's identity. */
+export interface ServedPerson extends Omit<ServedContact, "sourceUploadId" | "sourceRowId"> {
+  sourceUploadId: null;
+  sourceRowId: null;
+  pool: "people";
+  /** The person's opaque id (people/person-id.ts): what a URL or a later call names them by. */
+  personId: string | null;
+  emails: string[];
+  phones: string[];
+  /** Where each phone came from (`{ phone, source, via }`), from the person's presences. */
+  phoneSources: { phone: string; source: string; via: string | null }[];
+  sources: string[];
+}
+
+export interface ServeNextPeopleResult {
+  contacts: ServedPerson[];
+  served: number;
+  exhausted: boolean;
+}
+
+interface RawPersonRow {
+  id: string;
+  org_id: string;
+  brand_id: string;
+  person_id: string | null;
+  display_name: string | null;
+  emails: string[];
+  phones: string[];
+  sources: string[];
+  presences: { source: string; phones?: string[]; detail?: Record<string, unknown> }[];
+  built_at: string | Date;
+}
+
+/** Names first / last the same light way the CSV and Matrix paths do. */
+function splitDisplayName(name: string | null): { firstName: string | null; lastName: string | null } {
+  if (!name) return { firstName: null, lastName: null };
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  return { firstName: parts[0] ?? null, lastName: parts.length > 1 ? parts.slice(1).join(" ") : null };
+}
+
+export function phoneSourcesOf(row: Pick<RawPersonRow, "phones" | "presences">): ServedPerson["phoneSources"] {
+  return row.phones.map((phone) => {
+    const holder = row.presences.find((p) => (p.phones ?? []).some((x) => normalizedEq(x, phone)));
+    const via = holder?.detail && typeof holder.detail === "object"
+      ? ((holder.detail.phoneSources as { phone: string; via: string }[] | undefined) ?? []).find((s) => normalizedEq(s.phone, phone))?.via ?? null
+      : null;
+    return { phone, source: holder?.source ?? "evidence", via };
+  });
+}
+
+const digits = (s: string) => s.replace(/\D/g, "");
+const normalizedEq = (a: string, b: string) => digits(a) === digits(b);
+
+function toServedPerson(r: RawPersonRow): ServedPerson {
+  const { firstName, lastName } = splitDisplayName(r.display_name);
+  return {
+    id: r.id,
+    orgId: r.org_id,
+    brandId: r.brand_id,
+    primaryEmail: r.emails[0] ?? null,
+    phoneE164: r.phones[0] ?? null,
+    fullName: r.display_name,
+    firstName,
+    lastName,
+    rawAttributes: {},
+    consentStatus: "unknown",
+    unsubscribed: false,
+    sourceUploadId: null,
+    sourceRowId: null,
+    lastRebuiltAt: r.built_at instanceof Date ? r.built_at.toISOString() : r.built_at,
+    pool: "people",
+    personId: r.person_id,
+    emails: r.emails,
+    phones: r.phones,
+    phoneSources: phoneSourcesOf(r),
+    sources: r.sources,
+  };
+}
+
+/** The WHERE of the people pool (alias `p`), before the no-re-serve guard. */
+export function peoplePoolWhere(orgId: string, brandId: string, filter: PeopleFilter) {
+  const auth = sql.join(AUTH_PROVIDER_NAMES.map((n) => sql`${n}`), sql`, `);
+  const parts = [
+    sql`p.org_id = ${orgId}`,
+    sql`p.brand_id = ${brandId}`,
+    sql`NOT p.automated`,
+    sql`NOT p.not_business`,
+    sql`jsonb_array_length(p.emails) > 0`,
+  ];
+  if (filter.signedUp !== undefined) {
+    const signed = sql`EXISTS (SELECT 1 FROM jsonb_array_elements(p.presences) pr WHERE pr->>'source' IN (${auth}))`;
+    parts.push(filter.signedUp ? signed : sql`NOT ${signed}`);
+  }
+  if (filter.replied !== undefined) parts.push(filter.replied ? PERSON_REPLIED_SQL : sql`NOT ${PERSON_REPLIED_SQL}`);
+  if (filter.reachableBy === "phone") parts.push(sql`jsonb_array_length(p.phones) > 0`);
+  return sql.join(parts, sql` AND `);
+}
+
+const NOT_SERVED = sql`NOT EXISTS (
+  SELECT 1 FROM jsonb_array_elements_text(p.emails) AS pe(email)
+  JOIN contact_serves s ON s.brand_id = p.brand_id AND s.email = pe.email
+)`;
+
+export async function serveNextPeople(
+  orgId: string,
+  brandId: string,
+  limit: number,
+  runId: string,
+  filter: PeopleFilter,
+): Promise<ServeNextPeopleResult> {
+  const where = peoplePoolWhere(orgId, brandId, filter);
+  const rows = (await db.execute(sql`
+    WITH candidate AS (
+      SELECT p.id, p.org_id, p.brand_id, p.person_id, p.display_name, p.emails, p.phones,
+             p.sources, p.presences, p.built_at, p.first_activity_at, p.person_key
+      FROM people p
+      WHERE ${where} AND ${NOT_SERVED}
+      ORDER BY p.first_activity_at ASC NULLS LAST, p.person_key ASC
+      LIMIT ${limit}
+      FOR UPDATE SKIP LOCKED
+    ),
+    ins AS (
+      INSERT INTO contact_serves (org_id, brand_id, contact_id, email, served_run_id)
+      SELECT c.org_id, c.brand_id, c.id, e.email, ${runId}
+      FROM candidate c, jsonb_array_elements_text(c.emails) AS e(email)
+      ON CONFLICT (brand_id, email) DO NOTHING
+      RETURNING contact_id, email
+    )
+    SELECT candidate.* FROM candidate
+    WHERE EXISTS (SELECT 1 FROM ins WHERE ins.contact_id = candidate.id AND ins.email = candidate.emails->>0)
+    ORDER BY candidate.first_activity_at ASC NULLS LAST, candidate.person_key ASC
+  `)) as unknown as RawPersonRow[];
+
+  const contacts = rows.map(toServedPerson);
+  const stats = await serveStatsPeople(orgId, brandId, filter);
+  return { contacts, served: contacts.length, exhausted: stats.remainingSendable === 0 };
+}
+
+/** Same `{ served, remainingSendable, totalSendable }` over the people pool; served + remaining = total. */
+export async function serveStatsPeople(orgId: string, brandId: string, filter: PeopleFilter): Promise<ServeStats> {
+  const where = peoplePoolWhere(orgId, brandId, filter);
+  const res = (await db.execute(sql`
+    SELECT count(*)::int AS total, (count(*) FILTER (WHERE ${NOT_SERVED}))::int AS remaining
+    FROM people p WHERE ${where}
+  `)) as unknown as { total: number; remaining: number }[];
+  const row = res[0] ?? { total: 0, remaining: 0 };
+  return { served: row.total - row.remaining, remainingSendable: row.remaining, totalSendable: row.total };
 }

@@ -20,7 +20,14 @@ import {
   ColumnMapping,
 } from "../lib/column-typing.js";
 import { promoteUpload } from "../lib/promote.js";
-import { serveNext, serveStats, normalizeUploadIdsQuery } from "../lib/serve.js";
+import {
+  serveNext,
+  serveNextPeople,
+  serveStats,
+  serveStatsPeople,
+  normalizeUploadIdsQuery,
+  type PeopleFilter,
+} from "../lib/serve.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { SERVICE_NAME } from "../middleware/auth.js";
 
@@ -213,11 +220,41 @@ router.post(
 const MAX_UPLOAD_IDS = 200;
 const uploadIdsSchema = z.array(z.string().uuid()).min(1).max(MAX_UPLOAD_IDS);
 
-const serveNextBodySchema = z.object({
-  brandId: z.string().uuid(),
-  limit: z.number().int().positive().max(5000).optional(),
-  uploadIds: uploadIdsSchema.optional(),
-});
+// `people` switches the pool from the brand's CSV rows to its merged PEOPLE,
+// filtered (lib/serve.ts "PEOPLE pool"). Exclusive with `uploadIds`.
+const peopleFilterSchema = z
+  .object({
+    signedUp: z.boolean().optional(),
+    replied: z.boolean().optional(),
+    reachableBy: z.enum(["phone", "email"]).optional(),
+  })
+  .strict();
+
+const serveNextBodySchema = z
+  .object({
+    brandId: z.string().uuid(),
+    limit: z.number().int().positive().max(5000).optional(),
+    uploadIds: uploadIdsSchema.optional(),
+    people: peopleFilterSchema.optional(),
+  })
+  .refine((b) => !(b.uploadIds && b.people), { message: "uploadIds and people are exclusive" });
+
+const boolQuery = z.enum(["true", "false"]).transform((v) => v === "true");
+
+/** `?pool=people&signedUp=&replied=&reachableBy=` → the people filter; null = the CSV pool. */
+function peopleFilterFromQuery(q: Record<string, unknown>): { filter: PeopleFilter | null; error?: string } {
+  if (q.pool === undefined || q.pool === "csv") return { filter: null };
+  if (q.pool !== "people") return { filter: null, error: "pool must be csv or people" };
+  const parsed = z
+    .object({
+      signedUp: boolQuery.optional(),
+      replied: boolQuery.optional(),
+      reachableBy: z.enum(["phone", "email"]).optional(),
+    })
+    .safeParse({ signedUp: q.signedUp, replied: q.replied, reachableBy: q.reachableBy });
+  if (!parsed.success) return { filter: null, error: "signedUp / replied must be true|false; reachableBy phone|email" };
+  return { filter: parsed.data };
+}
 
 router.post(
   "/orgs/contacts/serve-next",
@@ -228,12 +265,16 @@ router.post(
     if (!parsed.success) {
       return res.status(400).json({
         type: "validation",
-        error: `brandId (uuid) required; limit optional 1..5000; uploadIds optional array of 1..${MAX_UPLOAD_IDS} uuids`,
+        error: `brandId (uuid) required; limit optional 1..5000; uploadIds optional array of 1..${MAX_UPLOAD_IDS} uuids; people optional {signedUp?, replied?, reachableBy?: phone|email}, exclusive with uploadIds`,
       });
     }
-    const { brandId, uploadIds } = parsed.data;
+    const { brandId, uploadIds, people } = parsed.data;
     const limit = parsed.data.limit ?? 100;
 
+    if (people) {
+      res.json(await serveNextPeople(req.orgId!, brandId, limit, req.runId!, people));
+      return;
+    }
     const result = await serveNext(req.orgId!, brandId, limit, req.runId!, uploadIds);
     res.json(result);
   },
@@ -249,6 +290,15 @@ router.get(
     const brandParse = brandIdSchema.safeParse(req.query.brandId);
     if (!brandParse.success) {
       return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
+    }
+
+    const pool = peopleFilterFromQuery(req.query as Record<string, unknown>);
+    if (pool.error) return res.status(400).json({ type: "validation", error: pool.error });
+    if (pool.filter) {
+      if (req.query.uploadIds !== undefined) {
+        return res.status(400).json({ type: "validation", error: "uploadIds and pool=people are exclusive" });
+      }
+      return res.json(await serveStatsPeople(req.orgId!, brandParse.data, pool.filter));
     }
 
     // Optional per-file scope: ?uploadIds=a,b or repeated ?uploadIds=a&uploadIds=b.

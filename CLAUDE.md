@@ -163,6 +163,22 @@ serve (identity-keying rule: the emitter owns "don't re-emit").
   totalSendable }`.
 - Zero cost declared (DB-only). Org run per request via `requireOrg`.
 
+### People pool (`people`) — serve merged persons, filtered
+
+`POST /orgs/contacts/serve-next` body `people: { signedUp?, replied?, reachableBy?: "phone"|"email" }`
+(exclusive with `uploadIds`) serves from the brand's `people` gold instead of CSV rows;
+`GET /orgs/contacts/serve-stats?pool=people&signedUp=true&replied=false[&reachableBy=phone]`
+counts it. `signedUp` = a presence on an `AUTH_PROVIDERS` source; `replied=false` = never
+wrote to the brand on a CONVERSATION channel (`lib/people/conversation.ts`: Gmail/Matrix
+`inboundCount > 0`, Instantly `anyReply`/`replied`; Copilot/API = product use, not a
+conversation; TS `personReplied` and `PERSON_REPLIED_SQL` must stay twins). Always out:
+automated, not_business, no email. No re-serve = the SAME `contact_serves` (brand, email):
+a served person suppresses EVERY address it holds. Served row = the Contact shape +
+`pool: "people"`, `personId`, `emails`, `phones`, `phoneSources [{phone, source, via}]`.
+Distribute.you 2026-10-12: 95 signups → 87 never answered (62 never written, 25 written
+without answer), 8 answered. The chain human-service → serve-next must pass `people`
+(human-service audience binding).
+
 ### Per-file serve restriction (`uploadIds`) — each imported file is its own pool
 
 Staff can toggle an imported CRM file ON/OFF, so a serve must be restrictable to a
@@ -238,9 +254,11 @@ every DM into Matrix rooms. crm-service does NOT build, configure or deploy them
 it CONSUMES the homeserver over the standard client-server API
 (`GET /_matrix/client/v3/sync` with a `since` cursor), read-only.
 
-**There is no send path, ever, by design.** `src/lib/matrix/client.ts` exposes
-`sync()` and nothing else. That is what makes Discord read-only, and it is a
-deliberate requirement — do not add a write.
+**ONE send path: a WhatsApp text, from the WhatsApp send module only** (owner
+2026-10-12, see "WhatsApp send" below). `client.ts` `sendText` + `bridge.ts`
+`resolveIdentifier`/`createDm` are called by `lib/whatsapp/send.ts` and nothing
+else; no redact, receipt, read marker or group, on any channel (pinned by
+`tests/unit/matrix-link.test.ts`). Discord / LinkedIn / Telegram stay read-only.
 
 ### Bronze — `matrix_connections` + `matrix_raw_events`
 
@@ -823,6 +841,38 @@ owner had written to. A recorded fact, never an address-shape guess.
   The serve recomputes that key from the item, so a row an older build wrote
   (a rolled-back deploy did, 2026-10-10) never doubles; store format 4 makes
   such a unit due for a re-read.
+
+## WhatsApp send — a campaign writes from the brand's linked number (`src/lib/whatsapp/send.ts`)
+
+Owner 2026-10-12: a campaign (workflow-service, Windmill) writes first on WhatsApp.
+
+**Contract:** `POST /orgs/whatsapp/messages`, `x-api-key` + `x-org-id` (+ `x-brand-id` or
+body `brandId`; `x-campaign-id` recorded), body `{ email?, phone?, text, idempotencyKey,
+fromAccount?, skipIfReplied? }`. 200 `{ sendId, status: "sent", duplicate, to, phoneSource,
+fromAccount, roomId, eventId, sentAt, previousSends }`. Refusals 422 `{ type: "refused",
+code, error }`: `whatsapp_not_linked` | `whatsapp_not_connected` | `no_phone_known` |
+`not_on_whatsapp` | `person_replied` (only with `skipIfReplied`); 409 `send_in_progress`;
+400 `invalid_request`; 502 `bridge_error`. `GET /orgs/whatsapp/messages?brandId=&email=|phone=`
+lists the person's sends. No cost.
+- Phone = `phone` if given, else the person's first phone from `people` (looked up by email).
+- Account = the brand's `matrix_links` whatsapp `linked` rows whose bridge login is
+  `CONNECTED` (`/whoami`), oldest first; one already in a DM with the number wins.
+- Bridge `GET resolve_identifier/+<digits>?login_id=` (404 = not on WhatsApp), `POST
+  create_dm` when no room, then `PUT rooms/{room}/send/m.room.message/{txnId}` as the
+  account (join first). txnId = hash(org, brand, key): Matrix itself dedupes a retry.
+- Idempotent: `whatsapp_sends` UNIQUE (org, brand, key); sent → same answer `duplicate: true`;
+  refused → same refusal; failed or stuck `sending` > 2 min → retried.
+- Into the thread: WhatsApp names counterparts by opaque LID ghosts (all 514 prod WhatsApp
+  contacts had no phone). The send records `matrix_ghost_phones` (ghost → phone, the
+  bridge's own answer); Matrix silver reads it, so the contact carries the phone. A sent
+  row with email + phone is merge evidence `whatsapp_send`. After a send the connection is
+  synced and the people scope rebuilt (unawaited), so the Unibox shows it within a minute.
+
+**Signup phones:** Clerk `derive` reads Clerk phone numbers THEN profile metadata
+(`public_metadata` / `unsafe_metadata` keys `phone|phoneNumber|phone_number`; distribute.you
+onboarding writes `public_metadata.phone`: 12 of 96 users, 0 Clerk phone numbers),
+tagged `phoneSources [{phone, via}]`. brand-service sales-rep phones (5 phones fleet-wide,
+1 matching a signup) are NOT read.
 
 ## Boot: the port binds BEFORE migrations
 

@@ -16,6 +16,7 @@ import peopleRoutes from "./routes/people.js";
 import posthogStripeRoutes from "./routes/posthog-stripe.js";
 import authProviderRoutes from "./routes/auth-providers.js";
 import copilotRoutes from "./routes/copilot.js";
+import whatsappRoutes from "./routes/whatsapp.js";
 import apiCallsRoutes from "./routes/api-calls.js";
 import { startFreshnessWatch } from "./lib/people/freshness.js";
 
@@ -67,6 +68,7 @@ app.use(peopleRoutes);
 app.use(posthogStripeRoutes);
 app.use(authProviderRoutes);
 app.use(copilotRoutes);
+app.use(whatsappRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ type: "not_found", error: "Not found" });

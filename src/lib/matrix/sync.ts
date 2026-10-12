@@ -23,6 +23,7 @@ import {
   contacts,
   conversations,
   matrixConnections,
+  matrixGhostPhones,
   matrixLeads,
   matrixRawEvents,
   type MatrixConnection,
@@ -214,6 +215,15 @@ async function ingestBronze(
   return { pages, eventsIngested, rooms };
 }
 
+/** The phone the bridge resolved to this ghost on a send, if any. */
+async function ghostPhone(mxid: string): Promise<string | null> {
+  const [row] = await db
+    .select({ phone: matrixGhostPhones.phone })
+    .from(matrixGhostPhones)
+    .where(eq(matrixGhostPhones.ghostMxid, mxid));
+  return row?.phone ?? null;
+}
+
 /**
  * SILVER — rebuild the contact + conversation for one room, reading BRONZE back.
  *
@@ -240,6 +250,10 @@ async function rebuildRoom(
 
   const names = splitName(counterpart.displayName);
   const now = new Date();
+  // WhatsApp names most counterparts by an opaque LID ghost, which encodes no
+  // phone. A send that resolved a phone to this ghost recorded the pairing (the
+  // bridge's own answer): read it back so the contact carries its number.
+  const phoneE164 = counterpart.phoneE164 ?? (await ghostPhone(counterpart.mxid));
 
   // Contact — natural key (org, brand, connection, channel, channel_handle). A
   // WhatsApp DM has no email, which is exactly why this key exists; the
@@ -250,7 +264,7 @@ async function rebuildRoom(
       orgId: conn.orgId,
       brandId: conn.brandId,
       primaryEmail: null,
-      phoneE164: counterpart.phoneE164,
+      phoneE164,
       fullName: names.fullName,
       firstName: names.firstName,
       lastName: names.lastName,
@@ -266,7 +280,7 @@ async function rebuildRoom(
     .onConflictDoUpdate({
       target: [contacts.orgId, contacts.brandId, contacts.sourceConnectionId, contacts.channel, contacts.channelHandle],
       set: {
-        phoneE164: counterpart.phoneE164,
+        phoneE164,
         fullName: names.fullName,
         firstName: names.firstName,
         lastName: names.lastName,

@@ -139,6 +139,22 @@ export const ServeNextRequestSchema = registry.register(
             "Omit for the whole brand. Suppression stays brand-wide: a contact already served " +
             "through another file is never returned again, whichever file is used.",
         }),
+      people: z
+        .object({
+          signedUp: z.boolean().optional().openapi({
+            description: "true = only people who signed up to the brand's product (its auth provider, e.g. Clerk); false = only people who did not.",
+          }),
+          replied: z.boolean().optional().openapi({
+            description:
+              "false = only people who NEVER wrote to the brand on any conversation channel (Gmail / WhatsApp / LinkedIn inbound, any answer to our cold email): never written to, or written to without an answer. true = only people who answered. Copilot / API use is the product being used, not a conversation.",
+          }),
+          reachableBy: z.enum(["phone", "email"]).optional().openapi({ description: "Only people holding a phone / an email." }),
+        })
+        .optional()
+        .openapi({
+          description:
+            "Serve from the brand's merged PEOPLE (one row per human, every source) instead of its CSV rows. Exclusive with uploadIds. Always excludes automated senders, people not about this brand, and anyone without an email. Same brand-wide no-re-serve: every address of a served person is suppressed, and a person any address of whom was served before is never served.",
+        }),
     })
     .openapi("ServeNextRequest"),
 );
@@ -147,7 +163,19 @@ export const ServeNextResponseSchema = registry.register(
   "ServeNextResponse",
   z
     .object({
-      contacts: z.array(ContactSchema),
+      contacts: z.array(
+        ContactSchema.extend({
+          pool: z.literal("people").optional().openapi({ description: "Present on a people-pool serve." }),
+          personId: z.string().uuid().nullable().optional().openapi({ description: "People pool: the person's opaque id." }),
+          emails: z.array(z.string()).optional().openapi({ description: "People pool: every address of the person, lead address first." }),
+          phones: z.array(z.string()).optional().openapi({ description: "People pool: every phone of the person, international form." }),
+          phoneSources: z
+            .array(z.object({ phone: z.string(), source: z.string(), via: z.string().nullable() }))
+            .optional()
+            .openapi({ description: "People pool: where each phone came from (source = the person's record holding it, via = the field, e.g. clerk_public_metadata.phone)." }),
+          sources: z.array(z.string()).optional(),
+        }).openapi("ServedContact"),
+      ),
       served: z.number().int().openapi({ description: "How many contacts this call served." }),
       exhausted: z.boolean().openapi({
         description:
@@ -303,6 +331,10 @@ registry.registerPath({
             "Comma-separated upload ids (from GET /orgs/contacts/uploads). Scopes the counts to " +
             "those files. May also be repeated. Omit for whole-brand counts.",
         }),
+      pool: z.enum(["csv", "people"]).optional().openapi({ description: "people = count the people pool (see ServeNextRequest.people) with the filters below." }),
+      signedUp: z.enum(["true", "false"]).optional(),
+      replied: z.enum(["true", "false"]).optional(),
+      reachableBy: z.enum(["phone", "email"]).optional(),
     }),
   },
   responses: {
@@ -2480,3 +2512,104 @@ for (const v of [
     responses: { 200: { description: "Rebuilt" } },
   });
 }
+
+// ─── WhatsApp send ───────────────────────────────────────────────────────────
+
+export const WhatsappSendRequestSchema = registry.register(
+  "WhatsappSendRequest",
+  z
+    .object({
+      brandId: z.string().uuid().optional().openapi({ description: "The brand whose linked WhatsApp sends. Or the x-brand-id header." }),
+      email: z.string().optional().openapi({ description: "The person, by email. Their phone is read from the brand's CRM people when `phone` is absent." }),
+      phone: z.string().optional().openapi({ description: "The number to write to, international form (+<country><number>). Wins over the CRM's." }),
+      text: z.string().min(1).max(4096),
+      idempotencyKey: z.string().min(1).max(200).openapi({ description: "One per person per step. A retry with the same key answers the first outcome and never sends twice." }),
+      fromAccount: z.string().optional().openapi({ description: "Send from this linked account (its own number). Default: an account already in a WhatsApp conversation with the person, else the first linked one." }),
+      skipIfReplied: z.boolean().optional().openapi({ description: "Refuse with `person_replied` when the person has written to the brand on any channel (use on follow-ups)." }),
+    })
+    .openapi("WhatsappSendRequest"),
+);
+
+export const WhatsappSendResponseSchema = registry.register(
+  "WhatsappSendResponse",
+  z
+    .object({
+      sendId: z.string().uuid(),
+      status: z.literal("sent"),
+      duplicate: z.boolean().openapi({ description: "True when this idempotency key had already sent: nothing was sent again." }),
+      to: z.string(),
+      phoneSource: z.string().openapi({ description: "`request`, or `crm:<source>` (the person's record holding the phone)." }),
+      fromAccount: z.string(),
+      roomId: z.string(),
+      eventId: z.string(),
+      sentAt: z.string(),
+      previousSends: z.number().int().openapi({ description: "WhatsApp messages sent to this number through this route before this one." }),
+    })
+    .openapi("WhatsappSendResponse"),
+);
+
+const WhatsappRefusalSchema = z.object({
+  type: z.literal("refused"),
+  code: z.enum([
+    "whatsapp_not_linked",
+    "whatsapp_not_connected",
+    "no_phone_known",
+    "not_on_whatsapp",
+    "person_replied",
+    "send_in_progress",
+  ]),
+  error: z.string(),
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/whatsapp/messages",
+  summary: "Send one WhatsApp message from the brand's linked WhatsApp account",
+  description:
+    "Writes `text` to the person on WhatsApp from the brand's linked account. The message comes back through the mirror as outbound in the person's merged thread. Refusals are 422 with a stable `code` (409 `send_in_progress` for a key in flight). No cost declared. Requires x-api-key, x-org-id; brand from body or x-brand-id; x-campaign-id recorded when sent.",
+  request: { body: { content: { "application/json": { schema: WhatsappSendRequestSchema } }, required: true } },
+  responses: {
+    200: { description: "Sent (or already sent under this key)", content: { "application/json": { schema: WhatsappSendResponseSchema } } },
+    400: { description: "Bad request (`code: invalid_request`)", content: { "application/json": { schema: ErrorResponseSchema } } },
+    409: { description: "`send_in_progress`", content: { "application/json": { schema: WhatsappRefusalSchema } } },
+    422: { description: "Refused, with a stable `code`", content: { "application/json": { schema: WhatsappRefusalSchema } } },
+    502: { description: "The WhatsApp bridge or run tracking failed (`code: bridge_error`)", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/whatsapp/messages",
+  summary: "WhatsApp messages sent to one person through this route, newest first",
+  request: {
+    query: z.object({ brandId: z.string().uuid(), email: z.string().optional(), phone: z.string().optional() }),
+  },
+  responses: {
+    200: {
+      description: "Sends",
+      content: {
+        "application/json": {
+          schema: z.object({
+            sends: z.array(
+              z.object({
+                sendId: z.string().uuid(),
+                status: z.enum(["sending", "sent", "refused", "failed"]),
+                code: z.string().nullable(),
+                error: z.string().nullable(),
+                email: z.string().nullable(),
+                to: z.string().nullable(),
+                phoneSource: z.string().nullable(),
+                fromAccount: z.string().nullable(),
+                text: z.string(),
+                campaignId: z.string().nullable(),
+                eventId: z.string().nullable(),
+                sentAt: z.string().nullable(),
+                createdAt: z.string(),
+              }),
+            ),
+          }),
+        },
+      },
+    },
+  },
+});

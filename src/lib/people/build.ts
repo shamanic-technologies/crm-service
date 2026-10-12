@@ -27,6 +27,7 @@ import {
   walkLeadStandings,
   type LeadStandingAnswer,
   readCsvEvidence,
+  readWhatsappSendEvidence,
   readGmail,
   readGoHighLevel,
   readGoogleContactEvidence,
@@ -248,7 +249,10 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
   const reads: SourceRead[] = filtered.map((f) => f.read);
   const [gmail, , , gohighlevel, , stripe] = reads;
 
-  const evidenceReads: EvidenceRead[] = [await readCsvEvidence(scope.orgId, scope.brandId)];
+  const evidenceReads: EvidenceRead[] = [
+    await readCsvEvidence(scope.orgId, scope.brandId),
+    await readWhatsappSendEvidence(scope.orgId, scope.brandId),
+  ];
   if (gmail.status !== "not_connected") evidenceReads.push(await readGoogleContactEvidence(identity));
   // A pairing lead-service is only GUESSING (`toConfirm`) merges nothing: it rides on the CRM contact as a hint.
   const possibleLeadsByCrmContact = new Map<string, PossibleLead[]>();

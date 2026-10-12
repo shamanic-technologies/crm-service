@@ -87,6 +87,31 @@ function ownedValues(list: unknown, field: string, primaryId: unknown): string[]
   return [...new Set(items.map((i) => str(i[field])).filter((v): v is string => !!v))];
 }
 
+/**
+ * A phone the brand's product stored on the user's profile itself: a product
+ * asking for a phone at onboarding often keeps it in Clerk metadata rather than
+ * as a Clerk phone number (distribute.you does: `public_metadata.phone`, 12 of
+ * 96 users vs 0 Clerk phone numbers, 2026-10-12). Read under the keys a product
+ * names a phone (`phone`, `phoneNumber`, `phone_number`), in `public_metadata`
+ * then `unsafe_metadata`; `private_metadata` is never stored, so never read.
+ * The user typed it: it is their own statement, tagged with where it was read.
+ */
+const METADATA_FIELDS = ["public_metadata", "unsafe_metadata"] as const;
+const METADATA_PHONE_KEYS = ["phone", "phoneNumber", "phone_number"] as const;
+
+function metadataPhones(record: Record<string, unknown>): { phone: string; via: string }[] {
+  const out: { phone: string; via: string }[] = [];
+  for (const field of METADATA_FIELDS) {
+    const meta = record[field];
+    if (!meta || typeof meta !== "object" || Array.isArray(meta)) continue;
+    for (const key of METADATA_PHONE_KEYS) {
+      const value = str((meta as Record<string, unknown>)[key]);
+      if (value) out.push({ phone: value, via: `clerk_${field}.${key}` });
+    }
+  }
+  return out;
+}
+
 export function deriveClerkUser(record: Record<string, unknown>): DerivedAuthUser | null {
   const externalId = str(record.id);
   if (!externalId) return null;
@@ -98,7 +123,7 @@ export function deriveClerkUser(record: Record<string, unknown>): DerivedAuthUse
     emails: ownedValues(record.email_addresses, "email_address", record.primary_email_address_id).map((e) =>
       e.toLowerCase(),
     ),
-    phones: ownedValues(record.phone_numbers, "phone_number", record.primary_phone_number_id),
+    ...phonesOf(record),
     firstName,
     lastName,
     fullName: [firstName, lastName].filter(Boolean).join(" ") || null,
@@ -106,6 +131,25 @@ export function deriveClerkUser(record: Record<string, unknown>): DerivedAuthUse
     updatedAt: msDate(record.updated_at),
     lastActiveAt: lastActive.length ? new Date(Math.max(...lastActive.map((d) => d.getTime()))) : null,
   };
+}
+
+/** Clerk's own (verified) phone numbers first, then the profile's metadata phones; each tagged. */
+function phonesOf(record: Record<string, unknown>): Pick<DerivedAuthUser, "phones" | "phoneSources"> {
+  const sources = [
+    ...ownedValues(record.phone_numbers, "phone_number", record.primary_phone_number_id).map((phone) => ({
+      phone,
+      via: "clerk_phone_number",
+    })),
+    ...metadataPhones(record),
+  ];
+  const seen = new Set<string>();
+  const phoneSources = sources.filter((s) => {
+    const k = s.phone.replace(/\D/g, "");
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+  return { phones: phoneSources.map((s) => s.phone), phoneSources };
 }
 
 export const clerk: AuthProviderAdapter = {
