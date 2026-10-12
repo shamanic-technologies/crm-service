@@ -18,7 +18,9 @@ import authProviderRoutes from "./routes/auth-providers.js";
 import copilotRoutes from "./routes/copilot.js";
 import whatsappRoutes from "./routes/whatsapp.js";
 import apiCallsRoutes from "./routes/api-calls.js";
+import formTriggerRoutes from "./routes/form-triggers.js";
 import { startFreshnessWatch } from "./lib/people/freshness.js";
+import { startFormWatch } from "./lib/form-trigger/watch.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -69,6 +71,7 @@ app.use(posthogStripeRoutes);
 app.use(authProviderRoutes);
 app.use(copilotRoutes);
 app.use(whatsappRoutes);
+app.use(formTriggerRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ type: "not_found", error: "Not found" });
@@ -99,6 +102,8 @@ if (process.env.NODE_ENV !== "test") {
         migrated = true;
         // Keeps the people message store current before anyone opens a person.
         startFreshnessWatch();
+        // Reports each new CRM form submission as a `form_submitted` trigger, within a minute.
+        startFormWatch();
       })
       .catch((err) => {
         console.error("[crm-service] Migration failed:", err);
