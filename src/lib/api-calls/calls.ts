@@ -43,7 +43,8 @@ export interface ApiCallInput {
   mcpTool?: string | null;
   orgId: string | null;
   userId: string;
-  email: string;
+  /** null when api-service could not resolve the key's user: skipped, counted. */
+  email: string | null;
   displayName?: string | null;
   keyFingerprint?: string | null;
   brandIds?: string[];
@@ -78,7 +79,7 @@ export async function storeApiCalls(
   if (!destination) throw new ApiCallDestinationMissingError();
   let skippedNoEmail = 0;
   const rows = calls.flatMap((c) => {
-    const email = normalizeEmail(c.email);
+    const email = c.email ? normalizeEmail(c.email) : null;
     if (!email) {
       skippedNoEmail += 1;
       return [];
