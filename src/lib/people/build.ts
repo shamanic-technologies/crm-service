@@ -9,6 +9,7 @@
  * (its database, run tracking) fails the build.
  */
 
+import { resolveBrandWhatsappPhones, type PhoneResolutionResult } from "../whatsapp/phone-resolution.js";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { leadStandingObservations, people, peopleScopes, type PeopleScope } from "../../db/schema.js";
@@ -115,6 +116,8 @@ export interface BuildSummary {
   messageIndex?: ({ status: "ok" } & MessageIndexSummary) | { status: "failed"; error: string };
   /** The fact feed emission that followed (absent until it ran). */
   facts?: ({ status: "ok" } & FactEmissionSummary) | { status: "failed"; error: string };
+  /** WhatsApp ghost → phone resolution run before reading Matrix (absent on builds before it existed). */
+  whatsappPhones?: PhoneResolutionResult | { status: "failed"; error: string };
 }
 
 const NUMBER_IN_NAME = /\d[\d\s().-]{5,}\d/;
@@ -238,6 +241,15 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     runId,
     brandId: scope.brandId,
   };
+
+  // Before reading Matrix: put on each mirrored WhatsApp contact the phone the
+  // bridge says its ghost IS, for every phone the CRM knows (lib/whatsapp/
+  // phone-resolution.ts), so this build merges those threads into their person.
+  // Never fails the build: a bridge outage leaves today's merge and is retried.
+  const whatsappPhones = await resolveBrandWhatsappPhones(scope.orgId, scope.brandId).catch((err) => {
+    console.error(`[crm-service] whatsapp phone resolution failed scope=${scope.id}:`, err);
+    return { status: "failed" as const, error: (err as Error).message };
+  });
 
   const [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, rawClerk, rawCopilot, rawApi, own] = await Promise.all([
     readGmail(identity),
@@ -391,6 +403,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
   });
 
   const summary: BuildSummary = {
+    whatsappPhones,
     people: rows.length,
     sources: reads.map((r) => ({
       source: r.source,

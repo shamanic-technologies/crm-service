@@ -903,6 +903,21 @@ lists the person's sends. No cost.
   row with email + phone is merge evidence `whatsapp_send`. After a send the connection is
   synced and the people scope rebuilt (unawaited), so the Unibox shows it within a minute.
 
+- **Which account writes** (owner 2026-10-12: the pro number, not the personal one,
+  unless a conversation already exists there): the account whose conversation with the
+  ghost HAS MESSAGES (latest), else the link marked `outreach_default` (`PATCH
+  /orgs/matrix/links/{linkId} {brandId, outreachDefault: true}`, one per brand+channel),
+  else the oldest linked. An empty DM room is not a conversation.
+- **WhatsApp threads merge into their person** (`lib/whatsapp/phone-resolution.ts`):
+  WhatsApp names counterparts by LID ghosts (514/514 mirrored contacts had no phone, so 6
+  of the first 13 people a campaign wrote to looked "never answered" while they had
+  dozens of WhatsApp messages with the owner). Each people build first asks the bridge
+  `resolve_identifier` ONCE per international phone the CRM knows outside Matrix
+  (`whatsapp_phone_lookups`, global: LIDs are the same from every account; not-found
+  re-asked after 30 days; ≤150 per pass, 400 ms apart), records `matrix_ghost_phones`
+  and writes the phone on the brand's mirrored contacts of that ghost, so the build
+  merges the thread on the phone key. `BuildSummary.whatsappPhones` reports it.
+
 **Signup phones:** Clerk `derive` reads Clerk phone numbers THEN profile metadata
 (`public_metadata` / `unsafe_metadata` keys `phone|phoneNumber|phone_number`; distribute.you
 onboarding writes `public_metadata.phone`: 12 of 96 users, 0 Clerk phone numbers),
