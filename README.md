@@ -18,6 +18,8 @@ api-service proxy, and the dashboard UI are separate later tasks.
 | `GET` | `/orgs/contacts?brandId=` | org | `x-api-key` + `x-org-id` |
 | `GET` | `/orgs/contacts/uploads?brandId=` | org | `x-api-key` + `x-org-id` |
 | `POST` | `/internal/copilot/messages` | internal | `x-api-key` |
+| `POST` | `/internal/api-calls` | internal | `x-api-key` |
+| `GET` | `/orgs/people/api-calls/{callId}?brandId=` | org | `x-api-key` + `x-org-id` + `x-user-id` |
 
 `POST /internal/copilot/messages` is how chat-service files each Copilot chat turn
 (user message + answer) on the staff Unibox: body `{ orgId, userId, email,

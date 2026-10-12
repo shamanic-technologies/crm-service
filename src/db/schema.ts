@@ -1635,6 +1635,61 @@ export const copilotMessages = pgTable(
   ],
 );
 
+/**
+ * Every call a client (or their AI assistant, through our MCP server or not)
+ * made to our API with THEIR OWN key, pushed by api-service (bronze,
+ * append-only). Like the Copilot, each call is a staff conversation with that
+ * person (they asked, we answered), stored ONLY under the staff Unibox scope
+ * (`COPILOT_UNIBOX_ORG_ID` / `COPILOT_UNIBOX_BRAND_ID`), never under the
+ * calling org. api-service has already removed every secret (auth headers, the
+ * key, secret-named fields, key-looking values) and cut each body at 256 KB.
+ * One row per api-service call id: a call pushed twice is stored once.
+ */
+export const apiCalls = pgTable(
+  "api_calls",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // The staff Unibox scope the call is filed under (never the calling org).
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    // api-service's id for the call: the idempotency key.
+    callId: text("call_id").notNull(),
+    // 'api' (their own code / assistant) | 'mcp' (our MCP server, for their assistant)
+    channel: text("channel").notNull(),
+    mcpTool: text("mcp_tool"),
+    // Who called: the org the call acted in (null when it named none), the key's user, their email (the match key).
+    callerOrgId: uuid("caller_org_id"),
+    callerUserId: uuid("caller_user_id").notNull(),
+    email: text("email").notNull(),
+    displayName: text("display_name"),
+    // One-way fingerprint of the key (never the key).
+    keyFingerprint: text("key_fingerprint"),
+    brandIds: jsonb("brand_ids").notNull().default([]),
+    method: text("method").notNull(),
+    path: text("path").notNull(),
+    query: jsonb("query").notNull().default({}),
+    requestHeaders: jsonb("request_headers").notNull().default({}),
+    requestBody: text("request_body"),
+    requestBodyBytes: integer("request_body_bytes").notNull().default(0),
+    requestBodyTruncated: boolean("request_body_truncated").notNull().default(false),
+    status: integer("status").notNull(),
+    responseContentType: text("response_content_type"),
+    responseBody: text("response_body"),
+    responseBodyBytes: integer("response_body_bytes").notNull().default(0),
+    responseBodyTruncated: boolean("response_body_truncated").notNull().default(false),
+    durationMs: integer("duration_ms").notNull(),
+    calledAt: timestamp("called_at", { withTimezone: true }).notNull(),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    requestId: text("request_id"),
+    gatewayRunId: text("gateway_run_id"),
+    runId: text("run_id"),
+  },
+  (table) => [
+    uniqueIndex("api_calls_call_uq").on(table.callId),
+    index("api_calls_scope_email_idx").on(table.orgId, table.brandId, table.email, table.calledAt),
+  ],
+);
+
 export type ContactUpload = typeof contactUploads.$inferSelect;
 export type NewContactUpload = typeof contactUploads.$inferInsert;
 export type ContactRowRaw = typeof contactRowsRaw.$inferSelect;
@@ -1674,3 +1729,4 @@ export type PeopleFact = typeof peopleFacts.$inferSelect;
 export type NewPeopleFact = typeof peopleFacts.$inferInsert;
 export type AuthConnection = typeof authConnections.$inferSelect;
 export type CopilotMessage = typeof copilotMessages.$inferSelect;
+export type ApiCall = typeof apiCalls.$inferSelect;

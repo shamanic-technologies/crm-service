@@ -16,6 +16,7 @@ import peopleRoutes from "./routes/people.js";
 import posthogStripeRoutes from "./routes/posthog-stripe.js";
 import authProviderRoutes from "./routes/auth-providers.js";
 import copilotRoutes from "./routes/copilot.js";
+import apiCallsRoutes from "./routes/api-calls.js";
 import { startFreshnessWatch } from "./lib/people/freshness.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -28,6 +29,9 @@ const PORT = process.env.PORT || 3010;
 app.use(cors());
 // JSON body parsing. Multipart (CSV upload) is handled by multer in the route,
 // so express.json only touches application/json requests.
+// API-call batches from api-service carry request + response bodies (each cut at
+// 256 KB, batches kept under 8 MB by the sender): their own, larger limit.
+app.use("/internal/api-calls", express.json({ limit: "16mb" }));
 app.use(express.json({ limit: "2mb" }));
 
 app.get("/openapi.json", (_req, res) => {
@@ -58,6 +62,7 @@ app.use(contactsRoutes);
 app.use(internalRoutes);
 app.use(matrixRoutes);
 app.use(gohighlevelRoutes);
+app.use(apiCallsRoutes);
 app.use(peopleRoutes);
 app.use(posthogStripeRoutes);
 app.use(authProviderRoutes);

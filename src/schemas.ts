@@ -433,6 +433,120 @@ registry.registerPath({
   },
 });
 
+// ─── API / MCP calls (the staff Unibox's API source) ─────────────────────────
+
+const ApiCallSchema = z
+  .object({
+    callId: z.string().min(1).max(200).openapi({ description: "api-service's id for the call. The idempotency key: a call pushed twice is stored once." }),
+    channel: z.enum(["api", "mcp"]).openapi({ description: "api = the client's own code or assistant called the API; mcp = our MCP server called it for the client's assistant (it sends `x-distribute-client: mcp`)." }),
+    mcpTool: z.string().max(200).nullable().optional().openapi({ description: "The MCP tool the call served, when the MCP server says (`x-distribute-mcp-tool`)." }),
+    orgId: z.string().uuid().nullable().openapi({ description: "The org the call acted in (internal uuid); null when it named none. Recorded, never the filing scope." }),
+    userId: z.string().uuid().openapi({ description: "The key's user (internal uuid)." }),
+    email: z.string().max(320).openapi({ description: "The key's user's email: the key that matches the call to their person. A call without a usable email is skipped (counted)." }),
+    displayName: z.string().max(500).nullable().optional(),
+    keyFingerprint: z.string().max(64).nullable().optional().openapi({ description: "One-way fingerprint of the key (first 16 hex of sha256). Never the key." }),
+    brandIds: z.array(z.string().max(100)).max(50).optional().openapi({ description: "Brand ids the call named (query, header, body, path)." }),
+    method: z.string().min(1).max(10),
+    path: z.string().min(1).max(2000).openapi({ description: "The path called, without the query string (e.g. /v1/emails)." }),
+    query: z.record(z.string(), z.unknown()).optional().openapi({ description: "Query parameters, secrets already redacted by api-service." }),
+    requestHeaders: z.record(z.string(), z.string()).optional().openapi({ description: "An allow-list of harmless request headers (content-type, user-agent, x-request-id, x-org-id, x-brand-id, x-distribute-client, x-distribute-mcp-tool). Never Authorization, x-api-key or cookies." }),
+    requestBody: z.string().max(300_000).nullable().optional().openapi({ description: "The request body as text, secrets redacted, cut at 256 KB." }),
+    requestBodyBytes: z.number().int().min(0).optional(),
+    requestBodyTruncated: z.boolean().optional(),
+    status: z.number().int().min(100).max(599),
+    responseContentType: z.string().max(200).nullable().optional(),
+    responseBody: z.string().max(300_000).nullable().optional().openapi({ description: "Our answer as text, secrets redacted, cut at 256 KB." }),
+    responseBodyBytes: z.number().int().min(0).optional().openapi({ description: "The answer's real size, cut or not." }),
+    responseBodyTruncated: z.boolean().optional(),
+    durationMs: z.number().min(0),
+    at: z.string().datetime({ offset: true }).openapi({ description: "When the call arrived (ISO 8601)." }),
+    requestId: z.string().max(200).nullable().optional(),
+    runId: z.string().max(200).nullable().optional().openapi({ description: "api-service's run for the call." }),
+  })
+  .openapi("ApiCall");
+
+export const ApiCallsRequestSchema = z
+  .object({ calls: z.array(ApiCallSchema).min(1).max(100) })
+  .openapi("ApiCallsRequest");
+
+const ApiCallsResponseSchema = z
+  .object({
+    stored: z.number().int(),
+    duplicates: z.number().int().openapi({ description: "Calls already stored (same callId): ignored." }),
+    skippedNoEmail: z.number().int().openapi({ description: "Calls whose user has no usable email: no person to file them under." }),
+  })
+  .openapi("ApiCallsResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/api-calls",
+  summary: "Store calls made to our API / MCP server with a client's own key, on the staff Unibox",
+  description:
+    "api-service pushes, in batches, every call a client (or their assistant) made with their own key. Each call is filed ONLY under the staff Unibox scope " +
+    "(COPILOT_UNIBOX_ORG_ID + COPILOT_UNIBOX_BRAND_ID), never under the calling org, and shows on that person's thread (`GET /orgs/people/timeline`, source `api`, " +
+    "channel `api` or `mcp`): what they asked inbound, what we answered outbound from \"distribute.you API\". Idempotent on callId. No cost, no customer org billed.",
+  request: { body: { content: { "application/json": { schema: ApiCallsRequestSchema } }, required: true } },
+  responses: {
+    200: { description: "Stored", content: { "application/json": { schema: ApiCallsResponseSchema } } },
+    400: { description: "Validation error" },
+    401: { description: "Missing or wrong x-api-key" },
+    502: { description: "Run tracking unavailable (nothing stored; retry)" },
+    503: { description: "The staff Unibox scope is not configured on crm-service (nothing stored)" },
+  },
+});
+
+const ApiCallDetailSchema = z
+  .object({
+    callId: z.string(),
+    channel: z.enum(["api", "mcp"]),
+    mcpTool: z.string().nullable(),
+    callerOrgId: z.string().nullable(),
+    callerUserId: z.string(),
+    email: z.string(),
+    displayName: z.string().nullable(),
+    keyFingerprint: z.string().nullable(),
+    brandIds: z.array(z.string()),
+    calledAt: z.string(),
+    durationMs: z.number().int(),
+    summary: z.object({ asked: z.string(), answered: z.string() }).openapi({ description: "The two lines the thread shows." }),
+    request: z.object({
+      method: z.string(),
+      path: z.string(),
+      query: z.record(z.string(), z.unknown()),
+      headers: z.record(z.string(), z.string()),
+      body: z.string().nullable(),
+      bodyBytes: z.number().int(),
+      bodyTruncated: z.boolean(),
+    }),
+    response: z.object({
+      status: z.number().int(),
+      contentType: z.string().nullable(),
+      body: z.string().nullable(),
+      bodyBytes: z.number().int(),
+      bodyTruncated: z.boolean(),
+    }),
+  })
+  .openapi("ApiCallDetail");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/people/api-calls/{callId}",
+  summary: "One API / MCP call, whole: the request and our answer as stored",
+  description:
+    "The raw side of a thread item of source `api` (its `ref.callId`): method, path, query, harmless headers, request body, status and response body, " +
+    "secrets already redacted, each body cut at 256 KB (`bodyTruncated`, real size in `bodyBytes`). Served on the staff Unibox scope only; any other (org, brand) is 404.",
+  request: {
+    headers: z.object({ "x-org-id": z.string(), "x-user-id": z.string() }),
+    params: z.object({ callId: z.string() }),
+    query: z.object({ brandId: z.string().uuid() }),
+  },
+  responses: {
+    200: { description: "The call", content: { "application/json": { schema: ApiCallDetailSchema } } },
+    400: { description: "brandId missing" },
+    404: { description: "reason=call_not_found: no such call in this scope" },
+  },
+});
+
 // ─── Matrix (direct-message ingestion) ───────────────────────────────────────
 
 export const MatrixChannelSchema = z.enum(MATRIX_CHANNELS);
@@ -1772,6 +1886,8 @@ const TimelineItemSchema = z
           "only when the source dates it (never invented, never the build time): " +
           "gohighlevel `added_to_crm` (dateBasis `contact_created_at`), csv `added_to_crm` (dateBasis `uploaded_at`, detail filename + uploadId), " +
           "posthog `signup` (dateBasis `person_created_at`), stripe `became_customer` (dateBasis `customer_created_at`). " +
+          "Source `api` (channel `api` or `mcp`) carries messages only: each call the person made to our API (or through our MCP server) with their own key is two messages, " +
+          "what they asked (inbound, a plain-words summary) and what we answered (outbound, from \"distribute.you API\"), both with `ref.callId` (whole call: GET /orgs/people/api-calls/{callId}), `ref.sessionId` (calls on one channel less than 30 min apart), method, path, status, mcpTool; staff Unibox scope alone. " +
           "Source `copilot` (channel `chat`) carries messages only: the person's chat with the distribute.you Copilot, served on the staff Unibox scope alone, inbound = the user wrote, outbound = the Copilot answered (`from` \"AI Copilot\").",
       }),
     textClean: z

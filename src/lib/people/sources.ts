@@ -26,6 +26,7 @@ import {
 import { siblingGet, siblingGetOk, type SiblingIdentity } from "./siblings.js";
 import type { GhlDeal, LeadStanding } from "./state.js";
 import { copilotPresences, isCopilotDestination, readCopilotRows } from "../copilot/messages.js";
+import { apiCallPresences, readApiCallPresenceRows } from "../api-calls/calls.js";
 
 export const SOURCE_STATUSES = ["not_connected", "ok", "failed"] as const;
 export type SourceStatus = (typeof SOURCE_STATUSES)[number];
@@ -631,6 +632,26 @@ export async function readCopilot(orgId: string, brandId: string): Promise<Sourc
     return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
   }
   const presences = copilotPresences(await readCopilotRows(orgId, brandId));
+  return { ...base, status: "ok", presences, sourceCount: presences.length, error: null };
+}
+
+// ─── crm-service bronze: calls to our API / MCP with a client's key (staff Unibox only) ─
+
+/**
+ * Everyone who called our API or MCP server with their own key. Only the staff
+ * Unibox scope holds any (`lib/api-calls/calls.ts`); every other (org, brand)
+ * is `not_connected`.
+ */
+export async function readApiCalls(orgId: string, brandId: string): Promise<SourceRead> {
+  const base = {
+    source: "api" as const,
+    scope: "brand" as const,
+    sourceCountBasis: "crm-service stored API / MCP caller addresses (staff Unibox only)",
+  };
+  if (!isCopilotDestination(orgId, brandId)) {
+    return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
+  }
+  const presences = apiCallPresences(await readApiCallPresenceRows(orgId, brandId));
   return { ...base, status: "ok", presences, sourceCount: presences.length, error: null };
 }
 
