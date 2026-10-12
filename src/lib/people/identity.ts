@@ -5,8 +5,10 @@
  * to the same person only when one record states both at once: a GoHighLevel,
  * Google or Stripe contact holding an email AND a phone, a CSV row carrying both, or a
  * lead-service pairing (its `paired` verdict on a CRM contact and one of our leads). Two records sharing a key are the same
- * person (that key IS the identity). Nothing else merges: no name matching, no
- * domain matching, no model. Unmerged stays two people.
+ * person (that key IS the identity). A STATED merge (someone said two people are
+ * one: `person_merges`) is evidence too: it ties every key both people held when
+ * it was stated. Nothing else merges: no name matching, no domain matching, no
+ * model. Unmerged stays two people.
  *
  * A third key, `uid:<id>`, is the brand's OWN user id: the auth provider's
  * (Clerk) user id, and every PostHog distinct id of a person (the brand's
@@ -70,6 +72,7 @@ export const EVIDENCE_KINDS = [
   "lead_pairing",
   "stripe_customer",
   "whatsapp_send",
+  "stated_merge",
 ] as const;
 export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
 
@@ -81,11 +84,13 @@ export interface Evidence {
   company: string | null;
   emails: string[];
   phones: string[];
+  /** Identity keys tied verbatim (a stated merge names any key: `matrix:<id>`, `uid:<id>`). */
+  keys?: string[];
 }
 
 /** The keys a record states. A record with neither email nor phone gets its own. */
 export function keysOf(
-  record: { emails: string[]; phones: string[]; userIds?: string[] },
+  record: { emails: string[]; phones: string[]; userIds?: string[]; keys?: string[] },
   fallback: string | null,
 ): string[] {
   const keys = new Set<string>();
@@ -101,6 +106,7 @@ export function keysOf(
     const id = u.trim();
     if (id) keys.add(userIdKey(id));
   }
+  for (const k of record.keys ?? []) if (k) keys.add(k);
   if (keys.size === 0 && fallback) keys.add(fallback);
   return [...keys];
 }

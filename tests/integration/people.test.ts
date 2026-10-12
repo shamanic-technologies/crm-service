@@ -391,7 +391,7 @@ async function retryOnDeadlock(fn: () => Promise<unknown>): Promise<void> {
 }
 
 async function wipe() {
-  await retryOnDeadlock(() => db.execute(sql`TRUNCATE sender_verdicts, conversation_verdicts, people_scopes, people, person_ids, person_id_aliases, contact_uploads, lead_standing_observations, matrix_raw_events, conversations, matrix_leads, matrix_connections, ghl_opportunities, ghl_connections, contacts CASCADE`));
+  await retryOnDeadlock(() => db.execute(sql`TRUNCATE sender_verdicts, conversation_verdicts, people_scopes, people, person_ids, person_id_aliases, person_merges, contact_uploads, lead_standing_observations, matrix_raw_events, conversations, matrix_leads, matrix_connections, ghl_opportunities, ghl_connections, contacts CASCADE`));
 }
 
 /** Alice in GoHighLevel (email + phone, a won deal) and on WhatsApp (phone only). */
@@ -1161,6 +1161,121 @@ describe.skipIf(!RUN)("person layer", () => {
       const viaRetired = await timeline(`personId=${retiredId}`);
       expect(viaRetired.status).toBe(200);
       expect(viaRetired.body.person.personId).toBe(carol.personId);
+    });
+  });
+
+  describe("stated merges (two people said to be one)", () => {
+    const H = (r: request.Test) => r.set("x-api-key", API_KEY).set("x-org-id", ORG).set("x-user-id", USER);
+    const merge = (body: unknown) => H(request(app()).post("/orgs/people/merges")).send(body);
+    const undo = (mergeId: string) => H(request(app()).post(`/orgs/people/merges/${mergeId}/undo`)).send({ brandId: BRAND });
+    const listMergesReq = () => H(request(app()).get(`/orgs/people/merges?brandId=${BRAND}`));
+    /** A build once the one the route kicked in the background has finished. */
+    async function buildAfterKick() {
+      const { scope } = await ensureScope(ORG, BRAND, USER);
+      for (let i = 0; i < 100; i++) {
+        const r = await runScopeBuild(scope);
+        expect(r.ok).toBe(true);
+        if (!r.skipped) return;
+        await new Promise((ok) => setTimeout(ok, 20));
+      }
+      throw new Error("the kicked build never finished");
+    }
+
+    /** Carol on WhatsApp only (phone) and carol@z.com in cold email: two people, no record ties them. */
+    async function seedCarol() {
+      await seedLocalSources();
+      const [mx] = await db.select().from(matrixConnections);
+      const [carolWa] = await db
+        .insert(contacts)
+        .values({ orgId: ORG, brandId: BRAND, source: "matrix", channel: "whatsapp", channelHandle: "@whatsapp_33699999999:hs", phoneE164: "+33699999999", rawAttributes: {}, sourceConnectionId: mx.id })
+        .returning();
+      await db.insert(conversations).values({
+        orgId: ORG, brandId: BRAND, connectionId: mx.id, contactId: carolWa.id, channel: "whatsapp", roomId: "!carol",
+        firstMessageAt: new Date("2026-09-06T12:00:00Z"), lastMessageAt: new Date("2026-09-06T12:00:00Z"),
+        messageCount: 1, inboundCount: 1, outboundCount: 0, lastEventId: "$c1",
+      });
+      extraWritten = [{ ...WRITTEN[1], campaignId: "camp-3", leadEmail: "carol@z.com", engaged: false, clicked: false, firstClickedAt: null }];
+      await buildNow();
+      const rows = await db.select().from(people);
+      return {
+        phoneId: rows.find((p) => p.personKey === "phone:+33699999999")!.personId!,
+        emailId: rows.find((p) => p.personKey === "email:carol@z.com")!.personId!,
+      };
+    }
+
+    it("merges two people into one that survives every rebuild; undo gives each its id back", async () => {
+      const { phoneId, emailId } = await seedCarol();
+      const res = await merge({ brandId: BRAND, personIds: [emailId, phoneId], reason: "same human, WhatsApp number never saved" });
+      expect(res.status).toBe(201);
+      expect(res.body).toMatchObject({ duplicate: false, applied: false, rebuild: "started" });
+      expect(res.body.merge).toMatchObject({ personIds: [emailId, phoneId], statedByUserId: USER, active: true, reason: "same human, WhatsApp number never saved" });
+      expect(res.body.merge.keys).toEqual({ a: ["email:carol@z.com"], b: ["phone:+33699999999"] });
+      const mergeId = res.body.merge.mergeId;
+
+      await buildAfterKick();
+      const after = await db.select().from(people).where(sql`${people.identityKeys} @> '["phone:+33699999999"]'::jsonb`);
+      expect(after).toHaveLength(1);
+      expect(after[0].personKey).toBe("email:carol@z.com");
+      expect(after[0].sources).toEqual(["instantly", "matrix"]);
+      expect([phoneId, emailId]).toContain(after[0].personId);
+      expect((after[0].mergeEvidence as { kind: string; ref: string }[]).map((e) => [e.kind, e.ref])).toEqual([["stated_merge", mergeId]]);
+      // The retired id still opens the merged person; one thread holds both channels.
+      const retired = after[0].personId === phoneId ? emailId : phoneId;
+      const thread = await H(request(app()).get(`/orgs/people/timeline?brandId=${BRAND}&personId=${retired}`));
+      expect(thread.status).toBe(200);
+      expect(thread.body.person.personId).toBe(after[0].personId);
+      expect(thread.body.person.sources).toEqual(["instantly", "matrix"]);
+
+      // A second rebuild changes nothing: still one.
+      await buildNow();
+      expect(await db.select().from(people).where(sql`${people.identityKeys} @> '["phone:+33699999999"]'::jsonb`)).toHaveLength(1);
+
+      // Idempotent, and the list says it is applied.
+      const again = await merge({ brandId: BRAND, personIds: [phoneId, emailId] });
+      expect(again.status).toBe(200);
+      expect(again.body).toMatchObject({ duplicate: true, applied: true, personId: after[0].personId, rebuild: "not_needed" });
+      expect(again.body.merge.mergeId).toBe(mergeId);
+      const listed = await listMergesReq();
+      expect(listed.body.merges).toHaveLength(1);
+      expect(listed.body.merges[0]).toMatchObject({ mergeId, applied: true, active: true });
+
+      // Undo: two people again, each with its own id.
+      const undone = await undo(mergeId);
+      expect(undone.status).toBe(200);
+      expect(undone.body).toMatchObject({ duplicate: false, rebuild: "started" });
+      expect(undone.body.merge).toMatchObject({ active: false, undoneByUserId: USER });
+      await buildAfterKick();
+      const split = await db.select().from(people);
+      expect(split.find((p) => p.personKey === "phone:+33699999999")!.personId).toBe(phoneId);
+      expect(split.find((p) => p.personKey === "email:carol@z.com")!.personId).toBe(emailId);
+      expect((await undo(mergeId)).body.duplicate).toBe(true);
+      expect((await listMergesReq()).body.merges[0]).toMatchObject({ active: false, applied: null });
+    });
+
+    it("refuses with a reason: unknown id, another brand, the same id, already one person", async () => {
+      const { phoneId, emailId } = await seedCarol();
+      const unknown = "bbbbbbbb-1111-4111-8111-00000000beef";
+      const r404 = await merge({ brandId: BRAND, personIds: [emailId, unknown] });
+      expect(r404.status).toBe(404);
+      expect(r404.body).toMatchObject({ type: "refused", reason: "person_not_found", personId: unknown });
+
+      const otherBrand = "dddddddd-1111-4111-8111-0000000000b2";
+      const r422 = await merge({ brandId: otherBrand, personIds: [emailId, phoneId] });
+      expect(r422.status).toBe(422);
+      expect(r422.body.reason).toBe("different_brand");
+
+      expect((await merge({ brandId: BRAND, personIds: [emailId, emailId] })).body.reason).toBe("same_person");
+
+      const alice = (await db.select().from(people).where(eq(people.personKey, "email:alice@x.com")))[0];
+      const retired = "bbbbbbbb-1111-4111-8111-0000000000a1";
+      await db.insert(personIdAliases).values({ orgId: ORG, brandId: BRAND, retiredId: retired, personId: alice.personId! });
+      const r409 = await merge({ brandId: BRAND, personIds: [alice.personId, retired] });
+      expect(r409.status).toBe(409);
+      expect(r409.body.reason).toBe("already_one_person");
+
+      expect((await merge({ brandId: BRAND, personIds: [emailId] })).status).toBe(400);
+      expect((await undo("bbbbbbbb-1111-4111-8111-00000000dead")).status).toBe(404);
+      expect((await listMergesReq()).body.merges).toEqual([]);
     });
   });
 

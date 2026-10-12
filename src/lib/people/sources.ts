@@ -11,9 +11,9 @@
  *  - `failed`        — connected (or unknown) but could not be read: `error`.
  */
 
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { authConnections, contacts, ghlConnections, matrixConnections, posthogConnections, stripeConnections, whatsappSends } from "../../db/schema.js";
+import { authConnections, contacts, ghlConnections, matrixConnections, posthogConnections, stripeConnections, personMerges, whatsappSends } from "../../db/schema.js";
 import { GHL_SOURCE } from "../gohighlevel/records.js";
 import { POSTHOG_SOURCE } from "../posthog/records.js";
 import { STRIPE_SOURCE } from "../stripe/records.js";
@@ -695,6 +695,35 @@ export async function readWhatsappSendEvidence(orgId: string, brandId: string): 
       emails: [r.email!],
       phones: [r.phone!],
     })),
+  };
+}
+
+/**
+ * Every ACTIVE stated merge (`person_merges`) ties every key both people held
+ * when it was stated: someone said they are one human, and that statement
+ * outlives every rebuild until it is taken back.
+ */
+export async function readStatedMergeEvidence(orgId: string, brandId: string): Promise<EvidenceRead> {
+  const rows = await db
+    .select({ id: personMerges.id, keysA: personMerges.keysA, keysB: personMerges.keysB })
+    .from(personMerges)
+    .where(and(eq(personMerges.orgId, orgId), eq(personMerges.brandId, brandId), isNull(personMerges.undoneAt)));
+  return {
+    kind: "stated_merge",
+    status: "ok",
+    error: null,
+    evidence: rows.map((r) => {
+      const keys = [...new Set([...(r.keysA as string[]), ...(r.keysB as string[])])].sort();
+      return {
+        kind: "stated_merge",
+        ref: r.id,
+        displayName: null,
+        company: null,
+        emails: keys.filter((k) => k.startsWith("email:")).map((k) => k.slice(6)),
+        phones: keys.filter((k) => k.startsWith("phone:")).map((k) => k.slice(6)),
+        keys,
+      };
+    }),
   };
 }
 

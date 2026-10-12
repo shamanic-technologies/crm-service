@@ -17,6 +17,7 @@ import type { PersonRelevance } from "../lib/people/relevance.js";
 import { findPerson, readTimeline } from "../lib/people/timeline.js";
 import { readFacts } from "../lib/people/facts.js";
 import { findPersonById } from "../lib/people/person-id.js";
+import { listMerges, mergeApplied, mergeView, stateMerge, undoMerge } from "../lib/people/merges.js";
 import { OUTCOME_STEPS, readCampaignReach, readOutcomeCounts, readOutcomePeople, type CampaignReach, type OutcomeStep } from "../lib/people/outcomes.js";
 import { LEG_STEPS, listLegReachBrands, parseLegStep, readLegReach } from "../lib/people/leg-reach.js";
 import { familyOf, LEAD_FAMILIES, readBrandFamilies, type FamilyVerdict, type LeadFamily } from "../lib/people/families.js";
@@ -491,6 +492,114 @@ router.post(
       setImmediate(() => {
         runScopeBuild(scope).catch((e) => console.error("[crm-service] people build crashed:", e));
       });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ─── Stated merges: two people of a brand are one human ──────────────────────
+
+/** Rebuild the brand's people in the background so a statement shows on the next read. */
+async function kickRebuild(req: AuthenticatedRequest, brandId: string) {
+  const { scope } = await ensureScope(req.orgId!, brandId, req.userId!);
+  setImmediate(() => {
+    runScopeBuild(scope).catch((e) => console.error("[crm-service] people build crashed:", e));
+  });
+}
+
+const mergeBodySchema = z.object({
+  brandId: brandIdSchema,
+  personIds: z.tuple([z.string().uuid(), z.string().uuid()]),
+  reason: z.string().trim().min(1).max(1000).optional(),
+});
+
+/**
+ * State that two people of the brand are the same human (people/merges.ts). The
+ * statement is recorded at once and honoured by every rebuild until undone; a
+ * rebuild starts now, so the merged person shows on the next read (~1 min).
+ */
+router.post(
+  "/orgs/people/merges",
+  apiKeyAuth,
+  requireOrgAndUser("people.merge"),
+  async (req: AuthenticatedRequest, res, next) => {
+    const parsed = mergeBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ type: "validation", error: `invalid body: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` });
+    }
+    const { brandId, personIds, reason } = parsed.data;
+    try {
+      const outcome = await stateMerge({
+        orgId: req.orgId!,
+        brandId,
+        personIds,
+        reason: reason ?? null,
+        userId: req.userId!,
+        runId: req.runId ?? null,
+      });
+      if (!outcome.ok) {
+        const { status, ...body } = outcome.refusal;
+        return res.status(status).json({ type: "refused", ...body });
+      }
+      if (!outcome.duplicate) await kickRebuild(req, brandId);
+      res.status(outcome.duplicate ? 200 : 201).json({
+        merge: mergeView(outcome.merge),
+        duplicate: outcome.duplicate,
+        ...(await mergeApplied(outcome.merge)),
+        rebuild: outcome.duplicate ? "not_needed" : "started",
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+/** Every statement of the brand, newest first, each with whether the latest build applied it. */
+router.get(
+  "/orgs/people/merges",
+  apiKeyAuth,
+  requireOrgAndUser("people.merges.list"),
+  async (req: AuthenticatedRequest, res, next) => {
+    const parsed = z.object({ brandId: brandIdSchema }).safeParse(req.query);
+    if (!parsed.success) {
+      return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
+    }
+    try {
+      const rows = await listMerges(req.orgId!, parsed.data.brandId);
+      const merges = await Promise.all(rows.map(async (m) => ({ ...mergeView(m), ...(m.undoneAt ? { applied: null, personId: null } : await mergeApplied(m)) })));
+      res.json({ brandId: parsed.data.brandId, merges });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+/** Take a statement back: each person gets their own id back; a rebuild starts now. */
+router.post(
+  "/orgs/people/merges/:mergeId/undo",
+  apiKeyAuth,
+  requireOrgAndUser("people.merge.undo"),
+  async (req: AuthenticatedRequest, res, next) => {
+    const mergeId = z.string().uuid().safeParse(req.params.mergeId);
+    const body = z.object({ brandId: brandIdSchema }).safeParse(req.body ?? {});
+    if (!mergeId.success || !body.success) {
+      return res.status(400).json({ type: "validation", error: "mergeId (uuid) path param and brandId (uuid) body are required" });
+    }
+    try {
+      const outcome = await undoMerge({
+        orgId: req.orgId!,
+        brandId: body.data.brandId,
+        mergeId: mergeId.data,
+        userId: req.userId!,
+        runId: req.runId ?? null,
+      });
+      if (!outcome.ok) {
+        const { status, ...rest } = outcome.refusal;
+        return res.status(status).json({ type: "refused", ...rest });
+      }
+      if (!outcome.duplicate) await kickRebuild(req, body.data.brandId);
+      res.json({ merge: mergeView(outcome.merge), duplicate: outcome.duplicate, rebuild: outcome.duplicate ? "not_needed" : "started" });
     } catch (err) {
       next(err);
     }

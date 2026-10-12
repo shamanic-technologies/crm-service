@@ -28,6 +28,7 @@ import {
   type LeadStandingAnswer,
   readCsvEvidence,
   readWhatsappSendEvidence,
+  readStatedMergeEvidence,
   readGmail,
   readGoHighLevel,
   readGoogleContactEvidence,
@@ -252,6 +253,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
   const evidenceReads: EvidenceRead[] = [
     await readCsvEvidence(scope.orgId, scope.brandId),
     await readWhatsappSendEvidence(scope.orgId, scope.brandId),
+    await readStatedMergeEvidence(scope.orgId, scope.brandId),
   ];
   if (gmail.status !== "not_connected") evidenceReads.push(await readGoogleContactEvidence(identity));
   // A pairing lead-service is only GUESSING (`toConfirm`) merges nothing: it rides on the CRM contact as a hint.
@@ -359,7 +361,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       phones: c.phones,
       sources: PEOPLE_SOURCES.filter((s) => c.presences.some((p) => p.source === s)),
       presences: c.presences,
-      mergeEvidence: c.evidence.map((e) => ({ kind: e.kind, ref: e.ref, emails: e.emails, phones: e.phones })),
+      mergeEvidence: c.evidence.map((e) => ({ kind: e.kind, ref: e.ref, emails: e.emails, phones: e.phones, ...(e.keys ? { keys: e.keys } : {}) })),
       firstActivityAt: (() => {
         const d = minDate(c.presences.map((p) => p.firstActivityAt));
         return d ? new Date(d) : null;

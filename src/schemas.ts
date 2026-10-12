@@ -2177,6 +2177,115 @@ registry.registerPath({
   responses: { 202: { description: "Build started; read GET /orgs/people for the result" } },
 });
 
+// ─── Stated merges (two people of a brand are one human) ─────────────────────
+
+const PersonMergeSchema = registry.register(
+  "PersonMerge",
+  z.object({
+    mergeId: z.string().uuid(),
+    brandId: z.string().uuid(),
+    personIds: z.array(z.string().uuid()).openapi({ description: "The two person ids as stated. After the rebuild one of them names the merged person and the other is retired into it (it still opens the merged person)." }),
+    keys: z.object({ a: z.array(z.string()), b: z.array(z.string()) }).openapi({ description: "Every identity key each person held when the merge was stated; the builder ties them all together on every rebuild." }),
+    reason: z.string().nullable(),
+    statedByUserId: z.string().openapi({ description: "Who stated it (the x-user-id of the call)." }),
+    statedAt: z.string(),
+    runId: z.string().nullable(),
+    active: z.boolean().openapi({ description: "false once undone." }),
+    undoneAt: z.string().nullable(),
+    undoneByUserId: z.string().nullable(),
+  }),
+);
+
+const MergeRefusalSchema = z.object({
+  type: z.literal("refused"),
+  reason: z.enum(["person_not_found", "different_brand", "same_person", "already_one_person", "merge_not_found"]),
+  personId: z.string().optional(),
+  error: z.string(),
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/people/merges",
+  summary: "Merge two people into one (state they are the same human)",
+  description:
+    "Merge two people of a brand into ONE person: one merged thread (every channel of both), every identity key and source kept. Use it when two people are the same human but no source record says so (a WhatsApp chat with a number nobody saved, and the same person on Gmail or in the CRM). The statement is recorded with who stated it and when, and every later people rebuild honours it until it is undone (POST /orgs/people/merges/{mergeId}/undo). A rebuild starts at once: the merged person shows on GET /orgs/people within about a minute. The merged person keeps one of the two person ids; the other id still opens it. Idempotent: the same two people stated again answer the existing merge (200, duplicate: true). Refused with a reason: an unknown id (404 person_not_found), an id of another brand (422 different_brand), the same id twice (422 same_person), two ids already naming one person (409 already_one_person). Any two people of a brand, any channels.",
+  request: {
+    headers: IDENTITY_HEADERS,
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            brandId: z.string().uuid(),
+            personIds: z.array(z.string().uuid()).length(2).openapi({ description: "The two personId values from GET /orgs/people." }),
+            reason: z.string().max(1000).optional().openapi({ description: "Why they are the same human (kept with the statement)." }),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    201: {
+      description: "Merge stated; rebuild started",
+      content: {
+        "application/json": {
+          schema: z.object({
+            merge: PersonMergeSchema,
+            duplicate: z.boolean(),
+            applied: z.boolean().nullable().openapi({ description: "Whether the people list already shows them as one (false right after stating: the rebuild is running)." }),
+            personId: z.string().uuid().nullable().openapi({ description: "The merged person's id once applied." }),
+            rebuild: z.enum(["started", "not_needed"]),
+          }),
+        },
+      },
+    },
+    200: { description: "Already stated (duplicate: true), same body" },
+    400: { description: "Invalid body" },
+    404: { description: "person_not_found", content: { "application/json": { schema: MergeRefusalSchema } } },
+    409: { description: "already_one_person", content: { "application/json": { schema: MergeRefusalSchema } } },
+    422: { description: "different_brand | same_person", content: { "application/json": { schema: MergeRefusalSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/people/merges",
+  summary: "List the merges stated on a brand's people",
+  description: "Every merge stated on the brand (two people said to be one), newest first, undone ones included, each with `applied` (the latest build shows them as one person) and the merged `personId`.",
+  request: { headers: IDENTITY_HEADERS, query: z.object({ brandId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "The brand's merges",
+      content: {
+        "application/json": {
+          schema: z.object({
+            brandId: z.string().uuid(),
+            merges: z.array(PersonMergeSchema.extend({ applied: z.boolean().nullable(), personId: z.string().uuid().nullable() })),
+          }),
+        },
+      },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/people/merges/{mergeId}/undo",
+  summary: "Unmerge two people (undo a stated merge)",
+  description: "Take a stated merge back: the two people come back apart, each with its own person id, at the rebuild that starts now (unless a source record ties them on its own). The statement stays listed with who undid it and when. Idempotent: undoing twice answers duplicate: true.",
+  request: {
+    headers: IDENTITY_HEADERS,
+    params: z.object({ mergeId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: z.object({ brandId: z.string().uuid() }) } } },
+  },
+  responses: {
+    200: {
+      description: "Undone",
+      content: { "application/json": { schema: z.object({ merge: PersonMergeSchema, duplicate: z.boolean(), rebuild: z.enum(["started", "not_needed"]) }) } },
+    },
+    404: { description: "merge_not_found", content: { "application/json": { schema: MergeRefusalSchema } } },
+  },
+});
+
 registry.registerPath({
   method: "post",
   path: "/internal/people/sync",

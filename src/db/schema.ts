@@ -1067,6 +1067,41 @@ export const personIdAliases = pgTable(
 );
 
 /**
+ * A STATED merge: someone (staff, an agent through the MCP) said two people of a
+ * brand are the same human, where no source record states it (a WhatsApp chat
+ * with a number the owner never saved, and the same person on Gmail).
+ *
+ * The builder honours every ACTIVE statement as merge evidence (`stated_merge`):
+ * every identity key either side held when it was stated is tied together, so the
+ * merge survives every rebuild. Taking it back sets `undone_at` (the row stays as
+ * the record of who said what, when); a later re-statement is a new row.
+ * `person_id_a` / `person_id_b` are the ids as stated, so an undo can give each
+ * side its own id back.
+ */
+export const personMerges = pgTable(
+  "person_merges",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    personIdA: uuid("person_id_a").notNull(),
+    personIdB: uuid("person_id_b").notNull(),
+    keysA: jsonb("keys_a").notNull(),
+    keysB: jsonb("keys_b").notNull(),
+    reason: text("reason"),
+    statedByUserId: text("stated_by_user_id").notNull(),
+    runId: text("run_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    undoneAt: timestamp("undone_at", { withTimezone: true }),
+    undoneByUserId: text("undone_by_user_id"),
+    undoRunId: text("undo_run_id"),
+  },
+  (table) => [index("person_merges_org_brand_idx").on(table.orgId, table.brandId)],
+);
+
+export type PersonMerge = typeof personMerges.$inferSelect;
+
+/**
  * SEARCH INDEX — one row per message an indexing UNIT holds, so a brand owner
  * can search what was said without the dashboard fanning out to every source.
  *

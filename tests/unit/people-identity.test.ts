@@ -102,6 +102,18 @@ describe("clusterPeople", () => {
     expect(out).toHaveLength(2);
   });
 
+  it("a stated merge ties any identity keys verbatim (a keyless Matrix contact to a Gmail address)", () => {
+    const gmail = presence({ source: "gmail", sourceRef: "s@x.com", emails: ["s@x.com"] });
+    const wa = presence({ source: "matrix", sourceRef: "contact-1" });
+    expect(clusterPeople([gmail, wa], [])).toHaveLength(2);
+    const stated: Evidence = { kind: "stated_merge", ref: "m-1", displayName: null, company: null, emails: ["s@x.com"], phones: [], keys: ["email:s@x.com", "matrix:contact-1"] };
+    const [one, ...rest] = clusterPeople([gmail, wa], [stated]);
+    expect(rest).toEqual([]);
+    expect(one.identityKeys).toEqual(["email:s@x.com", "matrix:contact-1"]);
+    expect(one.personKey).toBe("email:s@x.com");
+    expect(one.evidence.map((e) => e.kind)).toEqual(["stated_merge"]);
+  });
+
   it("drops evidence that ties nobody in conversation, and keys a keyless presence on its source", () => {
     const out = clusterPeople(
       [presence({ source: "matrix", sourceRef: "tg-1", displayName: "Bob" })],

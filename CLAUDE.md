@@ -778,6 +778,17 @@ owner had written to. A recorded fact, never an address-shape guess.
   (`leadAddressesFirst`): a lead shows under the address lead-service serves,
   never a CRM / Gmail address merged into it. `person_key` keeps its key order
   (identity, the fact feed keys on it); the fact content hash ignores `emails`.
+- **Stated merges** (`person_merges`, `lib/people/merges.ts`, owner 2026-10-12): staff /
+  an agent says two people of a brand are ONE human where no record states it (a WhatsApp
+  chat with a number never saved + the same person on Gmail). `POST /orgs/people/merges
+  {brandId, personIds:[a,b], reason?}` records it (who = `x-user-id`, when, run) with every
+  identity key each side held; every build reads it as evidence `stated_merge` (Evidence
+  `keys` ties ANY key verbatim, `matrix:<id>` included) and kicks a rebuild. Ids: the
+  person-id rule keeps one, retires the other. `POST /orgs/people/merges/:id/undo {brandId}`
+  sets `undone_at` (row kept), points each side's keys back at its own id, drops the
+  aliases, rebuilds: two people with their old ids. Idempotent both ways; refusals 404
+  `person_not_found`, 422 `different_brand` | `same_person`, 409 `already_one_person`,
+  404 `merge_not_found`. `GET /orgs/people/merges?brandId=` lists with `applied`.
 - **`person_key`** = smallest email key, else phone, else `<source>:<ref>`.
   Any identity key opens the person (`people.identity_keys` GIN `@>`).
   It is PII: a URL / link / analytics event carries **`personId`** instead
