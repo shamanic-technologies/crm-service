@@ -236,6 +236,50 @@ export const ServeNextResponseSchema = registry.register(
     .openapi("ServeNextResponse"),
 );
 
+export const StillFitsRequestSchema = registry.register(
+  "StillFitsRequest",
+  z
+    .object({
+      brandId: z.string().uuid(),
+      email: z.string().openapi({ description: "Any address of the person (case-insensitive)." }),
+      people: ServeNextRequestSchema.shape.people.openapi({ description: "Judge against the people pool under this filter (the audience's stored filter, verbatim). Exclusive with uploadIds." }),
+      uploadIds: ServeNextRequestSchema.shape.uploadIds.openapi({ description: "CSV pool restricted to these imported files. Omit both people and uploadIds for the brand's whole CSV pool." }),
+    })
+    .openapi("StillFitsRequest"),
+);
+
+export const StillFitsResponseSchema = registry.register(
+  "StillFitsResponse",
+  z
+    .object({
+      fits: z.boolean().openapi({ description: "true = the person satisfies every rule of the pool right now (the no-re-serve guard is not a rule here)." }),
+      pool: z.enum(["people", "csv"]),
+      reason: z.string().optional().openapi({ description: "fits=false only: plain English for a staff dashboard, e.g. \"Has written to the brand on WhatsApp\"." }),
+      failed: z
+        .array(z.object({ code: z.string(), reason: z.string() }))
+        .optional()
+        .openapi({ description: "fits=false only: every rule the person fails (code: automated, not_business, no_email, staff, signed_up, replied, no_phone, opted_out, segment_deal, segment_tag, segment_reached, segment_not_reached, client; CSV: opted_out, consent_denied, not_sendable, not_in_file)." }),
+    })
+    .openapi("StillFitsResponse"),
+);
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/contacts/still-fits",
+  summary: "Does ONE person still belong to a serve pool, right now?",
+  description:
+    "Judges one person (by email) against the SAME rule serve-next applies (people pool + filter, or the CSV pool / files), " +
+    "today. A question, not a serve: nothing is marked served. 404 = no person / imported contact of the brand holds the " +
+    "address (never a silent fits); 409 = several do. Requires x-api-key, x-org-id.",
+  request: { body: { content: { "application/json": { schema: StillFitsRequestSchema } } } },
+  responses: {
+    200: { description: "The verdict", content: { "application/json": { schema: StillFitsResponseSchema } } },
+    400: { description: "Bad request", content: { "application/json": { schema: ErrorResponseSchema } } },
+    404: { description: "Nobody of the brand holds the address", content: { "application/json": { schema: ErrorResponseSchema } } },
+    409: { description: "Several people hold the address", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
 export const ServeStatsResponseSchema = registry.register(
   "ServeStatsResponse",
   z

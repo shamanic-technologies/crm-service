@@ -3,7 +3,7 @@ import { db } from "../db/index.js";
 import { AUTH_PROVIDER_NAMES } from "./auth/providers.js";
 import { PERSON_REPLIED_SQL } from "./people/conversation.js";
 import { STAFF_DOMAIN, STAFF_EMAIL_LIST } from "./owner-telegram.js";
-import { perStageSegments, personOptedOut, readSegmentCatalogue, segmentWhere, type Segment, type SegmentCatalogue } from "./people/segment.js";
+import { perStageSegments, personOptedOut, readSegmentCatalogue, segmentClauses, type PoolClause, type Segment, type SegmentCatalogue } from "./people/segment.js";
 
 /**
  * SERVE — hand out the next batch of not-yet-served sendable contacts for a
@@ -442,33 +442,60 @@ function toServedPerson(r: RawPersonRow): ServedPerson {
   };
 }
 
-/** The WHERE of the people pool (alias `p`), before the no-re-serve guard. */
-export function peoplePoolWhere(orgId: string, brandId: string, filter: PeopleFilter, reach: readonly Reach[] = []) {
+/**
+ * The people pool's rule as NAMED clauses (alias `p`), before the no-re-serve
+ * guard and without the org/brand scope. ONE list feeds both the serve's WHERE
+ * (`peoplePoolWhere`) and the still-fits read (lib/still-fits.ts), so "who the
+ * pool takes" and "why this person is no longer in it" can never disagree.
+ */
+export function peoplePoolClauses(orgId: string, brandId: string, filter: PeopleFilter, reach: readonly Reach[] = []): PoolClause[] {
   const auth = sql.join(AUTH_PROVIDER_NAMES.map((n) => sql`${n}`), sql`, `);
-  const parts = [
-    sql`p.org_id = ${orgId}`,
-    sql`p.brand_id = ${brandId}`,
-    sql`NOT p.automated`,
-    sql`NOT p.not_business`,
-    sql`jsonb_array_length(p.emails) > 0`,
+  const parts: PoolClause[] = [
+    { code: "automated", reason: "Known as an automated sender", sql: sql`NOT p.automated` },
+    { code: "not_business", reason: "Not about this brand's business", sql: sql`NOT p.not_business` },
+    { code: "no_email", reason: "Holds no email address", sql: sql`jsonb_array_length(p.emails) > 0` },
     // Never our staff (the owner merged across his addresses, our own test accounts):
     // same rule as isStaffEmail, plus-addressing ignored, on EVERY address of the person.
-    sql`NOT EXISTS (
+    {
+      code: "staff",
+      reason: "Is our own staff",
+      sql: sql`NOT EXISTS (
       SELECT 1 FROM jsonb_array_elements_text(p.emails) AS se(email)
       WHERE lower(se.email) LIKE ${`%${STAFF_DOMAIN}`}
          OR (regexp_replace(split_part(lower(se.email), '@', 1), '[+].*$', '') || '@' || split_part(lower(se.email), '@', 2))
             IN (${sql.join(STAFF_EMAIL_LIST.map((e) => sql`${e}`), sql`, `)})
     )`,
+    },
   ];
   if (filter.signedUp !== undefined) {
     const signed = sql`EXISTS (SELECT 1 FROM jsonb_array_elements(p.presences) pr WHERE pr->>'source' IN (${auth}))`;
-    parts.push(filter.signedUp ? signed : sql`NOT ${signed}`);
+    parts.push(
+      filter.signedUp
+        ? { code: "signed_up", reason: "Not signed up to the product", sql: signed }
+        : { code: "signed_up", reason: "Signed up to the product", sql: sql`NOT ${signed}` },
+    );
   }
-  if (filter.replied !== undefined) parts.push(filter.replied ? PERSON_REPLIED_SQL : sql`NOT ${PERSON_REPLIED_SQL}`);
+  if (filter.replied !== undefined) {
+    parts.push(
+      filter.replied
+        ? { code: "replied", reason: "Never answered the brand", sql: PERSON_REPLIED_SQL }
+        : { code: "replied", reason: "Has written to the brand", sql: sql`NOT ${PERSON_REPLIED_SQL}` },
+    );
+  }
   // Email is always required (the no-re-serve key); phone when the audience or the pipe asks.
-  if ([...reachList(filter.reachableBy), ...reach].includes("phone")) parts.push(sql`jsonb_array_length(p.phones) > 0`);
-  if (!filter.segment?.includeOptedOut) parts.push(sql`NOT ${personOptedOut(orgId, brandId)}`);
-  parts.push(...segmentWhere(orgId, brandId, filter.segment));
+  if ([...reachList(filter.reachableBy), ...reach].includes("phone")) {
+    parts.push({ code: "no_phone", reason: "Holds no phone number", sql: sql`jsonb_array_length(p.phones) > 0` });
+  }
+  if (!filter.segment?.includeOptedOut) {
+    parts.push({ code: "opted_out", reason: "Marked do not contact in the brand's CRM", sql: sql`NOT ${personOptedOut(orgId, brandId)}` });
+  }
+  parts.push(...segmentClauses(orgId, brandId, filter.segment));
+  return parts;
+}
+
+/** The WHERE of the people pool (alias `p`), before the no-re-serve guard. */
+export function peoplePoolWhere(orgId: string, brandId: string, filter: PeopleFilter, reach: readonly Reach[] = []) {
+  const parts = [sql`p.org_id = ${orgId}`, sql`p.brand_id = ${brandId}`, ...peoplePoolClauses(orgId, brandId, filter, reach).map((c) => c.sql)];
   return sql.join(parts, sql` AND `);
 }
 

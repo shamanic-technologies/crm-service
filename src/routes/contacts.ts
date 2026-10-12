@@ -35,6 +35,7 @@ import {
   type Reach,
 } from "../lib/serve.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
+import { AmbiguousPersonError, stillFitsCsv, stillFitsPeople } from "../lib/still-fits.js";
 import { SERVICE_NAME } from "../middleware/auth.js";
 
 const router = Router();
@@ -299,6 +300,52 @@ router.post(
     }
     const result = await serveNext(req.orgId!, brandId, limit, req.runId!, uploadIds, reach);
     res.json(result);
+  },
+);
+
+// ─── POST /orgs/contacts/still-fits ──────────────────────────────────────────
+
+// Does ONE person still belong to a pool, right now? (lib/still-fits.ts). The
+// same pool words as serve-next; a question, never a serve: nothing is marked.
+const stillFitsBodySchema = z
+  .object({
+    brandId: z.string().uuid(),
+    email: z.string().trim().min(3).max(320).regex(/@/),
+    uploadIds: uploadIdsSchema.optional(),
+    people: peopleFilterSchema.optional(),
+  })
+  .strict()
+  .refine((b) => !(b.uploadIds && b.people), { message: "uploadIds and people are exclusive" });
+
+router.post(
+  "/orgs/contacts/still-fits",
+  apiKeyAuth,
+  requireOrg("contacts.still-fits"),
+  async (req: AuthenticatedRequest, res) => {
+    const parsed = stillFitsBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        type: "validation",
+        error: `brandId (uuid) and email required; people {signedUp?, replied?, reachableBy?, segment?} or uploadIds, exclusive: ${parsed.error.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`,
+      });
+    }
+    const { brandId, email, uploadIds, people } = parsed.data;
+    try {
+      const answer = people
+        ? await stillFitsPeople(req.orgId!, brandId, email, people)
+        : await stillFitsCsv(req.orgId!, brandId, email, uploadIds);
+      if (!answer) {
+        return res.status(404).json({
+          type: "person_not_found",
+          error: people ? "No person of this brand holds this address" : "No imported contact of this brand holds this address",
+        });
+      }
+      return res.json(answer);
+    } catch (e) {
+      if (e instanceof AmbiguousPersonError) return res.status(409).json({ type: "ambiguous_person", error: e.message });
+      console.error("[crm-service] still-fits failed:", e);
+      return res.status(500).json({ type: "internal", error: "still-fits read failed" });
+    }
   },
 );
 

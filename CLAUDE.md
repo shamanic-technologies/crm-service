@@ -200,6 +200,18 @@ email-only people to the email pipe. Email is always held anyway (no-re-serve ke
 adds `phone_e164 IS NOT NULL` (CSV) / `phones` non-empty (people). Omitted = unchanged.
 The pipe's channel reaches here from lead-service (outreach channel) through human-service.
 
+### Still fits (`POST /orgs/contacts/still-fits`) — is ONE person still in the pool, now?
+
+STILL-FITS-1012 (owner 2026-10-12): a serve judges the pool once; lead-service hands a found person to a
+pipe hours later (3 "never answered" signups had WhatsApp threads merged in by #114 and were still
+contacted). human-service asks here at handover. Body `{brandId, email, people?: <filter> | uploadIds?}`
+(same words as serve-next) → `{fits: true, pool}` | `{fits: false, pool, reason, failed: [{code, reason}]}`;
+404 `person_not_found` (unknown is never fits), 409 `ambiguous_person`. People pool: every clause of
+`peoplePoolClauses` (`lib/serve.ts`, the SAME list `peoplePoolWhere` joins: never add a pool rule
+outside it) evaluated on the person holding the address; a failed `replied:false` names the channels
+(`lib/still-fits.ts`). The no-re-serve guard is NOT a clause. CSV pool: still in `sendable_contacts`
+(+ file). A question: writes nothing (no `contact_serves`). Tests: `tests/integration/still-fits.test.ts`.
+
 ### Per-file serve restriction (`uploadIds`) — each imported file is its own pool
 
 Staff can toggle an imported CRM file ON/OFF, so a serve must be restrictable to a
