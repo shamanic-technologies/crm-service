@@ -123,17 +123,32 @@ function tagSql(orgId: string, brandId: string, tags: string[]): SQL {
   ))`;
 }
 
+/** One named predicate of a pool: what a person must satisfy, and the plain words when they do not. */
+export interface PoolClause {
+  code: string;
+  /** Plain English for a staff dashboard: why a person FAILING this clause is out. */
+  reason: string;
+  sql: SQL;
+}
+
+/** The segment's predicates on a `people p` row, each named (empty = no narrowing). */
+export function segmentClauses(orgId: string, brandId: string, segment: Segment | undefined): PoolClause[] {
+  if (!segment) return [];
+  const parts: PoolClause[] = [];
+  const deal = dealSql(orgId, brandId, segment);
+  if (deal) parts.push({ code: "segment_deal", reason: "No longer has a deal at the CRM stage the audience targets", sql: deal });
+  if (segment.tags) parts.push({ code: "segment_tag", reason: "No longer carries the CRM tag the audience targets", sql: tagSql(orgId, brandId, segment.tags) });
+  if (segment.reached) parts.push({ code: "segment_reached", reason: "Has not reached the funnel step the audience targets", sql: reachedSql(orgId, brandId, segment.reached) });
+  if (segment.notReached) {
+    parts.push({ code: "segment_not_reached", reason: "Reached a funnel step the audience leaves out", sql: sql`NOT ${reachedSql(orgId, brandId, segment.notReached)}` });
+  }
+  if (!segment.includeClients) parts.push({ code: "client", reason: "Became a client", sql: sql`NOT ${reachedSql(orgId, brandId, ["sale"])}` });
+  return parts;
+}
+
 /** The segment's predicates on a `people p` row (empty = no narrowing). */
 export function segmentWhere(orgId: string, brandId: string, segment: Segment | undefined): SQL[] {
-  if (!segment) return [];
-  const parts: SQL[] = [];
-  const deal = dealSql(orgId, brandId, segment);
-  if (deal) parts.push(deal);
-  if (segment.tags) parts.push(tagSql(orgId, brandId, segment.tags));
-  if (segment.reached) parts.push(reachedSql(orgId, brandId, segment.reached));
-  if (segment.notReached) parts.push(sql`NOT ${reachedSql(orgId, brandId, segment.notReached)}`);
-  if (!segment.includeClients) parts.push(sql`NOT ${reachedSql(orgId, brandId, ["sale"])}`);
-  return parts;
+  return segmentClauses(orgId, brandId, segment).map((c) => c.sql);
 }
 
 /** A person any of whose CRM contacts is marked do-not-contact (CSV opt-out, GoHighLevel DND). */
