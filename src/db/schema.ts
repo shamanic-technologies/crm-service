@@ -314,6 +314,10 @@ export const matrixConnections = pgTable(
     // against the platform account (`MATRIX_ACCESS_TOKEN`). Never served.
     accessToken: text("access_token"),
 
+    // When the reply watch first looked at this connection (lib/reply-trigger/):
+    // a message mirrored before it is history and is never reported.
+    replyWatchSince: timestamp("reply_watch_since", { withTimezone: true }),
+
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
@@ -1176,6 +1180,64 @@ export const formOfferMappings = pgTable(
   (table) => [uniqueIndex("form_offer_mappings_uq").on(table.orgId, table.brandId, table.formId)],
 );
 
+/**
+ * THE REPLY TRIGGER (lib/reply-trigger/): one row per UNANSWERED BURST of a
+ * person in a personal-channel thread one of our campaigns opened through our
+ * send route, reported to campaign-service as `positive_reply_received`, or
+ * recorded skipped with its reason (`human_took_over`, `automated_reply`,
+ * `no_email`, `before_watch`). Keyed on the burst's first message: a burst is
+ * reported once, however many messages it grows to; the next burst (after any
+ * outbound in the thread) is a new row.
+ */
+export const replyTriggerReports = pgTable(
+  "reply_trigger_reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    // 'matrix' today (WhatsApp; LinkedIn when a send route writes there).
+    source: text("source").notNull(),
+    channel: text("channel").notNull(),
+    connectionId: uuid("connection_id").notNull(),
+    roomId: text("room_id").notNull(),
+    conversationId: uuid("conversation_id"),
+    // The burst's first message: the row's identity.
+    anchorEventId: text("anchor_event_id").notNull(),
+    // The campaign whose send preceded the burst, and its offer once read.
+    campaignId: text("campaign_id").notNull(),
+    offerId: uuid("offer_id"),
+    // [{ eventId, at, text }] as detected (delivery re-reads the burst from bronze).
+    messages: jsonb("messages").notNull(),
+    firstMessageAt: timestamp("first_message_at", { withTimezone: true }).notNull(),
+    lastMessageAt: timestamp("last_message_at", { withTimezone: true }).notNull(),
+    // Jev's verdict on whether a person wrote it: { status, choice, confidence, model, error }.
+    judgment: jsonb("judgment"),
+    // Who, once resolved at delivery.
+    personId: uuid("person_id"),
+    fullName: text("full_name"),
+    email: text("email"),
+    phone: text("phone"),
+    detectedAt: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
+    // 'pending' | 'reported' | 'skipped' | 'failed'
+    status: text("status").notNull(),
+    reason: text("reason"),
+    lastError: text("last_error"),
+    attempts: integer("attempts").notNull().default(0),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    runId: text("run_id"),
+    reportedAt: timestamp("reported_at", { withTimezone: true }),
+    campaignEventId: text("campaign_event_id"),
+    campaignRecordedAt: timestamp("campaign_recorded_at", { withTimezone: true }),
+    campaignOutcome: jsonb("campaign_outcome"),
+  },
+  (table) => [
+    uniqueIndex("reply_trigger_reports_anchor_uq").on(table.orgId, table.brandId, table.source, table.anchorEventId),
+    index("reply_trigger_reports_room_idx").on(table.connectionId, table.roomId),
+    index("reply_trigger_reports_status_idx").on(table.status),
+  ],
+);
+
+export type ReplyTriggerReport = typeof replyTriggerReports.$inferSelect;
 export type FormTriggerReport = typeof formTriggerReports.$inferSelect;
 export type FormOfferMapping = typeof formOfferMappings.$inferSelect;
 

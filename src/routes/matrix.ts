@@ -2,7 +2,7 @@ import { Router } from "express";
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../db/index.js";
-import { contacts, conversations, matrixConnections, matrixLeads, matrixLinks } from "../db/schema.js";
+import { contacts, conversations, matrixConnections, matrixLeads, matrixLinks, replyTriggerReports } from "../db/schema.js";
 import {
   apiKeyAuth,
   requireOrg,
@@ -30,6 +30,49 @@ import {
 const router = Router();
 
 const brandIdSchema = z.string().uuid();
+
+// ─── GET /orgs/matrix/reply-triggers ─────────────────────────────────────────
+// Answers in threads our campaigns opened (lib/reply-trigger/): what was detected,
+// skipped (and why) and reported to campaign-service, with the timings.
+
+router.get(
+  "/orgs/matrix/reply-triggers",
+  apiKeyAuth,
+  requireOrg("reply-triggers.list"),
+  async (req: AuthenticatedRequest, res) => {
+    const brand = brandIdSchema.safeParse(req.query.brandId);
+    if (!brand.success) return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
+    const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+    const rows = await db
+      .select()
+      .from(replyTriggerReports)
+      .where(and(eq(replyTriggerReports.orgId, req.orgId!), eq(replyTriggerReports.brandId, brand.data)))
+      .orderBy(desc(replyTriggerReports.firstMessageAt), desc(replyTriggerReports.id))
+      .limit(limit);
+    res.json({
+      reports: rows.map((r) => ({
+        id: r.id,
+        channel: r.channel,
+        campaignId: r.campaignId,
+        offerId: r.offerId,
+        conversationId: r.conversationId,
+        person: { personId: r.personId, fullName: r.fullName, email: r.email, phone: r.phone },
+        messages: r.messages,
+        firstMessageAt: r.firstMessageAt,
+        lastMessageAt: r.lastMessageAt,
+        judgment: r.judgment,
+        status: r.status,
+        reason: r.reason,
+        lastError: r.lastError,
+        attempts: r.attempts,
+        detectedAt: r.detectedAt,
+        reportedAt: r.reportedAt,
+        campaignEventId: r.campaignEventId,
+        campaignOutcome: r.campaignOutcome,
+      })),
+    });
+  },
+);
 
 // ─── POST /orgs/matrix/connections ───────────────────────────────────────────
 

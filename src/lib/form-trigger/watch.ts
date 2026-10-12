@@ -58,6 +58,7 @@ import {
   reportOccurrence,
 } from "./campaign-client.js";
 import { resolveOffer } from "./offer.js";
+import { FINAL_REFUSAL_STATUSES } from "../trigger-door.js";
 import { isCalendarBookingForm, submissionAnswers, submissionPerson } from "./submission.js";
 
 const SERVICE_NAME = "crm-service";
@@ -80,8 +81,6 @@ export const REPORT_REASONS = {
   NO_EMAIL: "no_email",
 } as const;
 
-/** A refusal campaign-service states as final (a bad body): never retried. */
-const FINAL_REFUSAL_STATUSES = new Set([400, 422]);
 
 export interface ConnectionWatch {
   connectionId: string;

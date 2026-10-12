@@ -41,6 +41,7 @@ import {
   splitName,
 } from "./events.js";
 import { readThread, THREAD_WINDOW } from "./leads.js";
+import { deliverDueReplies, detectReplies, type ReplyDetection } from "../reply-trigger/watch.js";
 import {
   hidesConversation,
   judgeAndRecord,
@@ -68,6 +69,8 @@ export interface ConnectionSyncResult {
   /** Conversations with no verdict yet (Jev or brand-service failed): read once judged. */
   leadsDeferredUnjudged: number;
   relevance: JudgePassSummary;
+  /** Answers in threads our campaigns opened (lib/reply-trigger/); null = the watch failed this pass (logged). */
+  replies: ReplyDetection | null;
 }
 
 /**
@@ -475,6 +478,15 @@ export async function syncConnection(conn: MatrixConnection): Promise<Connection
       else leadsSkippedUnchanged += 1;
     }
 
+    // After bronze + silver: the timeline already serves what we are about to report.
+    let replies: ReplyDetection | null = null;
+    try {
+      replies = await detectReplies(conn, run.id);
+    } catch (err) {
+      // The mirror itself is fine; the next pass re-reads every campaign thread that moved.
+      console.error(`[crm-service][reply-trigger] detection failed for connection ${conn.id}:`, err);
+    }
+
     await db
       .update(matrixConnections)
       .set({ status: "active", lastError: null, lastRunId: run.id })
@@ -499,6 +511,7 @@ export async function syncConnection(conn: MatrixConnection): Promise<Connection
       leadsSkippedNotBusiness: gate.notBusiness,
       leadsDeferredUnjudged: gate.deferred,
       relevance: gate.relevance,
+      replies,
     };
   } catch (err) {
     const message = (err as Error).message;
@@ -544,6 +557,15 @@ export async function runSyncPass(connectionId?: string): Promise<SyncPassResult
     } catch (err) {
       console.error(`[crm-service][matrix] sync failed for connection ${conn.id}:`, err);
       failures.push({ connectionId: conn.id, error: (err as Error).message });
+    }
+  }
+
+  // Report the answers this pass found (and retry the due ones) to campaign-service.
+  if (process.env.REPLY_TRIGGER_DELIVERY !== "off") {
+    try {
+      await deliverDueReplies();
+    } catch (err) {
+      console.error("[crm-service][reply-trigger] delivery failed:", err);
     }
   }
 
@@ -606,6 +628,7 @@ export async function rebuildFromBronze(conn: MatrixConnection): Promise<Connect
       leadsSkippedNotBusiness: gate.notBusiness,
       leadsDeferredUnjudged: gate.deferred,
       relevance: gate.relevance,
+      replies: null,
     };
   } catch (err) {
     await updateRun(run.id, "failed", {

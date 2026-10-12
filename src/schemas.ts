@@ -2937,6 +2937,45 @@ registry.registerPath({
   },
 });
 
+export const ReplyTriggerReportSchema = z.object({
+  id: z.string().uuid(),
+  channel: z.string(),
+  campaignId: z.string(),
+  offerId: z.string().uuid().nullable(),
+  conversationId: z.string().uuid().nullable(),
+  person: z.object({ personId: z.string().uuid().nullable(), fullName: z.string().nullable(), email: z.string().nullable(), phone: z.string().nullable() }),
+  messages: z.array(z.object({ eventId: z.string(), at: z.string(), text: z.string() })),
+  firstMessageAt: z.string(),
+  lastMessageAt: z.string(),
+  judgment: z.unknown(),
+  status: z.enum(["pending", "reported", "skipped", "failed"]),
+  reason: z.string().nullable().describe(
+    "`human_took_over` | `automated_reply` | `before_watch` | `no_email` | `person_not_built` | `offer_unknown` | `campaign_refused` | `campaign_unreachable`",
+  ),
+  lastError: z.string().nullable(),
+  attempts: z.number().int(),
+  detectedAt: z.string(),
+  reportedAt: z.string().nullable(),
+  campaignEventId: z.string().nullable(),
+  campaignOutcome: z.unknown(),
+}).openapi("ReplyTriggerReport");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/matrix/reply-triggers",
+  summary: "Answers in threads our campaigns opened on a personal channel, and their `positive_reply_received` reports",
+  description:
+    "After each Matrix sync pass (every 5 min, and right after each of our sends), every thread a campaign wrote to " +
+    "through our send route is read. The person's words since our last message are ONE burst, reported ONCE to " +
+    "campaign-service (`POST /internal/trigger-events`, trigger `positive_reply_received`) for the offer of the campaign " +
+    "that wrote, naming the person by email. A thread a person of ours typed in by hand after the campaign wrote is " +
+    "theirs (`human_took_over`); an auto-reply is not an answer (`automated_reply`, Jev). Newest first.",
+  request: { query: z.object({ brandId: z.string().uuid(), limit: z.coerce.number().int().min(1).max(200).optional() }) },
+  responses: {
+    200: { description: "Reports", content: { "application/json": { schema: z.object({ reports: z.array(ReplyTriggerReportSchema) }) } } },
+  },
+});
+
 const FormOfferSchema = z.object({ formId: z.string(), offerId: z.string().uuid() });
 
 registry.registerPath({

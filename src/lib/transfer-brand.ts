@@ -60,6 +60,7 @@ import {
   personMerges,
   formTriggerReports,
   formOfferMappings,
+  replyTriggerReports,
 } from "../db/schema.js";
 
 export const TRANSFER_TABLES: PgTable[] = [
@@ -108,6 +109,8 @@ export const TRANSFER_TABLES: PgTable[] = [
   // CRM form submissions reported as `form_submitted`, and the offer each form is about.
   formTriggerReports,
   formOfferMappings,
+  // Answers in campaign-opened threads reported as `positive_reply_received`.
+  replyTriggerReports,
 ];
 
 export interface TransferBrandInput {

@@ -126,6 +126,10 @@ async function seedBrand(org: string, brand: string, tag: string) {
     INSERT INTO form_offer_mappings (org_id, brand_id, form_id, offer_id, stated_by_user_id)
     VALUES (${org}, ${brand}, '*', gen_random_uuid(), 'user-1')`);
   await db.execute(sql`
+    INSERT INTO reply_trigger_reports (org_id, brand_id, source, channel, connection_id, room_id, anchor_event_id, campaign_id,
+      messages, first_message_at, last_message_at, status)
+    VALUES (${org}, ${brand}, 'matrix', 'whatsapp', gen_random_uuid(), '!room', ${"$ev-" + tag}, 'camp-1', '[]', now(), now(), 'reported')`);
+  await db.execute(sql`
     INSERT INTO conversation_verdicts (org_id, brand_id, conversation_key, source, topic, confidence, probabilities,
       brand_probability, offer_scores, offer_ids, context_hash, judged_through, input, model, run_id)
     VALUES (${org}, ${brand}, 'gmail:a@b.co', 'gmail', 'this_brand', 0.9, '{}', 0.9, '{}', '[]', 'h', 'm', '{}', 'jev', 'run-1')`);
