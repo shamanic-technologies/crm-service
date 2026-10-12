@@ -57,6 +57,7 @@ import {
   whatsappSends,
   copilotMessages,
   apiCalls,
+  personMerges,
 } from "../db/schema.js";
 
 export const TRANSFER_TABLES: PgTable[] = [
@@ -100,6 +101,8 @@ export const TRANSFER_TABLES: PgTable[] = [
   copilotMessages,
   // Calls to our API / MCP filed under the staff Unibox scope.
   apiCalls,
+  // Stated merges (two people said to be one) follow the people they tie.
+  personMerges,
 ];
 
 export interface TransferBrandInput {
