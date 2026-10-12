@@ -179,6 +179,15 @@ Distribute.you 2026-10-12: 95 signups → 87 never answered (62 never written, 2
 without answer), 8 answered. The chain human-service → serve-next must pass `people`
 (human-service audience binding).
 
+### Reachability (`reachableBy`) — a serve FOR a pipe never burns whom it cannot reach
+
+`serve-next` body / `serve-stats` query `reachableBy: "phone" | "email" | [both]` (owner
+2026-10-12): the channel(s) the serving pipe writes on. On BOTH pools a contact / person
+the pipe cannot reach is SKIPPED and NOT marked served, so a WhatsApp serve (phone) leaves
+email-only people to the email pipe. Email is always held anyway (no-re-serve key); `phone`
+adds `phone_e164 IS NOT NULL` (CSV) / `phones` non-empty (people). Omitted = unchanged.
+The pipe's channel reaches here from lead-service (outreach channel) through human-service.
+
 ### Per-file serve restriction (`uploadIds`) — each imported file is its own pool
 
 Staff can toggle an imported CRM file ON/OFF, so a serve must be restrictable to a

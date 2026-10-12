@@ -119,6 +119,28 @@ function uploadFilter(uploadIds?: string[]) {
 }
 
 /**
+ * REACHABILITY — a serve made FOR a pipe names the channel(s) it writes on
+ * (`reachableBy`): `phone` (WhatsApp, calls, SMS) or `email`. A person the
+ * pipe cannot reach is SKIPPED, never marked served, so it stays available to
+ * the pipe that can (owner 2026-10-12: a WhatsApp serve must not burn the
+ * email-only signups the email pipe will write to). Same rule on both pools and
+ * every channel. Several values = all required. Empty = no requirement (the
+ * pre-existing behaviour, byte for byte).
+ */
+export const REACH_CHANNELS = ["phone", "email"] as const;
+export type Reach = (typeof REACH_CHANNELS)[number];
+
+/** CSV pool (alias `c` on `sendable_contacts`): the view already requires a valid email. */
+function csvReachFilter(reach: readonly Reach[] = []) {
+  return reach.includes("phone") ? sql` AND c.phone_e164 IS NOT NULL` : sql.empty();
+}
+
+/** `?reachableBy=phone,email` or repeated → the list; values are zod-checked by the route. */
+export function normalizeReachQuery(raw: unknown): string[] {
+  return normalizeUploadIdsQuery(raw);
+}
+
+/**
  * Normalize the `uploadIds` query parameter into a list of raw strings.
  * Accepts a repeated param (`?uploadIds=a&uploadIds=b`) or a comma-separated
  * one (`?uploadIds=a,b`). Returns `[]` when absent — i.e. no restriction.
@@ -157,8 +179,9 @@ export async function serveNext(
   limit: number,
   runId: string,
   uploadIds?: string[],
+  reach: readonly Reach[] = [],
 ): Promise<ServeNextResult> {
-  const files = uploadFilter(uploadIds);
+  const files = sql`${uploadFilter(uploadIds)}${csvReachFilter(reach)}`;
   const rows = (await db.execute(sql`
     WITH candidate AS (
       SELECT c.id, c.org_id, c.brand_id, c.primary_email, c.phone_e164,
@@ -193,7 +216,7 @@ export async function serveNext(
   // serve. Zero → the pool is drained. Computed live, never fabricated. Under a
   // file restriction the pool IS the restricted one, so `exhausted` answers
   // "these files are drained" — the question the caller actually asked.
-  const remaining = await countRemaining(orgId, brandId, uploadIds);
+  const remaining = await countRemaining(orgId, brandId, uploadIds, reach);
 
   return { contacts, served: contacts.length, exhausted: remaining === 0 };
 }
@@ -202,8 +225,9 @@ async function countRemaining(
   orgId: string,
   brandId: string,
   uploadIds?: string[],
+  reach: readonly Reach[] = [],
 ): Promise<number> {
-  const files = uploadFilter(uploadIds);
+  const files = sql`${uploadFilter(uploadIds)}${csvReachFilter(reach)}`;
   const res = (await db.execute(sql`
     SELECT count(*)::int AS remaining
     FROM sendable_contacts c
@@ -241,17 +265,19 @@ export async function serveStats(
   orgId: string,
   brandId: string,
   uploadIds?: string[],
+  reach: readonly Reach[] = [],
 ): Promise<ServeStats> {
-  if (uploadIds && uploadIds.length > 0) return serveStatsForFiles(orgId, brandId, uploadIds);
+  if (uploadIds && uploadIds.length > 0) return serveStatsForFiles(orgId, brandId, uploadIds, reach);
+  const reachSql = csvReachFilter(reach);
 
   const res = (await db.execute(sql`
     SELECT
       (SELECT count(*)::int FROM contact_serves s
          WHERE s.org_id = ${orgId} AND s.brand_id = ${brandId})            AS served,
       (SELECT count(*)::int FROM sendable_contacts c
-         WHERE c.org_id = ${orgId} AND c.brand_id = ${brandId})            AS total_sendable,
+         WHERE c.org_id = ${orgId} AND c.brand_id = ${brandId}${reachSql})            AS total_sendable,
       (SELECT count(*)::int FROM sendable_contacts c
-         WHERE c.org_id = ${orgId} AND c.brand_id = ${brandId}
+         WHERE c.org_id = ${orgId} AND c.brand_id = ${brandId}${reachSql}
            AND NOT EXISTS (
              SELECT 1 FROM contact_serves s
              WHERE s.brand_id = c.brand_id AND s.email = c.primary_email
@@ -270,8 +296,9 @@ async function serveStatsForFiles(
   orgId: string,
   brandId: string,
   uploadIds: string[],
+  reach: readonly Reach[] = [],
 ): Promise<ServeStats> {
-  const files = uploadFilter(uploadIds);
+  const files = sql`${uploadFilter(uploadIds)}${csvReachFilter(reach)}`;
   const res = (await db.execute(sql`
     SELECT
       count(*)::int AS total_sendable,
@@ -322,8 +349,10 @@ async function serveStatsForFiles(
 export interface PeopleFilter {
   signedUp?: boolean;
   replied?: boolean;
-  reachableBy?: "phone" | "email";
+  reachableBy?: Reach | Reach[];
 }
+
+const reachList = (r: PeopleFilter["reachableBy"]): Reach[] => (r === undefined ? [] : Array.isArray(r) ? r : [r]);
 
 /** A served person — the CSV `ServedContact` shape plus the person's identity. */
 export interface ServedPerson extends Omit<ServedContact, "sourceUploadId" | "sourceRowId"> {
@@ -405,7 +434,7 @@ function toServedPerson(r: RawPersonRow): ServedPerson {
 }
 
 /** The WHERE of the people pool (alias `p`), before the no-re-serve guard. */
-export function peoplePoolWhere(orgId: string, brandId: string, filter: PeopleFilter) {
+export function peoplePoolWhere(orgId: string, brandId: string, filter: PeopleFilter, reach: readonly Reach[] = []) {
   const auth = sql.join(AUTH_PROVIDER_NAMES.map((n) => sql`${n}`), sql`, `);
   const parts = [
     sql`p.org_id = ${orgId}`,
@@ -419,7 +448,8 @@ export function peoplePoolWhere(orgId: string, brandId: string, filter: PeopleFi
     parts.push(filter.signedUp ? signed : sql`NOT ${signed}`);
   }
   if (filter.replied !== undefined) parts.push(filter.replied ? PERSON_REPLIED_SQL : sql`NOT ${PERSON_REPLIED_SQL}`);
-  if (filter.reachableBy === "phone") parts.push(sql`jsonb_array_length(p.phones) > 0`);
+  // Email is always required (the no-re-serve key); phone when the audience or the pipe asks.
+  if ([...reachList(filter.reachableBy), ...reach].includes("phone")) parts.push(sql`jsonb_array_length(p.phones) > 0`);
   return sql.join(parts, sql` AND `);
 }
 
@@ -434,8 +464,9 @@ export async function serveNextPeople(
   limit: number,
   runId: string,
   filter: PeopleFilter,
+  reach: readonly Reach[] = [],
 ): Promise<ServeNextPeopleResult> {
-  const where = peoplePoolWhere(orgId, brandId, filter);
+  const where = peoplePoolWhere(orgId, brandId, filter, reach);
   const rows = (await db.execute(sql`
     WITH candidate AS (
       SELECT p.id, p.org_id, p.brand_id, p.person_id, p.display_name, p.emails, p.phones,
@@ -459,13 +490,18 @@ export async function serveNextPeople(
   `)) as unknown as RawPersonRow[];
 
   const contacts = rows.map(toServedPerson);
-  const stats = await serveStatsPeople(orgId, brandId, filter);
+  const stats = await serveStatsPeople(orgId, brandId, filter, reach);
   return { contacts, served: contacts.length, exhausted: stats.remainingSendable === 0 };
 }
 
 /** Same `{ served, remainingSendable, totalSendable }` over the people pool; served + remaining = total. */
-export async function serveStatsPeople(orgId: string, brandId: string, filter: PeopleFilter): Promise<ServeStats> {
-  const where = peoplePoolWhere(orgId, brandId, filter);
+export async function serveStatsPeople(
+  orgId: string,
+  brandId: string,
+  filter: PeopleFilter,
+  reach: readonly Reach[] = [],
+): Promise<ServeStats> {
+  const where = peoplePoolWhere(orgId, brandId, filter, reach);
   const res = (await db.execute(sql`
     SELECT count(*)::int AS total, (count(*) FILTER (WHERE ${NOT_SERVED}))::int AS remaining
     FROM people p WHERE ${where}
