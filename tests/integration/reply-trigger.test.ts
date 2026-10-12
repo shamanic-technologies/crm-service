@@ -5,6 +5,7 @@ import {
   contacts,
   conversations,
   matrixConnections,
+  matrixLinks,
   matrixRawEvents,
   people,
   peopleScopes,
@@ -35,6 +36,8 @@ const EMAIL = "prospect+wa@example.com";
 
 process.env.CAMPAIGN_SERVICE_URL = "http://campaign.test";
 process.env.CAMPAIGN_SERVICE_API_KEY = "campaign-key";
+process.env.BRAND_SERVICE_URL = "http://brand.test";
+process.env.BRAND_SERVICE_API_KEY = "brand-key";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -42,6 +45,8 @@ const json = (body: unknown, status = 200) =>
 let campaignCalls: { headers: Headers; body: Record<string, unknown> }[] = [];
 let jevChoice = "person";
 let jevCalls = 0;
+/** What brand-service states as the brand's sales rep phone; a number = brand-service answers that status. */
+let repPhone: string | null | number = null;
 
 function installFetchStub() {
   campaignCalls = [];
@@ -50,6 +55,10 @@ function installFetchStub() {
     const url = new URL(String(input));
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
       return json({ id: "run-" + Math.random().toString(16).slice(2) });
+    }
+    if (url.host === "brand.test" && url.pathname === `/orgs/brands/${BRAND}/sales-rep`) {
+      if (typeof repPhone === "number") return json({ error: "down" }, repPhone);
+      return json({ salesRepEmail: null, salesRepPhone: repPhone, salesRepFirstName: null, salesRepRole: null });
     }
     if (url.pathname === "/orgs/judgments") {
       jevCalls += 1;
@@ -100,6 +109,7 @@ async function cleanup() {
   await db.delete(replyTriggerReports).where(eq(replyTriggerReports.brandId, BRAND));
   await db.delete(whatsappSends).where(eq(whatsappSends.brandId, BRAND));
   await db.delete(people).where(eq(people.brandId, BRAND));
+  await db.delete(matrixLinks).where(eq(matrixLinks.brandId, BRAND));
   await db.delete(peopleScopes).where(eq(peopleScopes.brandId, BRAND));
   await db.delete(matrixConnections).where(eq(matrixConnections.brandId, BRAND)); // cascades bronze + conversations
   await db.delete(contacts).where(eq(contacts.brandId, BRAND));
@@ -128,6 +138,7 @@ describe.skipIf(!RUN)("reply trigger", () => {
       .returning();
     conversationId = conversation.id;
     jevChoice = "person";
+    repPhone = null;
     installFetchStub();
   });
 
@@ -256,5 +267,61 @@ describe.skipIf(!RUN)("reply trigger", () => {
     expect(campaignCalls).toHaveLength(1);
     expect(warn.mock.calls.some((c) => String(c[0]).includes("Kevin (WA)") && String(c[0]).includes("holds no email"))).toBe(true);
     expect((await reports()).find((r) => r.anchorEventId === "$b")).toMatchObject({ status: "skipped", reason: "no_email" });
+  });
+
+  describe("the brand's own team is never a prospect", () => {
+    async function campaignThreadAnswered() {
+      await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
+      conn = await fresh();
+      await buildPerson();
+      await send("$c", min(0), CAMPAIGN); // addressed to +33770657585
+      await event("$c", OWN, min(0), "Needs your call: X asked Y, please reply yourself");
+      await event("$ok", GHOST, min(1), "ok");
+    }
+
+    it("a burst from one of the brand's linked WhatsApp accounts is skipped as own_team, named in the log", async () => {
+      await db.insert(matrixLinks).values({
+        orgId: ORG, brandId: BRAND, channel: "whatsapp", createdByUserId: USER, status: "linked", method: "qr", remoteLoginId: "33770657585",
+      });
+      await campaignThreadAnswered();
+      const log = vi.spyOn(console, "log");
+      const d = await detectReplies(conn, "run-1");
+      expect(d.detected).toBe(0);
+      expect(d.skipped).toEqual([{ reason: "own_team", roomId: ROOM }]);
+      expect(jevCalls).toBe(0);
+      expect(log.mock.calls.some((c) => String(c[0]).includes("+33770657585 is one of the brand's linked WhatsApp accounts"))).toBe(true);
+      await deliverDueReplies();
+      expect(campaignCalls).toHaveLength(0);
+      expect((await reports())[0]).toMatchObject({ status: "skipped", reason: "own_team" });
+    });
+
+    it("a burst from the brand's sales rep phone (read from brand-service, any spelling) is skipped as own_team", async () => {
+      repPhone = "+33 7 70 65 75 85";
+      await campaignThreadAnswered();
+      const d = await detectReplies(conn, "run-1");
+      expect(d.skipped).toEqual([{ reason: "own_team", roomId: ROOM }]);
+      await deliverDueReplies();
+      expect(campaignCalls).toHaveLength(0);
+    });
+
+    it("a burst from any other number is still reported", async () => {
+      repPhone = "+33611223344";
+      await db.insert(matrixLinks).values({
+        orgId: ORG, brandId: BRAND, channel: "whatsapp", createdByUserId: USER, status: "linked", method: "qr", remoteLoginId: "33680478702",
+      });
+      await campaignThreadAnswered();
+      expect((await detectReplies(conn, "run-1")).detected).toBe(1);
+      await deliverDueReplies();
+      expect(campaignCalls).toHaveLength(1);
+    });
+
+    it("brand-service unable to say who the rep is: nothing recorded this pass, the next pass reads it again", async () => {
+      repPhone = 503;
+      await campaignThreadAnswered();
+      await expect(detectReplies(conn, "run-1")).rejects.toThrow(/sales-rep returned 503/);
+      expect(await reports()).toHaveLength(0);
+      repPhone = null;
+      expect((await detectReplies(conn, "run-1")).detected).toBe(1);
+    });
   });
 });
