@@ -172,12 +172,24 @@ counts it. `signedUp` = a presence on an `AUTH_PROVIDERS` source; `replied=false
 wrote to the brand on a CONVERSATION channel (`lib/people/conversation.ts`: Gmail/Matrix
 `inboundCount > 0`, Instantly `anyReply`/`replied`; Copilot/API = product use, not a
 conversation; TS `personReplied` and `PERSON_REPLIED_SQL` must stay twins). Always out:
-automated, not_business, no email. No re-serve = the SAME `contact_serves` (brand, email):
+automated, not_business, no email, CRM do-not-contact (CSV opt-out / GoHighLevel DND, as the CSV pool). No re-serve = the SAME `contact_serves` (brand, email):
 a served person suppresses EVERY address it holds. Served row = the Contact shape +
 `pool: "people"`, `personId`, `emails`, `phones`, `phoneSources [{phone, source, via}]`.
 Distribute.you 2026-10-12: 95 signups → 87 never answered (62 never written, 25 written
 without answer), 8 answered. The chain human-service → serve-next must pass `people`
 (human-service audience binding).
+
+### Segment (`people.segment`) — a CRM sourcing scoped to a part of the brand's CRM
+
+Owner 2026-10-12 (Doc Dinners nurturing): `people.segment` on serve-next / `segment=<json>` on
+serve-stats (`pool=people`), `lib/people/segment.ts`. Keys AND, list entries OR: `dealStages
+[{stage, pipeline?}]` (deal CURRENTLY there; GoHighLevel opportunities), `dealStatuses`, `tags`,
+`reached` / `notReached` (funnel steps off the live fact feed, Outcomes' evidence + `meeting_not_held`).
+Names = the customer's own, trimmed + case-insensitive, never mapped. Clients (`sale` reached) out
+unless `includeClients`; opted-out out unless `includeOptedOut`. Stats with `dealStages` add
+`byStage` (overlapping). `GET /orgs/contacts/segments?brandId=` = what a segment can name, each
+with `people` + `inPool`. The scope reaches a campaign through a human-service CRM audience
+(`crmPeople.segment`) the campaign targets (`audienceIds`).
 
 ### Reachability (`reachableBy`) — a serve FOR a pipe never burns whom it cannot reach
 
