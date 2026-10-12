@@ -26,7 +26,10 @@ import {
   serveStats,
   serveStatsPeople,
   normalizeUploadIdsQuery,
+  normalizeReachQuery,
+  REACH_CHANNELS,
   type PeopleFilter,
+  type Reach,
 } from "../lib/serve.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { SERVICE_NAME } from "../middleware/auth.js";
@@ -222,11 +225,16 @@ const uploadIdsSchema = z.array(z.string().uuid()).min(1).max(MAX_UPLOAD_IDS);
 
 // `people` switches the pool from the brand's CSV rows to its merged PEOPLE,
 // filtered (lib/serve.ts "PEOPLE pool"). Exclusive with `uploadIds`.
+// `reachableBy` (one channel or a list, all required): the channel(s) the pipe
+// serving writes on. Unreachable people are skipped, never marked served.
+const reachSchema = z.union([z.enum(REACH_CHANNELS), z.array(z.enum(REACH_CHANNELS)).max(2)]);
+const reachOf = (r: Reach | Reach[] | undefined): Reach[] => (r === undefined ? [] : Array.isArray(r) ? r : [r]);
+
 const peopleFilterSchema = z
   .object({
     signedUp: z.boolean().optional(),
     replied: z.boolean().optional(),
-    reachableBy: z.enum(["phone", "email"]).optional(),
+    reachableBy: reachSchema.optional(),
   })
   .strict();
 
@@ -236,6 +244,7 @@ const serveNextBodySchema = z
     limit: z.number().int().positive().max(5000).optional(),
     uploadIds: uploadIdsSchema.optional(),
     people: peopleFilterSchema.optional(),
+    reachableBy: reachSchema.optional(),
   })
   .refine((b) => !(b.uploadIds && b.people), { message: "uploadIds and people are exclusive" });
 
@@ -246,13 +255,9 @@ function peopleFilterFromQuery(q: Record<string, unknown>): { filter: PeopleFilt
   if (q.pool === undefined || q.pool === "csv") return { filter: null };
   if (q.pool !== "people") return { filter: null, error: "pool must be csv or people" };
   const parsed = z
-    .object({
-      signedUp: boolQuery.optional(),
-      replied: boolQuery.optional(),
-      reachableBy: z.enum(["phone", "email"]).optional(),
-    })
-    .safeParse({ signedUp: q.signedUp, replied: q.replied, reachableBy: q.reachableBy });
-  if (!parsed.success) return { filter: null, error: "signedUp / replied must be true|false; reachableBy phone|email" };
+    .object({ signedUp: boolQuery.optional(), replied: boolQuery.optional() })
+    .safeParse({ signedUp: q.signedUp, replied: q.replied });
+  if (!parsed.success) return { filter: null, error: "signedUp / replied must be true|false" };
   return { filter: parsed.data };
 }
 
@@ -265,17 +270,18 @@ router.post(
     if (!parsed.success) {
       return res.status(400).json({
         type: "validation",
-        error: `brandId (uuid) required; limit optional 1..5000; uploadIds optional array of 1..${MAX_UPLOAD_IDS} uuids; people optional {signedUp?, replied?, reachableBy?: phone|email}, exclusive with uploadIds`,
+        error: `brandId (uuid) required; limit optional 1..5000; uploadIds optional array of 1..${MAX_UPLOAD_IDS} uuids; people optional {signedUp?, replied?, reachableBy?}, exclusive with uploadIds; reachableBy optional phone|email or a list`,
       });
     }
     const { brandId, uploadIds, people } = parsed.data;
     const limit = parsed.data.limit ?? 100;
+    const reach = reachOf(parsed.data.reachableBy);
 
     if (people) {
-      res.json(await serveNextPeople(req.orgId!, brandId, limit, req.runId!, people));
+      res.json(await serveNextPeople(req.orgId!, brandId, limit, req.runId!, people, reach));
       return;
     }
-    const result = await serveNext(req.orgId!, brandId, limit, req.runId!, uploadIds);
+    const result = await serveNext(req.orgId!, brandId, limit, req.runId!, uploadIds, reach);
     res.json(result);
   },
 );
@@ -292,13 +298,19 @@ router.get(
       return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
     }
 
+    const reachParse = z.array(z.enum(REACH_CHANNELS)).max(2).safeParse(normalizeReachQuery(req.query.reachableBy));
+    if (!reachParse.success) {
+      return res.status(400).json({ type: "validation", error: "reachableBy must be phone, email, or both (comma-separated)" });
+    }
+    const reach = reachParse.data;
+
     const pool = peopleFilterFromQuery(req.query as Record<string, unknown>);
     if (pool.error) return res.status(400).json({ type: "validation", error: pool.error });
     if (pool.filter) {
       if (req.query.uploadIds !== undefined) {
         return res.status(400).json({ type: "validation", error: "uploadIds and pool=people are exclusive" });
       }
-      return res.json(await serveStatsPeople(req.orgId!, brandParse.data, pool.filter));
+      return res.json(await serveStatsPeople(req.orgId!, brandParse.data, pool.filter, reach));
     }
 
     // Optional per-file scope: ?uploadIds=a,b or repeated ?uploadIds=a&uploadIds=b.
@@ -315,7 +327,7 @@ router.get(
       uploadIds = idsParse.data;
     }
 
-    const stats = await serveStats(req.orgId!, brandParse.data, uploadIds);
+    const stats = await serveStats(req.orgId!, brandParse.data, uploadIds, reach);
     res.json(stats);
   },
 );

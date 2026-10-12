@@ -148,12 +148,22 @@ export const ServeNextRequestSchema = registry.register(
             description:
               "false = only people who NEVER wrote to the brand on any conversation channel (Gmail / WhatsApp / LinkedIn inbound, any answer to our cold email): never written to, or written to without an answer. true = only people who answered. Copilot / API use is the product being used, not a conversation.",
           }),
-          reachableBy: z.enum(["phone", "email"]).optional().openapi({ description: "Only people holding a phone / an email." }),
+          reachableBy: z
+            .union([z.enum(["phone", "email"]), z.array(z.enum(["phone", "email"]))])
+            .optional()
+            .openapi({ description: "Only people holding a phone / an email (a list = all)." }),
         })
         .optional()
         .openapi({
           description:
             "Serve from the brand's merged PEOPLE (one row per human, every source) instead of its CSV rows. Exclusive with uploadIds. Always excludes automated senders, people not about this brand, and anyone without an email. Same brand-wide no-re-serve: every address of a served person is suppressed, and a person any address of whom was served before is never served.",
+        }),
+      reachableBy: z
+        .union([z.enum(["phone", "email"]), z.array(z.enum(["phone", "email"]))])
+        .optional()
+        .openapi({
+          description:
+            "The channel(s) the pipe serving writes on (all required): `phone` (WhatsApp, calls, SMS) or `email`. On BOTH pools, a contact or person the pipe cannot reach is SKIPPED and NOT marked served, so it stays available to a pipe that can. Omit = no requirement (unchanged behaviour).",
         }),
     })
     .openapi("ServeNextRequest"),
@@ -334,7 +344,9 @@ registry.registerPath({
       pool: z.enum(["csv", "people"]).optional().openapi({ description: "people = count the people pool (see ServeNextRequest.people) with the filters below." }),
       signedUp: z.enum(["true", "false"]).optional(),
       replied: z.enum(["true", "false"]).optional(),
-      reachableBy: z.enum(["phone", "email"]).optional(),
+      reachableBy: z.string().optional().openapi({
+        description: "phone, email, or phone,email: count only what a pipe writing on those channels can reach (both pools).",
+      }),
     }),
   },
   responses: {

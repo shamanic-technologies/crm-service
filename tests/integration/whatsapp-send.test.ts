@@ -4,6 +4,7 @@ import request from "supertest";
 import { eq, inArray } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
 import {
+  contacts,
   contactServes,
   matrixConnections,
   matrixGhostPhones,
@@ -115,6 +116,7 @@ async function wipe() {
   await db.delete(matrixLinks).where(eq(matrixLinks.orgId, ORG));
   await db.delete(matrixConnections).where(eq(matrixConnections.orgId, ORG));
   await db.delete(contactServes).where(eq(contactServes.orgId, ORG));
+  await db.delete(contacts).where(eq(contacts.orgId, ORG));
   await db.delete(people).where(eq(people.orgId, ORG));
   await db.delete(peopleScopes).where(eq(peopleScopes.orgId, ORG));
   await db.delete(matrixGhostPhones).where(inArray(matrixGhostPhones.ghostMxid, ["@whatsapp_lid-1:matrix.test", "@whatsapp_lid-2:matrix.test"]));
@@ -361,6 +363,54 @@ describe.skipIf(!RUN)("people-pool serve (DB)", () => {
 
     const after = await request(app()).get(`/orgs/contacts/serve-stats?brandId=${BRAND}&${q}`).set(headers);
     expect(after.body).toEqual({ served: 3, remainingSendable: 0, totalSendable: 3 });
+  });
+
+  it("a serve FOR a pipe skips whom the pipe cannot reach, without marking them, on both pools", async () => {
+    await seedPeople([
+      { key: "email:ph@x.com", phones: ["+33600000001"], presences: [clerk(["+33600000001"])], at: "2026-09-01T00:00:00Z" },
+      { key: "email:nophone@x.com", presences: [clerk()], at: "2026-09-02T00:00:00Z" },
+    ]);
+    const people = { signedUp: true, replied: false };
+
+    // The WhatsApp pipe: phone required. The no-phone person is not reachable.
+    const wa = await request(app())
+      .post("/orgs/contacts/serve-next")
+      .set(headers)
+      .send({ brandId: BRAND, limit: 10, people, reachableBy: "phone" });
+    expect(wa.status).toBe(200);
+    expect(wa.body.contacts.map((c: { primaryEmail: string }) => c.primaryEmail)).toEqual(["ph@x.com"]);
+    expect(wa.body.exhausted).toBe(true);
+
+    // The email pipe still gets the no-phone person: never marked by the WhatsApp serve.
+    const statsEmail = await request(app()).get(`/orgs/contacts/serve-stats?brandId=${BRAND}&pool=people&signedUp=true&replied=false&reachableBy=email`).set(headers);
+    expect(statsEmail.body).toEqual({ served: 1, remainingSendable: 1, totalSendable: 2 });
+    const mail = await request(app())
+      .post("/orgs/contacts/serve-next")
+      .set(headers)
+      .send({ brandId: BRAND, limit: 10, people, reachableBy: ["email"] });
+    expect(mail.body.contacts.map((c: { primaryEmail: string }) => c.primaryEmail)).toEqual(["nophone@x.com"]);
+
+    // CSV pool: same rule.
+    const upload = "babababa-1111-4111-8111-0000000000a1";
+    await db.insert(contacts).values(
+      ["csvph@x.com", "csvnophone@x.com"].map((email, i) => ({
+        orgId: ORG,
+        brandId: BRAND,
+        primaryEmail: email,
+        phoneE164: i === 0 ? "+33600000009" : null,
+        rawAttributes: {},
+        consentStatus: "unknown",
+        unsubscribed: false,
+        sourceUploadId: upload,
+        sourceRowId: `babababa-1111-4111-8111-0000000000b${i}`,
+      })),
+    );
+    const csvStats = await request(app()).get(`/orgs/contacts/serve-stats?brandId=${BRAND}&reachableBy=phone`).set(headers);
+    expect(csvStats.body.totalSendable).toBe(1);
+    const csv = await request(app()).post("/orgs/contacts/serve-next").set(headers).send({ brandId: BRAND, limit: 10, reachableBy: "phone" });
+    expect(csv.body.contacts.map((c: { primaryEmail: string }) => c.primaryEmail)).toEqual(["csvph@x.com"]);
+    const csvAll = await request(app()).post("/orgs/contacts/serve-next").set(headers).send({ brandId: BRAND, limit: 10 });
+    expect(csvAll.body.contacts.map((c: { primaryEmail: string }) => c.primaryEmail)).toEqual(["csvnophone@x.com"]);
   });
 
   it("refuses uploadIds together with people", async () => {
