@@ -2,6 +2,7 @@ import { sql, type SQL } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { AUTH_PROVIDER_NAMES } from "./auth/providers.js";
 import { PERSON_REPLIED_SQL } from "./people/conversation.js";
+import { STAFF_DOMAIN, STAFF_EMAIL_LIST } from "./owner-telegram.js";
 import { perStageSegments, personOptedOut, readSegmentCatalogue, segmentWhere, type Segment, type SegmentCatalogue } from "./people/segment.js";
 
 /**
@@ -450,6 +451,14 @@ export function peoplePoolWhere(orgId: string, brandId: string, filter: PeopleFi
     sql`NOT p.automated`,
     sql`NOT p.not_business`,
     sql`jsonb_array_length(p.emails) > 0`,
+    // Never our staff (the owner merged across his addresses, our own test accounts):
+    // same rule as isStaffEmail, plus-addressing ignored, on EVERY address of the person.
+    sql`NOT EXISTS (
+      SELECT 1 FROM jsonb_array_elements_text(p.emails) AS se(email)
+      WHERE lower(se.email) LIKE ${`%${STAFF_DOMAIN}`}
+         OR (regexp_replace(split_part(lower(se.email), '@', 1), '[+].*$', '') || '@' || split_part(lower(se.email), '@', 2))
+            IN (${sql.join(STAFF_EMAIL_LIST.map((e) => sql`${e}`), sql`, `)})
+    )`,
   ];
   if (filter.signedUp !== undefined) {
     const signed = sql`EXISTS (SELECT 1 FROM jsonb_array_elements(p.presences) pr WHERE pr->>'source' IN (${auth}))`;
