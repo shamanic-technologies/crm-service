@@ -5,6 +5,7 @@ import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { copilotDestination } from "../lib/copilot/messages.js";
 import { describeRequest, describeResponse, readApiCall, storeApiCalls } from "../lib/api-calls/calls.js";
 import { ApiCallsRequestSchema } from "../schemas.js";
+import { announceApiCallStarts } from "../lib/conversation-pings.js";
 import { brandNamesFor } from "../lib/people/timeline.js";
 
 const router = Router();
@@ -34,9 +35,13 @@ router.post("/internal/api-calls", apiKeyAuth, async (req, res) => {
     return res.status(502).json({ type: "upstream", error: `run tracking unavailable: ${(err as Error).message}` });
   }
   try {
-    const result = await storeApiCalls(parsed.data.calls, runId);
+    const { stored, duplicates, skippedNoEmail, newCallIds } = await storeApiCalls(parsed.data.calls, runId);
     await updatePlatformRun(runId, "completed", SERVICE_NAME);
-    return res.json(result);
+    res.json({ stored, duplicates, skippedNoEmail });
+    // The owner's Telegram ping for each conversation this batch STARTS: after
+    // the answer, never awaited, never throws (lib/conversation-pings.ts).
+    void announceApiCallStarts(newCallIds, runId);
+    return;
   } catch (err) {
     await updatePlatformRun(runId, "failed", SERVICE_NAME).catch((e) =>
       console.error(`[crm-service] failed to close api-calls run ${runId}:`, e),

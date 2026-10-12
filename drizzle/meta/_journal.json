@@ -197,6 +197,13 @@
       "when": 1791787630139,
       "tag": "0027_api_calls",
       "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "7",
+      "when": 1791801598022,
+      "tag": "0028_conversation_pings",
+      "breakpoints": true
     }
   ]
 }

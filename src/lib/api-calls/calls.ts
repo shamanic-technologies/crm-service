@@ -73,7 +73,7 @@ const nulFreeJson = <T>(v: T): T => JSON.parse(stripNul(JSON.stringify(v ?? {}))
 export async function storeApiCalls(
   calls: ApiCallInput[],
   runId: string | null,
-): Promise<{ stored: number; duplicates: number; skippedNoEmail: number }> {
+): Promise<{ stored: number; duplicates: number; skippedNoEmail: number; newCallIds: string[] }> {
   const destination = copilotDestination();
   if (!destination) throw new ApiCallDestinationMissingError();
   let skippedNoEmail = 0;
@@ -116,13 +116,18 @@ export async function storeApiCalls(
       },
     ];
   });
-  if (rows.length === 0) return { stored: 0, duplicates: 0, skippedNoEmail };
+  if (rows.length === 0) return { stored: 0, duplicates: 0, skippedNoEmail, newCallIds: [] };
   const inserted = await db
     .insert(apiCalls)
     .values(rows)
     .onConflictDoNothing({ target: apiCalls.callId })
-    .returning({ id: apiCalls.id });
-  return { stored: inserted.length, duplicates: rows.length - inserted.length, skippedNoEmail };
+    .returning({ callId: apiCalls.callId });
+  return {
+    stored: inserted.length,
+    duplicates: rows.length - inserted.length,
+    skippedNoEmail,
+    newCallIds: inserted.map((r) => r.callId),
+  };
 }
 
 // ─── reading ────────────────────────────────────────────────────────────────

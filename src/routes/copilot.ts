@@ -3,6 +3,7 @@ import { apiKeyAuth, SERVICE_NAME } from "../middleware/auth.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { copilotDestination, storeCopilotTurn } from "../lib/copilot/messages.js";
 import { CopilotTurnRequestSchema } from "../schemas.js";
+import { announceCopilotStarts } from "../lib/conversation-pings.js";
 
 const router = Router();
 
@@ -31,9 +32,13 @@ router.post("/internal/copilot/messages", apiKeyAuth, async (req, res) => {
     return res.status(502).json({ type: "upstream", error: `run tracking unavailable: ${(err as Error).message}` });
   }
   try {
-    const result = await storeCopilotTurn(parsed.data, runId);
+    const { stored, duplicates, newMessageIds } = await storeCopilotTurn(parsed.data, runId);
     await updatePlatformRun(runId, "completed", SERVICE_NAME);
-    return res.json(result);
+    res.json({ stored, duplicates });
+    // The owner's Telegram ping when this turn STARTS a conversation: after the
+    // answer, never awaited, never throws (lib/conversation-pings.ts).
+    void announceCopilotStarts(parsed.data, newMessageIds, runId);
+    return;
   } catch (err) {
     await updatePlatformRun(runId, "failed", SERVICE_NAME).catch((e) =>
       console.error(`[crm-service] failed to close copilot run ${runId}:`, e),
