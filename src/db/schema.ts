@@ -1690,6 +1690,43 @@ export const apiCalls = pgTable(
   ],
 );
 
+/**
+ * One row per conversation START the owner was told about on Telegram (owner
+ * 2026-10-12: "envoie-moi des notifs Telegram à chaque conversation d'un user
+ * avec notre AI chat et notre API / MCP"). A Copilot chat session, or a burst of
+ * API / MCP calls on one channel, is ONE conversation; it starts again after 30
+ * minutes of silence. The row is written BEFORE the send, under an advisory lock
+ * per conversation, so a retried push, a concurrent batch or a restart never
+ * pings twice (at most once: a send that fails is logged and marked, never retried).
+ */
+export const conversationPings = pgTable(
+  "conversation_pings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // 'copilot' | 'api'
+    source: text("source").notNull(),
+    // 'chat' | 'api' | 'mcp'
+    channel: text("channel").notNull(),
+    // What one conversation is: `copilot:<sessionId>` or `api:<channel>:<email>`.
+    conversationKey: text("conversation_key").notNull(),
+    // The message id / call id that opened it.
+    startRef: text("start_ref").notNull(),
+    email: text("email").notNull(),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    // 'pending' | 'sent' | 'failed' | 'unconfigured'
+    status: text("status").notNull().default("pending"),
+    telegramMessageId: integer("telegram_message_id"),
+    text: text("text"),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("conversation_pings_start_uq").on(table.source, table.startRef),
+    index("conversation_pings_key_started_idx").on(table.conversationKey, table.startedAt),
+  ],
+);
+
 export type ContactUpload = typeof contactUploads.$inferSelect;
 export type NewContactUpload = typeof contactUploads.$inferInsert;
 export type ContactRowRaw = typeof contactRowsRaw.$inferSelect;
@@ -1730,3 +1767,4 @@ export type NewPeopleFact = typeof peopleFacts.$inferInsert;
 export type AuthConnection = typeof authConnections.$inferSelect;
 export type CopilotMessage = typeof copilotMessages.$inferSelect;
 export type ApiCall = typeof apiCalls.$inferSelect;
+export type ConversationPing = typeof conversationPings.$inferSelect;

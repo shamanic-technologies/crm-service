@@ -1087,6 +1087,35 @@ skippedNoEmail }`; 503 when the staff scope is unset. Idempotent on `callId`.
   burst (same channel, gaps under 30 min).
 - No cost (platform run), no facts, not in the message search index.
 
+## Owner Telegram ping at each conversation START (`src/lib/conversation-pings.ts`)
+
+Owner 2026-10-12: a Telegram message each time someone starts a conversation with
+us through the Copilot or our API / MCP. Same bot and chat as the fleet's owner
+alerts (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_CHAT_ID`); names and the Unibox
+link come from client-service (`CLIENT_SERVICE_URL` / `_API_KEY`).
+
+- **One conversation** = one Copilot session (again after 30 min of silence in
+  it), or one person's API / MCP calls on one channel, gaps under 30 min (same as
+  `sessionsOf`). One ping per START, never per message or call.
+- **Staff never pings:** a staff address (`isStaffEmail`, mirrored from
+  client-service / billing) or a user id EVER stored with one (copilot_messages or
+  api_calls), so a session of a person ever him stays silent under any address.
+- **Never twice:** the start is written to `conversation_pings` under
+  `pg_advisory_xact_lock` per conversation BEFORE the send; a candidate is skipped
+  when the conversation had activity in the 30 min before it OR a ping within
+  30 min either side (out-of-order and concurrent batches). At most once: a failed
+  send is marked `failed` with the error, never retried.
+- **Never slows the push:** the routes answer, then run the announce unawaited; it
+  never throws. Each lookup (org name, user name, brand names, link) fails alone:
+  its line is dropped and logged, the ping still goes.
+- **The link** opens the person's thread in the staff Unibox
+  (`/v2/orgs/<staff Clerk org>/brands/<brand>/unibox?person=<personId>`). A brand-new
+  person has no id until the next people build, so the id is minted into
+  `person_ids` exactly as the build would (the build adopts it).
+- **Logged-out visitors** have no AI chat and no API access: the only chat open to
+  them is the landing live chat (human, apps/landing `/api/chat`), which already
+  relays EVERY visitor message to the same Telegram chat. Nothing to add here.
+
 ## Brand transfer (`POST /internal/transfer-brand`, fleet contract)
 
 brand-service moves a brand to another org by calling this route on every
@@ -1230,6 +1259,7 @@ once CI is green, then tag the next version by hand at the merge commit
 `INSTANTLY_SERVICE_URL`, `INSTANTLY_SERVICE_API_KEY`, `LEAD_SERVICE_URL`, `LEAD_SERVICE_API_KEY`,
 `BRAND_SERVICE_URL`, `BRAND_SERVICE_API_KEY`, `FEATURES_SERVICE_URL`, `FEATURES_SERVICE_API_KEY`, `MATRIX_APPSERVICE_TOKEN`,
 `COPILOT_UNIBOX_ORG_ID`, `COPILOT_UNIBOX_BRAND_ID` (the staff Unibox scope Copilot turns are filed under; unset = 503),
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_CHAT_ID`, `CLIENT_SERVICE_URL`, `CLIENT_SERVICE_API_KEY` (the owner's conversation pings; unset = logged, nothing sent),
 `MATRIX_WHATSAPP_PROVISIONING_URL`, `MATRIX_WHATSAPP_PROVISIONING_SECRET`
 (+ `MATRIX_TELEGRAM_*` once its bridge runs).
 See `.env.example`. The four Matrix ones are REQUIRED for the sync to run at all —

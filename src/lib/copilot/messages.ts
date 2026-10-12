@@ -71,7 +71,7 @@ const stripNul = (s: string) => s.replace(/\u0000/g, "");
 export async function storeCopilotTurn(
   input: CopilotTurnInput,
   runId: string | null,
-): Promise<{ stored: number; duplicates: number }> {
+): Promise<{ stored: number; duplicates: number; newMessageIds: string[] }> {
   const destination = copilotDestination();
   if (!destination) throw new CopilotDestinationMissingError();
   const email = normalizeEmail(input.email);
@@ -94,8 +94,12 @@ export async function storeCopilotTurn(
     .insert(copilotMessages)
     .values(rows)
     .onConflictDoNothing({ target: copilotMessages.messageId })
-    .returning({ id: copilotMessages.id });
-  return { stored: inserted.length, duplicates: rows.length - inserted.length };
+    .returning({ messageId: copilotMessages.messageId });
+  return {
+    stored: inserted.length,
+    duplicates: rows.length - inserted.length,
+    newMessageIds: inserted.map((r) => r.messageId),
+  };
 }
 
 /** PURE: one presence per chatting address, from that address's stored turns. */

@@ -13,7 +13,7 @@
  * "failed" apart; nothing here turns a failure into an empty list.
  */
 
-export type Sibling = "google" | "instantly" | "lead" | "brand" | "features";
+export type Sibling = "google" | "instantly" | "lead" | "brand" | "features" | "client";
 
 const ENV: Record<Sibling, { url: string; key: string }> = {
   google: { url: "GOOGLE_SERVICE_URL", key: "GOOGLE_SERVICE_API_KEY" },
@@ -21,6 +21,8 @@ const ENV: Record<Sibling, { url: string; key: string }> = {
   lead: { url: "LEAD_SERVICE_URL", key: "LEAD_SERVICE_API_KEY" },
   brand: { url: "BRAND_SERVICE_URL", key: "BRAND_SERVICE_API_KEY" },
   features: { url: "FEATURES_SERVICE_URL", key: "FEATURES_SERVICE_API_KEY" },
+  // Who an org / a user is (names, the Clerk org id): the owner's conversation pings.
+  client: { url: "CLIENT_SERVICE_URL", key: "CLIENT_SERVICE_API_KEY" },
 };
 
 export const SIBLING_TIMEOUT_MS = Number(process.env.PEOPLE_SIBLING_TIMEOUT_MS) || 30_000;
