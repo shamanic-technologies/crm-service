@@ -117,7 +117,9 @@ export interface BuildSummary {
   facts?: ({ status: "ok" } & FactEmissionSummary) | { status: "failed"; error: string };
 }
 
-function firstNonNull(
+const NUMBER_IN_NAME = /\d[\d\s().-]{5,}\d/;
+
+export function firstNonNull(
   cluster: PersonCluster,
   field: "displayName" | "company",
 ): string | null {
@@ -130,7 +132,10 @@ function firstNonNull(
     const v = e[field];
     if (v && v.trim()) candidates.push({ rank: NAME_PRECEDENCE.indexOf(e.kind), value: v.trim() });
   }
-  candidates.sort((a, b) => a.rank - b.rank || (a.value < b.value ? -1 : 1));
+  // A "name" carrying a phone number (a WhatsApp chat with a number nobody saved:
+  // "+923065554166 (WA)") is a label, not a name: any real name wins over it.
+  const numberOnly = (v: string) => (field === "displayName" && NUMBER_IN_NAME.test(v) ? 1 : 0);
+  candidates.sort((a, b) => numberOnly(a.value) - numberOnly(b.value) || a.rank - b.rank || (a.value < b.value ? -1 : 1));
   return candidates[0]?.value ?? null;
 }
 
