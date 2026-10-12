@@ -58,6 +58,8 @@ import {
   copilotMessages,
   apiCalls,
   personMerges,
+  formTriggerReports,
+  formOfferMappings,
 } from "../db/schema.js";
 
 export const TRANSFER_TABLES: PgTable[] = [
@@ -103,6 +105,9 @@ export const TRANSFER_TABLES: PgTable[] = [
   apiCalls,
   // Stated merges (two people said to be one) follow the people they tie.
   personMerges,
+  // CRM form submissions reported as `form_submitted`, and the offer each form is about.
+  formTriggerReports,
+  formOfferMappings,
 ];
 
 export interface TransferBrandInput {

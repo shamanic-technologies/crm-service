@@ -575,6 +575,9 @@ export const ghlConnections = pgTable(
     lastError: text("last_error"),
     lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
     lastRunId: text("last_run_id"),
+    // When the form-trigger watch first looked at this connection. A submission
+    // made before it is history, never reported (lib/form-trigger/watch.ts).
+    formWatchSince: timestamp("form_watch_since", { withTimezone: true }),
 
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1100,6 +1103,77 @@ export const personMerges = pgTable(
 );
 
 export type PersonMerge = typeof personMerges.$inferSelect;
+
+/**
+ * FORM TRIGGER — one row per NEW form submission the watch saw in a brand's CRM,
+ * and what became of reporting it to campaign-service as a `form_submitted`
+ * trigger occurrence (lib/form-trigger/). Keyed on the vendor's submission id, so
+ * a submission is reported at most once, whatever the connection's history.
+ * `status`: 'pending' | 'reported' | 'skipped' | 'failed'.
+ */
+export const formTriggerReports = pgTable(
+  "form_trigger_reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    // 'gohighlevel' today; every CRM source reports through the same row.
+    source: text("source").notNull(),
+    submissionId: text("submission_id").notNull(),
+    formId: text("form_id"),
+    formName: text("form_name"),
+    // The vendor's contact id, and OUR contacts.id when that contact is mirrored.
+    sourceContactId: text("source_contact_id"),
+    crmContactId: uuid("crm_contact_id"),
+    fullName: text("full_name"),
+    email: text("email"),
+    phone: text("phone"),
+    // [{ key, label, value }] in the form's own field order.
+    answers: jsonb("answers").notNull(),
+    submittedAt: timestamp("submitted_at", { withTimezone: true }).notNull(),
+    detectedAt: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
+    status: text("status").notNull(),
+    // Why skipped / failed: 'calendar_booking_form' | 'offer_unknown' | 'campaign_refused' | ...
+    reason: text("reason"),
+    lastError: text("last_error"),
+    attempts: integer("attempts").notNull().default(0),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    offerId: uuid("offer_id"),
+    runId: text("run_id"),
+    reportedAt: timestamp("reported_at", { withTimezone: true }),
+    // campaign-service's answer: its event id, when it recorded it, what it did.
+    campaignEventId: text("campaign_event_id"),
+    campaignRecordedAt: timestamp("campaign_recorded_at", { withTimezone: true }),
+    campaignOutcome: jsonb("campaign_outcome"),
+  },
+  (table) => [
+    uniqueIndex("form_trigger_reports_submission_uq").on(table.orgId, table.brandId, table.source, table.submissionId),
+    index("form_trigger_reports_status_idx").on(table.status),
+  ],
+);
+
+/**
+ * Which offer a brand's form submissions are about, when the brand sells
+ * several. `form_id = '*'` = every form of the brand. A brand with ONE active
+ * offer needs no row (lib/form-trigger/offer.ts).
+ */
+export const formOfferMappings = pgTable(
+  "form_offer_mappings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    formId: text("form_id").notNull(),
+    offerId: uuid("offer_id").notNull(),
+    statedByUserId: text("stated_by_user_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("form_offer_mappings_uq").on(table.orgId, table.brandId, table.formId)],
+);
+
+export type FormTriggerReport = typeof formTriggerReports.$inferSelect;
+export type FormOfferMapping = typeof formOfferMappings.$inferSelect;
 
 /**
  * SEARCH INDEX — one row per message an indexing UNIT holds, so a brand owner

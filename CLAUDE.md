@@ -909,6 +909,39 @@ onboarding writes `public_metadata.phone`: 12 of 96 users, 0 Clerk phone numbers
 tagged `phoneSources [{phone, via}]`. brand-service sales-rep phones (5 phones fleet-wide,
 1 matching a signup) are NOT read.
 
+## Form trigger — a new CRM form fill starts the AI meeting booking (`src/lib/form-trigger/`)
+
+Owner 2026-10-12 (Doc Dinners' Meta Ads form, FORM-TRIGGER-1012): every NEW form submission
+in a brand's CRM is reported to campaign-service's generic trigger door
+(`POST /internal/trigger-events`, trigger `form_submitted`) within ~1 min, naming the person.
+
+- **Poll, not webhook**: a GoHighLevel Private Integration Token cannot subscribe webhooks
+  (marketplace apps only). In-process loop every 60s (`FORM_WATCH_INTERVAL_MS`, first pass 60s
+  after boot, one at a time): per connection not paused, `GET /forms/submissions` for the last
+  1-2 days (one page, ~0.9s). Writes NOTHING to bronze: the 15-min sync still sees each submission
+  as changed and derives it.
+- **New, once, never history**: `ghl_connections.form_watch_since` set at the first look (the
+  baseline, nothing reported); only submissions made after it count. One `form_trigger_reports`
+  row per submission (UNIQUE org, brand, source, submission id). campaign-service gets
+  `idempotencyKey = crm:<source>:form_submission:<id>` (replay = its first event).
+- **Skipped, recorded, never sent**: a calendar's own booking form (`calendar_booking_form`:
+  a mirrored calendar's `formId`, or the record's `others.internalSource.type = "calendars"`),
+  a fill with no email (`no_email`, logged: campaign-service files a person by email only).
+- **Body** (campaign-service's `RecordTriggerEventBody`, strict): `person {email, name?, phone?,
+  crmContact {provider, contactId}}` (absent values OMITTED, never null) + opaque `item {source,
+  submissionId, formId, formName, submittedAt, answers [{key, label, value}], crmContactId}`
+  handed verbatim to the workflow. `answers` = `others.fieldsOriSequance` order minus identity
+  keys and GoHighLevel's fixed non-answer elements; labels from `GET /locations/{id}/customFields`.
+- **Offer**: stated per form (`PUT /orgs/gohighlevel/form-offers {brandId, formId?, offerId}`,
+  omitted formId = every form) > the brand's ONLY active offer > `offer_unknown` (not sent, loud).
+- **Detection kicks the brand's GoHighLevel sync + people build** (unawaited) and reports at
+  once: lead-service only serves a person it knows from our fact feed; campaign-service holds a
+  `person_not_known` event `pending` and retries it 60 min.
+- Retries: 5xx / unreachable / offer unknown with backoff 1→60 min for 24h after the submission;
+  400/422 = final `campaign_refused`. One ORG run per (org, brand) per delivery batch.
+- Reads: `GET /orgs/gohighlevel/form-triggers?brandId=` (submittedAt / detectedAt / reportedAt /
+  campaign event). `POST /internal/form-triggers/watch` runs a pass now.
+
 ## Boot: the port binds BEFORE migrations
 
 `src/index.ts` listens first, then migrates; until migrations finish every
@@ -1385,6 +1418,7 @@ once CI is green, then tag the next version by hand at the merge commit
 `BRAND_SERVICE_URL`, `BRAND_SERVICE_API_KEY`, `FEATURES_SERVICE_URL`, `FEATURES_SERVICE_API_KEY`, `MATRIX_APPSERVICE_TOKEN`,
 `COPILOT_UNIBOX_ORG_ID`, `COPILOT_UNIBOX_BRAND_ID` (the staff Unibox scope Copilot turns are filed under; unset = 503),
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_CHAT_ID`, `CLIENT_SERVICE_URL`, `CLIENT_SERVICE_API_KEY` (the owner's conversation pings; unset = logged, nothing sent),
+`CAMPAIGN_SERVICE_URL`, `CAMPAIGN_SERVICE_API_KEY` (the form-trigger reports; unset = detected, not reported),
 `MATRIX_WHATSAPP_PROVISIONING_URL`, `MATRIX_WHATSAPP_PROVISIONING_SECRET`
 (+ `MATRIX_TELEGRAM_*` once its bridge runs).
 See `.env.example`. The four Matrix ones are REQUIRED for the sync to run at all —

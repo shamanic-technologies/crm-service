@@ -2826,3 +2826,104 @@ registry.registerPath({
     },
   },
 });
+
+// ─── Form trigger (lib/form-trigger/): each new CRM form submission → `form_submitted` ───
+
+const FormTriggerReportSchema = z.object({
+  id: z.string().uuid(),
+  source: z.string(),
+  submissionId: z.string(),
+  formId: z.string().nullable(),
+  formName: z.string().nullable(),
+  person: z.object({
+    fullName: z.string().nullable(),
+    email: z.string().nullable(),
+    phone: z.string().nullable(),
+    sourceContactId: z.string().nullable(),
+    crmContactId: z.string().nullable(),
+  }),
+  answers: z.array(z.object({ key: z.string(), label: z.string().nullable(), value: z.unknown() })),
+  status: z.enum(["pending", "reported", "skipped", "failed"]),
+  reason: z.string().nullable().describe("calendar_booking_form | offer_unknown | campaign_refused | campaign_unreachable | connection_gone"),
+  lastError: z.string().nullable(),
+  attempts: z.number().int(),
+  offerId: z.string().nullable(),
+  submittedAt: z.string(),
+  detectedAt: z.string(),
+  reportedAt: z.string().nullable(),
+  campaignEventId: z.string().nullable(),
+  campaignRecordedAt: z.string().nullable(),
+  campaignOutcome: z.unknown(),
+}).openapi("FormTriggerReport");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/gohighlevel/form-triggers",
+  summary: "The brand's new CRM form submissions and their `form_submitted` reports to campaign-service",
+  description:
+    "A watch asks each connected CRM every 60s for its recent submissions. Each one made after the watch first saw " +
+    "the connection is reported ONCE to campaign-service (`POST /internal/trigger-events`, trigger `form_submitted`) " +
+    "naming the person and their answers. A calendar's own booking form is recorded `skipped / calendar_booking_form`. " +
+    "Newest first.",
+  request: { query: z.object({ brandId: z.string().uuid(), limit: z.coerce.number().int().min(1).max(200).optional() }) },
+  responses: {
+    200: { description: "Reports", content: { "application/json": { schema: z.object({ reports: z.array(FormTriggerReportSchema) }) } } },
+  },
+});
+
+const FormOfferSchema = z.object({ formId: z.string(), offerId: z.string().uuid() });
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/gohighlevel/form-offers",
+  summary: "Which offer each of the brand's CRM forms is about (stated)",
+  description:
+    "A form submission is reported for the offer stated for its form, else the one stated for every form " +
+    "(`formId: \"*\"`), else the brand's ONLY active offer. A brand with several offers and no statement is reported " +
+    "nowhere (`offer_unknown`).",
+  request: { query: z.object({ brandId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Stated offers",
+      content: { "application/json": { schema: z.object({ formOffers: z.array(FormOfferSchema.extend({ statedByUserId: z.string(), updatedAt: z.string() })) }) } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "put",
+  path: "/orgs/gohighlevel/form-offers",
+  summary: "State which offer a CRM form (or every form of the brand) is about",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            brandId: z.string().uuid(),
+            formId: z.string().optional().describe("The CRM form id; omitted = every form of the brand"),
+            offerId: z.string().uuid(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: { description: "Stated", content: { "application/json": { schema: z.object({ formOffer: FormOfferSchema }) } } },
+    422: { description: "`offer_not_of_brand`" },
+  },
+});
+
+registry.registerPath({
+  method: "delete",
+  path: "/orgs/gohighlevel/form-offers",
+  summary: "Withdraw a stated form offer",
+  request: { query: z.object({ brandId: z.string().uuid(), formId: z.string().optional() }) },
+  responses: { 200: { description: "Withdrawn", content: { "application/json": { schema: z.object({ deleted: z.number().int() }) } } } },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/form-triggers/watch",
+  summary: "Run one form-trigger watch pass now (the loop runs every 60s)",
+  responses: { 200: { description: "What the pass saw and reported" }, 502: { description: "The pass failed" } },
+});

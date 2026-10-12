@@ -314,6 +314,57 @@ export async function* listFormSubmissions(
 }
 
 /**
+ * The submissions made from `fromMs` (its UTC day) to tomorrow: the form-trigger
+ * watch's read (lib/form-trigger/watch.ts). Same route and paging as the full
+ * history read, a window of a day or two, so one page in practice.
+ */
+export async function listRecentFormSubmissions(
+  token: string,
+  locationId: string,
+  fromMs: number,
+  now: number = Date.now(),
+): Promise<GhlFormSubmissionRecord[]> {
+  const startAt = new Date(fromMs).toISOString().slice(0, 10);
+  const endAt = new Date(now + 86_400_000).toISOString().slice(0, 10);
+  const out: GhlFormSubmissionRecord[] = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const body = await ghlGet<{
+      submissions?: GhlFormSubmissionRecord[];
+      meta?: { nextPage?: number | null };
+    }>(token, "/forms/submissions", {
+      locationId,
+      limit: String(PAGE_SIZE),
+      page: String(page),
+      startAt,
+      endAt,
+    });
+    const submissions = (body.submissions ?? []).filter((s) => s && typeof s.id === "string");
+    out.push(...submissions);
+    if (submissions.length === 0 || !body.meta?.nextPage) break;
+  }
+  return out;
+}
+
+/**
+ * The sub-account's custom fields, id -> the customer's own label. A form
+ * submission names a custom field by its id only ("MfQa5Fl4DCvkUHR3wZrE":
+ * "Chiropractor"); the label ("Which profession best describes you?") is what
+ * makes the answer readable.
+ */
+export async function listCustomFields(token: string, locationId: string): Promise<Map<string, string>> {
+  const body = await ghlGet<{ customFields?: { id?: unknown; name?: unknown }[] }>(
+    token,
+    `/locations/${encodeURIComponent(locationId)}/customFields`,
+    {},
+  );
+  const out = new Map<string, string>();
+  for (const f of body.customFields ?? []) {
+    if (typeof f.id === "string" && typeof f.name === "string") out.set(f.id, f.name);
+  }
+  return out;
+}
+
+/**
  * Where the appointment read starts. GoHighLevel launched in 2018, so no
  * sub-account holds an appointment scheduled before it.
  */
