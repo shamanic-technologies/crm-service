@@ -18,8 +18,9 @@ const SEND_TIMEOUT_MS = 10_000;
  * mirrored from api-service STAFF_EMAILS), plus any `@distribute.you` address
  * (our own test accounts). Plus-addressing is ignored.
  */
-const STAFF_EMAILS = new Set(["kevin.lourd@gmail.com", "kevin@distribute.you", "kevin@pressbeat.io"]);
-const STAFF_DOMAIN = "@distribute.you";
+export const STAFF_EMAIL_LIST = ["kevin.lourd@gmail.com", "kevin@distribute.you", "kevin@pressbeat.io"] as const;
+const STAFF_EMAILS = new Set<string>(STAFF_EMAIL_LIST);
+export const STAFF_DOMAIN = "@distribute.you";
 
 export function isStaffEmail(email: string | null | undefined): boolean {
   const normalized = email?.trim().toLowerCase();

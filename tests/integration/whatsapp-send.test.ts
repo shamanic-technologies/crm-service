@@ -204,7 +204,7 @@ async function mirroredThread(connectionId: string, ghost: string, messages: num
 
 type P = { source: string; phones?: string[]; inboundCount?: number | null; outboundCount?: number | null; detail?: Record<string, unknown> };
 
-async function seedPeople(rows: { key: string; phones?: string[]; presences: P[]; automated?: boolean; at: string }[]) {
+async function seedPeople(rows: { key: string; emails?: string[]; phones?: string[]; presences: P[]; automated?: boolean; at: string }[]) {
   const [scope] = await db.insert(peopleScopes).values({ orgId: ORG, brandId: BRAND, createdByUserId: USER, status: "built" }).returning();
   await db.insert(people).values(
     rows.map((r) => ({
@@ -214,7 +214,7 @@ async function seedPeople(rows: { key: string; phones?: string[]; presences: P[]
       personKey: r.key,
       identityKeys: [r.key, ...(r.phones ?? []).map((p) => `phone:${p}`)],
       displayName: "Ann Lee",
-      emails: [r.key.replace("email:", "")],
+      emails: r.emails ?? [r.key.replace("email:", "")],
       phones: r.phones ?? [],
       sources: [...new Set(r.presences.map((p) => p.source))],
       presences: r.presences.map((p) => ({
@@ -435,6 +435,10 @@ describe.skipIf(!RUN)("people-pool serve (DB)", () => {
       { key: "email:g@x.com", presences: [{ source: "posthog" }], at: "2026-09-07T00:00:00Z" },
       // Automated.
       { key: "email:h@x.com", presences: [clerk()], automated: true, at: "2026-09-08T00:00:00Z" },
+      // The owner, merged across a school address and his staff Gmail (plus-addressed): never in a pool.
+      { key: "email:kevin.lourd@school.edu", emails: ["kevin.lourd@school.edu", "kevin.lourd+x@gmail.com"], presences: [clerk()], at: "2026-09-09T00:00:00Z" },
+      // A test account on our own domain.
+      { key: "email:qa@distribute.you", presences: [clerk()], at: "2026-09-10T00:00:00Z" },
     ]);
 
     const q = "pool=people&signedUp=true&replied=false";
