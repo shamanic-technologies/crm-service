@@ -24,7 +24,10 @@
  *                     and the people layer kept the thread as business)
  *   website_visit   ← website_visit (PostHog)
  *   signup          ← signup (PostHog, auth providers)
- *   form_submission ← form_submitted (GoHighLevel)
+ *   form_submission ← form_submitted (GoHighLevel): a submission of a lead
+ *                     form, or a contact a form / survey created (`form_origin`);
+ *                     a submission of a calendar's own booking form is the
+ *                     BOOKING, not a form step (`NOT_CALENDAR_BOOKING_FORM`)
  *   meeting_booked / meeting_attended ← GoHighLevel
  *   sale            ← sale (GoHighLevel deal won) | payment that stands (Stripe)
  * The source that records each step is fixed by what the fact feed derives;
@@ -38,7 +41,7 @@ import { and, desc, eq, sql, type SQL } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { peopleScopes } from "../../db/schema.js";
 import { AUTH_PROVIDER_NAMES } from "../auth/providers.js";
-import { CONTACTED, PAYMENT_STANDS } from "./outcomes.js";
+import { CONTACTED, NOT_CALENDAR_BOOKING_FORM, PAYMENT_STANDS } from "./outcomes.js";
 
 export const LEG_STEPS = [
   "conversation",
@@ -277,6 +280,7 @@ async function countLeg(orgId: string, brandId: string, from: LegStep, to: LegSt
       AND f.live AND f.owner_person_key IS NOT NULL
       AND f.type IN (${sql.join(allTypes.map((t) => sql`${t}`), sql`, `)})
       AND ${PAYMENT_STANDS}
+      AND ${NOT_CALENDAR_BOOKING_FORM}
   `;
   const base = sql`
     WITH e AS (${evidence}),
