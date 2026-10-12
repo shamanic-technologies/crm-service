@@ -1023,7 +1023,8 @@ opens a scope or builds, no vendor call, no model, no cost.
   presence / lead-service lead), minus `automated` and `not_business` people. A fact
   owner no longer in `people` is kept. TO counts only on or after the UTC DAY of the
   first FROM (same day either order counts; undated end counts); TO only before =
-  `toBeforeFrom`, not counted.
+  `toBeforeFrom`, not counted. `reachedTo.byFromDay` (+ `undatedFrom`) = the same TO
+  people filed on their first-FROM UTC day (cohort: per period TO ⊆ FROM); `byDay` keeps the TO day.
 - **Reasons, never 0**: `no_people_scope` | `not_synced` (scope never built, or every
   recording source of an end connected but never read OK) | `no_connected_source` |
   `from_step_not_recorded` | `to_step_not_recorded` (with `step` + `recordedBy`).

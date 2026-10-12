@@ -2269,6 +2269,13 @@ const LegReachResponseSchema = z.object({
   reachedFrom: LegEndSchema.optional().openapi({ description: "Present when available." }),
   reachedTo: LegEndSchema.extend({
     toBeforeFrom: z.number().int().openapi({ description: "Population members who reached TO only on a UTC day BEFORE reaching FROM: not counted." }),
+    byFromDay: z
+      .array(z.object({ day: z.string().openapi({ example: "2026-09-24" }), people: z.number().int() }))
+      .openapi({
+        description:
+          "COHORT view of the same TO people: each filed on the UTC day they FIRST reached FROM (not the day they reached TO), ascending. For any period, its TO cohort is a subset of `reachedFrom.byDay` that period's people. Sum + `undatedFrom` = `people`.",
+      }),
+    undatedFrom: z.number().int().openapi({ description: "Of `people`, those whose FROM no source dated (not in `byFromDay`)." }),
   })
     .optional()
     .openapi({ description: "Present when available. TO counted on or after the UTC day of first reaching FROM (an undated end counts)." }),

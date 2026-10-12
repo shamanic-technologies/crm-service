@@ -18,6 +18,9 @@
  * creating the contact and the booking it led to are seconds apart, in either
  * order). An undated end cannot be ordered and counts. A person who reached TO
  * only on an earlier day is `toBeforeFrom`, reported, never counted.
+ * TO people are served twice by day: `byDay` on the day they reached TO, and
+ * `byFromDay` on the day they first reached FROM (the cohort: a period's TO is
+ * then always a subset of that period's FROM).
  *
  * Steps (lead-service's bucket tokens, plus `conversation`):
  *   conversation    ← message_in (Gmail / Matrix: the person WROTE to the brand,
@@ -188,7 +191,8 @@ export type LegReach =
       reason: LegReasonCodeOrNull;
       reasons: LegReachReason[];
       reachedFrom?: LegEnd;
-      reachedTo?: LegEnd & { toBeforeFrom: number };
+      /** `byFromDay` = the same TO people filed on the UTC day they first reached FROM (cohort). */
+      reachedTo?: LegEnd & { toBeforeFrom: number; byFromDay: { day: string; people: number }[]; undatedFrom: number };
       excluded?: { contactedByUs: number; automated: number; notBusiness: number };
     };
 type LegReasonCodeOrNull = LegReachReasonCode | null;
@@ -308,7 +312,7 @@ async function countLeg(orgId: string, brandId: string, from: LegStep, to: LegSt
     )
   `;
   const day = (col: string) => sql.raw(`to_char(${col} AT TIME ZONE 'UTC', 'YYYY-MM-DD')`);
-  const [excluded, fromDays, fromSources, toDays, toSources, before] = await Promise.all([
+  const [excluded, fromDays, fromSources, toDays, toSources, before, toCohort] = await Promise.all([
     rows<{ contacted: number; automated: number; not_business: number }>(sql`${base}
       SELECT count(*) FILTER (WHERE contacted)::int AS contacted,
              count(*) FILTER (WHERE NOT contacted AND automated)::int AS automated,
@@ -325,6 +329,9 @@ async function countLeg(orgId: string, brandId: string, from: LegStep, to: LegSt
       SELECT source, count(DISTINCT pk)::int AS people FROM to_ev WHERE counts GROUP BY source ORDER BY people DESC, source`),
     rows<{ n: number }>(sql`${base}
       SELECT count(DISTINCT pk)::int AS n FROM to_ev WHERE pk NOT IN (SELECT pk FROM toers)`),
+    rows<{ day: string | null; people: number }>(sql`${base}
+      SELECT ${day("pop.from_at")} AS day, count(*)::int AS people
+      FROM toers JOIN pop ON pop.pk = toers.pk GROUP BY 1 ORDER BY 1 NULLS LAST`),
   ]);
   const end = (days: { day: string | null; people: number }[], sources: { source: string; people: number }[]): LegEnd => ({
     people: days.reduce((n, d) => n + d.people, 0),
@@ -334,7 +341,12 @@ async function countLeg(orgId: string, brandId: string, from: LegStep, to: LegSt
   });
   return {
     reachedFrom: end(fromDays, fromSources),
-    reachedTo: { ...end(toDays, toSources), toBeforeFrom: before[0].n },
+    reachedTo: {
+      ...end(toDays, toSources),
+      toBeforeFrom: before[0].n,
+      byFromDay: toCohort.filter((d) => d.day !== null).map((d) => ({ day: d.day as string, people: d.people })),
+      undatedFrom: toCohort.filter((d) => d.day === null).reduce((n, d) => n + d.people, 0),
+    },
     excluded: { contactedByUs: excluded[0].contacted, automated: excluded[0].automated, notBusiness: excluded[0].not_business },
   };
 }
