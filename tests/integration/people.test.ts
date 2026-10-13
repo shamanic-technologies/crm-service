@@ -357,8 +357,8 @@ function installFetchStub() {
           return json({
             leads: [
               // A substring hit that is NOT bob, first in lead-service's order: must be ignored.
-              { id: "lc-0", leadId: "l-0", email: "jimbob@y.com", campaignId: "camp-9", standing: { state: "customer", tag: "customer" }, disqualification: null, company: null },
-              { id: "lc-2", leadId: "l-2", email: "bob@y.com", campaignId: "camp-2", standing: { state: "engaged", tag: "engaged", signal: "click" }, disqualification: { level: "lead", offerId: null, note: "Runs a construction company, we sell to supermarkets.", source: "manual", statedByUserId: "user-1", statedAt: "2026-10-13T09:00:00.000Z" }, company: { id: "c0c0c0c0-1111-4111-8111-000000000001", key: "c0c0c0c0-1111-4111-8111-000000000001", isClient: true, signedUp: true, disqualification: { level: "company", offerId: null, note: "Not our target.", source: "manual", statedByUserId: "user-1", statedAt: "2026-10-13T10:00:00.000Z" } } },
+              { id: "lc-0", leadId: "l-0", email: "jimbob@y.com", campaignId: "camp-9", standing: { state: "customer", tag: "customer" }, disqualification: null, company: null, human: null },
+              { id: "lc-2", leadId: "l-2", email: "bob@y.com", campaignId: "camp-2", standing: { state: "engaged", tag: "engaged", signal: "click" }, disqualification: { level: "lead", offerId: null, note: "Runs a construction company, we sell to supermarkets.", source: "manual", statedByUserId: "user-1", statedAt: "2026-10-13T09:00:00.000Z" }, company: { id: "c0c0c0c0-1111-4111-8111-000000000001", key: "c0c0c0c0-1111-4111-8111-000000000001", isClient: true, signedUp: true, disqualification: { level: "company", offerId: null, note: "Not our target.", source: "manual", statedByUserId: "user-1", statedAt: "2026-10-13T10:00:00.000Z" } }, human: { optedOut: true, doNotContact: false } },
             ],
           });
         }
@@ -563,10 +563,10 @@ describe.skipIf(!RUN)("person layer", () => {
     // The whole-brand walk answers lead-service's standing for every address at once.
     process.env.PEOPLE_STANDING_WALK_MIN = "1";
     leadList = [
-      { id: "lc-0", leadId: "l-0", email: "jimbob@y.com", campaignId: "camp-9", standing: { state: "customer", tag: "customer" }, disqualification: null, company: null },
-      { id: "lc-2", leadId: "l-2", email: "bob@y.com", campaignId: "camp-2", standing: { state: "engaged", tag: "engaged", signal: "click" }, disqualification: null, company: null },
-      { id: "lc-3", leadId: "l-3", email: "Dave@w.com", campaignId: "camp-3", standing: { state: "contacted", tag: "contacted" }, disqualification: null, company: null },
-      { id: "lc-4", leadId: "l-4", email: "dave@w.com", campaignId: "camp-5", standing: { state: "unresolved", tag: "unresolved" }, disqualification: null, company: null },
+      { id: "lc-0", leadId: "l-0", email: "jimbob@y.com", campaignId: "camp-9", standing: { state: "customer", tag: "customer" }, disqualification: null, company: null, human: null },
+      { id: "lc-2", leadId: "l-2", email: "bob@y.com", campaignId: "camp-2", standing: { state: "engaged", tag: "engaged", signal: "click" }, disqualification: null, company: null, human: null },
+      { id: "lc-3", leadId: "l-3", email: "Dave@w.com", campaignId: "camp-3", standing: { state: "contacted", tag: "contacted" }, disqualification: null, company: null, human: null },
+      { id: "lc-4", leadId: "l-4", email: "dave@w.com", campaignId: "camp-5", standing: { state: "unresolved", tag: "unresolved" }, disqualification: null, company: null, human: null },
     ];
     const summary = await buildNow();
 
@@ -865,7 +865,7 @@ describe.skipIf(!RUN)("person layer", () => {
         signedUp: true,
         disqualification: { level: "company", note: "Not our target." },
       },
-      humanOptedOut: false,
+      humanTags: { optedOut: true, doNotContact: false },
     });
     const instantly = res.body.sources.find((s: { source: string }) => s.source === "instantly");
     expect(instantly).toMatchObject({ status: "ok", people: 2, presences: 2, sourceCount: 2 });

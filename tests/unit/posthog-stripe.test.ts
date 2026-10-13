@@ -224,6 +224,7 @@ describe("Stripe state", () => {
             standing: { state: "customer", tag: "customer" },
             disqualification: null,
             company: null,
+            human: null,
             leadCampaignId: "lc",
             leadId: null,
             campaignId: null,

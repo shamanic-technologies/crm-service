@@ -1895,10 +1895,16 @@ const PersonSchema = registry.register(
           description:
             "lead-service's COMPANY block for the lead the state was read from, relayed verbatim (its `company` on the lead row): what holds for the person's company as a buyer of the brand (client, signed up, Disqualified \"not our target\"). Null = no company known, or the person is not one of our leads. Never derived here.",
         }),
-      humanOptedOut: z.boolean().nullable().openapi({
-        description:
-          "The HUMAN-level opt-out as lead-service states it: true when its standing signal is `human_opt_out` (human-service carries an opt-out / do-not-contact fact on this human: it holds at every company and brand). Null = the person is not one of our leads.",
-      }),
+      humanTags: z
+        .object({
+          optedOut: z.boolean().openapi({ description: "human-service carries a live opt_out fact on this human: never write to them again, at any company, any brand." }),
+          doNotContact: z.boolean().openapi({ description: "A live do_not_contact fact on the human (e.g. a CRM's DND)." }),
+        })
+        .nullable()
+        .openapi({
+          description:
+            "lead-service's HUMAN block for the lead the state was read from, relayed verbatim (its `human` on the lead row): what holds for the human wherever they work, whichever evidence decided the state (an unsubscribe under this brand reads state opted_out AND optedOut true). Null = the person is not one of our leads, or lead-service could not resolve the standing (never read as false). Never derived here.",
+        }),
       presences: z.array(PersonPresenceSchema),
       mergeEvidence: z.array(z.unknown()).openapi({
         description: "The records that tied two keys of this person together (a Google / GoHighLevel / Stripe / CSV contact holding both, a CONFIDENT lead-service pairing: signal, judgment at or above its pair threshold, or human acceptance). Empty when the person rests on a single key.",

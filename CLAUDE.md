@@ -868,11 +868,17 @@ owner had written to. A recorded fact, never an address-shape guess.
   carries lead-service's `level` (`lead` = this person at this company, else
   `company` = "not our target"; the lead's own answers first); the row's
   `company` block (`{id, key, isClient, signedUp, disqualification}`, null = no
-  company) rides in `stateDetail.company`, served as `companyTags`; the HUMAN
-  opt-out is lead-service's standing signal `human_opt_out`, served as
-  `humanOptedOut` (null when not a lead). All verbatim, never derived here; a
-  cached answer missing `company` or the mark's `level` is re-asked
+  company) rides in `stateDetail.company`, served as `companyTags`; the row's
+  `human` block (`{optedOut, doNotContact}`, v0.83.67, whichever rung decided
+  the standing; null = standing unresolved, never false) rides in
+  `stateDetail.human`, served as `humanTags`. All verbatim, never derived here;
+  a cached answer missing `company`, `human` or the mark's `level` is re-asked
   (`cachedAnswerIsCurrent`), an absent one fails the address loud.
+  ⚠️ Invalidating the cache re-asks EVERY address in one walk of lead-service's
+  list: a lead-service deploy (or its cold first pages) mid-walk makes the
+  whole brand `unavailable` until the next build (2026-10-13: 8,775 people for
+  ~3 min). Ship it when lead-service is settled, then force one rebuild
+  (`POST /internal/people/sync {scopeId}`) and check the `unavailable` count.
 - **Materialized, rebuilt whole.** `people_scopes` (one per (org, brand),
   carries `created_by_user_id` for the cron's org run) → `people` replaced in
   ONE transaction per build. `source_reads` keeps per source `not_connected |

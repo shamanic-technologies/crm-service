@@ -146,6 +146,7 @@ describe("resolvePersonState precedence", () => {
           standing: { state: "sales_interest", tag: "sales_interest", signal: "positive_reply" },
           disqualification: null,
           company: null,
+          human: null,
           leadCampaignId: "lc1",
           leadId: "l1",
           campaignId: "c1",
@@ -168,6 +169,7 @@ describe("resolvePersonState precedence", () => {
           standing: { state: "sales_interest", tag: "website_visit", signal: "click" },
           disqualification: null,
           company: null,
+          human: null,
           leadCampaignId: "lc1",
           leadId: "l1",
           campaignId: "c1",
@@ -192,6 +194,7 @@ describe("resolvePersonState precedence", () => {
           standing: { state: "sales_interest", tag: "sales_interest", signal: "positive_reply" },
           disqualification: mark,
           company,
+          human: { optedOut: true, doNotContact: false },
           leadCampaignId: "lc1",
           leadId: "l1",
           campaignId: "c1",
@@ -202,6 +205,7 @@ describe("resolvePersonState precedence", () => {
     expect(s.state).toBe("sales_interest");
     expect((s.stateDetail as { disqualification: unknown }).disqualification).toEqual(mark);
     expect((s.stateDetail as { company: unknown }).company).toEqual(company);
+    expect((s.stateDetail as { human: unknown }).human).toEqual({ optedOut: true, doNotContact: false });
   });
 
   it("a failed lead-service read is unavailable, never a guess from another source", () => {
@@ -310,6 +314,7 @@ describe("standingFromRows: lead-service's Disqualified mark", () => {
     campaignId: "c1",
     standing: { state: "sales_interest", tag: "sales_interest" },
     company: null,
+    human: null,
     ...extra,
   });
 
@@ -342,6 +347,7 @@ describe("standingFromRows: lead-service's company block (tags at their level)",
     campaignId: "c1",
     standing: { state: "customer", tag: "customer" },
     disqualification: null,
+    human: null,
     ...extra,
   });
   const notOurTarget = { level: "company", offerId: null, note: "Not our target.", source: "manual", statedByUserId: "u1", statedAt: "2026-10-13T09:00:00.000Z" };
@@ -365,14 +371,45 @@ describe("standingFromRows: lead-service's company block (tags at their level)",
   });
 });
 
+describe("standingFromRows: lead-service's human block (opted out wherever they work)", () => {
+  const row = (extra: Record<string, unknown>) => ({
+    id: "lc1",
+    leadId: "l1",
+    email: "hello@obra.cam",
+    campaignId: "c1",
+    // An unsubscribe under this brand decided the standing; the human block still says opted out.
+    standing: { state: "opted_out", tag: "opted_out", signal: "unsubscribed" },
+    disqualification: null,
+    company: null,
+    ...extra,
+  });
+
+  it("relays optedOut / doNotContact verbatim, whichever rung decided the standing", () => {
+    expect(standingFromRows([row({ human: { optedOut: true, doNotContact: false } })])).toMatchObject({
+      found: true,
+      human: { optedOut: true, doNotContact: false },
+    });
+  });
+
+  it("an explicit null (standing unresolved) is relayed as null, never false", () => {
+    expect(standingFromRows([row({ human: null })])).toMatchObject({ found: true, human: null });
+  });
+
+  it("an absent or unreadable block fails loud", () => {
+    expect(() => standingFromRows([row({})])).toThrow(/carries no human/);
+    expect(() => standingFromRows([row({ human: { optedOut: true } })])).toThrow(/unreadable human/);
+  });
+});
+
 describe("cachedAnswerIsCurrent: an older lead-service answer is re-asked", () => {
-  const current = { standing: { tag: "customer" }, disqualification: null, company: null };
+  const current = { standing: { tag: "customer" }, disqualification: null, company: null, human: null };
   it("a current answer is reused", () => {
     expect(cachedAnswerIsCurrent(current)).toBe(true);
     expect(cachedAnswerIsCurrent({ ...current, disqualification: { level: "lead" } })).toBe(true);
   });
   it("no company block, or a mark with no level, is re-asked (never read as no)", () => {
     expect(cachedAnswerIsCurrent({ standing: { tag: "customer" }, disqualification: null })).toBe(false);
+    expect(cachedAnswerIsCurrent({ standing: { tag: "customer" }, disqualification: null, company: null })).toBe(false);
     expect(cachedAnswerIsCurrent({ ...current, disqualification: { note: "x" } })).toBe(false);
     expect(cachedAnswerIsCurrent({ ...current, standing: { state: "customer" } })).toBe(false);
   });
