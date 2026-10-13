@@ -916,7 +916,9 @@ lists the person's sends. No cost.
   the sending login, else one fresh `create_dm` (used only if ANOTHER room that passes), else refused `wrong_room`,
   logged `WRONG ROOM`. Why: the bridge gave two portals ONE room in a mass resync (room v12 ids hash the create
   event); `resolve_identifier` kept answering the owner's number's room while the bridge delivered it to a friend.
-  3 such rooms found on 2026-10-13, repaired bridge-side (portal `mxid` nulled, bridge restarted).
+  4 such rooms found on 2026-10-13 (a bridge restart's resync made one more), repaired bridge-side (portal
+  `mxid` nulled, bridge restarted); the homeserver now creates room v11 (random ids,
+  `CONTINUWUITY_DEFAULT_ROOM_VERSION`, `docker-compose.matrix.yml`, project `-p matrix`).
 - Idempotent: `whatsapp_sends` UNIQUE (org, brand, key); sent → same answer `duplicate: true`;
   refused → same refusal; failed or stuck `sending` > 2 min → retried.
 - Into the thread: WhatsApp names counterparts by opaque LID ghosts (all 514 prod WhatsApp
