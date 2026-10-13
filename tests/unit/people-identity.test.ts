@@ -7,7 +7,7 @@ import {
   type Presence,
 } from "../../src/lib/people/identity.js";
 import { resolvePersonState } from "../../src/lib/people/state.js";
-import { pairingEvidence, possibleLeadOf, type LeadPairingRow } from "../../src/lib/people/sources.js";
+import { pairingEvidence, possibleLeadOf, standingFromRows, type LeadPairingRow } from "../../src/lib/people/sources.js";
 import { leadAddressesFirst, type LeadObservation } from "../../src/lib/people/state.js";
 
 function presence(over: Partial<Presence> & Pick<Presence, "source" | "sourceRef">): Presence {
@@ -144,6 +144,7 @@ describe("resolvePersonState precedence", () => {
           found: true,
           email: "a@x.com",
           standing: { state: "sales_interest", tag: "sales_interest", signal: "positive_reply" },
+          disqualification: null,
           leadCampaignId: "lc1",
           leadId: "l1",
           campaignId: "c1",
@@ -164,6 +165,7 @@ describe("resolvePersonState precedence", () => {
           found: true,
           email: "norman@x.com",
           standing: { state: "sales_interest", tag: "website_visit", signal: "click" },
+          disqualification: null,
           leadCampaignId: "lc1",
           leadId: "l1",
           campaignId: "c1",
@@ -174,6 +176,27 @@ describe("resolvePersonState precedence", () => {
     expect(s.state).toBe("website_visit");
     expect(s.stateSource).toBe("lead_service");
     expect((s.stateDetail as { standing: { state: string } }).standing.state).toBe("sales_interest");
+  });
+
+  it("lead-service's Disqualified mark rides beside the state, verbatim; the state is unchanged", () => {
+    const mark = { offerId: null, note: "Runs a construction company.", source: "manual", statedByUserId: "u1", statedAt: "2026-10-13T09:00:00.000Z" };
+    const s = resolvePersonState({
+      ...empty,
+      leadObservations: [
+        {
+          found: true,
+          email: "hello@obra.cam",
+          standing: { state: "sales_interest", tag: "sales_interest", signal: "positive_reply" },
+          disqualification: mark,
+          leadCampaignId: "lc1",
+          leadId: "l1",
+          campaignId: "c1",
+          campaignIds: ["c1"],
+        },
+      ],
+    });
+    expect(s.state).toBe("sales_interest");
+    expect((s.stateDetail as { disqualification: unknown }).disqualification).toEqual(mark);
   });
 
   it("a failed lead-service read is unavailable, never a guess from another source", () => {
@@ -265,5 +288,32 @@ describe("leadAddressesFirst: a lead shows under the address lead-service serves
       "drbricejackson@gmail.com",
     ]);
     expect(leadAddressesFirst(["b@x.com", "a@x.com"], new Map())).toEqual(["b@x.com", "a@x.com"]);
+  });
+});
+
+describe("standingFromRows: lead-service's Disqualified mark", () => {
+  const row = (extra: Record<string, unknown>) => ({
+    id: "lc1",
+    leadId: "l1",
+    email: "hello@obra.cam",
+    campaignId: "c1",
+    standing: { state: "sales_interest", tag: "sales_interest" },
+    ...extra,
+  });
+
+  it("relays the mark and its note verbatim", () => {
+    const mark = { offerId: "o1", note: "Wrong industry.", source: "reply", statedByUserId: null, statedAt: "2026-10-13T09:00:00.000Z" };
+    const a = standingFromRows([row({ disqualification: mark })]);
+    expect(a).toMatchObject({ found: true, disqualification: mark, standing: { tag: "sales_interest" } });
+  });
+
+  it("an explicit null is not disqualified", () => {
+    expect(standingFromRows([row({ disqualification: null })])).toMatchObject({ found: true, disqualification: null });
+  });
+
+  it("an absent or unreadable mark fails loud, never read as not disqualified", () => {
+    expect(() => standingFromRows([row({})])).toThrow(/carries no disqualification/);
+    expect(() => standingFromRows([row({ disqualification: { note: "x" } })])).toThrow(/unreadable disqualification/);
+    expect(() => standingFromRows([row({ disqualification: "yes" })])).toThrow(/unreadable disqualification/);
   });
 });

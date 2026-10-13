@@ -13,6 +13,7 @@ import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { ensureScope, runPeopleBuildPass, runScopeBuild, type BuildSummary } from "../lib/people/build.js";
 import { PEOPLE_SOURCES, type Presence } from "../lib/people/identity.js";
 import type { PossibleLead } from "../lib/people/sources.js";
+import type { LeadDisqualification } from "../lib/people/state.js";
 import type { PersonRelevance } from "../lib/people/relevance.js";
 import { findPerson, readTimeline } from "../lib/people/timeline.js";
 import { readFacts } from "../lib/people/facts.js";
@@ -75,6 +76,17 @@ function presenceView(p: Presence) {
   };
 }
 
+/**
+ * lead-service's Disqualified mark for the lead the person's state was read from
+ * (`stateDetail.disqualification`, relayed verbatim at build). Null when the
+ * person is not one of our leads, or lead-service says not disqualified.
+ */
+function disqualificationOf(row: typeof people.$inferSelect): LeadDisqualification | null {
+  if (row.stateSource !== "lead_service") return null;
+  const d = (row.stateDetail as { disqualification?: LeadDisqualification | null } | null)?.disqualification;
+  return d ?? null;
+}
+
 function personView(row: typeof people.$inferSelect) {
   return {
     // Opaque, stable across rebuilds, no personal data: the id to put in a URL.
@@ -91,6 +103,8 @@ function personView(row: typeof people.$inferSelect) {
     state: row.state,
     stateSource: row.stateSource,
     stateDetail: row.stateDetail as Record<string, unknown> | null,
+    // lead-service's Disqualified mark, beside the state (never instead of it).
+    disqualification: disqualificationOf(row),
     presences: (row.presences as Presence[]).map(presenceView),
     mergeEvidence: row.mergeEvidence as unknown[],
     automated: row.automated,
