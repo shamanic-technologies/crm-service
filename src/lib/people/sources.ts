@@ -603,6 +603,7 @@ export async function readAuthUsers(orgId: string, brandId: string, provider: "c
       phones?: string[];
       phoneSources?: { phone: string; via: string }[];
       lastActiveAt?: string | null;
+      signedUp?: boolean;
     };
     return {
       source: provider,
@@ -617,7 +618,8 @@ export async function readAuthUsers(orgId: string, brandId: string, provider: "c
       messageCount: null,
       inboundCount: null,
       outboundCount: null,
-      detail: { contactId: r.id, externalId: r.externalId, phoneSources: raw.phoneSources ?? [] },
+      // signedUp false = a teammate invited into an organization someone else created (auth/provider.ts isSignup).
+      detail: { contactId: r.id, externalId: r.externalId, phoneSources: raw.phoneSources ?? [], signedUp: raw.signedUp !== false },
     };
   });
   return { ...base, status: "ok", presences, sourceCount: rows.length, error: health.error };

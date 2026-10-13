@@ -140,9 +140,6 @@ async function seedBrand(org: string, brand: string, tag: string) {
     INSERT INTO api_calls (org_id, brand_id, call_id, channel, caller_user_id, email, method, path, status, duration_ms, called_at)
     VALUES (${org}, ${brand}, gen_random_uuid()::text, 'api', gen_random_uuid(), 'a@b.co', 'GET', '/v1/me', 200, 5, now())`);
   await db.execute(sql`
-    INSERT INTO platform_signup_facts (fact_id, seq, org_id, brand_id, type, payload)
-    VALUES (gen_random_uuid()::text, -floor(random() * 1e12)::bigint, ${org}, ${brand}, 'signup', '{}')`);
-  await db.execute(sql`
     INSERT INTO human_link_statements (org_id, brand_id, kind, ref, human_ids, stated_org_id)
     VALUES (${org}, ${brand}, 'stated_merge', gen_random_uuid()::text, '[]', ${org})`);
   await db.execute(sql`

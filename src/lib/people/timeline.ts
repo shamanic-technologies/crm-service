@@ -266,12 +266,15 @@ export async function entryItems(source: keyof typeof ENTRY, presences: Presence
       leadSource: contacts.leadSource,
       originMedium: contacts.originMedium,
       contactType: contacts.contactType,
+      rawAttributes: contacts.rawAttributes,
     })
     .from(contacts)
     .where(and(inArray(contacts.id, ids), eq(contacts.source, source)));
   const { step, dateBasis, channel } = ENTRY[source];
   return rows
     .filter((r) => r.createdAt !== null)
+    // An invited teammate's account is no signup (auth/provider.ts isSignup).
+    .filter((r) => !(source === "clerk" && (r.rawAttributes as { signedUp?: boolean } | null)?.signedUp === false))
     .map((r) =>
       entryEvent(
         source,

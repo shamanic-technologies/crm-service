@@ -4,6 +4,7 @@ import request from "supertest";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
 import { authConnections, authRawRecords, contacts, people, peopleFacts } from "../../src/db/schema.js";
+import { isSignup } from "../../src/lib/auth/provider.js";
 import { ensureScope, runScopeBuild } from "../../src/lib/people/build.js";
 import { rebuildAuthFromBronze, runAuthSyncPass } from "../../src/lib/auth/sync.js";
 import { runPosthogSyncPass } from "../../src/lib/posthog/sync.js";
@@ -41,6 +42,17 @@ let keys: Record<string, string> = {};
 let clerkRefuses = false;
 let calls: string[] = [];
 let USERS: Record<string, unknown>[] = [];
+let MEMBERSHIPS: Record<string, unknown>[] = [];
+
+/** A Clerk membership of `userId` in org `orgId`, created by `createdBy`. */
+const membership = (id: string, userId: string, orgId: string, createdBy: string | null) => ({
+  object: "organization_membership",
+  id,
+  role: "org:admin",
+  private_metadata: { secret: "never-stored" },
+  organization: { id: orgId, name: orgId, created_by: createdBy, private_metadata: { secret: "never-stored" } },
+  public_user_data: { user_id: userId, identifier: `${userId}@x.com` },
+});
 
 const ann = {
   id: "user_ann",
@@ -153,6 +165,11 @@ function installFetchStub() {
         return json({ errors: [{ message: "Invalid authentication", long_message: "The provided secret key is invalid.", code: "authentication_invalid" }] }, 401);
       }
       if (url.pathname === "/v1/users/count") return json({ object: "total_count", total_count: USERS.length });
+      if (url.pathname === "/v1/organization_memberships") {
+        const offset = Number(url.searchParams.get("offset") ?? 0);
+        const limit = Number(url.searchParams.get("limit"));
+        return json({ data: MEMBERSHIPS.slice(offset, offset + limit), total_count: MEMBERSHIPS.length });
+      }
       if (url.pathname === "/v1/users") {
         const offset = Number(url.searchParams.get("offset"));
         const limit = Number(url.searchParams.get("limit"));
@@ -213,6 +230,7 @@ describe.skipIf(!RUN)("Clerk auth provider", () => {
     keys = {};
     clerkRefuses = false;
     USERS = [ann, bob];
+    MEMBERSHIPS = [];
     installFetchStub();
     await wipe();
   });
@@ -342,5 +360,96 @@ describe.skipIf(!RUN)("Clerk auth provider", () => {
     const list = await asOrg(request(app()).get(`/orgs/people?brandId=${BRAND}`));
     const clerkSource = list.body.sources.find((s: { source: string }) => s.source === "clerk");
     expect(clerkSource).toMatchObject({ status: "ok", people: 2, sourceCount: 2 });
+  });
+  it("a teammate invited into an organization someone else created is no signup; leaving it makes them one", async () => {
+    // Ann created org_a and invited Bob into it.
+    MEMBERSHIPS = [membership("mem_ann", "user_ann", "org_a", "user_ann"), membership("mem_bob", "user_bob", "org_a", "user_ann")];
+    await connectClerk();
+    const pass = await syncMine();
+    expect(pass.results[0].memberships).toMatchObject({ listed: 2, providerCount: 2, complete: true, removed: 0 });
+    const raw = await db
+      .select()
+      .from(authRawRecords)
+      .where(and(eq(authRawRecords.brandId, BRAND), eq(authRawRecords.kind, "membership")));
+    expect(raw).toHaveLength(2);
+    expect(JSON.stringify(raw)).not.toContain("never-stored");
+
+    const { scope } = await ensureScope(ORG, BRAND, USER);
+    expect((await runScopeBuild(scope)).ok).toBe(true);
+    const signups = async () =>
+      (
+        await db
+          .select()
+          .from(peopleFacts)
+          .where(and(eq(peopleFacts.brandId, BRAND), eq(peopleFacts.type, "signup"), eq(peopleFacts.live, true)))
+      ).map((f) => f.sourceRef);
+    expect(await signups()).toEqual(["user_ann"]);
+    // Bob is still a person (his account is real), only not a signup.
+    const bobRow = (await db.select().from(people).where(eq(people.brandId, BRAND))).find((p) => p.personKey === "email:bob@y.com");
+    expect(bobRow).toBeTruthy();
+
+    // Bob leaves org_a: no membership left, he is a signup of his own.
+    MEMBERSHIPS = [MEMBERSHIPS[0]];
+    const again = await syncMine();
+    expect(again.results[0].memberships).toMatchObject({ listed: 1, removed: 1 });
+    expect((await runScopeBuild(scope)).ok).toBe(true);
+    expect((await signups()).sort()).toEqual(["user_ann", "user_bob"]);
+  });
+
+  it("an invited user who once had a signup fact gets it withdrawn", async () => {
+    await connectClerk();
+    await syncMine();
+    const { scope } = await ensureScope(ORG, BRAND, USER);
+    await runScopeBuild(scope);
+    MEMBERSHIPS = [membership("mem_bob", "user_bob", "org_a", "user_ann")];
+    await syncMine();
+    await runScopeBuild(scope);
+    const withdrawn = await db
+      .select()
+      .from(peopleFacts)
+      .where(and(eq(peopleFacts.brandId, BRAND), eq(peopleFacts.type, "withdrawn")));
+    expect(withdrawn.map((w) => [w.sourceRef, (w.payload as { reason: string }).reason])).toEqual([["user_bob", "vendor_record_gone"]]);
+  });
+
+  it("a live fact of a retired family is withdrawn as source_retired", async () => {
+    await connectClerk();
+    await syncMine();
+    const { scope } = await ensureScope(ORG, BRAND, USER);
+    await runScopeBuild(scope);
+    const [ann] = await db
+      .select()
+      .from(peopleFacts)
+      .where(and(eq(peopleFacts.brandId, BRAND), eq(peopleFacts.sourceRef, "user_ann")));
+    await db.insert(peopleFacts).values({
+      ...ann,
+      factId: undefined,
+      feedSeq: undefined,
+      source: "distribute_platform",
+      sourceRef: "fact-1",
+      naturalKey: "distribute_platform|signup|fact-1",
+      family: "platform_signup",
+    } as typeof peopleFacts.$inferInsert);
+    await runScopeBuild(scope);
+    const w = await db
+      .select()
+      .from(peopleFacts)
+      .where(and(eq(peopleFacts.brandId, BRAND), eq(peopleFacts.type, "withdrawn")));
+    expect(w.map((x) => [x.source, (x.payload as { reason: string }).reason])).toEqual([["distribute_platform", "source_retired"]]);
+    // Re-building withdraws nothing twice.
+    await runScopeBuild(scope);
+    expect(
+      await db.select().from(peopleFacts).where(and(eq(peopleFacts.brandId, BRAND), eq(peopleFacts.type, "withdrawn"))),
+    ).toHaveLength(1);
+  });
+});
+
+describe("isSignup", () => {
+  it("is a signup unless every organization the user belongs to was created by someone else", () => {
+    expect(isSignup("u", [])).toBe(true);
+    expect(isSignup("u", [{ orgCreatedBy: "u" }])).toBe(true);
+    expect(isSignup("u", [{ orgCreatedBy: "v" }, { orgCreatedBy: "u" }])).toBe(true);
+    expect(isSignup("u", [{ orgCreatedBy: null }])).toBe(true);
+    expect(isSignup("u", [{ orgCreatedBy: "v" }])).toBe(false);
+    expect(isSignup("u", [{ orgCreatedBy: "v" }, { orgCreatedBy: "w" }])).toBe(false);
   });
 });

@@ -32,7 +32,7 @@
  *   conversation    ← message_in (Gmail / Matrix: the person WROTE to the brand,
  *                     and the people layer kept the thread as business)
  *   website_visit   ← website_visit (PostHog)
- *   signup          ← signup (PostHog, auth providers; the platform itself, client-service, for a brand whose signups it states)
+ *   signup          ← signup (PostHog, auth providers)
  *   form_submission ← form_submitted (GoHighLevel): a submission of a lead
  *                     form, or a contact a form / survey created (`form_origin`);
  *                     a submission of a calendar's own booking form is the
@@ -95,7 +95,7 @@ export const STEP_SOURCES: Record<LegStep, readonly string[]> = {
   lead_found: ["gohighlevel", "csv", "gmail", "matrix", "posthog", "stripe", ...AUTH_PROVIDER_NAMES],
   conversation: ["gmail", "matrix"],
   website_visit: ["posthog"],
-  signup: ["posthog", ...AUTH_PROVIDER_NAMES, "distribute_platform"],
+  signup: ["posthog", ...AUTH_PROVIDER_NAMES],
   form_submission: ["gohighlevel"],
   meeting_booked: ["gohighlevel"],
   meeting_attended: ["gohighlevel"],

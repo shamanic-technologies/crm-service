@@ -253,6 +253,13 @@
       "when": 1791850000000,
       "tag": "0035_human_identity",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1791850010000,
+      "tag": "0036_drop_platform_signup_facts",
+      "breakpoints": true
     }
   ]
 }

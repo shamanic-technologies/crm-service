@@ -472,7 +472,8 @@ export function peoplePoolClauses(orgId: string, brandId: string, filter: People
     },
   ];
   if (filter.signedUp !== undefined) {
-    const signed = sql`EXISTS (SELECT 1 FROM jsonb_array_elements(p.presences) pr WHERE pr->>'source' IN (${auth}))`;
+    // An invited teammate (`detail.signedUp = false`) holds an account but never signed up.
+    const signed = sql`EXISTS (SELECT 1 FROM jsonb_array_elements(p.presences) pr WHERE pr->>'source' IN (${auth}) AND COALESCE(pr->'detail'->>'signedUp', 'true') <> 'false')`;
     parts.push(
       filter.signedUp
         ? { code: "signed_up", reason: "Not signed up to the product", sql: signed }
