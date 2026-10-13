@@ -143,6 +143,12 @@ async function seedBrand(org: string, brand: string, tag: string) {
     INSERT INTO platform_signup_facts (fact_id, seq, org_id, brand_id, type, payload)
     VALUES (gen_random_uuid()::text, -floor(random() * 1e12)::bigint, ${org}, ${brand}, 'signup', '{}')`);
   await db.execute(sql`
+    INSERT INTO human_link_statements (org_id, brand_id, kind, ref, human_ids, stated_org_id)
+    VALUES (${org}, ${brand}, 'stated_merge', gen_random_uuid()::text, '[]', ${org})`);
+  await db.execute(sql`
+    INSERT INTO human_fact_statements (org_id, brand_id, subject, kind, human_id, fact_id)
+    VALUES (${org}, ${brand}, 'csv:' || gen_random_uuid()::text, 'opt_out', gen_random_uuid(), gen_random_uuid())`);
+  await db.execute(sql`
     INSERT INTO whatsapp_sends (org_id, brand_id, idempotency_key, email, phone, text, status)
     VALUES (${org}, ${brand}, gen_random_uuid()::text, 'a@b.co', '+33600000001', 'hi', 'sent')`);
 }

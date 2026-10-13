@@ -12,6 +12,7 @@ import {
   bigserial,
   uniqueIndex,
   index,
+  primaryKey,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -1027,6 +1028,11 @@ export const people = pgTable(
     // Null only on a row built before the column existed.
     personId: uuid("person_id"),
 
+    // The fleet-wide human this person IS (human-service, in this org's view):
+    // human-service decides "same human?", see people/humans.ts. Null when the
+    // person holds no email / phone, or human-service has not answered yet.
+    humanId: uuid("human_id"),
+
     builtAt: timestamp("built_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
@@ -1465,6 +1471,9 @@ export const peopleFacts = pgTable(
     sourceRef: text("source_ref").notNull(),
     payload: jsonb("payload").notNull(),
     withdrawnOf: uuid("withdrawn_of"),
+    // The fleet-wide human (human-service) the fact's person was at emission.
+    // Written once; a person whose human changes gets its facts re-stated.
+    humanId: uuid("human_id"),
 
     // Bookkeeping (never served). Null on crm meta facts (withdrawn, merged, split).
     naturalKey: text("natural_key"),
@@ -2055,3 +2064,94 @@ export type CopilotMessage = typeof copilotMessages.$inferSelect;
 export type ApiCall = typeof apiCalls.$inferSelect;
 export type ConversationPing = typeof conversationPings.$inferSelect;
 export type PlatformSignupFact = typeof platformSignupFacts.$inferSelect;
+
+/**
+ * HUMAN IDENTITY (human-service is the ONLY service deciding "same human?",
+ * people/humans.ts). Which fleet human each email / phone key is, in the org's
+ * view. A cache of human-service's answer, refreshed when its event feed says a
+ * human merged or split; never a decision of ours.
+ */
+export const humanKeys = pgTable(
+  "human_keys",
+  {
+    orgId: uuid("org_id").notNull(),
+    identityKey: text("identity_key").notNull(),
+    humanId: uuid("human_id").notNull(),
+    atomicHumanId: uuid("atomic_human_id"),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.orgId, table.identityKey] }),
+    index("human_keys_human_idx").on(table.humanId),
+    index("human_keys_atomic_idx").on(table.atomicHumanId),
+  ],
+);
+
+/** One row per key set already stated to human-service as ONE contact (resolve, create). */
+export const humanResolutions = pgTable(
+  "human_resolutions",
+  {
+    orgId: uuid("org_id").notNull(),
+    keysHash: text("keys_hash").notNull(),
+    keys: jsonb("keys").notNull(),
+    humanId: uuid("human_id"),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.orgId, table.keysHash] })],
+);
+
+/**
+ * A JUDGMENT merge (a person said two people are one, a lead-service pairing)
+ * stated to human-service as an ORG-scoped `same` link. Withdrawn when its
+ * judgment goes (a merge undone, a pairing gone).
+ */
+export const humanLinkStatements = pgTable(
+  "human_link_statements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    kind: text("kind").notNull(),
+    ref: text("ref").notNull(),
+    humanIds: jsonb("human_ids").notNull(),
+    linkId: uuid("link_id"),
+    // The org the link was stated FOR in human-service. A brand transfer moves
+    // `org_id`, never this: a statement whose org differs is stated again.
+    statedOrgId: uuid("stated_org_id").notNull(),
+    statedAt: timestamp("stated_at", { withTimezone: true }).notNull().defaultNow(),
+    withdrawnAt: timestamp("withdrawn_at", { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex("human_link_statements_live_uq")
+      .on(table.orgId, table.brandId, table.kind, table.ref)
+      .where(sql`${table.withdrawnAt} IS NULL`),
+  ],
+);
+
+/** A do-not-contact mark a brand's tool states (CSV opt-out, GoHighLevel DND), stated on the human. */
+export const humanFactStatements = pgTable(
+  "human_fact_statements",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    subject: text("subject").notNull(),
+    kind: text("kind").notNull(),
+    humanId: uuid("human_id").notNull(),
+    factId: uuid("fact_id").notNull(),
+    statedAt: timestamp("stated_at", { withTimezone: true }).notNull().defaultNow(),
+    withdrawnAt: timestamp("withdrawn_at", { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex("human_fact_statements_live_uq")
+      .on(table.orgId, table.brandId, table.subject, table.kind)
+      .where(sql`${table.withdrawnAt} IS NULL`),
+  ],
+);
+
+/** Where this service is in human-service's event feed (one row). */
+export const humanEventCursor = pgTable("human_event_cursor", {
+  id: text("id").primaryKey(),
+  after: bigint("after", { mode: "number" }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});

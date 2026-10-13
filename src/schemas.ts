@@ -217,6 +217,7 @@ export const ServeNextResponseSchema = registry.register(
         ContactSchema.extend({
           pool: z.literal("people").optional().openapi({ description: "Present on a people-pool serve." }),
           personId: z.string().uuid().nullable().optional().openapi({ description: "People pool: the person's opaque id." }),
+          humanId: z.string().uuid().nullable().optional().openapi({ description: "People pool: the fleet-wide human (human-service) the person IS; null when not known yet." }),
           emails: z.array(z.string()).optional().openapi({ description: "People pool: every address of the person, lead address first." }),
           phones: z.array(z.string()).optional().openapi({ description: "People pool: every phone of the person, international form." }),
           phoneSources: z
@@ -1842,6 +1843,7 @@ const PersonSchema = registry.register(
           "retired and still opens the merged person. Split: the part holding most of the old id's keys keeps it, the other gets a new id. " +
           "Null only on a row built before ids existed (gone at the next build). Pass it to GET /orgs/people/timeline as `personId`.",
       }),
+      humanId: z.string().uuid().nullable().openapi({ description: "The fleet-wide human (human-service: ONE id per real human across every org and service; it alone decides same-human) this person IS, in this org's view. Null when the person holds no email / phone, or human-service has not answered yet." }),
       personKey: z.string().openapi({
         example: "email:alice@acme.com",
         description:
@@ -2479,6 +2481,12 @@ export const PeopleFactSchema = registry.register(
     sourceRef: z.string().openapi({ description: "The vendor's own record id (appointment, opportunity, submission, contact, message, charge...)." }),
     payload: z.record(z.string(), z.unknown()).openapi({ description: "Type-specific, see crm-service CLAUDE.md (people fact feed)." }),
     withdrawnOf: z.string().uuid().optional().openapi({ description: "type=withdrawn only: the factId it withdraws." }),
+    humanId: z.string().uuid().nullable().openapi({
+      description:
+        "The fleet-wide human (human-service) the fact's person was at emission; pair a CRM contact with a lead by it. Null on a fact emitted " +
+        "before the person's human was known: once known (or changed by a merge / split in human-service), every live fact of the person is " +
+        "re-stated (`withdrawn` reason `human_identified` + the same fact carrying humanId).",
+    }),
   }),
 );
 

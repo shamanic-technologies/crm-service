@@ -91,6 +91,9 @@ function personView(row: typeof people.$inferSelect) {
   return {
     // Opaque, stable across rebuilds, no personal data: the id to put in a URL.
     personId: row.personId,
+    // The fleet-wide human (human-service) this person IS; null when no email /
+    // phone, or human-service has not answered yet (people/humans.ts).
+    humanId: row.humanId ?? null,
     personKey: row.personKey,
     identityKeys: row.identityKeys as string[],
     displayName: row.displayName,

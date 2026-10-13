@@ -10,6 +10,11 @@
  * it was stated. Nothing else merges: no name matching, no domain matching, no
  * model. Unmerged stays two people.
  *
+ * "Same HUMAN?" is human-service's call (people/humans.ts): every record is
+ * stated to it, a judgment (stated merge, lead-service pairing) becomes an
+ * org-scoped link there, and its answer comes back as `human_identity`
+ * evidence. A judgment ties keys HERE only while human-service does not hold it.
+ *
  * A third key, `uid:<id>`, is the brand's OWN user id: the auth provider's
  * (Clerk) user id, and every PostHog distinct id of a person (the brand's
  * product names its users to PostHog by that same id). Two tools of one brand
@@ -73,6 +78,8 @@ export const EVIDENCE_KINDS = [
   "stripe_customer",
   "whatsapp_send",
   "stated_merge",
+  // human-service says these keys are ONE human (people/humans.ts).
+  "human_identity",
 ] as const;
 export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
 
@@ -86,6 +93,9 @@ export interface Evidence {
   phones: string[];
   /** Identity keys tied verbatim (a stated merge names any key: `matrix:<id>`, `uid:<id>`). */
   keys?: string[];
+  /** A JUDGMENT (stated merge, lead-service pairing): the two records it says are one, and who judged. */
+  sides?: [{ emails: string[]; phones: string[] }, { emails: string[]; phones: string[] }];
+  judgedBy?: string;
 }
 
 /** The keys a record states. A record with neither email nor phone gets its own. */

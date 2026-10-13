@@ -817,6 +817,23 @@ owner had written to. A recorded fact, never an address-shape guess.
   aliases, rebuilds: two people with their old ids. Idempotent both ways; refusals 404
   `person_not_found`, 422 `different_brand` | `same_person`, 409 `already_one_person`,
   404 `merge_not_found`. `GET /orgs/people/merges?brandId=` lists with `applied`.
+- **"Same HUMAN?" is human-service's call** (`lib/people/humans.ts`, LEAD-REFONTE-1013, human-service
+  `/internal/human-identities/*`). Each build states, before clustering: every record's email + phone
+  keys TOGETHER (`resolve`, create; proof = fleet-wide merge there), cached per key set in
+  `human_resolutions` (re-stated never); every judgment (`stated_merge`, confident `lead_pairing`) as an
+  ORG-scoped `same` link (`human_link_statements`, withdrawn when the merge is undone / the pairing goes,
+  only for a kind READ OK this build); CSV opt-out / denied consent = `opt_out`, GoHighLevel DND =
+  `do_not_contact` facts on the human (`human_fact_statements`, withdrawn when the contact is still there
+  unmarked; a disconnect withdraws nothing). Its answer (key -> humanId, org view) is `human_keys`,
+  refreshed from its event feed (`human_event_cursor`, linked / separated / link_withdrawn) and comes
+  back as `human_identity` evidence: our people follow its merges / splits. A judgment it holds no longer
+  ties keys here (still attached to the person, `mergeEvidence[].heldBy`). Fail-soft: human-service down
+  or a side with no email / phone (Matrix-only, `uid:`) = the judgment merges locally as before
+  (`judgmentsLocal`). Budget `HUMAN_RESOLVE_BUDGET_MS` (300 s) per build, the rest next build.
+  Served: `humanId` on `GET /orgs/people`, the timeline person, the people-pool serve, and every fact
+  (`people_facts.human_id`, written once; a person whose human becomes known / changes gets its live
+  facts re-stated: `withdrawn` reason `human_identified` + the same fact with humanId). Build summary
+  `humanIdentity` counts people with / without. No stop-request detector exists yet (only tool marks).
 - **`person_key`** = smallest email key, else phone, else `<source>:<ref>`.
   Any identity key opens the person (`people.identity_keys` GIN `@>`).
   It is PII: a URL / link / analytics event carries **`personId`** instead
@@ -1528,6 +1545,7 @@ once CI is green, then tag the next version by hand at the merge commit
 `KEY_SERVICE_URL`, `KEY_SERVICE_API_KEY`, `GOOGLE_SERVICE_URL`, `GOOGLE_SERVICE_API_KEY`,
 `INSTANTLY_SERVICE_URL`, `INSTANTLY_SERVICE_API_KEY`, `LEAD_SERVICE_URL`, `LEAD_SERVICE_API_KEY`,
 `BRAND_SERVICE_URL`, `BRAND_SERVICE_API_KEY`, `FEATURES_SERVICE_URL`, `FEATURES_SERVICE_API_KEY`, `MATRIX_APPSERVICE_TOKEN`,
+`HUMAN_SERVICE_URL`, `HUMAN_SERVICE_API_KEY` (same-human identity; unset = `humanIdentity.status=not_configured`, merges stay local),
 `COPILOT_UNIBOX_ORG_ID`, `COPILOT_UNIBOX_BRAND_ID` (the staff Unibox scope Copilot turns are filed under; unset = 503),
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_CHAT_ID`, `CLIENT_SERVICE_URL`, `CLIENT_SERVICE_API_KEY` (the owner's conversation pings; unset = logged, nothing sent),
 `CAMPAIGN_SERVICE_URL`, `CAMPAIGN_SERVICE_API_KEY` (the form-trigger reports; unset = detected, not reported),

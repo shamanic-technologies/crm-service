@@ -705,7 +705,7 @@ export async function readWhatsappSendEvidence(orgId: string, brandId: string): 
  */
 export async function readStatedMergeEvidence(orgId: string, brandId: string): Promise<EvidenceRead> {
   const rows = await db
-    .select({ id: personMerges.id, keysA: personMerges.keysA, keysB: personMerges.keysB })
+    .select({ id: personMerges.id, keysA: personMerges.keysA, keysB: personMerges.keysB, statedBy: personMerges.statedByUserId })
     .from(personMerges)
     .where(and(eq(personMerges.orgId, orgId), eq(personMerges.brandId, brandId), isNull(personMerges.undoneAt)));
   return {
@@ -714,14 +714,19 @@ export async function readStatedMergeEvidence(orgId: string, brandId: string): P
     error: null,
     evidence: rows.map((r) => {
       const keys = [...new Set([...(r.keysA as string[]), ...(r.keysB as string[])])].sort();
+      const side = (ks: string[]) => ({
+        emails: ks.filter((k) => k.startsWith("email:")).map((k) => k.slice(6)),
+        phones: ks.filter((k) => k.startsWith("phone:")).map((k) => k.slice(6)),
+      });
       return {
         kind: "stated_merge",
         ref: r.id,
         displayName: null,
         company: null,
-        emails: keys.filter((k) => k.startsWith("email:")).map((k) => k.slice(6)),
-        phones: keys.filter((k) => k.startsWith("phone:")).map((k) => k.slice(6)),
+        ...side(keys),
         keys,
+        sides: [side(r.keysA as string[]), side(r.keysB as string[])],
+        judgedBy: `person:${r.statedBy}`,
       };
     }),
   };
@@ -860,6 +865,11 @@ export function pairingEvidence(row: LeadPairingRow): Evidence | null {
     company: row.crmContact.company ?? lead.company,
     emails: [row.crmContact.email, lead.email].filter((e): e is string => !!e),
     phones: row.crmContact.phone ? [row.crmContact.phone] : [],
+    sides: [
+      { emails: row.crmContact.email ? [row.crmContact.email] : [], phones: row.crmContact.phone ? [row.crmContact.phone] : [] },
+      { emails: lead.email ? [lead.email] : [], phones: [] },
+    ],
+    judgedBy: "lead-service",
   };
 }
 

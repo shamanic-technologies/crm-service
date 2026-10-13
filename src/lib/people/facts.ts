@@ -33,7 +33,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { and, asc, eq, gt, sql, type SQL } from "drizzle-orm";
+import { and, asc, eq, gt, inArray, sql, type SQL } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { people, peopleFacts, type PeopleFact, type PeopleScope, type Person } from "../../db/schema.js";
 import { eventsQuery, type FunnelEventSource } from "../gohighlevel/funnel-events.js";
@@ -121,6 +121,8 @@ export interface FactPerson {
   emails: string[];
   phones: string[];
   fullName: string | null;
+  /** The fleet-wide human (human-service) the person is; null when not known. */
+  humanId?: string | null;
 }
 
 const iso = (v: string | Date | null | undefined): string | null =>
@@ -158,13 +160,16 @@ export class PersonIndex {
   private byPresence = new Map<string, FactPerson>();
   private byKey = new Map<string, FactPerson>();
 
-  constructor(rows: Pick<Person, "personKey" | "emails" | "phones" | "displayName" | "identityKeys" | "presences">[]) {
+  constructor(
+    rows: (Pick<Person, "personKey" | "emails" | "phones" | "displayName" | "identityKeys" | "presences"> & { humanId?: string | null })[],
+  ) {
     for (const r of rows) {
       const person: FactPerson = {
         personKey: r.personKey,
         emails: r.emails as string[],
         phones: r.phones as string[],
         fullName: r.displayName,
+        humanId: r.humanId ?? null,
       };
       for (const p of r.presences as Presence[]) this.byPresence.set(presenceStableKey(p), person);
       for (const k of r.identityKeys as string[]) this.byKey.set(k, person);
@@ -856,6 +861,8 @@ export interface FactEmissionSummary {
   superseded: number;
   /** Facts re-stated because their vendor contact now sits on a new crm contact row. */
   reminted: number;
+  /** Facts re-stated because their person's fleet human (human-service) is now known or changed. */
+  humanIdentified: number;
   /** Candidates whose subject is nobody in the people build (e.g. the brand's own address). */
   held: number;
   duplicateKeys: number;
@@ -892,6 +899,7 @@ function factRow(
     naturalKey: c.naturalKey,
     family: c.family,
     contentHash: contentHash(c),
+    humanId: person.humanId ?? null,
     ownerPersonKey: person.personKey,
     subjectPresence: c.subject.presence,
     subjectKeys: c.subject.keys,
@@ -990,7 +998,13 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
     }
     const personByKey = new Map<string, FactPerson>();
     for (const r of personRows) {
-      personByKey.set(r.personKey, { personKey: r.personKey, emails: r.emails as string[], phones: r.phones as string[], fullName: r.displayName });
+      personByKey.set(r.personKey, {
+        personKey: r.personKey,
+        emails: r.emails as string[],
+        phones: r.phones as string[],
+        fullName: r.displayName,
+        humanId: r.humanId ?? null,
+      });
     }
     for (const m of ownership.merges) {
       const into = personByKey.get(m.intoPersonKey);
@@ -1001,6 +1015,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
         emails: into?.emails ?? [],
         phones: into?.phones ?? [],
         fullName: into?.fullName ?? null,
+        humanId: into?.humanId ?? null,
         sourceContactId: null,
         crmContactId: null,
         type: "person_merged",
@@ -1021,7 +1036,13 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
     // 3-4. Withdrawals, then new facts.
     const withdrawals: {
       fact: PeopleFact;
-      reason: "vendor_record_changed" | "vendor_record_gone" | "crm_contact_reminted" | "source_withdrawn" | "signup_source_superseded";
+      reason:
+        | "vendor_record_changed"
+        | "vendor_record_gone"
+        | "crm_contact_reminted"
+        | "source_withdrawn"
+        | "signup_source_superseded"
+        | "human_identified";
       sourceReason?: string | null;
     }[] = [];
     const fresh: (typeof peopleFacts.$inferInsert)[] = [];
@@ -1111,6 +1132,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
         emails: person?.emails ?? (live.emails as string[]),
         phones: person?.phones ?? (live.phones as string[]),
         fullName: person?.fullName ?? live.fullName,
+        humanId: person?.humanId ?? live.humanId,
         sourceContactId: live.sourceContactId,
         crmContactId: now,
         type: live.type,
@@ -1130,6 +1152,45 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       bySource[live.source] = (bySource[live.source] ?? 0) + 1;
     }
 
+    // 5. A person's fleet human (human-service) known now, or changed (a merge /
+    // split there): every live fact of theirs is re-stated carrying it. Served
+    // columns are never updated in place (lead-service copies each fact once);
+    // the first pass after the column existed is the backfill.
+    const restated = new Set(withdrawals.map((w) => w.fact.factId));
+    let humanIdentified = 0;
+    for (const live of liveByKey.values()) {
+      if (restated.has(live.factId)) continue;
+      const owner = ownerNow.get(live.factId) ?? live.ownerPersonKey!;
+      const person = personByKey.get(owner);
+      if (!person?.humanId || person.humanId === live.humanId) continue;
+      withdrawals.push({ fact: live, reason: "human_identified" });
+      humanIdentified++;
+      fresh.push({
+        orgId,
+        brandId,
+        personKey: owner,
+        emails: person.emails,
+        phones: person.phones,
+        fullName: person.fullName ?? live.fullName,
+        humanId: person.humanId,
+        sourceContactId: live.sourceContactId,
+        crmContactId: live.crmContactId,
+        type: live.type,
+        occurredAt: live.occurredAt,
+        dateBasis: live.dateBasis,
+        source: live.source,
+        sourceRef: live.sourceRef,
+        payload: live.payload,
+        naturalKey: live.naturalKey,
+        family: live.family,
+        contentHash: live.contentHash,
+        ownerPersonKey: owner,
+        subjectPresence: live.subjectPresence,
+        subjectKeys: live.subjectKeys,
+        subjectStandalone: live.subjectStandalone,
+      });
+    }
+
     const withdrawnRows = withdrawals.map(({ fact, reason, sourceReason }): typeof peopleFacts.$inferInsert => {
       const owner = ownerNow.get(fact.factId) ?? fact.ownerPersonKey!;
       const person = personByKey.get(owner);
@@ -1140,6 +1201,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
         emails: person?.emails ?? (fact.emails as string[]),
         phones: person?.phones ?? (fact.phones as string[]),
         fullName: person?.fullName ?? fact.fullName,
+        humanId: fact.humanId,
         sourceContactId: fact.sourceContactId,
         crmContactId: fact.crmContactId,
         type: "withdrawn",
@@ -1151,8 +1213,9 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
         withdrawnOf: fact.factId,
       };
     });
-    for (const { fact } of withdrawals) {
-      await tx.update(peopleFacts).set({ live: false }).where(eq(peopleFacts.factId, fact.factId));
+    const ids = withdrawals.map((w) => w.fact.factId);
+    for (let i = 0; i < ids.length; i += 1000) {
+      await tx.update(peopleFacts).set({ live: false }).where(inArray(peopleFacts.factId, ids.slice(i, i + 1000)));
     }
     await insertAll(tx, withdrawnRows);
     await insertAll(tx, fresh);
@@ -1161,10 +1224,11 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       candidates: candidates.size,
       emitted: fresh.length,
       unchanged,
-      corrected: withdrawals.length - withdrawnGone - reminted - supersededCount,
+      corrected: withdrawals.length - withdrawnGone - reminted - supersededCount - humanIdentified,
       withdrawnGone,
       superseded: supersededCount,
       reminted,
+      humanIdentified,
       held,
       duplicateKeys,
       gmailOtherSkipped: gmail.skippedOther,
@@ -1195,6 +1259,8 @@ export interface Fact {
   sourceRef: string;
   payload: Record<string, unknown>;
   withdrawnOf?: string;
+  /** The fleet-wide human (human-service) the person was at emission; null before it was known. */
+  humanId: string | null;
 }
 
 export function toFact(r: PeopleFact): Fact {
@@ -1216,6 +1282,7 @@ export function toFact(r: PeopleFact): Fact {
     sourceRef: r.sourceRef,
     payload: r.payload as Record<string, unknown>,
     ...(r.withdrawnOf ? { withdrawnOf: r.withdrawnOf } : {}),
+    humanId: r.humanId ?? null,
   };
 }
 
