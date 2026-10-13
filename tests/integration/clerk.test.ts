@@ -411,6 +411,22 @@ describe.skipIf(!RUN)("Clerk auth provider", () => {
     expect(withdrawn.map((w) => [w.sourceRef, (w.payload as { reason: string }).reason])).toEqual([["user_bob", "vendor_record_gone"]]);
   });
 
+  it("an org our staff opened for a client: the staff is no signup, the client's first member is", async () => {
+    const staff = { ...ann, id: "user_staff", primary_email_address_id: "idn_st", email_addresses: [{ id: "idn_st", email_address: "kevin.lourd+x@gmail.com", verification: { status: "verified" } }] };
+    USERS = [staff, ann, bob];
+    const at = (iso: string) => ({ created_at: ms(iso) });
+    MEMBERSHIPS = [
+      { ...membership("mem_s", "user_staff", "org_dd", "user_staff"), ...at("2026-09-27T10:00:00Z") },
+      { ...membership("mem_b", "user_bob", "org_dd", "user_staff"), ...at("2026-09-27T12:00:00Z") },
+      { ...membership("mem_a", "user_ann", "org_dd", "user_staff"), ...at("2026-09-27T11:00:00Z") },
+    ];
+    await connectClerk();
+    await syncMine();
+    const rows = await db.select().from(contacts).where(and(eq(contacts.brandId, BRAND), eq(contacts.source, "clerk")));
+    const signed = Object.fromEntries(rows.map((r) => [r.externalId, (r.rawAttributes as { signedUp: boolean }).signedUp]));
+    expect(signed).toEqual({ user_staff: false, user_ann: true, user_bob: false });
+  });
+
   it("a live fact of a retired family is withdrawn as source_retired", async () => {
     await connectClerk();
     await syncMine();
@@ -444,12 +460,23 @@ describe.skipIf(!RUN)("Clerk auth provider", () => {
 });
 
 describe("isSignup", () => {
-  it("is a signup unless every organization the user belongs to was created by someone else", () => {
-    expect(isSignup("u", [])).toBe(true);
-    expect(isSignup("u", [{ orgCreatedBy: "u" }])).toBe(true);
-    expect(isSignup("u", [{ orgCreatedBy: "v" }, { orgCreatedBy: "u" }])).toBe(true);
-    expect(isSignup("u", [{ orgCreatedBy: null }])).toBe(true);
-    expect(isSignup("u", [{ orgCreatedBy: "v" }])).toBe(false);
-    expect(isSignup("u", [{ orgCreatedBy: "v" }, { orgCreatedBy: "w" }])).toBe(false);
+  const ctx = (team: string[] = [], first: Record<string, string> = {}) => ({
+    isTeam: (id: string) => team.includes(id),
+    firstOutsider: (org: string) => first[org] ?? null,
+  });
+  it("is a signup unless every organization the user belongs to was opened by someone else", () => {
+    expect(isSignup("u", [], ctx())).toBe(true);
+    expect(isSignup("u", [{ orgId: "o", orgCreatedBy: "u" }], ctx())).toBe(true);
+    expect(isSignup("u", [{ orgId: "o", orgCreatedBy: "v" }, { orgId: "p", orgCreatedBy: "u" }], ctx())).toBe(true);
+    expect(isSignup("u", [{ orgId: "o", orgCreatedBy: null }], ctx())).toBe(true);
+    expect(isSignup("u", [{ orgId: "o", orgCreatedBy: "v" }], ctx())).toBe(false);
+    expect(isSignup("u", [{ orgId: "o", orgCreatedBy: "v" }, { orgId: "p", orgCreatedBy: "w" }], ctx())).toBe(false);
+  });
+  it("our team never signs up; in an org the team opened, the first outsider to join is the signup", () => {
+    expect(isSignup("staff", [{ orgId: "o", orgCreatedBy: "staff" }], ctx(["staff"]))).toBe(false);
+    expect(isSignup("staff", [], ctx(["staff"]))).toBe(false);
+    const c = ctx(["staff"], { o: "info" });
+    expect(isSignup("info", [{ orgId: "o", orgCreatedBy: "staff" }], c)).toBe(true);
+    expect(isSignup("shahab", [{ orgId: "o", orgCreatedBy: "staff" }], c)).toBe(false);
   });
 });

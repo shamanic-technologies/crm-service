@@ -51,17 +51,39 @@ export interface DerivedAuthMembership {
   orgId: string;
   /** The user who created the organization; null when the provider names nobody. */
   orgCreatedBy: string | null;
+  /** When the user joined it (ms); null when the provider gives no date. */
+  joinedAt: number | null;
+}
+
+export interface SignupContext {
+  /** The user is on OUR team (staff): never a signup, in any brand's product. */
+  isTeam(userId: string): boolean;
+  /** The organization's first member by join time who is not on the team (null = none). */
+  firstOutsider(orgId: string): string | null;
 }
 
 /**
- * Signed up = came to the product on their own. A user is NOT a signup only on
- * positive evidence: they belong to at least one organization and EVERY one of
- * them was created by someone else (they were invited in). A user in no
+ * Signed up = came to the product on their own. Never a member of our team
+ * (staff open organizations ON BEHALF of clients: Doc Dinners was created by
+ * our staff, its people are the client). Otherwise a user is NOT a signup only
+ * on positive evidence: they belong to at least one organization and in EVERY
+ * one someone else came first: an outsider created it, or the team created it
+ * and another outsider joined before them (they were invited in). A user in no
  * organization, or in one the provider names no creator for, is a signup.
  */
-export function isSignup(userId: string, memberships: Pick<DerivedAuthMembership, "orgCreatedBy">[]): boolean {
+export function isSignup(
+  userId: string,
+  memberships: Pick<DerivedAuthMembership, "orgId" | "orgCreatedBy">[],
+  ctx: SignupContext,
+): boolean {
+  if (ctx.isTeam(userId)) return false;
   if (memberships.length === 0) return true;
-  return !memberships.every((m) => m.orgCreatedBy !== null && m.orgCreatedBy !== userId);
+  return memberships.some(
+    (m) =>
+      m.orgCreatedBy === null ||
+      m.orgCreatedBy === userId ||
+      (ctx.isTeam(m.orgCreatedBy) && ctx.firstOutsider(m.orgId) === userId),
+  );
 }
 
 export interface AuthProviderAdapter {
