@@ -1815,6 +1815,17 @@ registry.registerPath({
 
 const PeopleSourceSchema = z.enum(PEOPLE_SOURCES);
 
+const LeadDisqualificationSchema = z
+  .object({
+    level: z.string().openapi({ description: "lead-service's verbatim: `lead` (this person at this company: not the right contact, left the role) or `company` (\"not our target\": every lead of the company)." }),
+    offerId: z.string().nullable().openapi({ description: "The offer the mark is about, or null = every offer of the brand." }),
+    note: z.string().nullable().openapi({ description: "The optional free note: why, in the words of whoever set it.", example: "Runs a construction company, we sell to supermarkets." }),
+    source: z.string().openapi({ description: "lead-service's verbatim: `manual` (a person set it) or `reply` (set from a reply judged not the right contact / left the role)." }),
+    statedByUserId: z.string().nullable(),
+    statedAt: z.string().openapi({ description: "When it was set (ISO 8601)." }),
+  })
+  .nullable();
+
 const PersonPresenceSchema = z
   .object({
     source: PeopleSourceSchema,
@@ -1867,19 +1878,27 @@ const PersonSchema = registry.register(
       }),
       stateSource: z.enum(STATE_SOURCES),
       stateDetail: z.record(z.string(), z.unknown()).nullable(),
-      disqualification: z
+      disqualification: LeadDisqualificationSchema.openapi({
+        description:
+          "lead-service's Disqualified MARK for the lead the state was read from, relayed verbatim (its `disqualification` on the lead row): shown BESIDE `state`, never instead of it (a lead can read \"Positive reply\" AND \"Disqualified\"). lead-service answers the lead's own mark first, else its company's: `level` says which. Null = not disqualified, or the person is not one of our leads (`stateSource` is not lead_service). Never derived here.",
+      }),
+      companyTags: z
         .object({
-          offerId: z.string().nullable().openapi({ description: "The offer the mark is about, or null = every offer of the brand." }),
-          note: z.string().nullable().openapi({ description: "The optional free note: why, in the words of whoever set it.", example: "Runs a construction company, we sell to supermarkets." }),
-          source: z.string().openapi({ description: "lead-service's verbatim: `manual` (a person set it) or `reply` (set from a reply judged not the right contact / left the role)." }),
-          statedByUserId: z.string().nullable(),
-          statedAt: z.string().openapi({ description: "When it was set (ISO 8601)." }),
+          id: z.string().nullable().openapi({ description: "brand-service company id; null for a name-only employer." }),
+          key: z.string().openapi({ description: "lead-service's company key: `id`, else `org:<its local organization id>`." }),
+          isClient: z.boolean().openapi({ description: "A lead of this company holds a live sale at the brand: the COMPANY is a client." }),
+          signedUp: z.boolean().openapi({ description: "A lead of this company holds a live signup at the brand." }),
+          disqualification: LeadDisqualificationSchema.openapi({ description: "The COMPANY-level Disqualified mark (\"not our target\"), covering every lead of the company, or null." }),
         })
         .nullable()
         .openapi({
           description:
-            "lead-service's Disqualified MARK for the lead the state was read from, relayed verbatim (its `disqualification` on the lead row): shown BESIDE `state`, never instead of it (a lead can read \"Positive reply\" AND \"Disqualified\"). Null = not disqualified, or the person is not one of our leads (`stateSource` is not lead_service). Never derived here.",
+            "lead-service's COMPANY block for the lead the state was read from, relayed verbatim (its `company` on the lead row): what holds for the person's company as a buyer of the brand (client, signed up, Disqualified \"not our target\"). Null = no company known, or the person is not one of our leads. Never derived here.",
         }),
+      humanOptedOut: z.boolean().nullable().openapi({
+        description:
+          "The HUMAN-level opt-out as lead-service states it: true when its standing signal is `human_opt_out` (human-service carries an opt-out / do-not-contact fact on this human: it holds at every company and brand). Null = the person is not one of our leads.",
+      }),
       presences: z.array(PersonPresenceSchema),
       mergeEvidence: z.array(z.unknown()).openapi({
         description: "The records that tied two keys of this person together (a Google / GoHighLevel / Stripe / CSV contact holding both, a CONFIDENT lead-service pairing: signal, judgment at or above its pair threshold, or human acceptance). Empty when the person rests on a single key.",

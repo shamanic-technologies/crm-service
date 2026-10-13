@@ -223,6 +223,7 @@ describe("Stripe state", () => {
             email: "a@x.com",
             standing: { state: "customer", tag: "customer" },
             disqualification: null,
+            company: null,
             leadCampaignId: "lc",
             leadId: null,
             campaignId: null,
