@@ -9,9 +9,20 @@
  * Users are listed oldest first (`order_by=+created_at`) in pages of 500 with
  * `offset`: a user signing up during a pass lands at the END of the order, so it
  * never shifts a page not yet read. Clerk API reads are free: no cost declared.
+ *
+ * Organization memberships (`/organization_memberships`, every org of the
+ * instance, each carrying its organization's `created_by`) are listed the same
+ * way: they tell a teammate invited into someone else's organization from a
+ * signup (`isSignup`). Measured on distribute.you 2026-10-13: 176 memberships,
+ * 118 organizations, in one page.
  */
 
-import { AuthProviderError, type AuthProviderAdapter, type DerivedAuthUser } from "./provider.js";
+import {
+  AuthProviderError,
+  type AuthProviderAdapter,
+  type DerivedAuthMembership,
+  type DerivedAuthUser,
+} from "./provider.js";
 
 export const CLERK_API_BASE_URL = "https://api.clerk.com/v1";
 const REQUEST_TIMEOUT_MS = Number(process.env.CLERK_TIMEOUT_MS) || 30_000;
@@ -152,6 +163,28 @@ function phonesOf(record: Record<string, unknown>): Pick<DerivedAuthUser, "phone
   return { phones: phoneSources.map((s) => s.phone), phoneSources };
 }
 
+/** Drop the server-only fields, on the membership AND on the organization it carries. */
+function stripMembership(m: Record<string, unknown>): Record<string, unknown> {
+  const copy = { ...m };
+  for (const f of NEVER_STORED) delete copy[f];
+  if (copy.organization && typeof copy.organization === "object") {
+    const org = { ...(copy.organization as Record<string, unknown>) };
+    for (const f of NEVER_STORED) delete org[f];
+    copy.organization = org;
+  }
+  return copy;
+}
+
+export function deriveClerkMembership(record: Record<string, unknown>): DerivedAuthMembership | null {
+  const externalId = str(record.id);
+  const org = record.organization as Record<string, unknown> | undefined;
+  const user = record.public_user_data as Record<string, unknown> | undefined;
+  const userId = str(user?.user_id);
+  const orgId = str(org?.id);
+  if (!externalId || !userId || !orgId) return null;
+  return { externalId, userId, orgId, orgCreatedBy: str(org?.created_by) };
+}
+
 export const clerk: AuthProviderAdapter = {
   name: "clerk",
   label: "Clerk",
@@ -186,4 +219,27 @@ export const clerk: AuthProviderAdapter = {
   },
   idOf: (record) => String(record.id),
   derive: deriveClerkUser,
+  memberships: {
+    async count(key) {
+      const body = (await clerkGet(key, "/organization_memberships", { limit: "1" })) as { total_count?: unknown };
+      if (typeof body.total_count !== "number") {
+        throw new Error(`[crm-service][clerk] /organization_memberships answered without total_count`);
+      }
+      return body.total_count;
+    },
+    async *list(key) {
+      for (let page = 0; page < CLERK_MAX_PAGES; page++) {
+        const body = (await clerkGet(key, "/organization_memberships", {
+          limit: String(CLERK_PAGE_SIZE),
+          offset: String(page * CLERK_PAGE_SIZE),
+          order_by: "+created_at",
+        })) as { data?: unknown };
+        if (!Array.isArray(body.data)) throw new Error(`[crm-service][clerk] /organization_memberships answered without data`);
+        const rows = (body.data as Record<string, unknown>[]).map(stripMembership);
+        if (rows.length > 0) yield rows;
+        if (rows.length < CLERK_PAGE_SIZE) return;
+      }
+    },
+    derive: deriveClerkMembership,
+  },
 };

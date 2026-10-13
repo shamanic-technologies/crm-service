@@ -64,6 +64,7 @@ export const FACT_TYPES = [
 ] as const;
 export type FactType = (typeof FACT_TYPES)[number];
 
+// `distribute_platform`: retired (see RETIRED_FAMILIES); kept because the feed still serves the facts it stated.
 export const FACT_SOURCES = ["gohighlevel", "gmail", "matrix", "stripe", "posthog", "clerk", "csv", "crm", "distribute_platform"] as const;
 export type FactSource = (typeof FACT_SOURCES)[number];
 
@@ -84,9 +85,17 @@ const FAMILIES = {
   stripe_subscription: { source: "stripe", snapshot: false, immutable: false },
   clerk_user: { source: "clerk", snapshot: true, immutable: false },
   csv_contact: { source: "csv", snapshot: false, immutable: true },
-  platform_signup: { source: "distribute_platform", snapshot: true, immutable: false },
 } as const;
 export type FactFamily = keyof typeof FAMILIES;
+
+/**
+ * Families no candidate is derived for any more. Their live facts are withdrawn
+ * (`source_retired`) on the next emission: a retired source states nothing, so
+ * nothing it stated stays live. `platform_signup` = distribute.you's signups
+ * read from client-service (2026-10-13, crm#124), retired the same day: our own
+ * brand plugs its data through the connectors every client can plug (Clerk).
+ */
+const RETIRED_FAMILIES: ReadonlySet<string> = new Set(["platform_signup"]);
 
 /** Who a fact is about: a presence of the people build, or (CSV) its own keys. */
 export interface FactSubject {
@@ -529,12 +538,15 @@ async function posthogCandidates(orgId: string, brandId: string): Promise<Candid
  * One `signup` per user of the brand's auth provider, dated by the provider's
  * own creation date (`user_created_at`) — the same fact type PostHog signups
  * use, so lead-service reads both alike. A user deleted in the provider is a
- * snapshot record gone: its signup is withdrawn.
+ * snapshot record gone: its signup is withdrawn. A teammate invited into an
+ * organization someone else created (`signedUp: false`, auth/provider.ts
+ * `isSignup`) stated no signup: none is emitted, a live one is withdrawn.
  */
 async function authCandidates(orgId: string, brandId: string, provider: "clerk"): Promise<CandidateFact[]> {
   const users = await rows<{ id: string; external_id: string; full_name: string | null; source_created_at: string | Date | null }>(sql`
     SELECT id, external_id, full_name, source_created_at FROM contacts
     WHERE org_id = ${orgId} AND brand_id = ${brandId} AND source = ${provider} AND external_id IS NOT NULL
+      AND COALESCE(raw_attributes->>'signedUp', 'true') <> 'false'
   `);
   return users.map((u) => ({
     naturalKey: `${provider}|signup|${u.external_id}`,
@@ -550,80 +562,6 @@ async function authCandidates(orgId: string, brandId: string, provider: "clerk")
     subject: presenceSubject(provider, u.external_id, u.full_name),
   }));
 }
-
-/**
- * The platform's own signups (client-service's feed, copied by
- * `platform-signups/pull.ts`): one `signup` per org that became real, naming the
- * person who created it, dated `occurredAt` + `dateBasis` verbatim. A signup
- * client-service later withdrew (org deleted, shell absorbed) is not a
- * candidate: the live fact copied from it is withdrawn with its reason.
- *
- * The subject is the person's keys (the auth user id, the email, the phone):
- * the same `uid:` key the auth-provider mirror states, so it lands on the person
- * the build already holds. Nobody holding them (the brand's own address) = held.
- */
-async function platformSignupCandidates(
-  orgId: string,
-  brandId: string,
-): Promise<{ stated: boolean; facts: CandidateFact[]; withdrawnUpstream: Map<string, string | null> }> {
-  const found = await rows<{ fact_id: string; type: string; withdrawn_of: string | null; payload: Record<string, unknown> }>(sql`
-    SELECT fact_id, type, withdrawn_of, payload FROM platform_signup_facts
-    WHERE org_id = ${orgId} AND brand_id = ${brandId}
-    ORDER BY seq
-  `);
-  const withdrawnUpstream = new Map<string, string | null>();
-  for (const r of found) {
-    if (r.type === "withdrawn" && r.withdrawn_of) {
-      withdrawnUpstream.set(r.withdrawn_of, (r.payload.withdrawnReason as string | null) ?? null);
-    }
-  }
-  const facts: CandidateFact[] = [];
-  for (const r of found) {
-    if (r.type !== "signup" || withdrawnUpstream.has(r.fact_id)) continue;
-    const p = r.payload as {
-      customerOrgId: string | null;
-      clerkOrgId: string | null;
-      userId: string | null;
-      clerkUserId: string | null;
-      email: string | null;
-      fullName: string | null;
-      phone: string | null;
-      occurredAt: string | null;
-      dateBasis: string | null;
-    };
-    const email = normalizeEmail(p.email);
-    const keys = keysOf({ emails: email ? [email] : [], phones: p.phone ? [p.phone] : [], userIds: p.clerkUserId ? [p.clerkUserId] : [] }, null);
-    facts.push({
-      naturalKey: `distribute_platform|signup|${r.fact_id}`,
-      family: "platform_signup",
-      type: "signup",
-      source: "distribute_platform",
-      sourceRef: r.fact_id,
-      sourceContactId: p.clerkUserId,
-      crmContactId: null,
-      occurredAt: iso(p.occurredAt),
-      dateBasis: p.dateBasis ?? "none",
-      payload: { customerOrgId: p.customerOrgId, clerkOrgId: p.clerkOrgId, userId: p.userId, clerkUserId: p.clerkUserId },
-      subject: {
-        presence: null,
-        keys,
-        standalone: false,
-        emails: email ? [email] : [],
-        phones: keys.filter((k) => k.startsWith("phone:")).map((k) => k.slice(6)),
-        fullName: p.fullName,
-      },
-    });
-  }
-  return { stated: found.length > 0, facts, withdrawnUpstream };
-}
-
-/**
- * Families that echo a signup the platform states itself. Once the platform
- * states a brand's signups (`platformSignupCandidates` found any), they are no
- * longer a signup source for it: their live facts are withdrawn
- * (`signup_source_superseded`) and none are emitted. The people they hold stay.
- */
-const SIGNUP_ECHO_FAMILIES: ReadonlySet<FactFamily> = new Set<FactFamily>(["clerk_user", "posthog_person"]);
 
 /** Which date a subscription status is dated by — Stripe states no date for most transitions. */
 function subscriptionDate(status: string | null, startedAt: string | null, detail: Record<string, unknown>) {
@@ -857,8 +795,8 @@ export interface FactEmissionSummary {
   unchanged: number;
   corrected: number;
   withdrawnGone: number;
-  /** Echo signups withdrawn because the platform states the brand's signups itself. */
-  superseded: number;
+  /** Live facts of a retired family, withdrawn (`source_retired`). */
+  retired: number;
   /** Facts re-stated because their vendor contact now sits on a new crm contact row. */
   reminted: number;
   /** Facts re-stated because their person's fleet human (human-service) is now known or changed. */
@@ -929,7 +867,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       .where(and(eq(people.scopeId, scope.id), eq(people.notBusiness, false)));
     const index = new PersonIndex(personRows);
 
-    const [ghl, matrix, gmail, posthog, stripe, clerk, csv, platform, connected] = await Promise.all([
+    const [ghl, matrix, gmail, posthog, stripe, clerk, csv, connected] = await Promise.all([
       ghlCandidates(orgId, brandId),
       matrixCandidates(orgId, brandId),
       gmailCandidates(scope.id),
@@ -937,15 +875,9 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       stripeCandidates(orgId, brandId),
       authCandidates(orgId, brandId, "clerk"),
       csvCandidates(orgId, brandId),
-      platformSignupCandidates(orgId, brandId),
       connectedSources(orgId, brandId),
     ]);
-    // The platform states this brand's signups: it is their only source from now on.
-    const superseded = platform.stated ? SIGNUP_ECHO_FAMILIES : new Set<FactFamily>();
-    if (platform.stated) connected.add("distribute_platform");
-    const all = [...ghl, ...matrix, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv, ...platform.facts].filter(
-      (c) => !superseded.has(c.family),
-    );
+    const all = [...ghl, ...matrix, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv];
     const candidates = new Map<string, CandidateFact>();
     let duplicateKeys = 0;
     for (const c of all) {
@@ -1040,10 +972,8 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
         | "vendor_record_changed"
         | "vendor_record_gone"
         | "crm_contact_reminted"
-        | "source_withdrawn"
-        | "signup_source_superseded"
+        | "source_retired"
         | "human_identified";
-      sourceReason?: string | null;
     }[] = [];
     const fresh: (typeof peopleFacts.$inferInsert)[] = [];
     let unchanged = 0;
@@ -1065,7 +995,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       bySource[c.source] = (bySource[c.source] ?? 0) + 1;
     }
     let withdrawnGone = 0;
-    let supersededCount = 0;
+    let retired = 0;
     // A brand connects several Stripe accounts: disconnecting ONE drops its
     // mirror (cascade) while the source stays connected. Its facts stop, they
     // are not withdrawn: a Stripe record counts as gone only while an account
@@ -1081,15 +1011,9 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
     );
     for (const [key, live] of liveByKey) {
       if (candidates.has(key)) continue;
-      if (superseded.has(live.family as FactFamily)) {
-        withdrawals.push({ fact: live, reason: "signup_source_superseded" });
-        supersededCount++;
-        continue;
-      }
-      if (live.source === "distribute_platform" && platform.withdrawnUpstream.has(live.sourceRef)) {
-        // client-service withdrew the signup we copied: our correction carries its reason.
-        withdrawals.push({ fact: live, reason: "source_withdrawn", sourceReason: platform.withdrawnUpstream.get(live.sourceRef) });
-        withdrawnGone++;
+      if (RETIRED_FAMILIES.has(live.family ?? "")) {
+        withdrawals.push({ fact: live, reason: "source_retired" });
+        retired++;
         continue;
       }
       const family = FAMILIES[live.family as FactFamily];
@@ -1191,7 +1115,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       });
     }
 
-    const withdrawnRows = withdrawals.map(({ fact, reason, sourceReason }): typeof peopleFacts.$inferInsert => {
+    const withdrawnRows = withdrawals.map(({ fact, reason }): typeof peopleFacts.$inferInsert => {
       const owner = ownerNow.get(fact.factId) ?? fact.ownerPersonKey!;
       const person = personByKey.get(owner);
       return {
@@ -1209,7 +1133,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
         dateBasis: "none",
         source: fact.source,
         sourceRef: fact.sourceRef,
-        payload: sourceReason === undefined ? { reason, withdrawnType: fact.type } : { reason, withdrawnType: fact.type, sourceReason },
+        payload: { reason, withdrawnType: fact.type },
         withdrawnOf: fact.factId,
       };
     });
@@ -1224,9 +1148,9 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       candidates: candidates.size,
       emitted: fresh.length,
       unchanged,
-      corrected: withdrawals.length - withdrawnGone - reminted - supersededCount - humanIdentified,
+      corrected: withdrawals.length - withdrawnGone - reminted - retired - humanIdentified,
       withdrawnGone,
-      superseded: supersededCount,
+      retired,
       reminted,
       humanIdentified,
       held,

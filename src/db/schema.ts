@@ -1785,35 +1785,6 @@ export const authRawRecords = pgTable(
 );
 
 /**
- * BRONZE: client-service's signup fact feed, copied verbatim (append-only).
- * client-service owns the account (org, users, signup) and states every real
- * signup to distribute.you as a fact (`GET /internal/signup-facts`); we PULL it
- * on a cursor (= the largest `seq` stored) and never call back. Each row is
- * filed under the staff org (`COPILOT_UNIBOX_ORG_ID`, where our own brand's
- * people live) and the brand the fact names. Keyed on client-service's fact id:
- * a page pulled twice stores nothing twice. A `withdrawn` row is client-service's
- * correction of an earlier signup (`withdrawn_of`), never an update of it.
- */
-export const platformSignupFacts = pgTable(
-  "platform_signup_facts",
-  {
-    factId: text("fact_id").primaryKey(),
-    seq: bigint("seq", { mode: "number" }).notNull(),
-    orgId: uuid("org_id").notNull(),
-    brandId: uuid("brand_id").notNull(),
-    // 'signup' | 'withdrawn'
-    type: text("type").notNull(),
-    withdrawnOf: text("withdrawn_of"),
-    payload: jsonb("payload").notNull(),
-    pulledAt: timestamp("pulled_at", { withTimezone: true }).notNull().defaultNow(),
-  },
-  (table) => [
-    uniqueIndex("platform_signup_facts_seq_uq").on(table.seq),
-    index("platform_signup_facts_org_brand_idx").on(table.orgId, table.brandId),
-  ],
-);
-
-/**
  * The distribute.you Copilot's chat turns, pushed by chat-service (bronze,
  * append-only). The Copilot is a member of OUR staff, so each turn is a staff
  * conversation with the person, stored ONLY under the staff Unibox scope
@@ -2063,7 +2034,6 @@ export type AuthConnection = typeof authConnections.$inferSelect;
 export type CopilotMessage = typeof copilotMessages.$inferSelect;
 export type ApiCall = typeof apiCalls.$inferSelect;
 export type ConversationPing = typeof conversationPings.$inferSelect;
-export type PlatformSignupFact = typeof platformSignupFacts.$inferSelect;
 
 /**
  * HUMAN IDENTITY (human-service is the ONLY service deciding "same human?",

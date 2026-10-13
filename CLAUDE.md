@@ -1125,8 +1125,7 @@ lead-service serves the overall tag, then go.
   Gmail `message_in/out` (Gmail `other` = a third party, skipped); PostHog
   `signup` (person created) + `website_visit`; Stripe `payment | refund`
   (minor units verbatim) + `subscription_changed` (one per status observed);
-  CSV `added_to_crm` (once per email, dated `uploaded_at`); `distribute_platform` `signup`
-  (client-service's own signups, see "Platform signups"); crm
+  CSV `added_to_crm` (once per email, dated `uploaded_at`); crm
   `person_merged | person_split | withdrawn`. GoHighLevel `sale.amountMinor` =
   deal value × 100 (GoHighLevel states no currency; `amountVerbatim` beside it).
 - OUT: our own outreach (Instantly, self-send) — lead-service reads it directly.
@@ -1290,6 +1289,12 @@ fact source literal (`"clerk"`) is the one per-provider line in `identity.ts` /
   the provider's own count is COMPLETE: users it did not list are deleted from
   bronze + silver (a deleted account is no signup; its fact is withdrawn).
   Fewer listed (page cap, mid-pass delete) removes nothing.
+- **An invited teammate is no signup** (`isSignup`, `auth/provider.ts`): Clerk's `/organization_memberships`
+  (each with its org's `created_by`) is mirrored as bronze `kind='membership'`; a user whose EVERY organization
+  was created by someone else gets `raw_attributes.signedUp = false`: no `signup` fact (a live one withdrawn),
+  no timeline signup, out of the serve `signedUp` pool, still a person. No org / unnamed creator = signup.
+  Our own brand counts its signups through THIS connector like any client (2026-10-13: a read of
+  client-service, #124, was retired the same day: `RETIRED_FAMILIES` withdraws its facts as `source_retired`).
 - People: source `clerk`, presence `userIds = [Clerk user id]`. Fact: `signup`,
   dateBasis `user_created_at`, family `clerk_user` (snapshot) — the vocabulary
   PostHog signups use; lead-service reads `source` as a free string.
@@ -1312,29 +1317,6 @@ ids as a distinct id (29: server-side captures keyed on the Clerk id never set
 every email-less person — `IDENTIFIED` is built strictly boolean. ⚠️ A HogQL
 query without LIMIT answers 100 rows. A person mirrored for the FIRST time on a
 later pass gets its whole activity history read (the window would miss it).
-
-## Platform signups — our own brand's signups come from client-service (`src/lib/platform-signups/pull.ts`)
-
-Owner 2026-10-13 (LEAD-REFONTE-1013): client-service owns the account (org, users, signup); the
-signup in our own funnel is a COPY of its fact, never a scrape of Clerk.
-
-- **Pull, never pushed:** every 60s (first pass 60s after boot) `GET {CLIENT_SERVICE_URL}/internal/signup-facts?since=<cursor>&limit=500`
-  (contract: client-service#160). Cursor = MAX(`seq`) in bronze `platform_signup_facts` (verbatim payload,
-  keyed on client-service's fact id). A malformed fact throws the whole page: nothing stored, cursor unmoved.
-  `POST /internal/platform-signups/pull` runs one now. Reads ride the staff scope's last build run (no run per pass).
-- **Filed under the staff org** (`COPILOT_UNIBOX_ORG_ID`) + the brand the fact NAMES: the brand id alone is
-  shared with test orgs, so the org is never read off the fact. New rows kick that scope's people build.
-- **Facts** (`facts.ts` `platformSignupCandidates`): each `signup` → fact `signup`, source `distribute_platform`,
-  `sourceRef` = client-service's factId, `occurredAt` + `dateBasis` verbatim, subject = its keys (`uid:<clerkUserId>`,
-  email, phone; NOT standalone): it lands on the person the build holds (the Clerk presence), and nobody (the
-  brand's own address) = HELD. A client-service `withdrawn` → our `withdrawn` of the copy, reason
-  `source_withdrawn` + `sourceReason` (`org_deleted` / `org_absorbed`).
-- **Echo signups superseded:** once a brand's signups are stated this way, its Clerk + PostHog `signup` families
-  emit nothing and their live facts are withdrawn (`signup_source_superseded`). Generic, keyed on "the platform
-  states this brand's signups", never a brand id. The Clerk / PostHog PEOPLE (presences, uid merge, visits) stay.
-- Prod 2026-10-13: 117 pulled, 116 emitted (1 held: an own address), Clerk 96 + PostHog 90 superseded (#124).
-- ⚠️ The cursor is TABLE-wide: a test fixture in `platform_signup_facts` uses a NEGATIVE `seq` (a positive one moved
-  the cursor past the platform suite's feed in CI only, file order).
 
 ## Copilot chat — the staff Unibox's chat source (`src/lib/copilot/messages.ts`)
 

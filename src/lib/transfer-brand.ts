@@ -61,7 +61,6 @@ import {
   formTriggerReports,
   formOfferMappings,
   replyTriggerReports,
-  platformSignupFacts,
   humanLinkStatements,
   humanFactStatements,
 } from "../db/schema.js";
@@ -114,8 +113,6 @@ export const TRANSFER_TABLES: PgTable[] = [
   formOfferMappings,
   // Answers in campaign-opened threads reported as `positive_reply_received`.
   replyTriggerReports,
-  // client-service's signup facts copied for the brand (staff org).
-  platformSignupFacts,
   // What the brand's CRM stated to human-service (judgment merges, do-not-contact
   // marks). A link stated for the old org is stated again for the new one.
   humanLinkStatements,

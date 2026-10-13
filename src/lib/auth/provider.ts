@@ -39,6 +39,31 @@ export interface DerivedAuthUser {
   lastActiveAt: Date | null;
 }
 
+/**
+ * One membership of a user in one of the product's ORGANIZATIONS (teams), with
+ * the user who created that organization. It is what tells a SIGNUP (someone
+ * who came to the product on their own) from a TEAMMATE invited into an
+ * organization somebody else created.
+ */
+export interface DerivedAuthMembership {
+  externalId: string;
+  userId: string;
+  orgId: string;
+  /** The user who created the organization; null when the provider names nobody. */
+  orgCreatedBy: string | null;
+}
+
+/**
+ * Signed up = came to the product on their own. A user is NOT a signup only on
+ * positive evidence: they belong to at least one organization and EVERY one of
+ * them was created by someone else (they were invited in). A user in no
+ * organization, or in one the provider names no creator for, is a signup.
+ */
+export function isSignup(userId: string, memberships: Pick<DerivedAuthMembership, "orgCreatedBy">[]): boolean {
+  if (memberships.length === 0) return true;
+  return !memberships.every((m) => m.orgCreatedBy !== null && m.orgCreatedBy !== userId);
+}
+
 export interface AuthProviderAdapter {
   /** Provider name: the key-service provider, the `contacts.source`, the people source. */
   name: string;
@@ -50,6 +75,17 @@ export interface AuthProviderAdapter {
   /** The record's id in the provider. */
   idOf(record: Record<string, unknown>): string;
   derive(record: Record<string, unknown>): DerivedAuthUser | null;
+  /**
+   * Organization memberships, for a provider with organizations (Clerk). The
+   * provider's own total, then every membership page by page, verbatim minus
+   * server-only secrets. Absent = the provider has no organizations: every user
+   * is a signup.
+   */
+  memberships?: {
+    count(secretKey: string): Promise<number>;
+    list(secretKey: string): AsyncGenerator<Record<string, unknown>[]>;
+    derive(record: Record<string, unknown>): DerivedAuthMembership | null;
+  };
   /** Shape check on the pasted key, before any call (null = acceptable). */
   rejectKey(secretKey: string): string | null;
 }
