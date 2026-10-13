@@ -795,7 +795,7 @@ export interface FactEmissionSummary {
   unchanged: number;
   corrected: number;
   withdrawnGone: number;
-  /** Live facts of a retired family, withdrawn (`source_retired`). */
+  /** Live facts of a retired family (`source_retired`), or PostHog signups an auth provider supersedes. */
   retired: number;
   /** Facts re-stated because their vendor contact now sits on a new crm contact row. */
   reminted: number;
@@ -877,7 +877,13 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       csvCandidates(orgId, brandId),
       connectedSources(orgId, brandId),
     ]);
-    const all = [...ghl, ...matrix, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv];
+    // An auth provider connected = it alone states who signed up (it knows invited
+    // teammates and staff; PostHog only knows who was identified). PostHog keeps
+    // its visits; its signups are not emitted and live ones are withdrawn.
+    const authStatesSignups = connected.has("clerk");
+    const all = [...ghl, ...matrix, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv].filter(
+      (c) => !(authStatesSignups && c.family === "posthog_person"),
+    );
     const candidates = new Map<string, CandidateFact>();
     let duplicateKeys = 0;
     for (const c of all) {
@@ -973,6 +979,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
         | "vendor_record_gone"
         | "crm_contact_reminted"
         | "source_retired"
+        | "signup_stated_by_auth_provider"
         | "human_identified";
     }[] = [];
     const fresh: (typeof peopleFacts.$inferInsert)[] = [];
@@ -1011,6 +1018,11 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
     );
     for (const [key, live] of liveByKey) {
       if (candidates.has(key)) continue;
+      if (authStatesSignups && live.family === "posthog_person") {
+        withdrawals.push({ fact: live, reason: "signup_stated_by_auth_provider" });
+        retired++;
+        continue;
+      }
       if (RETIRED_FAMILIES.has(live.family ?? "")) {
         withdrawals.push({ fact: live, reason: "source_retired" });
         retired++;

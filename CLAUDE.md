@@ -1295,6 +1295,9 @@ fact source literal (`"clerk"`) is the one per-provider line in `identity.ts` /
   no timeline signup, out of the serve `signedUp` pool, still a person. No org / unnamed creator = signup.
   Our staff (`isStaffEmail`) is never a signup: they open orgs FOR clients (Kevin opened Doc Dinners); in an org
   the team opened, the FIRST outsider to join (membership `created_at`) is the signup, later ones are invited.
+  Team = the fleet staff list only: a client brand's own team opening orgs in its Clerk is not recognised yet.
+- **An auth provider connected = the only signup source**: PostHog `signup` (an identified person) is then not
+  emitted and live ones are withdrawn (`signup_stated_by_auth_provider`); PostHog keeps its visits.
   Our own brand counts its signups through THIS connector like any client (2026-10-13: a read of
   client-service, #124, was retired the same day: `RETIRED_FAMILIES` withdraws its facts as `source_retired`).
 - People: source `clerk`, presence `userIds = [Clerk user id]`. Fact: `signup`,

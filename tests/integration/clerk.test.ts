@@ -343,8 +343,7 @@ describe.skipIf(!RUN)("Clerk auth provider", () => {
     expect(signups.map((f) => [f.source, f.sourceRef, f.dateBasis, f.occurredAt?.toISOString(), f.emails])).toEqual([
       ["clerk", "user_ann", "user_created_at", "2026-06-18T10:00:00.000Z", ["ann.old@x.com", "ann@x.com"]],
       ["clerk", "user_bob", "user_created_at", "2026-07-01T10:00:00.000Z", ["bob@y.com"]],
-      ["posthog", "ph-ann", "person_created_at", "2026-06-18T10:00:05.000Z", ["ann.old@x.com", "ann@x.com"]],
-      ["posthog", "ph-bob", "person_created_at", "2026-07-01T10:00:02.000Z", ["bob@y.com"]],
+      // Clerk connected: it alone states signups, PostHog's identified persons are not signups.
     ]);
 
     // Bob's visit, read from PostHog's whole history, is in his thread beside his Clerk signup.
@@ -354,7 +353,6 @@ describe.skipIf(!RUN)("Clerk auth provider", () => {
     expect(tl.status).toBe(200);
     expect(tl.body.items.map((i: { source: string; event: { step: string } }) => `${i.source}:${i.event.step}`)).toEqual([
       "clerk:signup",
-      "posthog:signup",
       "posthog:visit",
     ]);
     const list = await asOrg(request(app()).get(`/orgs/people?brandId=${BRAND}`));
