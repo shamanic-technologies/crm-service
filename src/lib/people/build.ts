@@ -17,6 +17,7 @@ import { SERVICE_NAME } from "../../middleware/auth.js";
 import { createRun, updateRun } from "../runs-client.js";
 import {
   clusterPeople,
+  keysOf,
   PEOPLE_SOURCES,
   type Evidence,
   type PersonCluster,
@@ -59,6 +60,15 @@ import { leadAddressesFirst, resolvePersonState, type GhlDeal, type LeadObservat
 import { indexScopeMessages, type MessageIndexSummary } from "./search.js";
 import { emitScopeFacts, type FactEmissionSummary } from "./facts.js";
 import { persistPersonIds } from "./person-id.js";
+import {
+  humanEvidence,
+  judgmentId,
+  personHumanId,
+  resolveScopeHumans,
+  type HumanIdentitySummary,
+  type IdentityRecord,
+  type Judgment,
+} from "./humans.js";
 
 /** How long lead-service's answer about an address is reused. */
 export const STANDING_TTL_MS = 60 * 60 * 1000;
@@ -116,6 +126,8 @@ export interface BuildSummary {
   messageIndex?: ({ status: "ok" } & MessageIndexSummary) | { status: "failed"; error: string };
   /** The fact feed emission that followed (absent until it ran). */
   facts?: ({ status: "ok" } & FactEmissionSummary) | { status: "failed"; error: string };
+  /** human-service's answer to "same human?" (people/humans.ts; absent on builds before it existed). */
+  humanIdentity?: HumanIdentitySummary & { peopleWithHumanId: number; peopleWithoutHumanId: number };
   /** WhatsApp ghost → phone resolution run before reading Matrix (absent on builds before it existed). */
   whatsappPhones?: PhoneResolutionResult | { status: "failed"; error: string };
 }
@@ -310,13 +322,52 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       phones: p.phones,
     }));
 
+  // "Same human?" is human-service's call (people/humans.ts). Every record is
+  // stated to it (keys given together = one contact); a judgment (a stated
+  // merge, a confident lead-service pairing) is stated as an org-scoped link;
+  // its answer comes back as `human_identity` evidence. A judgment it does not
+  // hold yet (no email / phone on a side, not resolved yet, human-service down)
+  // still ties keys here, as before.
+  const presences = reads.flatMap((r) => r.presences);
+  const allEvidence = [...ghlEvidence, ...stripeEvidence, ...evidenceReads.flatMap((e) => e.evidence)];
+  const isJudgment = (e: Evidence) => !!e.sides && !!e.judgedBy;
+  const judgments: Judgment[] = allEvidence.filter(isJudgment).map((e) => ({
+    kind: e.kind as Judgment["kind"],
+    ref: e.ref,
+    sides: e.sides!,
+    judgedBy: e.judgedBy!,
+    evidence:
+      e.kind === "stated_merge"
+        ? `Stated in the brand's CRM (crm-service person merge ${e.ref}) that two people are one human`
+        : `lead-service paired the brand's CRM contact ${e.ref} with one of its leads`,
+  }));
+  const records: IdentityRecord[] = [
+    ...presences.map((p) => ({ emails: p.emails, phones: p.phones })),
+    ...allEvidence.filter((e) => !isJudgment(e)).map((e) => ({ emails: e.emails, phones: e.phones })),
+  ];
+  const kindsRead = new Set<Judgment["kind"]>(
+    evidenceReads
+      .filter((e) => e.status === "ok" && (e.kind === "stated_merge" || e.kind === "lead_pairing"))
+      .map((e) => e.kind as Judgment["kind"]),
+  );
+  const humans = await resolveScopeHumans(scope, records, judgments, kindsRead);
+  const heldEvidence = allEvidence.filter((e) => isJudgment(e) && humans.heldJudgments.has(judgmentId({ kind: e.kind as Judgment["kind"], ref: e.ref })));
+  const buildKeys = new Set<string>();
+  for (const x of [...presences, ...allEvidence]) for (const k of keysOf(x, null)) buildKeys.add(k);
+
   // A PostHog person PostHog holds no email for, whom no other record names by
   // their user id, says nothing about who they are: nobody to show (their
   // facts are held). Once the brand's auth provider names them, they join.
-  const clusters = clusterPeople(
-    reads.flatMap((r) => r.presences),
-    [...ghlEvidence, ...stripeEvidence, ...evidenceReads.flatMap((e) => e.evidence)],
-  ).filter((c) => !isUnnamedPosthogOnly(c));
+  const clusters = clusterPeople(presences, [
+    ...allEvidence.filter((e) => !heldEvidence.includes(e)),
+    ...humanEvidence(buildKeys, humans.humanOf),
+  ]).filter((c) => !isUnnamedPosthogOnly(c));
+  // A judgment human-service holds no longer ties keys here, but it still
+  // describes the person (name, "a CRM contact paired with a lead" = business).
+  for (const e of heldEvidence) {
+    const ks = new Set(keysOf(e, null));
+    for (const c of clusters) if (c.identityKeys.some((k) => ks.has(k))) c.evidence.push(e);
+  }
 
   // lead-service is asked about every address of every person.
   const wanted = new Map<string, string | null>();
@@ -375,6 +426,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       orgId: scope.orgId,
       brandId: scope.brandId,
       personKey: c.personKey,
+      humanId: personHumanId(c.identityKeys, humans.humanOf),
       identityKeys: c.identityKeys,
       displayName: firstNonNull(c, "displayName"),
       company: firstNonNull(c, "company"),
@@ -382,7 +434,14 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       phones: c.phones,
       sources: PEOPLE_SOURCES.filter((s) => c.presences.some((p) => p.source === s)),
       presences: c.presences,
-      mergeEvidence: c.evidence.map((e) => ({ kind: e.kind, ref: e.ref, emails: e.emails, phones: e.phones, ...(e.keys ? { keys: e.keys } : {}) })),
+      mergeEvidence: c.evidence.map((e) => ({
+        kind: e.kind,
+        ref: e.ref,
+        emails: e.emails,
+        phones: e.phones,
+        ...(e.keys ? { keys: e.keys } : {}),
+        ...(e.kind === "stated_merge" || e.kind === "lead_pairing" ? { heldBy: heldEvidence.includes(e) ? "human-service" : "crm-service" } : {}),
+      })),
       firstActivityAt: (() => {
         const d = minDate(c.presences.map((p) => p.firstActivityAt));
         return d ? new Date(d) : null;
@@ -406,8 +465,10 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     };
   });
 
+  const withHuman = rows.filter((r) => r.humanId).length;
   const summary: BuildSummary = {
     whatsappPhones,
+    humanIdentity: { ...humans.summary, peopleWithHumanId: withHuman, peopleWithoutHumanId: rows.length - withHuman },
     people: rows.length,
     sources: reads.map((r) => ({
       source: r.source,
@@ -492,7 +553,7 @@ export async function runScopeBuild(scope: PeopleScope): Promise<{ scopeId: stri
     const summary = await buildScopePeople(scope, run.id);
     await updateRun(run.id, "completed", { orgId: scope.orgId, userId: scope.createdByUserId });
     console.log(
-      `[crm-service] people build scope=${scope.id} brand=${scope.brandId} people=${summary.people} automated=${summary.senderVerdicts.automatedPeople} notBusiness=${summary.relevance?.notBusinessPeople} relevanceJudged=${summary.relevance?.judged} relevancePending=${summary.relevance?.pending} judged=${summary.senderVerdicts.judged} pending=${summary.senderVerdicts.pending} facts=${summary.facts?.status === "ok" ? `+${summary.facts.emitted}/-${summary.facts.corrected + summary.facts.withdrawnGone}` : summary.facts?.status} sources=${summary.sources
+      `[crm-service] people build scope=${scope.id} brand=${scope.brandId} people=${summary.people} humanIds=${summary.humanIdentity?.peopleWithHumanId}/${summary.people}:${summary.humanIdentity?.status}:+${summary.humanIdentity?.resolved}~${summary.humanIdentity?.pending} automated=${summary.senderVerdicts.automatedPeople} notBusiness=${summary.relevance?.notBusinessPeople} relevanceJudged=${summary.relevance?.judged} relevancePending=${summary.relevance?.pending} judged=${summary.senderVerdicts.judged} pending=${summary.senderVerdicts.pending} facts=${summary.facts?.status === "ok" ? `+${summary.facts.emitted}/-${summary.facts.corrected + summary.facts.withdrawnGone}` : summary.facts?.status} sources=${summary.sources
         .map((s) => `${s.source}:${s.status}:${s.presences}`)
         .join(",")}`,
     );

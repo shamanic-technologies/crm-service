@@ -370,6 +370,8 @@ export interface ServedPerson extends Omit<ServedContact, "sourceUploadId" | "so
   pool: "people";
   /** The person's opaque id (people/person-id.ts): what a URL or a later call names them by. */
   personId: string | null;
+  /** The fleet-wide human (human-service) the person IS; null when not known yet. */
+  humanId: string | null;
   emails: string[];
   phones: string[];
   /** Where each phone came from (`{ phone, source, via }`), from the person's presences. */
@@ -388,6 +390,7 @@ interface RawPersonRow {
   org_id: string;
   brand_id: string;
   person_id: string | null;
+  human_id: string | null;
   display_name: string | null;
   emails: string[];
   phones: string[];
@@ -435,6 +438,7 @@ function toServedPerson(r: RawPersonRow): ServedPerson {
     lastRebuiltAt: r.built_at instanceof Date ? r.built_at.toISOString() : r.built_at,
     pool: "people",
     personId: r.person_id,
+    humanId: r.human_id ?? null,
     emails: r.emails,
     phones: r.phones,
     phoneSources: phoneSourcesOf(r),
@@ -515,7 +519,7 @@ export async function serveNextPeople(
   const where = peoplePoolWhere(orgId, brandId, filter, reach);
   const rows = (await db.execute(sql`
     WITH candidate AS (
-      SELECT p.id, p.org_id, p.brand_id, p.person_id, p.display_name, p.emails, p.phones,
+      SELECT p.id, p.org_id, p.brand_id, p.person_id, p.human_id, p.display_name, p.emails, p.phones,
              p.sources, p.presences, p.built_at, p.first_activity_at, p.person_key
       FROM people p
       WHERE ${where} AND ${NOT_SERVED}

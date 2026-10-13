@@ -246,6 +246,12 @@ describe("pairingEvidence: lead-service's CONFIDENT paired verdict, nothing else
       company: "Aim",
       emails: ["marketing@aim.com", "joanie@aim.com"],
       phones: ["+13529423443"],
+      // The two records it judges one human: stated to human-service as an org-scoped link.
+      sides: [
+        { emails: ["marketing@aim.com"], phones: ["+13529423443"] },
+        { emails: ["joanie@aim.com"], phones: [] },
+      ],
+      judgedBy: "lead-service",
     });
     expect(possibleLeadOf(row("paired"))).toBeNull();
   });
