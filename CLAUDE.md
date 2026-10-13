@@ -1300,7 +1300,9 @@ signup in our own funnel is a COPY of its fact, never a scrape of Clerk.
 - **Echo signups superseded:** once a brand's signups are stated this way, its Clerk + PostHog `signup` families
   emit nothing and their live facts are withdrawn (`signup_source_superseded`). Generic, keyed on "the platform
   states this brand's signups", never a brand id. The Clerk / PostHog PEOPLE (presences, uid merge, visits) stay.
-- Prod 2026-10-13: client-service backfill = 117 signups (one per org). See the PR for the before/after person set.
+- Prod 2026-10-13: 117 pulled, 116 emitted (1 held: an own address), Clerk 96 + PostHog 90 superseded (#124).
+- ⚠️ The cursor is TABLE-wide: a test fixture in `platform_signup_facts` uses a NEGATIVE `seq` (a positive one moved
+  the cursor past the platform suite's feed in CI only, file order).
 
 ## Copilot chat — the staff Unibox's chat source (`src/lib/copilot/messages.ts`)
 
