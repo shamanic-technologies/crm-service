@@ -26,7 +26,8 @@ import { people, whatsappSends } from "../../db/schema.js";
 import { BridgeError, createDm, resolveIdentifier } from "../matrix/bridge.js";
 import { connectedOnly, linkedWhatsappAccounts, type WhatsappAccount } from "./accounts.js";
 import { recordGhostPhone } from "./phone-resolution.js";
-import { joinRoom, sendText } from "../matrix/client.js";
+import { joinRoom, readRoomBridgeInfo, sendText } from "../matrix/client.js";
+import { expectedChannelIds, roomDeliversTo } from "./room-check.js";
 import { emailKey, normalizeEmail, normalizePhone, phoneKey, type Presence } from "../people/identity.js";
 import { personReplied } from "../people/conversation.js";
 
@@ -43,6 +44,12 @@ export const SEND_REFUSAL_CODES = [
   "person_replied",
   /** Another call with the same idempotency key is sending right now. */
   "send_in_progress",
+  /**
+   * The DM room the bridge answered for this number delivers to SOMEONE ELSE
+   * (its `m.bridge` channel is another person: room-check.ts), and no fresh DM
+   * fixed it. Nothing was sent; the room needs repairing on the bridge.
+   */
+  "wrong_room",
 ] as const;
 export type SendRefusalCode = (typeof SEND_REFUSAL_CODES)[number];
 
@@ -270,6 +277,53 @@ async function countPreviousSends(req: SendRequest, phone: string, excludeId: st
   return row?.n ?? 0;
 }
 
+/**
+ * Join `roomId` and check, from the bridge's own room state, that it delivers
+ * to the person resolved for `phone` on this account's login. A room naming
+ * someone else is never written to: the bridge is asked for a fresh DM once,
+ * used only when it is ANOTHER room that names the person; otherwise the send
+ * is refused `wrong_room`, logged loud. Returns the room (and its ghost) to send into.
+ */
+async function verifiedRoom(
+  account: WhatsappAccount,
+  resolvedId: string,
+  phone: string,
+  target: { roomId: string; ghost: string },
+): Promise<{ roomId: string; ghost: string }> {
+  const { roomId } = target;
+  const check = async (room: string, id: string) => {
+    await joinRoom(account.accessToken, room);
+    return roomDeliversTo(await readRoomBridgeInfo(account.accessToken, room), expectedChannelIds(id, phone), account.loginId);
+  };
+  const first = await check(roomId, resolvedId);
+  if (first.ok) return target;
+  console.error(
+    `[crm-service][whatsapp] WRONG ROOM: the bridge answered ${roomId} for ${phone} (from +${digitsOf(account.loginId)}), ` +
+      `but the room delivers to ${first.actual}. Not sending there; asking the bridge for a fresh DM.`,
+  );
+  let freshNote = "";
+  try {
+    const dm = await createDm("whatsapp", account.matrixUserId, account.loginId, phone);
+    if (dm.dmRoomId && dm.dmRoomId !== roomId) {
+      const fresh = await check(dm.dmRoomId, dm.id);
+      if (fresh.ok) {
+        console.error(`[crm-service][whatsapp] WRONG ROOM avoided: ${phone} gets the fresh DM ${dm.dmRoomId} instead of ${roomId}.`);
+        return { roomId: dm.dmRoomId, ghost: dm.mxid };
+      }
+      freshNote = ` The fresh DM ${dm.dmRoomId} delivers to ${fresh.actual} too.`;
+    } else {
+      freshNote = " The bridge answered the same room again.";
+    }
+  } catch (err) {
+    freshNote = ` Asking for a fresh DM failed: ${(err as Error).message}`;
+  }
+  const message =
+    `The WhatsApp room the bridge answered for ${phone} (${roomId}) delivers to ${first.actual}, not to ${phone}. ` +
+    `Nothing was sent.${freshNote}`;
+  console.error(`[crm-service][whatsapp] WRONG ROOM refused: ${message}`);
+  throw new SendRefusal("wrong_room", message);
+}
+
 export async function sendWhatsApp(req: SendRequest): Promise<SendResult> {
   const claimed = await claim(req);
   if ("earlier" in claimed) {
@@ -335,8 +389,11 @@ export async function sendWhatsApp(req: SendRequest): Promise<SendResult> {
       ghost = dm.mxid;
     }
 
-    // 5. Send.
-    await joinRoom(account.accessToken, roomId);
+    // 5. The room must deliver to THIS person: never post into a room the
+    //    bridge maps to someone else (room-check.ts).
+    ({ roomId, ghost } = await verifiedRoom(account, onAccount.id, phone, { roomId, ghost }));
+
+    // 6. Send.
     const eventId = await sendText(account.accessToken, roomId, txnIdFor(req.orgId, req.brandId, req.idempotencyKey), req.text);
     const sent = await finish(row.id, {
       status: "sent",

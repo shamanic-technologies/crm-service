@@ -57,6 +57,11 @@ const KNOWN_ROOM = "!known:matrix.test";
 let sends: { room: string; txn: string; body: string; auth: string | null }[] = [];
 let createdDms: string[] = [];
 let loginState = "CONNECTED";
+/** Room → the bridge's `m.bridge` channel id, when a test makes a room deliver to someone else. */
+let roomChannelOverride: Record<string, string> = {};
+/** Digits → the room `create_dm` answers instead of a fresh `!dm-<digits>` one. */
+let createDmRoomOverride: Record<string, string> = {};
+const jidOfLid = (lid: string) => `${lid.replace(/^lid-/, "")}@lid`;
 /** Phone digits → WhatsApp state for the stub. */
 const NETWORK: Record<string, { lid: string; room: string | null }> = {
   "33600000001": { lid: "lid-1", room: KNOWN_ROOM },
@@ -68,6 +73,8 @@ function installFetchStub() {
   createdDms = [];
   lookups = [];
   loginState = "CONNECTED";
+  roomChannelOverride = {};
+  createDmRoomOverride = {};
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     const auth = new Headers(init?.headers).get("authorization");
@@ -90,7 +97,7 @@ function installFetchStub() {
         if (!who) return json({ errcode: "M_NOT_FOUND", error: `the server said +${digits} is not on WhatsApp` }, 404);
         let room = who.room;
         if (m[1] === "create_dm") {
-          room = `!dm-${digits}:matrix.test`;
+          room = createDmRoomOverride[digits] ?? `!dm-${digits}:matrix.test`;
           createdDms.push(digits);
         }
         return json({ id: who.lid, name: `+${digits} (WA)`, mxid: `@whatsapp_${who.lid}:matrix.test`, ...(room ? { dm_room_mxid: room } : {}) });
@@ -98,6 +105,22 @@ function installFetchStub() {
     }
     if (url.host === "hs.test") {
       if (url.pathname.startsWith("/_matrix/client/v3/join/")) return json({ room_id: "x" });
+      const st = url.pathname.match(/^\/_matrix\/client\/v3\/rooms\/([^/]+)\/state$/);
+      if (st) {
+        // The bridge's own statement of whom the room talks to, on the token's login.
+        const room = decodeURIComponent(st[1]);
+        const dmDigits = room.match(/^!dm-(\d+):/)?.[1];
+        const channel =
+          roomChannelOverride[room] ??
+          (room === KNOWN_ROOM ? jidOfLid(NETWORK["33600000001"].lid) : dmDigits && NETWORK[dmDigits] ? jidOfLid(NETWORK[dmDigits].lid) : "unknown@lid");
+        const receiver = (auth ?? "").replace("Bearer tok-", "");
+        const content = { bridgebot: "@whatsappbot:matrix.test", channel: { id: channel, displayname: "x (WA)", "fi.mau.receiver": receiver } };
+        return json([
+          { type: "m.room.create", state_key: "", content: {} },
+          { type: "m.bridge", state_key: "matrix.test/whatsapp", content },
+          { type: "uk.half-shot.bridge", state_key: "matrix.test/whatsapp", content },
+        ]);
+      }
       const s = url.pathname.match(/^\/_matrix\/client\/v3\/rooms\/([^/]+)\/send\/m\.room\.message\/([^/]+)$/);
       if (s) {
         const body = JSON.parse(String(init?.body)).body as string;
@@ -327,6 +350,40 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
       .set(headers)
       .send({ brandId: BRAND, phone: "+33600000001", text: "Hi again", idempotencyKey: "k-known" });
     expect(known.body.fromAccount).toBe("+33611111111");
+  });
+
+  it("never posts into a DM room the bridge maps to someone else (JACKSON-WA-WRONG-ROOM)", async () => {
+    await linkAccount();
+    // The bridge answers KNOWN_ROOM for +33600000001, but the room's m.bridge is another person.
+    roomChannelOverride[KNOWN_ROOM] = "152128261730337@lid";
+    // create_dm hands back the same broken room: no correct DM exists.
+    createDmRoomOverride["33600000001"] = KNOWN_ROOM;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const body = { brandId: BRAND, phone: "+33600000001", text: "Test", idempotencyKey: "k-wrong-room" };
+    const res = await request(app()).post("/orgs/whatsapp/messages").set(headers).send(body);
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({ type: "refused", code: "wrong_room" });
+    expect(res.body.error).toContain("152128261730337@lid");
+    expect(sends).toEqual([]);
+    const [row] = await db.select().from(whatsappSends).where(eq(whatsappSends.idempotencyKey, "k-wrong-room"));
+    expect(row).toMatchObject({ status: "refused", errorCode: "wrong_room", phone: "+33600000001", roomId: null, eventId: null });
+    expect(row.error).toContain(KNOWN_ROOM);
+    expect(errors.mock.calls.some((c) => String(c[0]).includes("WRONG ROOM refused") && String(c[0]).includes("+33600000001"))).toBe(true);
+
+    // A retry under the same key answers the same refusal and still sends nothing.
+    const again = await request(app()).post("/orgs/whatsapp/messages").set(headers).send(body);
+    expect(again.status).toBe(422);
+    expect(again.body.code).toBe("wrong_room");
+    expect(sends).toEqual([]);
+
+    // When the bridge can open a fresh DM that IS the person, the send goes there instead.
+    delete createDmRoomOverride["33600000001"];
+    const fixed = await request(app()).post("/orgs/whatsapp/messages").set(headers).send({ ...body, idempotencyKey: "k-wrong-room-2" });
+    expect(fixed.status).toBe(200);
+    expect(fixed.body.roomId).toBe("!dm-33600000001:matrix.test");
+    expect(sends.map((x) => x.room)).toEqual(["!dm-33600000001:matrix.test"]);
+    errors.mockRestore();
   });
 
   it("refuses with named codes the workflow can record", async () => {

@@ -902,7 +902,7 @@ body `brandId`; `x-campaign-id` recorded), body `{ email?, phone?, text, idempot
 fromAccount?, skipIfReplied? }`. 200 `{ sendId, status: "sent", duplicate, to, phoneSource,
 fromAccount, roomId, eventId, sentAt, previousSends }`. Refusals 422 `{ type: "refused",
 code, error }`: `whatsapp_not_linked` | `whatsapp_not_connected` | `no_phone_known` |
-`not_on_whatsapp` | `person_replied` (only with `skipIfReplied`); 409 `send_in_progress`;
+`not_on_whatsapp` | `person_replied` (only with `skipIfReplied`) | `wrong_room`; 409 `send_in_progress`;
 400 `invalid_request`; 502 `bridge_error`. `GET /orgs/whatsapp/messages?brandId=&email=|phone=`
 lists the person's sends. No cost.
 - Phone = `phone` if given, else the person's first phone from `people` (looked up by email).
@@ -911,6 +911,12 @@ lists the person's sends. No cost.
 - Bridge `GET resolve_identifier/+<digits>?login_id=` (404 = not on WhatsApp), `POST
   create_dm` when no room, then `PUT rooms/{room}/send/m.room.message/{txnId}` as the
   account (join first). txnId = hash(org, brand, key): Matrix itself dedupes a retry.
+- **The room must deliver to the person** (`room-check.ts`, JACKSON-WA-WRONG-ROOM 2026-10-12): after join,
+  the room's `m.bridge` state (`channel.id` + `fi.mau.receiver`) must name the resolved LID / the phone's JID on
+  the sending login, else one fresh `create_dm` (used only if ANOTHER room that passes), else refused `wrong_room`,
+  logged `WRONG ROOM`. Why: the bridge gave two portals ONE room in a mass resync (room v12 ids hash the create
+  event); `resolve_identifier` kept answering the owner's number's room while the bridge delivered it to a friend.
+  3 such rooms found on 2026-10-13, repaired bridge-side (portal `mxid` nulled, bridge restarted).
 - Idempotent: `whatsapp_sends` UNIQUE (org, brand, key); sent → same answer `duplicate: true`;
   refused → same refusal; failed or stuck `sending` > 2 min → retried.
 - Into the thread: WhatsApp names counterparts by opaque LID ghosts (all 514 prod WhatsApp
