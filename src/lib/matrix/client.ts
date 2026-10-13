@@ -159,3 +159,54 @@ export async function joinRoom(token: string, roomId: string): Promise<void> {
     clearTimeout(timer);
   }
 }
+
+/** One `m.bridge` (or legacy `uk.half-shot.bridge`) state event: whom the bridge says the room talks to. */
+export interface RoomBridgeInfo {
+  type: string;
+  /** The network's chat id (WhatsApp: the counterpart's JID, `…@lid` or `…@s.whatsapp.net`). */
+  channelId: string | null;
+  /** The login the portal belongs to (`fi.mau.receiver`), when the bridge states it. */
+  receiver: string | null;
+  displayname: string | null;
+}
+
+const BRIDGE_STATE_TYPES = ["m.bridge", "uk.half-shot.bridge"];
+
+/**
+ * The bridge's own statement of WHO a room delivers to, read from the room
+ * state as the account owning `token` (it must be a member). Read only.
+ * Fails loud: any non-2xx or transport error throws.
+ */
+export async function readRoomBridgeInfo(token: string, roomId: string): Promise<RoomBridgeInfo[]> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${homeserverUrl()}/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${token}` },
+      signal: controller.signal,
+    });
+    const body = await res.text();
+    if (!res.ok) throw new Error(`[crm-service][matrix] GET room state returned ${res.status}: ${body.slice(0, 300)}`);
+    const events = JSON.parse(body) as MatrixEvent[];
+    return events
+      .filter((e) => BRIDGE_STATE_TYPES.includes(e.type))
+      .map((e) => {
+        const channel = (e.content?.channel ?? {}) as Record<string, unknown>;
+        const str = (v: unknown) => (typeof v === "string" && v ? v : null);
+        return {
+          type: e.type,
+          channelId: str(channel.id),
+          receiver: str(channel["fi.mau.receiver"]),
+          displayname: str(channel.displayname),
+        };
+      });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`[crm-service][matrix] GET room state aborted after ${SEND_TIMEOUT_MS}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}

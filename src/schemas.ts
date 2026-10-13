@@ -2836,6 +2836,7 @@ const WhatsappRefusalSchema = z.object({
     "not_on_whatsapp",
     "person_replied",
     "send_in_progress",
+    "wrong_room",
   ]),
   error: z.string(),
 });
