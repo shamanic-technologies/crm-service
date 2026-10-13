@@ -61,6 +61,7 @@ import {
   formTriggerReports,
   formOfferMappings,
   replyTriggerReports,
+  platformSignupFacts,
 } from "../db/schema.js";
 
 export const TRANSFER_TABLES: PgTable[] = [
@@ -111,6 +112,8 @@ export const TRANSFER_TABLES: PgTable[] = [
   formOfferMappings,
   // Answers in campaign-opened threads reported as `positive_reply_received`.
   replyTriggerReports,
+  // client-service's signup facts copied for the brand (staff org).
+  platformSignupFacts,
 ];
 
 export interface TransferBrandInput {

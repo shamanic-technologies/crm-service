@@ -19,8 +19,10 @@ import copilotRoutes from "./routes/copilot.js";
 import whatsappRoutes from "./routes/whatsapp.js";
 import apiCallsRoutes from "./routes/api-calls.js";
 import formTriggerRoutes from "./routes/form-triggers.js";
+import platformSignupRoutes from "./routes/platform-signups.js";
 import { startFreshnessWatch } from "./lib/people/freshness.js";
 import { startFormWatch } from "./lib/form-trigger/watch.js";
+import { startPlatformSignupPull } from "./lib/platform-signups/pull.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -72,6 +74,7 @@ app.use(authProviderRoutes);
 app.use(copilotRoutes);
 app.use(whatsappRoutes);
 app.use(formTriggerRoutes);
+app.use(platformSignupRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ type: "not_found", error: "Not found" });
@@ -104,6 +107,8 @@ if (process.env.NODE_ENV !== "test") {
         startFreshnessWatch();
         // Reports each new CRM form submission as a `form_submitted` trigger, within a minute.
         startFormWatch();
+        // Copies client-service's signup facts (our own brand's signups) into the people fact feed.
+        startPlatformSignupPull();
       })
       .catch((err) => {
         console.error("[crm-service] Migration failed:", err);
