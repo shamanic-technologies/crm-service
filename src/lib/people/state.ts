@@ -60,11 +60,26 @@ export const LEAD_STANDING_STATES = [
  * null = not disqualified for that conversation. Never derived here.
  */
 export interface LeadDisqualification {
+  /** lead-service's level, verbatim: `lead` (this person at this company) or `company` ("not our target"). */
+  level: string;
   offerId: string | null;
   note: string | null;
   source: string;
   statedByUserId: string | null;
   statedAt: string;
+}
+
+/**
+ * lead-service's COMPANY block on a lead row (`company`), verbatim: the company
+ * the lead is at and what is true of it as a buyer of the brand. null = no
+ * company known. Never derived here.
+ */
+export interface LeadCompanyTags {
+  id: string | null;
+  key: string;
+  isClient: boolean;
+  signedUp: boolean;
+  disqualification: LeadDisqualification | null;
 }
 
 export const DEAL_STATES = ["deal_won", "deal_open", "deal_lost", "deal_abandoned"] as const;
@@ -101,6 +116,8 @@ export type LeadObservation =
       standing: LeadStanding;
       /** lead-service's Disqualified mark on that same row, verbatim (null = not disqualified). */
       disqualification: LeadDisqualification | null;
+      /** lead-service's company block on that same row, verbatim (null = no company known). */
+      company: LeadCompanyTags | null;
       /** The leads_campaigns row whose standing it is (lead-service `sort=activity` first row). */
       leadCampaignId: string;
       leadId: string | null;
@@ -151,6 +168,7 @@ export function resolvePersonState(input: StateInputs): PersonState {
         email: lead.email,
         standing: lead.standing,
         disqualification: lead.disqualification,
+        company: lead.company,
         leadCampaignId: lead.leadCampaignId,
         leadId: lead.leadId,
         campaignId: lead.campaignId,

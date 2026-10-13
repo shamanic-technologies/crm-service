@@ -25,6 +25,7 @@ import {
 } from "./identity.js";
 import { mapLimit, type SiblingIdentity } from "./siblings.js";
 import {
+  cachedAnswerIsCurrent,
   lookupLeadStanding,
   walkLeadStandings,
   type LeadStandingAnswer,
@@ -190,12 +191,11 @@ async function observeStandings(
       hit &&
       now - hit.observedAt.getTime() < STANDING_TTL_MS &&
       (!lastActivity || new Date(lastActivity) <= hit.observedAt) &&
-      // An answer cached before lead-service served `standing.tag`, or before it
-      // served its Disqualified mark (`disqualification`, null or the mark), is
-      // re-asked: an absent mark is not "not disqualified".
-      (!hit.found ||
-        (typeof (hit.payload as { standing?: { tag?: unknown } } | null)?.standing?.tag === "string" &&
-          (hit.payload as { disqualification?: unknown } | null)?.disqualification !== undefined));
+      // An answer cached before lead-service served `standing.tag`, its
+      // Disqualified mark (`disqualification`, null or the mark, now with its
+      // `level`) or its company block (`company`, null or the block), is
+      // re-asked: an absent value is not "no".
+      (!hit.found || cachedAnswerIsCurrent(hit.payload));
     if (fresh) {
       observations.set(email, hit.found ? ({ found: true, email, ...(hit.payload as object) } as LeadObservation) : { found: false });
       reused++;

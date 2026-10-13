@@ -13,7 +13,7 @@ import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { ensureScope, runPeopleBuildPass, runScopeBuild, type BuildSummary } from "../lib/people/build.js";
 import { PEOPLE_SOURCES, type Presence } from "../lib/people/identity.js";
 import type { PossibleLead } from "../lib/people/sources.js";
-import type { LeadDisqualification } from "../lib/people/state.js";
+import type { LeadCompanyTags, LeadDisqualification } from "../lib/people/state.js";
 import type { PersonRelevance } from "../lib/people/relevance.js";
 import { findPerson, readTimeline } from "../lib/people/timeline.js";
 import { readFacts } from "../lib/people/facts.js";
@@ -87,6 +87,29 @@ function disqualificationOf(row: typeof people.$inferSelect): LeadDisqualificati
   return d ?? null;
 }
 
+/**
+ * lead-service's COMPANY block for that same lead (client, signed up, company
+ * Disqualified "not our target"), relayed verbatim at build. Null when the
+ * person is not one of our leads or lead-service knows no company for them.
+ */
+function companyTagsOf(row: typeof people.$inferSelect): LeadCompanyTags | null {
+  if (row.stateSource !== "lead_service") return null;
+  return (row.stateDetail as { company?: LeadCompanyTags | null } | null)?.company ?? null;
+}
+
+/**
+ * The HUMAN-level opt-out, as lead-service states it: its standing signal
+ * `human_opt_out` (human-service carries an opt-out / do-not-contact fact on the
+ * human: every company, every brand). Null when the person is not one of our
+ * leads (nothing to relay).
+ */
+function humanOptedOutOf(row: typeof people.$inferSelect): boolean | null {
+  if (row.stateSource !== "lead_service") return null;
+  const standing = (row.stateDetail as { standing?: { signal?: unknown } } | null)?.standing;
+  if (!standing) return null;
+  return standing.signal === "human_opt_out";
+}
+
 function personView(row: typeof people.$inferSelect) {
   return {
     // Opaque, stable across rebuilds, no personal data: the id to put in a URL.
@@ -108,6 +131,10 @@ function personView(row: typeof people.$inferSelect) {
     stateDetail: row.stateDetail as Record<string, unknown> | null,
     // lead-service's Disqualified mark, beside the state (never instead of it).
     disqualification: disqualificationOf(row),
+    // lead-service's tags at THEIR level (LEAD-REFONTE-1013): the company's
+    // (client, signed up, not our target) and the human's opt-out.
+    companyTags: companyTagsOf(row),
+    humanOptedOut: humanOptedOutOf(row),
     presences: (row.presences as Presence[]).map(presenceView),
     mergeEvidence: row.mergeEvidence as unknown[],
     automated: row.automated,

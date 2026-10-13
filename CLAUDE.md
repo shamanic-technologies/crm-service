@@ -864,6 +864,15 @@ owner had written to. A recorded fact, never an address-shape guess.
   beside `state` (null when not a lead). Never derived here. A cached
   observation missing the key is re-asked (like a tagless one); an absent or
   malformed mark fails the address loud (`unavailable`).
+  **Tags at THEIR level** (LEAD-REFONTE-1013, lead-service v0.83.65): the mark
+  carries lead-service's `level` (`lead` = this person at this company, else
+  `company` = "not our target"; the lead's own answers first); the row's
+  `company` block (`{id, key, isClient, signedUp, disqualification}`, null = no
+  company) rides in `stateDetail.company`, served as `companyTags`; the HUMAN
+  opt-out is lead-service's standing signal `human_opt_out`, served as
+  `humanOptedOut` (null when not a lead). All verbatim, never derived here; a
+  cached answer missing `company` or the mark's `level` is re-asked
+  (`cachedAnswerIsCurrent`), an absent one fails the address loud.
 - **Materialized, rebuilt whole.** `people_scopes` (one per (org, brand),
   carries `created_by_user_id` for the cron's org run) → `people` replaced in
   ONE transaction per build. `source_reads` keeps per source `not_connected |

@@ -24,7 +24,7 @@ import {
   type Presence,
 } from "./identity.js";
 import { siblingGet, siblingGetOk, type SiblingIdentity } from "./siblings.js";
-import type { GhlDeal, LeadDisqualification, LeadStanding } from "./state.js";
+import type { GhlDeal, LeadCompanyTags, LeadDisqualification, LeadStanding } from "./state.js";
 import { copilotPresences, isCopilotDestination, readCopilotRows } from "../copilot/messages.js";
 import { apiCallPresences, readApiCallPresenceRows } from "../api-calls/calls.js";
 
@@ -924,6 +924,8 @@ export interface LeadRow {
   standing: (Record<string, unknown> & { state: string; tag?: unknown }) | null;
   /** lead-service's Disqualified mark (v0.83.59+): null or the mark; absent = an older answer. */
   disqualification?: unknown;
+  /** lead-service's company block (LEAD-REFONTE-1013): null or the block; absent = an older answer. */
+  company?: unknown;
 }
 
 export type LeadStandingAnswer =
@@ -932,6 +934,7 @@ export type LeadStandingAnswer =
       found: true;
       standing: LeadStanding;
       disqualification: LeadDisqualification | null;
+      company: LeadCompanyTags | null;
       leadCampaignId: string;
       leadId: string | null;
       campaignId: string | null;
@@ -944,28 +947,72 @@ export type LeadStandingAnswer =
  * disqualified": only lead-service's explicit null means that.
  */
 export function disqualificationFromRow(row: LeadRow): LeadDisqualification | null {
-  const d = row.disqualification;
+  if (row.disqualification === undefined) throw new Error(`lead-service row ${row.id} carries no disqualification`);
+  return readMark(row.id, row.disqualification, "disqualification");
+}
+
+function readMark(rowId: string, d: unknown, what: string): LeadDisqualification | null {
   if (d === null) return null;
-  if (d === undefined) throw new Error(`lead-service row ${row.id} carries no disqualification`);
   const m = d as Record<string, unknown>;
   const nullableString = (v: unknown) => v === null || typeof v === "string";
   if (
     typeof d !== "object" ||
+    typeof m.level !== "string" ||
     typeof m.source !== "string" ||
     typeof m.statedAt !== "string" ||
     !nullableString(m.offerId) ||
     !nullableString(m.note) ||
     !nullableString(m.statedByUserId)
   ) {
-    throw new Error(`lead-service row ${row.id} carries an unreadable disqualification: ${JSON.stringify(d).slice(0, 200)}`);
+    throw new Error(`lead-service row ${rowId} carries an unreadable ${what}: ${JSON.stringify(d).slice(0, 200)}`);
   }
   return {
+    level: m.level,
     offerId: m.offerId as string | null,
     note: m.note as string | null,
     source: m.source,
     statedByUserId: m.statedByUserId as string | null,
     statedAt: m.statedAt,
   };
+}
+
+/**
+ * PURE: lead-service's company block on one row, verbatim (LEAD-REFONTE-1013:
+ * client / signed up / Disqualified "not our target" are COMPANY-level tags).
+ * Absent or malformed fails loud, never "no company": only lead-service's
+ * explicit null means that.
+ */
+export function companyTagsFromRow(row: LeadRow): LeadCompanyTags | null {
+  const c = row.company;
+  if (c === null) return null;
+  if (c === undefined) throw new Error(`lead-service row ${row.id} carries no company`);
+  const m = c as Record<string, unknown>;
+  if (
+    typeof c !== "object" ||
+    !(m.id === null || typeof m.id === "string") ||
+    typeof m.key !== "string" ||
+    typeof m.isClient !== "boolean" ||
+    typeof m.signedUp !== "boolean" ||
+    m.disqualification === undefined
+  ) {
+    throw new Error(`lead-service row ${row.id} carries an unreadable company: ${JSON.stringify(c).slice(0, 200)}`);
+  }
+  return {
+    id: m.id as string | null,
+    key: m.key,
+    isClient: m.isClient,
+    signedUp: m.signedUp,
+    disqualification: readMark(row.id, m.disqualification, "company disqualification"),
+  };
+}
+
+/** PURE: a cached lead-service answer carries every field the current read relays. */
+export function cachedAnswerIsCurrent(payload: unknown): boolean {
+  const p = payload as { standing?: { tag?: unknown }; disqualification?: { level?: unknown } | null; company?: unknown } | null;
+  if (typeof p?.standing?.tag !== "string") return false;
+  if (p.disqualification === undefined) return false;
+  if (p.disqualification !== null && typeof p.disqualification.level !== "string") return false;
+  return p.company !== undefined;
 }
 
 /**
@@ -985,6 +1032,7 @@ export function standingFromRows(rows: LeadRow[]): LeadStandingAnswer {
     found: true,
     standing: { ...first.standing, tag: first.standing.tag },
     disqualification: disqualificationFromRow(first),
+    company: companyTagsFromRow(first),
     leadCampaignId: first.id,
     leadId: first.leadId,
     campaignId: first.campaignId,

@@ -7,7 +7,7 @@ import {
   type Presence,
 } from "../../src/lib/people/identity.js";
 import { resolvePersonState } from "../../src/lib/people/state.js";
-import { pairingEvidence, possibleLeadOf, standingFromRows, type LeadPairingRow } from "../../src/lib/people/sources.js";
+import { cachedAnswerIsCurrent, pairingEvidence, possibleLeadOf, standingFromRows, type LeadPairingRow } from "../../src/lib/people/sources.js";
 import { leadAddressesFirst, type LeadObservation } from "../../src/lib/people/state.js";
 
 function presence(over: Partial<Presence> & Pick<Presence, "source" | "sourceRef">): Presence {
@@ -145,6 +145,7 @@ describe("resolvePersonState precedence", () => {
           email: "a@x.com",
           standing: { state: "sales_interest", tag: "sales_interest", signal: "positive_reply" },
           disqualification: null,
+          company: null,
           leadCampaignId: "lc1",
           leadId: "l1",
           campaignId: "c1",
@@ -166,6 +167,7 @@ describe("resolvePersonState precedence", () => {
           email: "norman@x.com",
           standing: { state: "sales_interest", tag: "website_visit", signal: "click" },
           disqualification: null,
+          company: null,
           leadCampaignId: "lc1",
           leadId: "l1",
           campaignId: "c1",
@@ -179,7 +181,8 @@ describe("resolvePersonState precedence", () => {
   });
 
   it("lead-service's Disqualified mark rides beside the state, verbatim; the state is unchanged", () => {
-    const mark = { offerId: null, note: "Runs a construction company.", source: "manual", statedByUserId: "u1", statedAt: "2026-10-13T09:00:00.000Z" };
+    const mark = { level: "lead", offerId: null, note: "Runs a construction company.", source: "manual", statedByUserId: "u1", statedAt: "2026-10-13T09:00:00.000Z" };
+    const company = { id: "co1", key: "co1", isClient: true, signedUp: true, disqualification: null };
     const s = resolvePersonState({
       ...empty,
       leadObservations: [
@@ -188,6 +191,7 @@ describe("resolvePersonState precedence", () => {
           email: "hello@obra.cam",
           standing: { state: "sales_interest", tag: "sales_interest", signal: "positive_reply" },
           disqualification: mark,
+          company,
           leadCampaignId: "lc1",
           leadId: "l1",
           campaignId: "c1",
@@ -197,6 +201,7 @@ describe("resolvePersonState precedence", () => {
     });
     expect(s.state).toBe("sales_interest");
     expect((s.stateDetail as { disqualification: unknown }).disqualification).toEqual(mark);
+    expect((s.stateDetail as { company: unknown }).company).toEqual(company);
   });
 
   it("a failed lead-service read is unavailable, never a guess from another source", () => {
@@ -304,11 +309,12 @@ describe("standingFromRows: lead-service's Disqualified mark", () => {
     email: "hello@obra.cam",
     campaignId: "c1",
     standing: { state: "sales_interest", tag: "sales_interest" },
+    company: null,
     ...extra,
   });
 
   it("relays the mark and its note verbatim", () => {
-    const mark = { offerId: "o1", note: "Wrong industry.", source: "reply", statedByUserId: null, statedAt: "2026-10-13T09:00:00.000Z" };
+    const mark = { level: "lead", offerId: "o1", note: "Wrong industry.", source: "reply", statedByUserId: null, statedAt: "2026-10-13T09:00:00.000Z" };
     const a = standingFromRows([row({ disqualification: mark })]);
     expect(a).toMatchObject({ found: true, disqualification: mark, standing: { tag: "sales_interest" } });
   });
@@ -321,5 +327,53 @@ describe("standingFromRows: lead-service's Disqualified mark", () => {
     expect(() => standingFromRows([row({})])).toThrow(/carries no disqualification/);
     expect(() => standingFromRows([row({ disqualification: { note: "x" } })])).toThrow(/unreadable disqualification/);
     expect(() => standingFromRows([row({ disqualification: "yes" })])).toThrow(/unreadable disqualification/);
+    // A mark without its level (an answer from before LEAD-REFONTE-1013) is unreadable too.
+    expect(() =>
+      standingFromRows([row({ disqualification: { offerId: null, note: null, source: "manual", statedByUserId: null, statedAt: "2026-10-13T09:00:00.000Z" } })]),
+    ).toThrow(/unreadable disqualification/);
+  });
+});
+
+describe("standingFromRows: lead-service's company block (tags at their level)", () => {
+  const row = (extra: Record<string, unknown>) => ({
+    id: "lc1",
+    leadId: "l1",
+    email: "hello@obra.cam",
+    campaignId: "c1",
+    standing: { state: "customer", tag: "customer" },
+    disqualification: null,
+    ...extra,
+  });
+  const notOurTarget = { level: "company", offerId: null, note: "Not our target.", source: "manual", statedByUserId: "u1", statedAt: "2026-10-13T09:00:00.000Z" };
+
+  it("relays client / signed up / company Disqualified verbatim", () => {
+    const company = { id: "co1", key: "co1", isClient: true, signedUp: true, disqualification: notOurTarget };
+    expect(standingFromRows([row({ company })])).toMatchObject({ found: true, company });
+  });
+
+  it("an explicit null is no company known", () => {
+    expect(standingFromRows([row({ company: null })])).toMatchObject({ found: true, company: null });
+  });
+
+  it("an absent or unreadable block fails loud, never read as no company", () => {
+    expect(() => standingFromRows([row({})])).toThrow(/carries no company/);
+    expect(() => standingFromRows([row({ company: { key: "k", isClient: "yes", signedUp: false, disqualification: null, id: null } })])).toThrow(/unreadable company/);
+    expect(() => standingFromRows([row({ company: { key: "k", isClient: true, signedUp: false, id: null } })])).toThrow(/unreadable company/);
+    expect(() =>
+      standingFromRows([row({ company: { key: "k", isClient: true, signedUp: false, id: null, disqualification: { note: "x" } } })]),
+    ).toThrow(/unreadable company disqualification/);
+  });
+});
+
+describe("cachedAnswerIsCurrent: an older lead-service answer is re-asked", () => {
+  const current = { standing: { tag: "customer" }, disqualification: null, company: null };
+  it("a current answer is reused", () => {
+    expect(cachedAnswerIsCurrent(current)).toBe(true);
+    expect(cachedAnswerIsCurrent({ ...current, disqualification: { level: "lead" } })).toBe(true);
+  });
+  it("no company block, or a mark with no level, is re-asked (never read as no)", () => {
+    expect(cachedAnswerIsCurrent({ standing: { tag: "customer" }, disqualification: null })).toBe(false);
+    expect(cachedAnswerIsCurrent({ ...current, disqualification: { note: "x" } })).toBe(false);
+    expect(cachedAnswerIsCurrent({ ...current, standing: { state: "customer" } })).toBe(false);
   });
 });
