@@ -24,7 +24,7 @@ import {
   type Presence,
 } from "./identity.js";
 import { siblingGet, siblingGetOk, type SiblingIdentity } from "./siblings.js";
-import type { GhlDeal, LeadCompanyTags, LeadDisqualification, LeadStanding } from "./state.js";
+import type { GhlDeal, LeadCompanyTags, LeadDisqualification, LeadHumanTags, LeadStanding } from "./state.js";
 import { copilotPresences, isCopilotDestination, readCopilotRows } from "../copilot/messages.js";
 import { apiCallPresences, readApiCallPresenceRows } from "../api-calls/calls.js";
 
@@ -926,6 +926,8 @@ export interface LeadRow {
   disqualification?: unknown;
   /** lead-service's company block (LEAD-REFONTE-1013): null or the block; absent = an older answer. */
   company?: unknown;
+  /** lead-service's human block (LEAD-REFONTE-1013, v0.83.67): null or the block; absent = an older answer. */
+  human?: unknown;
 }
 
 export type LeadStandingAnswer =
@@ -935,6 +937,7 @@ export type LeadStandingAnswer =
       standing: LeadStanding;
       disqualification: LeadDisqualification | null;
       company: LeadCompanyTags | null;
+      human: LeadHumanTags | null;
       leadCampaignId: string;
       leadId: string | null;
       campaignId: string | null;
@@ -1008,11 +1011,27 @@ export function companyTagsFromRow(row: LeadRow): LeadCompanyTags | null {
 
 /** PURE: a cached lead-service answer carries every field the current read relays. */
 export function cachedAnswerIsCurrent(payload: unknown): boolean {
-  const p = payload as { standing?: { tag?: unknown }; disqualification?: { level?: unknown } | null; company?: unknown } | null;
+  const p = payload as { standing?: { tag?: unknown }; disqualification?: { level?: unknown } | null; company?: unknown; human?: unknown } | null;
   if (typeof p?.standing?.tag !== "string") return false;
   if (p.disqualification === undefined) return false;
   if (p.disqualification !== null && typeof p.disqualification.level !== "string") return false;
-  return p.company !== undefined;
+  return p.company !== undefined && p.human !== undefined;
+}
+
+/**
+ * PURE: lead-service's human block on one row, verbatim (opted out / do not
+ * contact, wherever the human works). Absent or malformed fails loud; null is
+ * lead-service's own "standing unresolved", relayed as null, never as false.
+ */
+export function humanTagsFromRow(row: LeadRow): LeadHumanTags | null {
+  const h = row.human;
+  if (h === null) return null;
+  if (h === undefined) throw new Error(`lead-service row ${row.id} carries no human`);
+  const m = h as Record<string, unknown>;
+  if (typeof h !== "object" || typeof m.optedOut !== "boolean" || typeof m.doNotContact !== "boolean") {
+    throw new Error(`lead-service row ${row.id} carries an unreadable human: ${JSON.stringify(h).slice(0, 200)}`);
+  }
+  return { optedOut: m.optedOut, doNotContact: m.doNotContact };
 }
 
 /**
@@ -1033,6 +1052,7 @@ export function standingFromRows(rows: LeadRow[]): LeadStandingAnswer {
     standing: { ...first.standing, tag: first.standing.tag },
     disqualification: disqualificationFromRow(first),
     company: companyTagsFromRow(first),
+    human: humanTagsFromRow(first),
     leadCampaignId: first.id,
     leadId: first.leadId,
     campaignId: first.campaignId,

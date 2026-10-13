@@ -13,7 +13,7 @@ import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { ensureScope, runPeopleBuildPass, runScopeBuild, type BuildSummary } from "../lib/people/build.js";
 import { PEOPLE_SOURCES, type Presence } from "../lib/people/identity.js";
 import type { PossibleLead } from "../lib/people/sources.js";
-import type { LeadCompanyTags, LeadDisqualification } from "../lib/people/state.js";
+import type { LeadCompanyTags, LeadDisqualification, LeadHumanTags } from "../lib/people/state.js";
 import type { PersonRelevance } from "../lib/people/relevance.js";
 import { findPerson, readTimeline } from "../lib/people/timeline.js";
 import { readFacts } from "../lib/people/facts.js";
@@ -98,16 +98,14 @@ function companyTagsOf(row: typeof people.$inferSelect): LeadCompanyTags | null 
 }
 
 /**
- * The HUMAN-level opt-out, as lead-service states it: its standing signal
- * `human_opt_out` (human-service carries an opt-out / do-not-contact fact on the
- * human: every company, every brand). Null when the person is not one of our
- * leads (nothing to relay).
+ * lead-service's HUMAN block for that same lead (opted out / do not contact,
+ * from human-service's facts: every company, every brand), relayed verbatim at
+ * build. Null when the person is not one of our leads, or lead-service could
+ * not resolve the row's standing.
  */
-function humanOptedOutOf(row: typeof people.$inferSelect): boolean | null {
+function humanTagsOf(row: typeof people.$inferSelect): LeadHumanTags | null {
   if (row.stateSource !== "lead_service") return null;
-  const standing = (row.stateDetail as { standing?: { signal?: unknown } } | null)?.standing;
-  if (!standing) return null;
-  return standing.signal === "human_opt_out";
+  return (row.stateDetail as { human?: LeadHumanTags | null } | null)?.human ?? null;
 }
 
 function personView(row: typeof people.$inferSelect) {
@@ -132,9 +130,9 @@ function personView(row: typeof people.$inferSelect) {
     // lead-service's Disqualified mark, beside the state (never instead of it).
     disqualification: disqualificationOf(row),
     // lead-service's tags at THEIR level (LEAD-REFONTE-1013): the company's
-    // (client, signed up, not our target) and the human's opt-out.
+    // (client, signed up, not our target) and the human's (opted out, do not contact).
     companyTags: companyTagsOf(row),
-    humanOptedOut: humanOptedOutOf(row),
+    humanTags: humanTagsOf(row),
     presences: (row.presences as Presence[]).map(presenceView),
     mergeEvidence: row.mergeEvidence as unknown[],
     automated: row.automated,

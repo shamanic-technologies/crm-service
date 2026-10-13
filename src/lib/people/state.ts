@@ -82,6 +82,16 @@ export interface LeadCompanyTags {
   disqualification: LeadDisqualification | null;
 }
 
+/**
+ * lead-service's HUMAN block on a lead row (`human`), verbatim: what human-service
+ * holds on the human wherever they work. null = lead-service could not resolve
+ * the row's standing (never read as false). Never derived here.
+ */
+export interface LeadHumanTags {
+  optedOut: boolean;
+  doNotContact: boolean;
+}
+
 export const DEAL_STATES = ["deal_won", "deal_open", "deal_lost", "deal_abandoned"] as const;
 export const STRIPE_STATES = [
   "subscription_active",
@@ -118,6 +128,8 @@ export type LeadObservation =
       disqualification: LeadDisqualification | null;
       /** lead-service's company block on that same row, verbatim (null = no company known). */
       company: LeadCompanyTags | null;
+      /** lead-service's human block on that same row, verbatim. */
+      human: LeadHumanTags | null;
       /** The leads_campaigns row whose standing it is (lead-service `sort=activity` first row). */
       leadCampaignId: string;
       leadId: string | null;
@@ -169,6 +181,7 @@ export function resolvePersonState(input: StateInputs): PersonState {
         standing: lead.standing,
         disqualification: lead.disqualification,
         company: lead.company,
+        human: lead.human,
         leadCampaignId: lead.leadCampaignId,
         leadId: lead.leadId,
         campaignId: lead.campaignId,
