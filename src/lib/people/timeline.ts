@@ -359,11 +359,12 @@ async function ghlItems(person: Person, presences: Presence[]): Promise<SourceRe
 
 // ─── posthog ────────────────────────────────────────────────────────────────
 
-async function posthogItems(presences: Presence[]): Promise<SourceResult> {
+/** `authStatesSignups`: an auth provider is connected, it alone shows the signup (PostHog keeps its visits). */
+async function posthogItems(presences: Presence[], authStatesSignups: boolean): Promise<SourceResult> {
   const contactIds = presences.map((p) => p.sourceRef);
   if (contactIds.length === 0) return { status: "empty", items: [], error: null, asked: [] };
   const rows = await db.select().from(posthogActivities).where(inArray(posthogActivities.contactId, contactIds));
-  const items: TimelineItem[] = (await entryItems("posthog", presences)).concat(rows.map((a): TimelineItem => ({
+  const items: TimelineItem[] = (authStatesSignups ? [] : await entryItems("posthog", presences)).concat(rows.map((a): TimelineItem => ({
     at: a.occurredAt.toISOString(),
     source: "posthog",
     channel: "web",
@@ -640,7 +641,7 @@ export async function readTimeline(
     connected("gohighlevel")
       ? ghlItems(person, of("gohighlevel")).catch((e) => toFailed(e))
       : Promise.resolve(notConnected()),
-    connected("posthog") ? posthogItems(of("posthog")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
+    connected("posthog") ? posthogItems(of("posthog"), connected("clerk")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
     connected("stripe") ? stripeItems(of("stripe")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
     connected("clerk") ? authItems("clerk", of("clerk")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
     copilotItems(person).catch((e) => toFailed(e, emails)),
