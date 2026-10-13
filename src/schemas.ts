@@ -1861,10 +1861,23 @@ const PersonSchema = registry.register(
       state: z.string().openapi({
         example: "sales_interest",
         description:
-          "The ONE state, set by `stateSource` (first that applies): lead_service = lead-service's standing TAG verbatim (unresolved | not_contacted | contacted | engaged | sales_interest | website_visit | customer | disqualified | opted_out; the standing's own `state` rides in `stateDetail.standing`), or `unavailable` when lead-service could not be asked; stripe = subscription_active | subscription_trialing | subscription_past_due | subscription_unpaid | paid | refunded | subscription_canceled; gohighlevel = deal_won | deal_open | deal_lost | deal_abandoned; matrix = new | qualifying | negotiating | won | lost | unresponsive; instantly = replied | clicked; none = in_conversation. Render it; never recompute it.",
+          "The ONE state, set by `stateSource` (first that applies): lead_service = lead-service's standing TAG verbatim (unresolved | not_contacted | contacted | engaged | sales_interest | website_visit | customer | opted_out; the standing's own `state` rides in `stateDetail.standing`; Disqualified is not a state, see `disqualification`), or `unavailable` when lead-service could not be asked; stripe = subscription_active | subscription_trialing | subscription_past_due | subscription_unpaid | paid | refunded | subscription_canceled; gohighlevel = deal_won | deal_open | deal_lost | deal_abandoned; matrix = new | qualifying | negotiating | won | lost | unresponsive; instantly = replied | clicked; none = in_conversation. Render it; never recompute it.",
       }),
       stateSource: z.enum(STATE_SOURCES),
       stateDetail: z.record(z.string(), z.unknown()).nullable(),
+      disqualification: z
+        .object({
+          offerId: z.string().nullable().openapi({ description: "The offer the mark is about, or null = every offer of the brand." }),
+          note: z.string().nullable().openapi({ description: "The optional free note: why, in the words of whoever set it.", example: "Runs a construction company, we sell to supermarkets." }),
+          source: z.string().openapi({ description: "lead-service's verbatim: `manual` (a person set it) or `reply` (set from a reply judged not the right contact / left the role)." }),
+          statedByUserId: z.string().nullable(),
+          statedAt: z.string().openapi({ description: "When it was set (ISO 8601)." }),
+        })
+        .nullable()
+        .openapi({
+          description:
+            "lead-service's Disqualified MARK for the lead the state was read from, relayed verbatim (its `disqualification` on the lead row): shown BESIDE `state`, never instead of it (a lead can read \"Positive reply\" AND \"Disqualified\"). Null = not disqualified, or the person is not one of our leads (`stateSource` is not lead_service). Never derived here.",
+        }),
       presences: z.array(PersonPresenceSchema),
       mergeEvidence: z.array(z.unknown()).openapi({
         description: "The records that tied two keys of this person together (a Google / GoHighLevel / Stripe / CSV contact holding both, a CONFIDENT lead-service pairing: signal, judgment at or above its pair threshold, or human acceptance). Empty when the person rests on a single key.",

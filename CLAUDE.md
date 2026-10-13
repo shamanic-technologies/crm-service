@@ -840,6 +840,13 @@ owner had written to. A recorded fact, never an address-shape guess.
   search only indexes the identity address, 1 of 40 repliers on 2026-10-09) > GoHighLevel deal status (fixed vocabulary,
   `deal_*`) > Matrix thread reading > Instantly `replied|clicked` >
   `in_conversation`. The browser renders `state` + `stateSource`.
+  **Disqualified is NOT a state** (lead-service v0.83.59): lead-service's own
+  mark `disqualification` (null or `{offerId, note, source, statedByUserId,
+  statedAt}`) on the SAME row the standing came from, relayed verbatim into
+  `stateDetail.disqualification` and served as the person's `disqualification`
+  beside `state` (null when not a lead). Never derived here. A cached
+  observation missing the key is re-asked (like a tagless one); an absent or
+  malformed mark fails the address loud (`unavailable`).
 - **Materialized, rebuilt whole.** `people_scopes` (one per (org, brand),
   carries `created_by_user_id` for the cron's org run) → `people` replaced in
   ONE transaction per build. `source_reads` keeps per source `not_connected |

@@ -24,7 +24,7 @@ import {
   type Presence,
 } from "./identity.js";
 import { siblingGet, siblingGetOk, type SiblingIdentity } from "./siblings.js";
-import type { GhlDeal, LeadStanding } from "./state.js";
+import type { GhlDeal, LeadDisqualification, LeadStanding } from "./state.js";
 import { copilotPresences, isCopilotDestination, readCopilotRows } from "../copilot/messages.js";
 import { apiCallPresences, readApiCallPresenceRows } from "../api-calls/calls.js";
 
@@ -912,6 +912,8 @@ export interface LeadRow {
   email: string;
   campaignId: string | null;
   standing: (Record<string, unknown> & { state: string; tag?: unknown }) | null;
+  /** lead-service's Disqualified mark (v0.83.59+): null or the mark; absent = an older answer. */
+  disqualification?: unknown;
 }
 
 export type LeadStandingAnswer =
@@ -919,11 +921,42 @@ export type LeadStandingAnswer =
   | {
       found: true;
       standing: LeadStanding;
+      disqualification: LeadDisqualification | null;
       leadCampaignId: string;
       leadId: string | null;
       campaignId: string | null;
       campaignIds: string[];
     };
+
+/**
+ * PURE: lead-service's Disqualified mark on one row, verbatim. Absent or
+ * malformed fails loud (the address reads `unavailable`), never "not
+ * disqualified": only lead-service's explicit null means that.
+ */
+export function disqualificationFromRow(row: LeadRow): LeadDisqualification | null {
+  const d = row.disqualification;
+  if (d === null) return null;
+  if (d === undefined) throw new Error(`lead-service row ${row.id} carries no disqualification`);
+  const m = d as Record<string, unknown>;
+  const nullableString = (v: unknown) => v === null || typeof v === "string";
+  if (
+    typeof d !== "object" ||
+    typeof m.source !== "string" ||
+    typeof m.statedAt !== "string" ||
+    !nullableString(m.offerId) ||
+    !nullableString(m.note) ||
+    !nullableString(m.statedByUserId)
+  ) {
+    throw new Error(`lead-service row ${row.id} carries an unreadable disqualification: ${JSON.stringify(d).slice(0, 200)}`);
+  }
+  return {
+    offerId: m.offerId as string | null,
+    note: m.note as string | null,
+    source: m.source,
+    statedByUserId: m.statedByUserId as string | null,
+    statedAt: m.statedAt,
+  };
+}
 
 /**
  * PURE: one address's answer from ITS rows, in lead-service's `sort=activity`
@@ -941,6 +974,7 @@ export function standingFromRows(rows: LeadRow[]): LeadStandingAnswer {
   return {
     found: true,
     standing: { ...first.standing, tag: first.standing.tag },
+    disqualification: disqualificationFromRow(first),
     leadCampaignId: first.id,
     leadId: first.leadId,
     campaignId: first.campaignId,

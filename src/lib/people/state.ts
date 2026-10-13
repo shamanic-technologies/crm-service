@@ -6,10 +6,13 @@
  *  1. `lead_service` — the person is one of our leads: lead-service's own
  *     standing TAG, verbatim (its `state` vocabulary `unresolved |
  *     not_contacted | contacted | engaged | sales_interest | customer |
- *     disqualified | opted_out`, plus `website_visit`: a sales interest whose
- *     only interest is a visit — a click — is tagged as that, while its state
- *     stays `sales_interest` for the stats). lead-service owns the tag; the
- *     full standing rides in the detail. When lead-service
+ *     opted_out`, plus `website_visit`: a sales interest whose only interest
+ *     is a visit — a click — is tagged as that, while its state stays
+ *     `sales_interest` for the stats). lead-service owns the tag; the full
+ *     standing rides in the detail. "Disqualified" is NOT a tag (lead-service
+ *     v0.83.59): it is lead-service's own MARK beside the standing
+ *     (`disqualification`), relayed verbatim in `stateDetail.disqualification`
+ *     and served beside the state, never instead of it. When lead-service
  *     could not be asked, the state is `unavailable` with the error — never a
  *     guess from the other sources.
  *  2. `stripe` — the brand's own Stripe account holds money from them. Stripe's
@@ -49,9 +52,20 @@ export const LEAD_STANDING_STATES = [
   "sales_interest",
   "website_visit",
   "customer",
-  "disqualified",
   "opted_out",
 ] as const;
+
+/**
+ * lead-service's Disqualified MARK on a lead row (`disqualification`), verbatim:
+ * null = not disqualified for that conversation. Never derived here.
+ */
+export interface LeadDisqualification {
+  offerId: string | null;
+  note: string | null;
+  source: string;
+  statedByUserId: string | null;
+  statedAt: string;
+}
 
 export const DEAL_STATES = ["deal_won", "deal_open", "deal_lost", "deal_abandoned"] as const;
 export const STRIPE_STATES = [
@@ -85,6 +99,8 @@ export type LeadObservation =
       email: string;
       /** lead-service's `standing` object, verbatim. */
       standing: LeadStanding;
+      /** lead-service's Disqualified mark on that same row, verbatim (null = not disqualified). */
+      disqualification: LeadDisqualification | null;
       /** The leads_campaigns row whose standing it is (lead-service `sort=activity` first row). */
       leadCampaignId: string;
       leadId: string | null;
@@ -134,6 +150,7 @@ export function resolvePersonState(input: StateInputs): PersonState {
       stateDetail: {
         email: lead.email,
         standing: lead.standing,
+        disqualification: lead.disqualification,
         leadCampaignId: lead.leadCampaignId,
         leadId: lead.leadId,
         campaignId: lead.campaignId,
