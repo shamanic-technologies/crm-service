@@ -3042,6 +3042,21 @@ registry.registerPath({
 
 registry.registerPath({
   method: "post",
+  path: "/internal/platform-signups/pull",
+  summary: "Pull client-service's signup facts now (the loop runs every 60s)",
+  description:
+    "Copies every new fact of client-service's `GET /internal/signup-facts` feed (the platform's own signups and their withdrawals) into crm-service. " +
+    "Each `signup` becomes a people fact (`source: distribute_platform`, type `signup`) of the brand it names, under the staff org; each `withdrawn` becomes crm-service's own `withdrawn` of the copied fact. " +
+    "Once a brand's signups are stated this way, its Clerk / PostHog signup facts are withdrawn (`signup_source_superseded`).",
+  responses: {
+    200: { description: "`{ status: ok | not_configured, reason?, pages, pulled, stored, cursor, brands }`" },
+    409: { description: "A pull is already running" },
+    502: { description: "client-service could not be read, or answered a malformed fact (nothing after it stored)" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
   path: "/internal/form-triggers/watch",
   summary: "Run one form-trigger watch pass now (the loop runs every 60s)",
   responses: { 200: { description: "What the pass saw and reported" }, 502: { description: "The pass failed" } },

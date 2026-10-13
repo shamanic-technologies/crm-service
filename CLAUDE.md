@@ -1093,7 +1093,8 @@ lead-service serves the overall tag, then go.
   Gmail `message_in/out` (Gmail `other` = a third party, skipped); PostHog
   `signup` (person created) + `website_visit`; Stripe `payment | refund`
   (minor units verbatim) + `subscription_changed` (one per status observed);
-  CSV `added_to_crm` (once per email, dated `uploaded_at`); crm
+  CSV `added_to_crm` (once per email, dated `uploaded_at`); `distribute_platform` `signup`
+  (client-service's own signups, see "Platform signups"); crm
   `person_merged | person_split | withdrawn`. GoHighLevel `sale.amountMinor` =
   deal value × 100 (GoHighLevel states no currency; `amountVerbatim` beside it).
 - OUT: our own outreach (Instantly, self-send) — lead-service reads it directly.
@@ -1279,6 +1280,27 @@ ids as a distinct id (29: server-side captures keyed on the Clerk id never set
 every email-less person — `IDENTIFIED` is built strictly boolean. ⚠️ A HogQL
 query without LIMIT answers 100 rows. A person mirrored for the FIRST time on a
 later pass gets its whole activity history read (the window would miss it).
+
+## Platform signups — our own brand's signups come from client-service (`src/lib/platform-signups/pull.ts`)
+
+Owner 2026-10-13 (LEAD-REFONTE-1013): client-service owns the account (org, users, signup); the
+signup in our own funnel is a COPY of its fact, never a scrape of Clerk.
+
+- **Pull, never pushed:** every 60s (first pass 60s after boot) `GET {CLIENT_SERVICE_URL}/internal/signup-facts?since=<cursor>&limit=500`
+  (contract: client-service#160). Cursor = MAX(`seq`) in bronze `platform_signup_facts` (verbatim payload,
+  keyed on client-service's fact id). A malformed fact throws the whole page: nothing stored, cursor unmoved.
+  `POST /internal/platform-signups/pull` runs one now. Reads ride the staff scope's last build run (no run per pass).
+- **Filed under the staff org** (`COPILOT_UNIBOX_ORG_ID`) + the brand the fact NAMES: the brand id alone is
+  shared with test orgs, so the org is never read off the fact. New rows kick that scope's people build.
+- **Facts** (`facts.ts` `platformSignupCandidates`): each `signup` → fact `signup`, source `distribute_platform`,
+  `sourceRef` = client-service's factId, `occurredAt` + `dateBasis` verbatim, subject = its keys (`uid:<clerkUserId>`,
+  email, phone; NOT standalone): it lands on the person the build holds (the Clerk presence), and nobody (the
+  brand's own address) = HELD. A client-service `withdrawn` → our `withdrawn` of the copy, reason
+  `source_withdrawn` + `sourceReason` (`org_deleted` / `org_absorbed`).
+- **Echo signups superseded:** once a brand's signups are stated this way, its Clerk + PostHog `signup` families
+  emit nothing and their live facts are withdrawn (`signup_source_superseded`). Generic, keyed on "the platform
+  states this brand's signups", never a brand id. The Clerk / PostHog PEOPLE (presences, uid merge, visits) stay.
+- Prod 2026-10-13: client-service backfill = 117 signups (one per org). See the PR for the before/after person set.
 
 ## Copilot chat — the staff Unibox's chat source (`src/lib/copilot/messages.ts`)
 

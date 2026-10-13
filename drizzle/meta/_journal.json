@@ -239,6 +239,13 @@
       "when": 1791830000000,
       "tag": "0033_reply_trigger",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1791840000000,
+      "tag": "0034_platform_signup_facts",
+      "breakpoints": true
     }
   ]
 }
