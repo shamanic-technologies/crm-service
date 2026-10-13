@@ -1293,6 +1293,8 @@ fact source literal (`"clerk"`) is the one per-provider line in `identity.ts` /
   (each with its org's `created_by`) is mirrored as bronze `kind='membership'`; a user whose EVERY organization
   was created by someone else gets `raw_attributes.signedUp = false`: no `signup` fact (a live one withdrawn),
   no timeline signup, out of the serve `signedUp` pool, still a person. No org / unnamed creator = signup.
+  Our staff (`isStaffEmail`) is never a signup: they open orgs FOR clients (Kevin opened Doc Dinners); in an org
+  the team opened, the FIRST outsider to join (membership `created_at`) is the signup, later ones are invited.
   Our own brand counts its signups through THIS connector like any client (2026-10-13: a read of
   client-service, #124, was retired the same day: `RETIRED_FAMILIES` withdraws its facts as `source_retired`).
 - People: source `clerk`, presence `userIds = [Clerk user id]`. Fact: `signup`,

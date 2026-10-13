@@ -15,9 +15,11 @@
  *
  * A provider with organizations (Clerk) also mirrors every MEMBERSHIP
  * (`kind = 'membership'`, same no-churn upsert, same complete-listing removal).
- * A user who only belongs to organizations someone else created was INVITED:
- * the contact carries `raw_attributes.signedUp = false` and states no signup
- * (`isSignup`). When any membership moves, every user is re-derived.
+ * A user who only belongs to organizations someone else created was INVITED,
+ * and our own staff never signs up (they open organizations FOR clients: in one
+ * the team created, the first outsider to join is the signup): the contact
+ * carries `raw_attributes.signedUp = false` and states no signup (`isSignup`).
+ * When any membership moves, every user is re-derived.
  */
 
 import { and, eq, inArray, notInArray, sql } from "drizzle-orm";
@@ -28,7 +30,8 @@ import { createRun, updateRun } from "../runs-client.js";
 import { resolveBrandCredential } from "../gohighlevel/credentials.js";
 import { canonicalHash } from "../gohighlevel/records.js";
 import { normalizePhone } from "../people/identity.js";
-import { isSignup, type AuthProviderAdapter, type DerivedAuthMembership } from "./provider.js";
+import { isStaffEmail } from "../owner-telegram.js";
+import { isSignup, type AuthProviderAdapter, type DerivedAuthMembership, type SignupContext } from "./provider.js";
 import { AUTH_PROVIDERS, isAuthProvider } from "./providers.js";
 
 export interface AuthSyncResult {
@@ -98,26 +101,49 @@ async function readBronze(conn: AuthConnection, externalIds?: string[]): Promise
   return out;
 }
 
-/** Every mirrored membership, by user id (empty for a provider without organizations). */
-async function membershipsByUser(conn: AuthConnection): Promise<Map<string, DerivedAuthMembership[]>> {
-  const out = new Map<string, DerivedAuthMembership[]>();
-  const derive = adapterOf(conn).memberships?.derive;
-  if (!derive) return out;
-  const rows = await db
-    .select({ payload: authRawRecords.payload })
-    .from(authRawRecords)
-    .where(and(eq(authRawRecords.connectionId, conn.id), eq(authRawRecords.kind, "membership")));
-  for (const r of rows) {
-    const m = derive(r.payload as Record<string, unknown>);
-    if (m) out.set(m.userId, [...(out.get(m.userId) ?? []), m]);
+/**
+ * Every mirrored membership by user id, and who counts as a signup in which
+ * organization (empty for a provider without organizations). Our team = a user
+ * holding a staff address (`isStaffEmail`), read off the mirrored users.
+ */
+async function signupContext(
+  conn: AuthConnection,
+): Promise<{ byUser: Map<string, DerivedAuthMembership[]>; ctx: SignupContext }> {
+  const adapter = adapterOf(conn);
+  const team = new Set<string>();
+  for (const payload of await readBronze(conn)) {
+    const u = adapter.derive(payload);
+    if (u && u.emails.some((e) => isStaffEmail(e))) team.add(u.externalId);
   }
-  return out;
+  const byUser = new Map<string, DerivedAuthMembership[]>();
+  const byOrg = new Map<string, DerivedAuthMembership[]>();
+  const derive = adapter.memberships?.derive;
+  if (derive) {
+    const rows = await db
+      .select({ payload: authRawRecords.payload })
+      .from(authRawRecords)
+      .where(and(eq(authRawRecords.connectionId, conn.id), eq(authRawRecords.kind, "membership")));
+    for (const r of rows) {
+      const m = derive(r.payload as Record<string, unknown>);
+      if (!m) continue;
+      byUser.set(m.userId, [...(byUser.get(m.userId) ?? []), m]);
+      byOrg.set(m.orgId, [...(byOrg.get(m.orgId) ?? []), m]);
+    }
+  }
+  const first = new Map<string, string | null>();
+  for (const [orgId, ms] of byOrg) {
+    const outsiders = ms
+      .filter((m) => !team.has(m.userId))
+      .sort((a, b) => (a.joinedAt ?? Infinity) - (b.joinedAt ?? Infinity) || (a.externalId < b.externalId ? -1 : 1));
+    first.set(orgId, outsiders[0]?.userId ?? null);
+  }
+  return { byUser, ctx: { isTeam: (id) => team.has(id), firstOutsider: (orgId) => first.get(orgId) ?? null } };
 }
 
 async function deriveContacts(conn: AuthConnection, externalIds?: string[]): Promise<number> {
   const adapter = adapterOf(conn);
   const now = new Date();
-  const memberships = await membershipsByUser(conn);
+  const { byUser, ctx } = await signupContext(conn);
   let derived = 0;
   for (const payload of await readBronze(conn, externalIds)) {
     const u = adapter.derive(payload);
@@ -133,7 +159,7 @@ async function deriveContacts(conn: AuthConnection, externalIds?: string[]): Pro
         phones: u.phones,
         phoneSources: u.phoneSources,
         lastActiveAt: u.lastActiveAt?.toISOString() ?? null,
-        signedUp: isSignup(u.externalId, memberships.get(u.externalId) ?? []),
+        signedUp: isSignup(u.externalId, byUser.get(u.externalId) ?? [], ctx),
       },
       sourceCreatedAt: u.createdAt,
       sourceUpdatedAt: u.updatedAt,
@@ -254,8 +280,9 @@ export async function syncAuthConnection(conn: AuthConnection): Promise<AuthSync
     // short and removes nothing: never remove on a doubt.
     const complete = listed.size >= providerUserCount;
     const usersRemoved = complete ? await removeUnlisted(conn, listed) : 0;
-    // A membership that moved can turn any user into (or out of) a signup: re-derive them all.
-    const membershipsMoved = !!memberships && memberships.changed + memberships.removed > 0;
+    // A membership that moved (or a member gone) can turn any user into or out of
+    // a signup: re-derive them all.
+    const membershipsMoved = !!memberships && memberships.changed + memberships.removed + usersRemoved > 0;
     const contactsDerived = await deriveContacts(conn, membershipsMoved ? undefined : changed);
 
     await db

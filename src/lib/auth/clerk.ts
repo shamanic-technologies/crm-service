@@ -182,7 +182,7 @@ export function deriveClerkMembership(record: Record<string, unknown>): DerivedA
   const userId = str(user?.user_id);
   const orgId = str(org?.id);
   if (!externalId || !userId || !orgId) return null;
-  return { externalId, userId, orgId, orgCreatedBy: str(org?.created_by) };
+  return { externalId, userId, orgId, orgCreatedBy: str(org?.created_by), joinedAt: msDate(record.created_at)?.getTime() ?? null };
 }
 
 export const clerk: AuthProviderAdapter = {
