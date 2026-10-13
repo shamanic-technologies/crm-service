@@ -78,7 +78,7 @@ export interface PlatformSignupPullResult {
 
 /** The largest `seq` already copied (0 = nothing yet: the first pass is the backfill). */
 export async function platformSignupCursor(): Promise<number> {
-  const [r] = (await db.execute(sql`SELECT COALESCE(MAX(seq), 0)::bigint AS seq FROM platform_signup_facts`)) as unknown as {
+  const [r] = (await db.execute(sql`SELECT GREATEST(COALESCE(MAX(seq), 0), 0)::bigint AS seq FROM platform_signup_facts`)) as unknown as {
     seq: string | number;
   }[];
   return Number(r.seq);
