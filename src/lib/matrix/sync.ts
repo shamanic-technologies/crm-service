@@ -24,6 +24,9 @@ import {
   conversations,
   matrixConnections,
   matrixGhostPhones,
+  matrixGroupMembers,
+  matrixGroups,
+  matrixLinks,
   matrixLeads,
   matrixRawEvents,
   type MatrixConnection,
@@ -34,8 +37,11 @@ import { SERVICE_NAME } from "../../middleware/auth.js";
 import { platformAccessToken, sync, type MatrixEvent } from "./client.js";
 import {
   aggregateMessages,
+  groupMembers,
   ingestionFloor,
+  isGroupRoom,
   renderThread,
+  roomName,
   shouldMirror,
   resolveCounterpart,
   splitName,
@@ -261,6 +267,10 @@ async function rebuildRoom(
     .orderBy(asc(matrixRawEvents.originServerTs), asc(matrixRawEvents.eventId));
 
   const events = rows.map((r) => r.payload as unknown as MatrixEvent);
+  if (isGroupRoom(events, conn.matrixUserId, conn.counterpartPrefix)) {
+    await rebuildGroup(conn, roomId);
+    return null;
+  }
   const counterpart = resolveCounterpart(events, conn.matrixUserId, conn.counterpartPrefix);
   if (!counterpart) return null;
 
@@ -355,6 +365,156 @@ async function rebuildRoom(
     );
 
   return { conversationId: conversation.id };
+}
+
+/** Digits of the brand's own linked accounts on this channel: their ghosts are never members. */
+async function ownLoginDigits(conn: MatrixConnection): Promise<Set<string>> {
+  const links = await db
+    .select({ remoteLoginId: matrixLinks.remoteLoginId })
+    .from(matrixLinks)
+    .where(and(eq(matrixLinks.orgId, conn.orgId), eq(matrixLinks.brandId, conn.brandId), eq(matrixLinks.channel, conn.channel)));
+  return new Set(links.map((l) => (l.remoteLoginId ?? "").replace(/^\+/, "")).filter((d) => /^\d{6,20}$/.test(d)));
+}
+
+/**
+ * SILVER for a GROUP room (RELATIONSHIP-TAGS-1014): the group, and one contact
+ * per member ghost (same natural key as a DM counterpart, so a member the brand
+ * also talks to in a DM is the SAME contact row). The room is no conversation:
+ * any conversation row an earlier rule made of it (its first-joined member) is
+ * dropped. Reads the room's events across the brand: a group two linked
+ * accounts share is one room whose events either may have mirrored.
+ */
+async function rebuildGroup(caller: MatrixConnection, roomId: string): Promise<void> {
+  // The connection that first built the group keeps it (its members' contact
+  // rows hang on it), so two accounts in one group never flip it between them.
+  const [existing] = await db
+    .select({ connectionId: matrixGroups.connectionId })
+    .from(matrixGroups)
+    .where(and(eq(matrixGroups.orgId, caller.orgId), eq(matrixGroups.brandId, caller.brandId), eq(matrixGroups.roomId, roomId)));
+  const [owner] =
+    existing && existing.connectionId !== caller.id
+      ? await db.select().from(matrixConnections).where(eq(matrixConnections.id, existing.connectionId))
+      : [caller];
+  const conn = owner ?? caller;
+  const rows = await db
+    .select({ payload: matrixRawEvents.payload })
+    .from(matrixRawEvents)
+    .where(and(eq(matrixRawEvents.orgId, conn.orgId), eq(matrixRawEvents.brandId, conn.brandId), eq(matrixRawEvents.roomId, roomId)))
+    .orderBy(asc(matrixRawEvents.originServerTs), asc(matrixRawEvents.eventId));
+  const events = rows.map((r) => r.payload as unknown as MatrixEvent);
+  const own = await ownLoginDigits(conn);
+  const members = groupMembers(events, conn.matrixUserId, conn.counterpartPrefix).filter(
+    (m) => !own.has(m.mxid.slice(conn.counterpartPrefix.length).split(":")[0] ?? ""),
+  );
+  const messageCount = events.filter((e) => e.type === "m.room.message").length;
+  const now = new Date();
+
+  await db.transaction(async (tx) => {
+    await tx
+      .delete(conversations)
+      .where(and(eq(conversations.orgId, conn.orgId), eq(conversations.brandId, conn.brandId), eq(conversations.roomId, roomId)));
+    const [group] = await tx
+      .insert(matrixGroups)
+      .values({
+        orgId: conn.orgId,
+        brandId: conn.brandId,
+        connectionId: conn.id,
+        channel: conn.channel,
+        roomId,
+        name: roomName(events),
+        memberCount: members.filter((m) => m.membership === "join" || m.membership === "invite").length,
+        messageCount,
+        lastRebuiltAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [matrixGroups.orgId, matrixGroups.brandId, matrixGroups.roomId],
+        set: {
+          connectionId: conn.id,
+          channel: conn.channel,
+          name: roomName(events),
+          memberCount: members.filter((m) => m.membership === "join" || m.membership === "invite").length,
+          messageCount,
+          lastRebuiltAt: now,
+        },
+      })
+      .returning({ id: matrixGroups.id });
+    if (members.length === 0) {
+      await tx.delete(matrixGroupMembers).where(eq(matrixGroupMembers.groupId, group.id));
+      return;
+    }
+
+    // The phone a send resolved to a LID ghost (the bridge's own answer).
+    const ghostPhones = new Map<string, string>();
+    const mxids = members.map((m) => m.mxid);
+    for (let i = 0; i < mxids.length; i += 1000) {
+      const found = await tx
+        .select({ ghost: matrixGhostPhones.ghostMxid, phone: matrixGhostPhones.phone })
+        .from(matrixGhostPhones)
+        .where(inArray(matrixGhostPhones.ghostMxid, mxids.slice(i, i + 1000)));
+      for (const f of found) ghostPhones.set(f.ghost, f.phone);
+    }
+
+    const contactIdOf = new Map<string, string>();
+    for (let i = 0; i < members.length; i += 500) {
+      const batch = members.slice(i, i + 500);
+      const inserted = await tx
+        .insert(contacts)
+        .values(
+          batch.map((m) => {
+            const names = splitName(m.displayName);
+            return {
+              orgId: conn.orgId,
+              brandId: conn.brandId,
+              primaryEmail: null,
+              phoneE164: m.phoneE164 ?? ghostPhones.get(m.mxid) ?? null,
+              fullName: names.fullName,
+              firstName: names.firstName,
+              lastName: names.lastName,
+              rawAttributes: {},
+              consentStatus: "unknown" as const,
+              unsubscribed: false,
+              source: "matrix",
+              channel: conn.channel,
+              channelHandle: m.mxid,
+              sourceConnectionId: conn.id,
+              lastRebuiltAt: now,
+            };
+          }),
+        )
+        .onConflictDoUpdate({
+          target: [contacts.orgId, contacts.brandId, contacts.sourceConnectionId, contacts.channel, contacts.channelHandle],
+          // A DM rebuild owns the counterpart's name; a group only fills what is missing.
+          set: {
+            phoneE164: sql`COALESCE(${contacts.phoneE164}, excluded.phone_e164)`,
+            fullName: sql`COALESCE(${contacts.fullName}, excluded.full_name)`,
+            firstName: sql`COALESCE(${contacts.firstName}, excluded.first_name)`,
+            lastName: sql`COALESCE(${contacts.lastName}, excluded.last_name)`,
+            lastRebuiltAt: now,
+          },
+        })
+        .returning({ id: contacts.id, handle: contacts.channelHandle });
+      for (const r of inserted) if (r.handle) contactIdOf.set(r.handle, r.id);
+    }
+
+    await tx.delete(matrixGroupMembers).where(eq(matrixGroupMembers.groupId, group.id));
+    for (let i = 0; i < members.length; i += 500) {
+      await tx.insert(matrixGroupMembers).values(
+        members.slice(i, i + 500).map((m) => ({
+          orgId: conn.orgId,
+          brandId: conn.brandId,
+          groupId: group.id,
+          roomId,
+          contactId: contactIdOf.get(m.mxid)!,
+          ghostMxid: m.mxid,
+          membership: m.membership,
+          joinedAt: m.joinedAt,
+          authoredCount: m.authoredCount,
+          firstAuthoredAt: m.firstAuthoredAt,
+          lastAuthoredAt: m.lastAuthoredAt,
+        })),
+      );
+    }
+  });
 }
 
 /**

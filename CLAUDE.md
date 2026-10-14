@@ -191,6 +191,25 @@ unless `includeClients`; opted-out out unless `includeOptedOut`. Stats with `dea
 with `people` + `inPool`. The scope reaches a campaign through a human-service CRM audience
 (`crmPeople.segment`) the campaign targets (`audienceIds`).
 
+### Relationships (`relationships: "business_only"`) — a business pipe never writes to a friend
+
+RELATIONSHIP-TAGS-1014 (owner 2026-10-14): top-level `relationships` on serve-next (forwarded by
+human-service from the pipe's strategy), both pools. Candidates are walked in pool order (pages of
+1000, `SERVE_RELATIONSHIP_MAX_PAGES` 50), lead-service `POST /internal/brands/{b}/relationships/query
+{humanIds}` is asked (no cache), a person is served iff `policies.business_only === true`
+(lead-service's ONE rule; no human id = no). Refused = NOT marked served. lead-service unreadable =
+502 `relationships_unavailable`. CSV rows find their human through `human_keys` (email). Response
+adds `relationships {policy, checked, skipped{reason}}`; `exhausted` = nothing allowed left AND
+nobody waiting on a first judgment.
+
+### Unibox relationship block
+
+`GET /orgs/people`: each row carries lead-service's `relationship` block verbatim (by `humanId`,
+read 60s-cached per human, `lib/people/relationships.ts`), `relationships {status, counts per YES
+tag, untagged, unjudged}` over the population, filter `relationship=<tag>|untagged|unjudged` (502
+when lead-service is unreadable). One row per human: human-service's merges (incl. org judgment
+links) come back as `human_identity` evidence, so two people one human holds collapse at build.
+
 ### Reachability (`reachableBy`) — a serve FOR a pipe never burns whom it cannot reach
 
 `serve-next` body / `serve-stats` query `reachableBy: "phone" | "email" | [both]` (owner
@@ -348,6 +367,23 @@ Deterministic, **zero per-row LLM** — knowing who wrote to you needs no model.
   raw events: first/last message timestamp, message / inbound / outbound counts,
   and `last_event_id`, which doubles as the freshness watermark.
   **Natural key = `UNIQUE(contact_id, channel)`.**
+
+### Silver — GROUPS: `matrix_groups` + `matrix_group_members` (RELATIONSHIP-TAGS-1014)
+
+A room is a GROUP when no membership event carries `is_direct: true` (the Matrix DM mark the bridge
+sets) and it holds 2+ ghosts (`isGroupRoom`). A group is NO conversation (any conversation row of
+the room is dropped): every member ghost (minus the brand's own linked logins) gets a `contacts`
+row (same natural key as a DM counterpart: a member the brand also DMs is ONE contact) and a
+`matrix_group_members` row (membership, joined_at, authored count / first / last). Keyed on the
+ROOM per brand, events read across the brand's connections (two linked accounts in one group);
+the connection that first built it keeps it. Prod 2026-10-14 (Distribute.you): 131 groups,
+~19.7k member ghosts, 582 ever wrote. People: a member is a Matrix presence (`detail.kind =
+group_member`, `detail.groups`); a person known ONLY as a member who never wrote is
+`people.group_only`, hidden from the list unless `includeGroupMembers=true`
+(`groupMembersHidden`), out of leg reach. Identity: every Matrix presence states
+`matrix:<contactId>` + `msg:<network>:<id>` (`handleKey`; WhatsApp LID `<digits>@lid`, LinkedIn
+member id unescaped, phone ghosts none), resolved by human-service `messagingHandles` (weak:
+never auto-merges; lead-service's org link does). Handle-only records are stated LAST.
 
 ### Gold — `matrix_leads`
 
@@ -755,6 +791,12 @@ owner had written to. A recorded fact, never an address-shape guess.
   unless `includeAutomated=true` (`automatedHidden` counts them). Jev down =
   nobody hidden, `senderVerdicts.status=failed`, retried next build. Source
   data stays whole.
+- **RETIRED as a visibility gate (RELATIONSHIP-TAGS-1014, owner 2026-10-14: « TU NE DEVRAIT JAMAIS
+  ASSUME QUE JE NE LES CONNAIS PAS »):** the Unibox list, the search and the fact feed ignore
+  `people.not_business` (nobody hidden, no fact held, `notBusinessHidden` = 0). Who a person is to the
+  brand is lead-service's `relationship` tag (below). The verdicts are still written and read ONLY
+  for: offer tags (`offer_ids`), the paid Matrix lead-reading gate, and the serve pool / leg reach
+  exclusion (a serve with no relationship policy stays exactly as wide as before). History:
 - **Sales leads only — every other thread is nobody** (`relevance.ts`,
   owner 2026-10-10: « je veux que mes sales lead »). Every Gmail / Matrix
   conversation of a non-automated person gets ONE Jev call: `topic` choice
@@ -1117,6 +1159,11 @@ lead-service serves the overall tag, then go.
   id + what about it) and a content hash: new key → fact; same hash → nothing (a
   re-sync emits 0); changed hash → `withdrawn` + a new fact. The first pass is
   the backfill. One global advisory lock per emission so seqs commit in order.
+- Groups (RELATIONSHIP-TAGS-1014): `group_member` (natural key room|ghost, payload channel,
+  threadId, groupName, membership, dated joined_at) and `group_message` (a word the person WROTE
+  in a group, payload groupName/text/direction; never `message_in`: lead-service's "waiting on us"
+  reads message_in). The brand's own posts in a group are about nobody: never emitted, and the
+  `message_in/out` an older rule filed on the first-joined member are withdrawn `subject_changed`.
 - Types: GoHighLevel `added_to_crm` (contact, dated `created_at`), funnel facts
   `form_submitted | meeting_booked | meeting_attended | meeting_not_held | sale
   | deal_lost` built from `eventsQuery` (THE funnel-events evidence: payload

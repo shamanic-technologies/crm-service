@@ -8,6 +8,7 @@ import { STATE_SOURCES } from "./lib/people/state.js";
 import { SOURCE_STATUSES } from "./lib/people/sources.js";
 import { TEXT_CLEAN_STATUSES, TIMELINE_SOURCE_STATUSES } from "./lib/people/timeline.js";
 import { FACT_SOURCES, FACT_TYPES } from "./lib/people/facts.js";
+import { RELATIONSHIP_POLICIES, RELATIONSHIP_TAGS } from "./lib/people/relationships.js";
 import { OUTCOME_STEPS } from "./lib/people/outcomes.js";
 import { SEGMENT_STEPS } from "./lib/people/segment.js";
 import { LEG_STEPS } from "./lib/people/leg-reach.js";
@@ -205,6 +206,10 @@ export const ServeNextRequestSchema = registry.register(
           description:
             "The channel(s) the pipe serving writes on (all required): `phone` (WhatsApp, calls, SMS) or `email`. On BOTH pools, a contact or person the pipe cannot reach is SKIPPED and NOT marked served, so it stays available to a pipe that can. Omit = no requirement (unchanged behaviour).",
         }),
+      relationships: z.enum(RELATIONSHIP_POLICIES).optional().openapi({
+        description:
+          "The pipe's relationship policy (its lead strategy, forwarded by human-service). `business_only`: lead-service is asked who each candidate is to the brand (POST /internal/brands/{brandId}/relationships/query); nobody tagged personal, investor, supplier, team, partner or advisor (sure or unsure), nobody lead-service never judged, nobody without a human id is handed out, on BOTH pools. Such a person is NOT marked served (another pipe may still write to them). lead-service unreadable = 502 relationships_unavailable, nothing served. Omit = unchanged behaviour.",
+      }),
     })
     .openapi("ServeNextRequest"),
 );
@@ -231,8 +236,16 @@ export const ServeNextResponseSchema = registry.register(
       exhausted: z.boolean().openapi({
         description:
           "True when no un-served sendable contacts remain after this serve — for the brand, or " +
-          "for the restricted files when `uploadIds` was supplied.",
+          "for the restricted files when `uploadIds` was supplied. Under relationships=business_only: nothing left that may ever be served (no allowed person left AND nobody waiting on a first judgment).",
       }),
+      relationships: z
+        .object({
+          policy: z.enum(RELATIONSHIP_POLICIES),
+          checked: z.number().int().openapi({ description: "Candidates lead-service was asked about." }),
+          skipped: z.record(z.string(), z.number().int()).openapi({ description: "Candidates kept out (not served, not burned), by reason: never_judged, no_human, tagged_<tag>." }),
+        })
+        .optional()
+        .openapi({ description: "Present only when the request set `relationships`." }),
     })
     .openapi("ServeNextResponse"),
 );
@@ -1918,7 +1931,10 @@ const PersonSchema = registry.register(
         .openapi({ description: "Jev's verdict per address (null verdict = not judged yet, read as human). Null for a person with no email." }),
       notBusiness: z.boolean().openapi({
         description:
-          "True when the person is known from the owner's personal channels ALONE (Gmail, Matrix-bridged WhatsApp / Telegram / ...: no cold email, lead, CRM, CSV, Stripe or PostHog record) and Jev (chat-service judgments) judged EVERY one of their conversations not with a sales lead of this brand (personal life, or other work: supplier, accountant, mentor, investor, press, another company) with P(sales lead of this brand) < 0.50, or found nothing a person wrote in it (only the bridge's own notices, uncaptioned media, empty mails). Hidden from GET /orgs/people unless includeNotBusiness=true.",
+          "Jev judged every one of the person's personal-channel conversations not about this brand (personal-channel-only people). Since RELATIONSHIP-TAGS-1014 (2026-10-14) it hides NOBODY from this list, the search or the fact feed: who a person is to the brand is lead-service's `relationship` block. It only keeps a serve without a relationship policy exactly as before.",
+      }),
+      groupOnly: z.boolean().openapi({
+        description: "True when the person is known ONLY as a member of the brand's messaging groups and never wrote a word anywhere: listed only with includeGroupMembers=true.",
       }),
       offerIds: z.array(z.string()).openapi({
         description: "The brand's offers (brand-service offer ids) Jev tied this person's personal-channel conversations to (yes-probability >= 0.5, on a conversation about the brand). Empty when none or not judged.",
@@ -2041,7 +2057,7 @@ const PeopleListResponseSchema = registry.register(
         })
         .nullable()
         .openapi({ description: "Jev's business / brand / offer verdicts on the last build's personal-channel conversations: recorded ones reused, judged now, still pending (shown until judged), verdicts per topic, people hidden. Null before a build that judged." }),
-      notBusinessHidden: z.number().int().openapi({ description: "People hidden from this list because Jev judged them not about this brand (0 when includeNotBusiness=true)." }),
+      notBusinessHidden: z.number().int().openapi({ description: "Always 0 since RELATIONSHIP-TAGS-1014: no conversation verdict hides anyone." }),
       offerId: z.string().nullable().openapi({ description: "The offer filter applied (null = every offer)." }),
       total: z.number().int(),
       limit: z.number().int(),
@@ -2082,8 +2098,36 @@ const PeopleListResponseSchema = registry.register(
           readAt: z.string().nullable().openapi({ description: "When crm-service read features-service (a read is shared for up to 60s)." }),
         })
         .openapi({ description: "The Unibox family filters (Won clients, Hot leads, Lost leads, Cold leads)." }),
+      relationships: z
+        .object({
+          status: z.enum(["ok", "failed"]).openapi({ description: "failed = lead-service could not be read: every person's relationship is null for THAT reason (see error)." }),
+          error: z.string().nullable(),
+          filter: z.string().nullable().openapi({ description: "The relationship filter applied (null = All)." }),
+          counts: z.record(z.string(), z.number().int()).nullable().openapi({ description: "People per relationship tag (YES tags) over this list's population; tags overlap (a person can be personal AND a customer)." }),
+          untagged: z.number().int().nullable().openapi({ description: "Judged, no tag yet." }),
+          unjudged: z.number().int().nullable().openapi({ description: "lead-service never read their thread, or no human id yet." }),
+          population: z.number().int(),
+        })
+        .openapi({ description: "Who the people are to the brand (lead-service's relationship tags, RELATIONSHIP-TAGS-1014)." }),
+      groupMembersHidden: z.number().int().openapi({ description: "People hidden because they are known ONLY as members of the brand's messaging groups and never wrote a word (0 when includeGroupMembers=true)." }),
       people: z.array(
         PersonSchema.extend({
+          relationship: z
+            .object({
+              humanId: z.string().nullable(),
+              company: z
+                .object({ id: z.string().nullable(), name: z.string().nullable(), domain: z.string().nullable(), source: z.string() })
+                .nullable(),
+              tags: z.array(z.enum(RELATIONSHIP_TAGS)),
+              unsureTags: z.array(z.enum(RELATIONSHIP_TAGS)),
+              judgedAt: z.string().nullable(),
+              details: z.array(z.record(z.string(), z.unknown())),
+              policies: z.object({ business_only: z.boolean().optional() }).optional(),
+            })
+            .nullable().openapi({
+            description:
+              "lead-service's relationship block for this person's human, verbatim: tags (YES), unsureTags (waiting on the owner's review), judgedAt (null = never judged), company, details. Null when the person has no human id yet, or relationships.status = failed.",
+          }),
           family: z.enum(["won", "hot", "lost", "cold"]).nullable().openapi({
             description: "features-service's verdict on this person as our lead, verbatim; a person with several lead addresses takes the strongest (won > hot > lost > cold). Null = not one of our leads, or families.status = failed.",
           }),
@@ -2208,7 +2252,11 @@ registry.registerPath({
       offset: z.coerce.number().int().min(0).optional(),
       source: PeopleSourceSchema.optional().openapi({ description: "Only people present on this source." }),
       includeAutomated: z.enum(["true", "false"]).optional().openapi({ description: "Also return automated senders (person.automated = true). Default false: hidden." }),
-      includeNotBusiness: z.enum(["true", "false"]).optional().openapi({ description: "Also return personal-channel people Jev judged not about this brand (person.notBusiness = true: personal life, another business). Default false: hidden." }),
+      includeNotBusiness: z.enum(["true", "false"]).optional().openapi({ description: "Kept for compatibility: since RELATIONSHIP-TAGS-1014 no person is notBusiness (who a person is to the brand is the `relationship` filter), so it changes nothing." }),
+      includeGroupMembers: z.enum(["true", "false"]).optional().openapi({ description: "Also return people known ONLY as members of the brand's messaging groups (WhatsApp, LinkedIn...) who never wrote a word (person.groupOnly = true). Default false: hidden." }),
+      relationship: z.enum([...RELATIONSHIP_TAGS, "untagged", "unjudged"]).optional().openapi({
+        description: "Only people whose lead-service relationship carries this YES tag; `untagged` = judged, no tag; `unjudged` = never judged / no human id. lead-service unreadable = 502 relationships_unavailable.",
+      }),
       offerId: z.string().uuid().optional().openapi({ description: "Only people with a conversation Jev tied to this offer of the brand (person.offerIds contains it)." }),
       family: z.enum(["won", "hot", "lost", "cold"]).optional().openapi({
         description:
@@ -2597,7 +2645,7 @@ const LegReachResponseSchema = z.object({
     .optional()
     .openapi({ description: "Present when available. TO counted on or after the UTC day of first reaching FROM (an undated end counts)." }),
   excluded: z
-    .object({ contactedByUs: z.number().int(), automated: z.number().int(), notBusiness: z.number().int() })
+    .object({ contactedByUs: z.number().int(), automated: z.number().int(), notBusiness: z.number().int(), groupOnly: z.number().int() })
     .optional()
     .openapi({ description: "People who reached FROM but are out of the population, each counted once (first matching reason)." }),
 });

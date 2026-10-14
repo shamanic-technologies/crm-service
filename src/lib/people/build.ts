@@ -45,6 +45,7 @@ import {
   readAuthUsers,
   readCopilot,
   readApiCalls,
+  isGroupOnly,
   withoutOwnAddresses,
   type EvidenceRead,
   type StripeStanding,
@@ -341,8 +342,16 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
         ? `Stated in the brand's CRM (crm-service person merge ${e.ref}) that two people are one human`
         : `lead-service paired the brand's CRM contact ${e.ref} with one of its leads`,
   }));
+  // A record a messaging handle alone names (a group member who never wrote) is
+  // stated LAST: the long tail of the brand's groups never holds back the rest.
+  const handlesOf = (p: (typeof presences)[number]) => (p.keys ?? []).filter((k) => k.startsWith("msg:"));
+  const lurker = (p: (typeof presences)[number]) => isGroupOnly([p]) && p.phones.length === 0;
   const records: IdentityRecord[] = [
-    ...presences.map((p) => ({ emails: p.emails, phones: p.phones })),
+    ...[...presences.filter((p) => !lurker(p)), ...presences.filter(lurker)].map((p) => ({
+      emails: p.emails,
+      phones: p.phones,
+      handles: handlesOf(p),
+    })),
     ...allEvidence.filter((e) => !isJudgment(e)).map((e) => ({ emails: e.emails, phones: e.phones })),
   ];
   const kindsRead = new Set<Judgment["kind"]>(
@@ -455,9 +464,14 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       stateDetail: state.stateDetail,
       automated: automated.get(c.personKey)!,
       automatedVerdict: c.emails.length ? personVerdicts(c.emails, senders.verdicts) : null,
+      // RELATIONSHIP-TAGS-1014: `notBusiness` hides NOBODY any more (list, search,
+      // fact feed all ignore it); who a person is to the brand is lead-service's
+      // relationship tag. It only keeps today's serve (no relationship policy)
+      // exactly as it was: never wider than before the tags existed.
       ...(automated.get(c.personKey)
         ? { notBusiness: false, offerIds: [] as string[], relevance: null }
         : personRelevance(c, relevance.verdicts, isOurLead(c))),
+      groupOnly: isGroupOnly(c.presences),
       possibleLeads: c.presences
         .filter((p) => p.source === "gohighlevel")
         .flatMap((p) => possibleLeadsByCrmContact.get(p.sourceRef) ?? [])
@@ -509,8 +523,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
   // The people are live; now bring the message search index up to date with them.
   // Its failure does not undo the build: it is recorded beside it and retried next pass.
   try {
-    // A person hidden as not about the brand keeps no copy of their messages in our index.
-    const indexed = await indexScopeMessages(scope, rows.filter((r) => !r.notBusiness), identity, gmail.status === "ok");
+    const indexed = await indexScopeMessages(scope, rows, identity, gmail.status === "ok");
     summary.messageIndex = { status: "ok", ...indexed };
   } catch (err) {
     console.error(`[crm-service] people message index failed scope=${scope.id}:`, err);

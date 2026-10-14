@@ -1440,7 +1440,7 @@ describe.skipIf(!RUN)("person layer", () => {
       personalEmails = new Set(["mom@family.com"]);
     });
 
-    it("hides a personal Gmail thread, keeps a brand thread tagged with its offer, and judges each once", async () => {
+    it("RELATIONSHIP-TAGS-1014: a personal thread hides NOBODY from the Unibox; the verdicts still tag offers and are judged once", async () => {
       const summary = await buildNow();
       expect(summary.relevance).toMatchObject({ status: "ok", judged: 2, notBusinessPeople: 1 });
       expect(summary.relevance!.topics).toMatchObject({ personal: 1, this_brand: 1 });
@@ -1450,36 +1450,26 @@ describe.skipIf(!RUN)("person layer", () => {
       expect((relevanceRequests[0].body.state as unknown as { offers: { name: string }[] }).offers[0].name).toBe("Pro plan");
 
       const list = await listPeople();
-      expect(keysOf(list)).not.toContain("email:mom@family.com");
-      expect(list.body.notBusinessHidden).toBe(1);
+      expect(keysOf(list)).toContain("email:mom@family.com");
+      expect(list.body.notBusinessHidden).toBe(0);
+      // Still judged (it keeps a policy-less serve as narrow as before), shown all the same.
+      expect(list.body.people.find((p: { personKey: string }) => p.personKey === "email:mom@family.com").notBusiness).toBe(true);
       const alice = list.body.people.find((p: { personKey: string }) => p.personKey === "email:alice@x.com");
       expect(alice).toMatchObject({ notBusiness: false, offerIds: [OFFER] });
       expect(alice.relevance[0]).toMatchObject({ conversation: "gmail:alice@x.com", topic: "this_brand" });
-
-      const all = await listPeople("&includeNotBusiness=true");
-      expect(keysOf(all)).toContain("email:mom@family.com");
-      expect(all.body.people.find((p: { personKey: string }) => p.personKey === "email:mom@family.com").notBusiness).toBe(true);
 
       // An offer-scoped read: only the people Jev tied to that offer.
       expect(keysOf(await listPeople(`&offerId=${OFFER}`))).toEqual(["email:alice@x.com"]);
       expect(keysOf(await listPeople("&offerId=dddddddd-1111-4111-8111-0000000000f2"))).toEqual([]);
 
-      // A search never reaches a hidden person.
-      expect(keysOf(await listPeople("&q=Mom"))).toEqual([]);
+      // A search reaches everyone.
+      expect(keysOf(await listPeople("&q=Mom"))).toEqual(["email:mom@family.com"]);
 
       // A rebuild with nothing new judges nothing (no new bill).
       relevanceRequests.length = 0;
       const again = await buildNow();
       expect(relevanceRequests).toHaveLength(0);
       expect(again.relevance).toMatchObject({ judged: 0, reused: 2, notBusinessPeople: 1 });
-    });
-
-    it("never hides a person a business source knows, even when Jev calls the thread personal", async () => {
-      personalEmails = new Set(["mom@family.com", "alice@x.com"]);
-      await buildNow();
-      const keys = keysOf(await listPeople());
-      expect(keys).toContain("email:alice@x.com"); // a cold-email lead
-      expect(keys).not.toContain("email:mom@family.com");
     });
 
     it("an unjudged thread stays visible: brand-service down hides nobody", async () => {

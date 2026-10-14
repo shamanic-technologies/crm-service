@@ -31,6 +31,8 @@ import {
   matrixRawEvents,
   conversations,
   matrixLeads,
+  matrixGroups,
+  matrixGroupMembers,
   ghlConnections,
   ghlRawRecords,
   ghlPipelines,
@@ -76,6 +78,9 @@ export const TRANSFER_TABLES: PgTable[] = [
   matrixRawEvents,
   conversations,
   matrixLeads,
+  // Bridged groups and their members (RELATIONSHIP-TAGS-1014).
+  matrixGroups,
+  matrixGroupMembers,
   ghlConnections,
   ghlRawRecords,
   ghlPipelines,

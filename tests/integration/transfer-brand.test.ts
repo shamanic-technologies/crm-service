@@ -47,6 +47,12 @@ async function seedBrand(org: string, brand: string, tag: string) {
   await db.execute(sql`
     INSERT INTO matrix_leads (org_id, brand_id, conversation_id, contact_id, status, next_step, estimated_value_usd, summary, computed_through_event_id, model, run_id)
     VALUES (${org}, ${brand}, ${conv.id}, ${contact.id}, 'new', 'reply', 0, 's', ${"$ev-" + tag}, 'm', 'run')`);
+  const [grp] = await db.execute<{ id: string }>(sql`
+    INSERT INTO matrix_groups (org_id, brand_id, connection_id, channel, room_id, name, member_count, message_count)
+    VALUES (${org}, ${brand}, ${mx.id}, 'whatsapp', ${"!g-" + tag}, 'Group', 1, 0) RETURNING id`);
+  await db.execute(sql`
+    INSERT INTO matrix_group_members (org_id, brand_id, group_id, room_id, contact_id, ghost_mxid, membership, authored_count)
+    VALUES (${org}, ${brand}, ${grp.id}, ${"!g-" + tag}, ${contact.id}, '@whatsapp_lid-1:hs', 'join', 0)`);
 
   const [ghl] = await db.execute<{ id: string }>(sql`
     INSERT INTO ghl_connections (org_id, brand_id, location_id, created_by_user_id)

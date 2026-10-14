@@ -5,6 +5,8 @@ import {
   contacts,
   conversations,
   matrixConnections,
+  matrixGroupMembers,
+  matrixGroups,
   matrixLeads,
   matrixRawEvents,
 } from "../../src/db/schema.js";
@@ -59,7 +61,11 @@ function page(nextBatch: string, timeline: MatrixEvent[]): MatrixSyncResponse {
       join: {
         [ROOM]: {
           state: {
-            events: [member(OWN, "2026-08-01T00:00:00Z"), member(GHOST, "2026-08-01T00:00:00Z", "Alice Martin")],
+            // The bridge marks a DM on the account's membership (`is_direct`), as in prod.
+            events: [
+              { ...member(OWN, "2026-08-01T00:00:00Z"), content: { membership: "join", is_direct: true } },
+              member(GHOST, "2026-08-01T00:00:00Z", "Alice Martin"),
+            ],
           },
           timeline: { events: timeline },
         },
@@ -154,6 +160,8 @@ function installFetchStub() {
 
 async function wipe() {
   await db.execute(sql`DELETE FROM conversation_verdicts`);
+  await db.delete(matrixGroupMembers);
+  await db.delete(matrixGroups);
   await db.delete(matrixLeads);
   await db.delete(conversations);
   await db.delete(matrixRawEvents);
@@ -548,5 +556,61 @@ describe.skipIf(!RUN)("matrix ingestion", () => {
     expect(after.estimatedValueUsd).toBe(before.estimatedValueUsd);
     expect(after.computedThroughEventId).toBe(before.computedThroughEventId);
     expect(after.conversationId).toBe(before.conversationId);
+  });
+
+  it("a GROUP is no conversation: every member is a contact, each with what they wrote (RELATIONSHIP-TAGS-1014)", async () => {
+    const connectionId = await seedConnection();
+    const GROUP = "!group1:hs.example";
+    const YULIA = "@whatsapp_lid-83932385144839:hs.example";
+    const CHARLOTTE = "@whatsapp_lid-2:hs.example";
+    syncPages = [
+      {
+        next_batch: "g2",
+        rooms: {
+          join: {
+            [GROUP]: {
+              state: {
+                events: [
+                  member(OWN, "2026-08-01T00:00:00Z"),
+                  member(CHARLOTTE, "2026-08-01T00:00:00Z", "Charlotte Leonard (WA)"),
+                  member(YULIA, "2026-08-01T00:00:01Z", "Yulia (WA)"),
+                  member(GHOST, "2026-08-01T00:00:02Z", "Alice Martin"),
+                  { event_id: "$name", type: "m.room.name", sender: OWN, origin_server_ts: Date.parse("2026-08-01T00:00:00Z"), state_key: "", content: { name: "Mush KPG Cross-Promotion (MCP '24)" } },
+                ],
+              },
+              timeline: {
+                events: [
+                  message("$g1", CHARLOTTE, "2026-08-02T10:00:00Z", "welcome everyone"),
+                  message("$g2", OWN, "2026-08-02T10:05:00Z", "thanks!"),
+                ],
+              },
+            },
+          },
+        },
+      },
+      emptyPage("g3"),
+    ];
+    const [r] = (await runSyncPass(connectionId)).results;
+    expect(r.conversationsRebuilt).toBe(0);
+    expect(chatCalls).toBe(0);
+    expect(await db.select().from(conversations)).toHaveLength(0);
+    const [g] = await db.select().from(matrixGroups);
+    expect(g).toMatchObject({ roomId: GROUP, name: "Mush KPG Cross-Promotion (MCP '24)", memberCount: 3, messageCount: 2 });
+    const ms = await db.select().from(matrixGroupMembers);
+    expect(ms.map((m) => [m.ghostMxid, m.authoredCount]).sort()).toEqual([
+      [GHOST, 0],
+      [CHARLOTTE, 1],
+      [YULIA, 0],
+    ].sort());
+    const cs = await db.select().from(contacts).where(eq(contacts.source, "matrix"));
+    expect(cs.map((c) => c.fullName).sort()).toEqual(["Alice Martin", "Charlotte Leonard (WA)", "Yulia (WA)"]);
+    // The phone ghost carries its phone; a LID ghost none.
+    expect(cs.find((c) => c.channelHandle === GHOST)!.phoneE164).toBe("+33612345678");
+
+    // Rebuilding from bronze reproduces it byte for byte.
+    const conn = (await db.select().from(matrixConnections).where(eq(matrixConnections.id, connectionId)))[0];
+    await rebuildFromBronze(conn);
+    expect(await db.select().from(matrixGroupMembers)).toHaveLength(3);
+    expect(await db.select().from(contacts).where(eq(contacts.source, "matrix"))).toHaveLength(3);
   });
 });

@@ -128,6 +128,135 @@ export function resolveCounterpart(
 }
 
 /**
+ * Is this room a GROUP (several people) rather than a DM?
+ *
+ * Decided on the room's own state, the same way on every bridge: a bridged DM
+ * carries `is_direct: true` on a membership event (the Matrix spec's DM mark,
+ * set by the bridge when it invites the account); a group never does. A room
+ * with no such mark and a single ghost is treated as a DM (a hand-registered
+ * room, a two-person group): there is only one person to talk to.
+ * RELATIONSHIP-TAGS-1014: a WhatsApp group used to be read as a conversation
+ * with its first-joined member, and every other member was nobody.
+ */
+export function isGroupRoom(events: MatrixEvent[], ownMxid: string, counterpartPrefix: string): boolean {
+  const ghosts = new Set<string>();
+  for (const ev of events) {
+    if (ev.type !== "m.room.member") continue;
+    if (ev.content?.is_direct === true) return false;
+    const k = ev.state_key;
+    if (k && k !== ownMxid && k.startsWith(counterpartPrefix)) ghosts.add(k);
+  }
+  return ghosts.size >= 2;
+}
+
+/** The room's current name (`m.room.name`, latest), or null. */
+export function roomName(events: MatrixEvent[]): string | null {
+  let latest: MatrixEvent | null = null;
+  for (const ev of events) {
+    if (ev.type !== "m.room.name") continue;
+    if (!latest || compareEvents(latest, ev) < 0) latest = ev;
+  }
+  const name = latest?.content?.name;
+  return typeof name === "string" && name.trim() !== "" ? name.trim() : null;
+}
+
+export interface GroupMember extends Counterpart {
+  /** The member's latest membership (`join`, `invite`, `leave`, `ban`...). */
+  membership: string;
+  /** When they first joined (or were invited), the vendor's date. */
+  joinedAt: Date | null;
+  /** Messages they wrote in the room (any content). */
+  authoredCount: number;
+  firstAuthoredAt: Date | null;
+  lastAuthoredAt: Date | null;
+}
+
+/**
+ * Every member of a group room in the bridge's ghost namespace (the account
+ * itself is never a ghost), with what they did there. Pure, deterministic,
+ * sorted by MXID.
+ */
+export function groupMembers(events: MatrixEvent[], ownMxid: string, counterpartPrefix: string): GroupMember[] {
+  const byMxid = new Map<string, { first: MatrixEvent | null; latest: MatrixEvent; authored: number; firstAuthored: number | null; lastAuthored: number | null }>();
+  for (const ev of events) {
+    if (ev.type !== "m.room.member") continue;
+    const k = ev.state_key;
+    if (!k || k === ownMxid || !k.startsWith(counterpartPrefix)) continue;
+    const membership = String(ev.content?.membership ?? "");
+    const entered = membership === "join" || membership === "invite";
+    const m = byMxid.get(k);
+    if (!m) {
+      byMxid.set(k, { first: entered ? ev : null, latest: ev, authored: 0, firstAuthored: null, lastAuthored: null });
+      continue;
+    }
+    if (entered && (!m.first || compareEvents(m.first, ev) > 0)) m.first = ev;
+    if (compareEvents(m.latest, ev) < 0) m.latest = ev;
+  }
+  for (const ev of events) {
+    if (ev.type !== "m.room.message") continue;
+    const m = byMxid.get(ev.sender);
+    if (!m) continue;
+    m.authored += 1;
+    if (m.firstAuthored === null || ev.origin_server_ts < m.firstAuthored) m.firstAuthored = ev.origin_server_ts;
+    if (m.lastAuthored === null || ev.origin_server_ts > m.lastAuthored) m.lastAuthored = ev.origin_server_ts;
+  }
+  return [...byMxid.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([mxid, m]) => {
+      // The latest event naming a display name: a `leave` carries none.
+      const named = [m.latest, m.first].find((e) => typeof e?.content?.displayname === "string" && String(e.content.displayname).trim() !== "");
+      return {
+        mxid,
+        displayName: named ? String(named.content!.displayname).trim() : null,
+        phoneE164: phoneFromMxid(mxid, counterpartPrefix),
+        membership: String(m.latest.content?.membership ?? ""),
+        joinedAt: m.first ? new Date(m.first.origin_server_ts) : null,
+        authoredCount: m.authored,
+        firstAuthoredAt: m.firstAuthored === null ? null : new Date(m.firstAuthored),
+        lastAuthoredAt: m.lastAuthored === null ? null : new Date(m.lastAuthored),
+      };
+    });
+}
+
+/**
+ * The messaging handle a ghost names, in the form human-service stores it
+ * (RELATIONSHIP-TAGS-1014, agreed with human-service): a WhatsApp LID ghost
+ * `@whatsapp_lid-839…:hs` → `839…@lid`; a LinkedIn ghost → the LinkedIn member
+ * id verbatim (the bridge escapes it in the localpart: `_a` = `A`, `__` = `_`,
+ * `=2d` = `-`). A WhatsApp ghost that encodes a phone has no handle: its phone
+ * IS the key. Null for a channel human-service has no network for.
+ */
+export function handleOf(channel: string, mxid: string, counterpartPrefix: string): { network: string; id: string } | null {
+  if (!mxid.startsWith(counterpartPrefix)) return null;
+  const local = mxid.slice(counterpartPrefix.length).split(":")[0] ?? "";
+  if (!local) return null;
+  if (channel === "whatsapp") {
+    const lid = /^lid-(\d+)$/.exec(local);
+    return lid ? { network: "whatsapp", id: `${lid[1]}@lid` } : null;
+  }
+  if (channel === "linkedin" || channel === "telegram") return { network: channel, id: unescapeLocalpart(local) };
+  return null;
+}
+
+/** PURE: undo the mautrix MXID localpart escaping (`_x` → `X`, `__` → `_`, `=hh` → byte). */
+export function unescapeLocalpart(local: string): string {
+  let out = "";
+  for (let i = 0; i < local.length; i++) {
+    const c = local[i];
+    if (c === "_" && i + 1 < local.length) {
+      const n = local[++i];
+      out += n === "_" ? "_" : n.toUpperCase();
+    } else if (c === "=" && /^[0-9a-f]{2}$/.test(local.slice(i + 1, i + 3))) {
+      out += String.fromCharCode(parseInt(local.slice(i + 1, i + 3), 16));
+      i += 2;
+    } else {
+      out += c;
+    }
+  }
+  return out;
+}
+
+/**
  * mautrix-whatsapp encodes the counterpart's phone number in the ghost MXID
  * localpart (`@whatsapp_33612345678:hs` → `+33612345678`). Other bridges use
  * opaque ids, so this returns null for them — deterministically, never a guess.
