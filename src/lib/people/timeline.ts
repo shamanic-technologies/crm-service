@@ -175,7 +175,46 @@ async function matrixItems(presences: Presence[]): Promise<SourceResult> {
   const conversationIds = presences
     .map((p) => p.detail.conversationId)
     .filter((c): c is string => typeof c === "string");
-  if (conversationIds.length === 0) return { status: "empty", items: [], error: null, asked: [] };
+  // The groups the person is in (RELATIONSHIP-TAGS-1014): the words THEY wrote there, labelled with the group.
+  const groupHandles = presences
+    .filter((p) => Array.isArray(p.detail.groups) && (p.detail.groups as { authoredCount?: number }[]).some((g) => (g.authoredCount ?? 0) > 0))
+    .map((p) => ({ handle: p.detail.channelHandle as string, channel: p.detail.channel as string, groups: p.detail.groups as { roomId: string; name: string | null; authoredCount: number }[] }));
+  const groupItems: TimelineItem[] = [];
+  for (const g of groupHandles) {
+    const rooms = g.groups.filter((x) => x.authoredCount > 0);
+    if (!g.handle || rooms.length === 0) continue;
+    const events = await db
+      .select()
+      .from(matrixRawEvents)
+      .where(
+        and(
+          inArray(matrixRawEvents.roomId, rooms.map((r) => r.roomId)),
+          eq(matrixRawEvents.sender, g.handle),
+          eq(matrixRawEvents.eventType, "m.room.message"),
+        ),
+      );
+    for (const e of events) {
+      const content = (e.payload as { content?: { body?: unknown } }).content;
+      groupItems.push({
+        at: e.originServerTs.toISOString(),
+        source: "matrix",
+        channel: g.channel,
+        kind: "message",
+        direction: "inbound",
+        subject: rooms.find((r) => r.roomId === e.roomId)?.name ?? null,
+        text: typeof content?.body === "string" ? content.body : null,
+        from: e.sender,
+        to: [],
+        ref: { eventId: e.eventId, roomId: e.roomId, groupRoomId: e.roomId },
+        textClean: null,
+        outreachFact: null,
+        event: null,
+      });
+    }
+  }
+  if (conversationIds.length === 0) {
+    return { status: groupItems.length ? "ok" : "empty", items: groupItems, error: null, asked: [] };
+  }
   const convs = await db
     .select({
       id: conversations.id,
@@ -218,6 +257,7 @@ async function matrixItems(presences: Presence[]): Promise<SourceResult> {
       });
     }
   }
+  items.push(...groupItems);
   return { status: items.length ? "ok" : "empty", items, error: null, asked: conversationIds };
 }
 

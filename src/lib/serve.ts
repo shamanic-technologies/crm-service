@@ -3,6 +3,8 @@ import { db } from "../db/index.js";
 import { AUTH_PROVIDER_NAMES } from "./auth/providers.js";
 import { PERSON_REPLIED_SQL } from "./people/conversation.js";
 import { STAFF_DOMAIN, STAFF_EMAIL_LIST } from "./owner-telegram.js";
+import { businessOnlyVerdict, queryRelationships, type Relationship, type RelationshipPolicy } from "./people/relationships.js";
+import type { SiblingIdentity } from "./people/siblings.js";
 import { perStageSegments, personOptedOut, readSegmentCatalogue, segmentClauses, type PoolClause, type Segment, type SegmentCatalogue } from "./people/segment.js";
 
 /**
@@ -142,6 +144,13 @@ export function normalizeReachQuery(raw: unknown): string[] {
   return normalizeUploadIdsQuery(raw);
 }
 
+/** SQL restricting a candidate CTE to the given row ids (a `business_only` serve's allowed rows). Empty list = none. */
+function idFilter(alias: "c" | "p", ids?: string[]) {
+  if (ids === undefined) return sql.empty();
+  if (ids.length === 0) return sql` AND false`;
+  return sql` AND ${sql.raw(alias)}.id IN (${sql.join(ids.map((id) => sql`${id}::uuid`), sql`, `)})`;
+}
+
 /**
  * Normalize the `uploadIds` query parameter into a list of raw strings.
  * Accepts a repeated param (`?uploadIds=a&uploadIds=b`) or a comma-separated
@@ -182,8 +191,9 @@ export async function serveNext(
   runId: string,
   uploadIds?: string[],
   reach: readonly Reach[] = [],
+  onlyIds?: string[],
 ): Promise<ServeNextResult> {
-  const files = sql`${uploadFilter(uploadIds)}${csvReachFilter(reach)}`;
+  const files = sql`${uploadFilter(uploadIds)}${csvReachFilter(reach)}${idFilter("c", onlyIds)}`;
   const rows = (await db.execute(sql`
     WITH candidate AS (
       SELECT c.id, c.org_id, c.brand_id, c.primary_email, c.phone_e164,
@@ -516,6 +526,7 @@ export async function serveNextPeople(
   runId: string,
   filter: PeopleFilter,
   reach: readonly Reach[] = [],
+  onlyIds?: string[],
 ): Promise<ServeNextPeopleResult> {
   const where = peoplePoolWhere(orgId, brandId, filter, reach);
   const rows = (await db.execute(sql`
@@ -523,7 +534,7 @@ export async function serveNextPeople(
       SELECT p.id, p.org_id, p.brand_id, p.person_id, p.human_id, p.display_name, p.emails, p.phones,
              p.sources, p.presences, p.built_at, p.first_activity_at, p.person_key
       FROM people p
-      WHERE ${where} AND ${NOT_SERVED}
+      WHERE ${where} AND ${NOT_SERVED}${idFilter("p", onlyIds)}
       ORDER BY p.first_activity_at ASC NULLS LAST, p.person_key ASC
       LIMIT ${limit}
       FOR UPDATE SKIP LOCKED
@@ -595,4 +606,125 @@ export function readPeopleSegments(orgId: string, brandId: string): Promise<Segm
     brandId,
     peoplePoolWhere(orgId, brandId, {}),
   );
+}
+
+// ─── RELATIONSHIPS — a business pipe never writes to a friend (RELATIONSHIP-TAGS-1014) ───
+
+/**
+ * `relationships: "business_only"` (owner decision 6, forwarded by
+ * human-service from the pipe's own strategy): before a serve, lead-service
+ * says who each candidate is to the brand; nobody tagged personal, investor,
+ * supplier, team, partner or advisor (sure or unsure), and nobody whose thread
+ * lead-service never judged (or who has no human id yet), is handed out. A
+ * person refused for it is NOT marked served: another pipe may still write to
+ * them. Same rule on both pools. lead-service unreadable = the serve fails loud
+ * (`RelationshipsUnavailableError`, 502): never an unchecked hand-out.
+ *
+ * Candidates are walked in the pool's own order, a page at a time, until the
+ * limit is filled with allowed people; the atomic serve then runs restricted
+ * to those rows (its own SKIP LOCKED / ON CONFLICT guards unchanged).
+ */
+export class RelationshipsUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RelationshipsUnavailableError";
+  }
+}
+
+export interface RelationshipsServeSummary {
+  policy: RelationshipPolicy;
+  /** Candidates lead-service was asked about. */
+  checked: number;
+  /** Candidates kept out, by reason (`never_judged`, `no_human`, `tagged_personal`...). */
+  skipped: Record<string, number>;
+}
+
+const RELATIONSHIP_PAGE = 1000;
+const RELATIONSHIP_MAX_PAGES = Number(process.env.SERVE_RELATIONSHIP_MAX_PAGES) || 50;
+
+async function pickBusinessOnly(
+  identity: SiblingIdentity,
+  limit: number,
+  page: (offset: number, size: number) => Promise<{ id: string; human_id: string | null }[]>,
+): Promise<{ allowed: string[]; summary: RelationshipsServeSummary; walkedAll: boolean; waiting: number }> {
+  const summary: RelationshipsServeSummary = { policy: "business_only", checked: 0, skipped: {} };
+  const allowed: string[] = [];
+  let walkedAll = false;
+  let waiting = 0; // never judged / no human yet: may become allowed later
+  for (let p = 0; p < RELATIONSHIP_MAX_PAGES; p++) {
+    const rows = await page(p * RELATIONSHIP_PAGE, RELATIONSHIP_PAGE);
+    const humanIds = [...new Set(rows.map((r) => r.human_id).filter((h): h is string => !!h))];
+    let byHuman: Map<string, Relationship>;
+    try {
+      byHuman = humanIds.length ? await queryRelationships(identity, humanIds) : new Map();
+    } catch (err) {
+      throw new RelationshipsUnavailableError(`lead-service relationships unreadable: ${(err as Error).message}`);
+    }
+    summary.checked += rows.length;
+    for (const r of rows) {
+      const v = businessOnlyVerdict(r.human_id ? byHuman.get(r.human_id) : null);
+      if (v.ok) {
+        if (allowed.length < limit) allowed.push(r.id);
+        continue;
+      }
+      summary.skipped[v.reason] = (summary.skipped[v.reason] ?? 0) + 1;
+      if (v.reason === "never_judged" || v.reason === "no_human") waiting++;
+    }
+    if (rows.length < RELATIONSHIP_PAGE) {
+      walkedAll = true;
+      break;
+    }
+    if (allowed.length >= limit) break;
+  }
+  return { allowed, summary, walkedAll, waiting };
+}
+
+/** CSV pool under `business_only`. */
+export async function serveNextBusinessOnly(
+  identity: SiblingIdentity,
+  limit: number,
+  runId: string,
+  uploadIds?: string[],
+  reach: readonly Reach[] = [],
+): Promise<ServeNextResult & { relationships: RelationshipsServeSummary }> {
+  const { orgId, brandId } = identity;
+  const files = sql`${uploadFilter(uploadIds)}${csvReachFilter(reach)}`;
+  const pick = await pickBusinessOnly(identity, limit, async (offset, size) =>
+    (await db.execute(sql`
+      SELECT c.id, hk.human_id
+      FROM sendable_contacts c
+      LEFT JOIN human_keys hk ON hk.org_id = c.org_id AND hk.identity_key = 'email:' || c.primary_email
+      WHERE c.org_id = ${orgId} AND c.brand_id = ${brandId}${files}
+        AND NOT EXISTS (SELECT 1 FROM contact_serves s WHERE s.brand_id = c.brand_id AND s.email = c.primary_email)
+      ORDER BY c.last_rebuilt_at ASC, c.id ASC
+      LIMIT ${size} OFFSET ${offset}
+    `)) as unknown as { id: string; human_id: string | null }[],
+  );
+  const served = await serveNext(orgId, brandId, limit, runId, uploadIds, reach, pick.allowed);
+  // Exhausted only when nothing is left that may ever be served under this policy.
+  const exhausted = pick.walkedAll && pick.waiting === 0 && pick.allowed.length <= served.served;
+  return { ...served, exhausted, relationships: pick.summary };
+}
+
+/** People pool under `business_only`. */
+export async function serveNextPeopleBusinessOnly(
+  identity: SiblingIdentity,
+  limit: number,
+  runId: string,
+  filter: PeopleFilter,
+  reach: readonly Reach[] = [],
+): Promise<ServeNextPeopleResult & { relationships: RelationshipsServeSummary }> {
+  const { orgId, brandId } = identity;
+  const where = peoplePoolWhere(orgId, brandId, filter, reach);
+  const pick = await pickBusinessOnly(identity, limit, async (offset, size) =>
+    (await db.execute(sql`
+      SELECT p.id, p.human_id FROM people p
+      WHERE ${where} AND ${NOT_SERVED}
+      ORDER BY p.first_activity_at ASC NULLS LAST, p.person_key ASC
+      LIMIT ${size} OFFSET ${offset}
+    `)) as unknown as { id: string; human_id: string | null }[],
+  );
+  const served = await serveNextPeople(orgId, brandId, limit, runId, filter, reach, pick.allowed);
+  const exhausted = pick.walkedAll && pick.waiting === 0 && pick.allowed.length <= served.served;
+  return { ...served, exhausted, relationships: pick.summary };
 }

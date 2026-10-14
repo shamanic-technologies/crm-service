@@ -221,7 +221,7 @@ export type LegReach =
       reachedFrom?: LegEnd;
       /** `byFromDay` = the same TO people filed on the UTC day they first reached FROM (cohort). */
       reachedTo?: LegEnd & { toBeforeFrom: number; byFromDay: { day: string; people: number }[]; undatedFrom: number };
-      excluded?: { contactedByUs: number; automated: number; notBusiness: number };
+      excluded?: { contactedByUs: number; automated: number; notBusiness: number; groupOnly: number };
     };
 type LegReasonCodeOrNull = LegReachReasonCode | null;
 
@@ -376,11 +376,13 @@ async function countLeg(orgId: string, brandId: string, from: LegStep, to: LegSt
       SELECT fr.pk, fr.from_at,
              COALESCE(${CONTACTED}, false) AS contacted,
              COALESCE(p.automated, false) AS automated,
-             COALESCE(p.not_business, false) AS not_business
+             COALESCE(p.not_business, false) AS not_business,
+             COALESCE(p.group_only, false) AS group_only
       FROM fromers fr
       LEFT JOIN people p ON p.org_id = ${orgId} AND p.brand_id = ${brandId} AND p.person_key = fr.pk
     ),
-    pop AS (SELECT pk, from_at FROM tagged WHERE NOT contacted AND NOT automated AND NOT not_business),
+    -- A member of the brand's groups who never wrote a word is no lead the team found (RELATIONSHIP-TAGS-1014).
+    pop AS (SELECT pk, from_at FROM tagged WHERE NOT contacted AND NOT automated AND NOT not_business AND NOT group_only),
     to_ev AS (
       SELECT e.pk, e.source, e.occurred_at,
              (e.occurred_at IS NULL OR pop.from_at IS NULL
@@ -393,10 +395,11 @@ async function countLeg(orgId: string, brandId: string, from: LegStep, to: LegSt
   `;
   const day = (col: string) => sql.raw(`to_char(${col} AT TIME ZONE 'UTC', 'YYYY-MM-DD')`);
   const [excluded, fromDays, fromSources, toDays, toSources, before, toCohort] = await Promise.all([
-    rows<{ contacted: number; automated: number; not_business: number }>(sql`${base}
+    rows<{ contacted: number; automated: number; not_business: number; group_only: number }>(sql`${base}
       SELECT count(*) FILTER (WHERE contacted)::int AS contacted,
              count(*) FILTER (WHERE NOT contacted AND automated)::int AS automated,
-             count(*) FILTER (WHERE NOT contacted AND NOT automated AND not_business)::int AS not_business
+             count(*) FILTER (WHERE NOT contacted AND NOT automated AND not_business)::int AS not_business,
+             count(*) FILTER (WHERE NOT contacted AND NOT automated AND NOT not_business AND group_only)::int AS group_only
       FROM tagged`),
     rows<{ day: string | null; people: number }>(sql`${base}
       SELECT ${day("from_at")} AS day, count(*)::int AS people FROM pop GROUP BY 1 ORDER BY 1 NULLS LAST`),
@@ -427,6 +430,11 @@ async function countLeg(orgId: string, brandId: string, from: LegStep, to: LegSt
       byFromDay: toCohort.filter((d) => d.day !== null).map((d) => ({ day: d.day as string, people: d.people })),
       undatedFrom: toCohort.filter((d) => d.day === null).reduce((n, d) => n + d.people, 0),
     },
-    excluded: { contactedByUs: excluded[0].contacted, automated: excluded[0].automated, notBusiness: excluded[0].not_business },
+    excluded: {
+      contactedByUs: excluded[0].contacted,
+      automated: excluded[0].automated,
+      notBusiness: excluded[0].not_business,
+      groupOnly: excluded[0].group_only,
+    },
   };
 }

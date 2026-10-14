@@ -4,8 +4,9 @@
  * lead-service (our leads' standing), brand-service (the brand's own domain) and
  * features-service (each of our leads' family: won / hot / lost / cold).
  *
- * READ-ONLY by construction: this module only issues GETs. The person layer
- * never writes to a sibling, and through it to no outside tool.
+ * READ-ONLY by construction: this module only issues GETs (and read-only POST
+ * queries, `siblingQuery`). The person layer never writes to a sibling, and
+ * through it to no outside tool.
  *
  * Each call carries the org's identity and this service's run id, so the
  * sibling attributes the read. A sibling answer is returned with its status so
@@ -149,6 +150,57 @@ export async function siblingGet(
     );
   }
   return { status: res.status, body };
+}
+
+/**
+ * A READ a sibling serves as a POST (a query whose ids do not fit a URL, e.g.
+ * lead-service's relationships query). Same headers, same retry of a
+ * connect-phase failure (the query writes nothing, so asking again is safe);
+ * non-2xx is a SiblingError.
+ */
+export async function siblingQuery<T>(sibling: Sibling, path: string, identity: SiblingIdentity, body: unknown): Promise<T> {
+  const { url, key } = envOf(sibling);
+  let res: Response;
+  for (let attempt = 0; ; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), SIBLING_TIMEOUT_MS);
+    try {
+      res = await fetch(`${url}${path}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": key,
+          "x-org-id": identity.orgId,
+          ...(identity.userId ? { "x-user-id": identity.userId } : {}),
+          "x-run-id": identity.runId,
+          "x-brand-id": identity.brandId,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      break;
+    } catch (err) {
+      if (isConnectError(err) && attempt < SIBLING_CONNECT_RETRY_DELAYS_MS.length) {
+        await sleep(SIBLING_CONNECT_RETRY_DELAYS_MS[attempt]);
+        continue;
+      }
+      const reason = (err as Error).name === "AbortError" ? `timed out after ${SIBLING_TIMEOUT_MS}ms` : (err as Error).message;
+      throw new SiblingError(sibling, path, null, `${sibling}-service POST ${path} unreachable: ${reason}`);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  const text = await res.text();
+  let parsed: unknown;
+  try {
+    parsed = text.length ? JSON.parse(text) : null;
+  } catch {
+    throw new SiblingError(sibling, path, res.status, `${sibling}-service POST ${path} answered ${res.status} with non-JSON: ${text.slice(0, 200)}`);
+  }
+  if (res.status < 200 || res.status >= 300) {
+    throw new SiblingError(sibling, path, res.status, `${sibling}-service POST ${path} returned ${res.status}: ${JSON.stringify(parsed).slice(0, 300)}`);
+  }
+  return parsed as T;
 }
 
 /** GET that must succeed (2xx); any other status is a SiblingError. */

@@ -187,7 +187,7 @@ describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
       byFromDay: [{ day: "2026-09-01", people: 2 }],
       undatedFrom: 1,
     });
-    expect(r.body.excluded).toEqual({ contactedByUs: 2, automated: 0, notBusiness: 0 });
+    expect(r.body.excluded).toEqual({ contactedByUs: 2, automated: 0, notBusiness: 0, groupOnly: 0 });
   });
 
   it("a submission of a calendar's own booking form is the booking, never a form step", async () => {
@@ -290,7 +290,7 @@ describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
     expect(r.body.reachedFrom.people).toBe(1);
     expect(r.body.reachedFrom.sources).toEqual([{ source: "matrix", people: 1 }]);
     expect(r.body.reachedTo).toMatchObject({ people: 1, byDay: [{ day: "2026-09-10", people: 1 }], sources: [{ source: "stripe", people: 1 }] });
-    expect(r.body.excluded).toEqual({ contactedByUs: 0, automated: 1, notBusiness: 1 });
+    expect(r.body.excluded).toEqual({ contactedByUs: 0, automated: 1, notBusiness: 1, groupOnly: 0 });
   });
 
   it("no scope / never built / connected but never read: named reasons", async () => {
@@ -400,7 +400,7 @@ describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
       byFromDay: [{ day: "2026-08-15", people: 1 }],
       undatedFrom: 0,
     });
-    expect(r.body.excluded).toEqual({ contactedByUs: 3, automated: 0, notBusiness: 0 });
+    expect(r.body.excluded).toEqual({ contactedByUs: 3, automated: 0, notBusiness: 0, groupOnly: 0 });
 
     // Never a TO step.
     const back = await get({ brandId: BRAND, from: "form_submission", to: "lead_found" });

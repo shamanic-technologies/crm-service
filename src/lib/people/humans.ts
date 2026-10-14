@@ -44,13 +44,15 @@ import {
   withdrawHumanFact,
   withdrawHumanLink,
 } from "../human-identity/client.js";
-import { emailKey, normalizeEmail, normalizePhone, phoneKey, type Evidence } from "./identity.js";
+import { emailKey, normalizeEmail, normalizePhone, parseHandleKey, phoneKey, type Evidence } from "./identity.js";
 import { mapLimit } from "./siblings.js";
 
 /** One record: keys a single source record states together. */
 export interface IdentityRecord {
   emails: string[];
   phones: string[];
+  /** Messaging handle keys (`msg:<network>:<id>`, identity.ts): a bridged contact with no email / phone. */
+  handles?: string[];
 }
 
 /** A judgment that two records are one human. */
@@ -84,9 +86,10 @@ export const resolveBudgetMs = () => Number(process.env.HUMAN_RESOLVE_BUDGET_MS)
 
 // ─── pure ────────────────────────────────────────────────────────────────────
 
-/** PURE: the email / phone identity keys a record states (sorted, unique). Other keys never reach human-service. */
+/** PURE: the email / phone / messaging-handle identity keys a record states (sorted, unique). Other keys never reach human-service. */
 export function recordKeys(r: IdentityRecord): string[] {
   const keys = new Set<string>();
+  for (const h of r.handles ?? []) if (parseHandleKey(h)) keys.add(h);
   for (const e of r.emails) {
     const n = normalizeEmail(e);
     if (n) keys.add(emailKey(n));
@@ -103,6 +106,7 @@ export const keysHash = (keys: string[]) => createHash("sha256").update(keys.joi
 const splitKeys = (keys: string[]) => ({
   emails: keys.filter((k) => k.startsWith("email:")).map((k) => k.slice(6)),
   phones: keys.filter((k) => k.startsWith("phone:")).map((k) => k.slice(6)),
+  messagingHandles: keys.map(parseHandleKey).filter((h): h is { network: string; id: string } => !!h),
 });
 
 /**
@@ -121,7 +125,9 @@ export function humanEvidence(keys: Iterable<string>, humanOf: Map<string, strin
   for (const [humanId, ks] of [...byHuman.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
     if (ks.size < 2) continue;
     const sorted = [...ks].sort();
-    out.push({ kind: "human_identity", ref: humanId, displayName: null, company: null, ...splitKeys(sorted) });
+    const { emails, phones } = splitKeys(sorted);
+    const handles = sorted.filter((k) => parseHandleKey(k));
+    out.push({ kind: "human_identity", ref: humanId, displayName: null, company: null, emails, phones, ...(handles.length ? { keys: handles } : {}) });
   }
   return out;
 }

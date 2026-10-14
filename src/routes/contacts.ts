@@ -21,7 +21,11 @@ import {
 } from "../lib/column-typing.js";
 import { promoteUpload } from "../lib/promote.js";
 import { segmentSchema } from "../lib/people/segment.js";
+import { RELATIONSHIP_POLICIES } from "../lib/people/relationships.js";
 import {
+  RelationshipsUnavailableError,
+  serveNextBusinessOnly,
+  serveNextPeopleBusinessOnly,
   serveNext,
   serveNextPeople,
   serveStats,
@@ -250,6 +254,9 @@ const serveNextBodySchema = z
     uploadIds: uploadIdsSchema.optional(),
     people: peopleFilterSchema.optional(),
     reachableBy: reachSchema.optional(),
+    // The pipe's relationship policy (forwarded by human-service): business_only = never a
+    // friend / investor / supplier / team / partner / advisor, never someone never judged.
+    relationships: z.enum(RELATIONSHIP_POLICIES).optional(),
   })
   .refine((b) => !(b.uploadIds && b.people), { message: "uploadIds and people are exclusive" });
 
@@ -293,6 +300,24 @@ router.post(
     const { brandId, uploadIds, people } = parsed.data;
     const limit = parsed.data.limit ?? 100;
     const reach = reachOf(parsed.data.reachableBy);
+
+    if (parsed.data.relationships === "business_only") {
+      // No user on a service call: the header is then not sent (never a placeholder identity).
+      const identity = { orgId: req.orgId!, userId: req.userId ?? "", runId: req.runId!, brandId };
+      try {
+        res.json(
+          people
+            ? await serveNextPeopleBusinessOnly(identity, limit, req.runId!, people, reach)
+            : await serveNextBusinessOnly(identity, limit, req.runId!, uploadIds, reach),
+        );
+      } catch (e) {
+        if (e instanceof RelationshipsUnavailableError) {
+          return res.status(502).json({ type: "upstream", reason: "relationships_unavailable", error: e.message });
+        }
+        throw e;
+      }
+      return;
+    }
 
     if (people) {
       res.json(await serveNextPeople(req.orgId!, brandId, limit, req.runId!, people, reach));

@@ -50,6 +50,21 @@ export function normalizePhone(raw: string | null | undefined): string | null {
 export const emailKey = (email: string) => `email:${email}`;
 export const phoneKey = (phone: string) => `phone:${phone}`;
 export const userIdKey = (id: string) => `uid:${id}`;
+/**
+ * A messaging handle (RELATIONSHIP-TAGS-1014): the id a messaging network names
+ * a person by (a WhatsApp LID, a LinkedIn member id), as the bridge mirrors it.
+ * `msg:<network>:<id>`. It ties the records of ONE handle (a counterpart two
+ * linked accounts talk to) and is what human-service resolves a person with no
+ * email and no phone by. It sorts after `matrix:`, so a Matrix-only person keeps
+ * the key it had.
+ */
+export const handleKey = (network: string, id: string) => `msg:${network}:${id}`;
+export function parseHandleKey(key: string): { network: string; id: string } | null {
+  if (!key.startsWith("msg:")) return null;
+  const rest = key.slice(4);
+  const i = rest.indexOf(":");
+  return i > 0 && i < rest.length - 1 ? { network: rest.slice(0, i), id: rest.slice(i + 1) } : null;
+}
 
 /** One source record a person appears on. */
 export interface Presence {
@@ -62,6 +77,8 @@ export interface Presence {
   phones: string[];
   /** The brand's own user ids the record states (auth user id, PostHog distinct ids). */
   userIds?: string[];
+  /** Identity keys stated verbatim (a Matrix contact: its own `matrix:<id>` + its `msg:` handle). */
+  keys?: string[];
   firstActivityAt: string | null;
   lastActivityAt: string | null;
   messageCount: number | null;

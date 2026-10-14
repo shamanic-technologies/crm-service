@@ -458,6 +458,7 @@ export const matrixRawEvents = pgTable(
     uniqueIndex("matrix_raw_events_event_id_uq").on(table.eventId),
     index("matrix_raw_events_room_idx").on(table.connectionId, table.roomId, table.originServerTs),
     index("matrix_raw_events_org_brand_idx").on(table.orgId, table.brandId),
+    index("matrix_raw_events_brand_room_idx").on(table.orgId, table.brandId, table.roomId),
   ],
 );
 
@@ -500,6 +501,66 @@ export const conversations = pgTable(
   (table) => [
     uniqueIndex("conversations_contact_channel_uq").on(table.contactId, table.channel),
     index("conversations_org_brand_idx").on(table.orgId, table.brandId),
+  ],
+);
+
+/**
+ * SILVER — one row per bridged GROUP room of a brand (RELATIONSHIP-TAGS-1014).
+ *
+ * A group is not a conversation with one contact: every member is a person
+ * (`matrix_group_members`), and each message is its writer's. Derived from
+ * bronze alone (`m.room.member` / `m.room.name`), deterministic, zero LLM.
+ * Keyed on the ROOM within the brand: a group two of the brand's linked accounts
+ * are both in is one room, whose events either account may have mirrored.
+ */
+export const matrixGroups = pgTable(
+  "matrix_groups",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    // The connection that last rebuilt the group (its members' contact rows hang on it).
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => matrixConnections.id, { onDelete: "cascade" }),
+    channel: text("channel").notNull(),
+    roomId: text("room_id").notNull(),
+    name: text("name"),
+    memberCount: integer("member_count").notNull(),
+    messageCount: integer("message_count").notNull(),
+    lastRebuiltAt: timestamp("last_rebuilt_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("matrix_groups_brand_room_uq").on(table.orgId, table.brandId, table.roomId),
+  ],
+);
+
+/** SILVER — one row per (group, member ghost): who is in the brand's groups, and what they wrote there. */
+export const matrixGroupMembers = pgTable(
+  "matrix_group_members",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    groupId: uuid("group_id")
+      .notNull()
+      .references(() => matrixGroups.id, { onDelete: "cascade" }),
+    roomId: text("room_id").notNull(),
+    contactId: uuid("contact_id")
+      .notNull()
+      .references(() => contacts.id, { onDelete: "cascade" }),
+    ghostMxid: text("ghost_mxid").notNull(),
+    // The member's latest membership: join | invite | leave | ban | knock.
+    membership: text("membership").notNull(),
+    joinedAt: timestamp("joined_at", { withTimezone: true }),
+    authoredCount: integer("authored_count").notNull(),
+    firstAuthoredAt: timestamp("first_authored_at", { withTimezone: true }),
+    lastAuthoredAt: timestamp("last_authored_at", { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex("matrix_group_members_group_ghost_uq").on(table.groupId, table.ghostMxid),
+    index("matrix_group_members_contact_idx").on(table.contactId),
+    index("matrix_group_members_org_brand_idx").on(table.orgId, table.brandId),
   ],
 );
 
@@ -1016,6 +1077,10 @@ export const people = pgTable(
     // see people/relevance.ts. `relevance` = the per-conversation verdicts,
     // `offer_ids` = the brand's offers those conversations are about.
     notBusiness: boolean("not_business").notNull().default(false),
+    // RELATIONSHIP-TAGS-1014: the person is known ONLY as a member of the
+    // brand's messaging groups and never wrote a word anywhere: a person (with a
+    // human id, their memberships in the fact feed), listed only on demand.
+    groupOnly: boolean("group_only").notNull().default(false),
     relevance: jsonb("relevance"),
     offerIds: jsonb("offer_ids").notNull().default([]),
 

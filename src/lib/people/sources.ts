@@ -18,12 +18,14 @@ import { GHL_SOURCE } from "../gohighlevel/records.js";
 import { POSTHOG_SOURCE } from "../posthog/records.js";
 import { STRIPE_SOURCE } from "../stripe/records.js";
 import {
+  handleKey,
   normalizeEmail,
   type Evidence,
   type PeopleSource,
   type Presence,
 } from "./identity.js";
 import { siblingGet, siblingGetOk, type SiblingIdentity } from "./siblings.js";
+import { handleOf } from "../matrix/events.js";
 import type { GhlDeal, LeadCompanyTags, LeadDisqualification, LeadHumanTags, LeadStanding } from "./state.js";
 import { copilotPresences, isCopilotDestination, readCopilotRows } from "../copilot/messages.js";
 import { apiCallPresences, readApiCallPresenceRows } from "../api-calls/calls.js";
@@ -279,11 +281,13 @@ export async function readMatrix(orgId: string, brandId: string): Promise<Source
   }
   const rows = (await db.execute(sql`
     SELECT c.id AS contact_id, c.full_name, c.phone_e164, c.channel, c.channel_handle,
+           mc.counterpart_prefix,
            v.id AS conversation_id, v.first_message_at, v.last_message_at,
            v.message_count, v.inbound_count, v.outbound_count,
            l.status AS lead_status
     FROM conversations v
     JOIN contacts c ON c.id = v.contact_id
+    JOIN matrix_connections mc ON mc.id = v.connection_id
     LEFT JOIN matrix_leads l ON l.conversation_id = v.id
     WHERE v.org_id = ${orgId} AND v.brand_id = ${brandId}
     ORDER BY v.last_message_at DESC, v.id
@@ -293,6 +297,7 @@ export async function readMatrix(orgId: string, brandId: string): Promise<Source
     phone_e164: string | null;
     channel: string;
     channel_handle: string | null;
+    counterpart_prefix: string;
     conversation_id: string;
     first_message_at: string | Date;
     last_message_at: string | Date;
@@ -301,6 +306,54 @@ export async function readMatrix(orgId: string, brandId: string): Promise<Source
     outbound_count: number;
     lead_status: string | null;
   }[];
+  // Every group the brand's accounts are in, per member contact (RELATIONSHIP-TAGS-1014).
+  const memberRows = (await db.execute(sql`
+    SELECT gm.contact_id, c.full_name, c.phone_e164, c.channel, c.channel_handle, mc.counterpart_prefix,
+           g.room_id, g.name AS group_name, g.member_count, gm.membership, gm.joined_at,
+           gm.authored_count, gm.first_authored_at, gm.last_authored_at
+    FROM matrix_group_members gm
+    JOIN matrix_groups g ON g.id = gm.group_id
+    JOIN contacts c ON c.id = gm.contact_id
+    JOIN matrix_connections mc ON mc.id = g.connection_id
+    WHERE gm.org_id = ${orgId} AND gm.brand_id = ${brandId}
+    ORDER BY gm.contact_id, g.room_id
+  `)) as unknown as {
+    contact_id: string;
+    full_name: string | null;
+    phone_e164: string | null;
+    channel: string;
+    channel_handle: string | null;
+    counterpart_prefix: string;
+    room_id: string;
+    group_name: string | null;
+    member_count: number;
+    membership: string;
+    joined_at: string | Date | null;
+    authored_count: number;
+    last_authored_at: string | Date | null;
+    first_authored_at: string | Date | null;
+  }[];
+  const groupsOf = new Map<string, MatrixGroupMembership[]>();
+  for (const m of memberRows) {
+    const list = groupsOf.get(m.contact_id) ?? [];
+    list.push({
+      roomId: m.room_id,
+      name: m.group_name,
+      memberCount: Number(m.member_count),
+      membership: m.membership,
+      joinedAt: iso(m.joined_at),
+      authoredCount: Number(m.authored_count),
+      firstAuthoredAt: iso(m.first_authored_at),
+      lastAuthoredAt: iso(m.last_authored_at),
+    });
+    groupsOf.set(m.contact_id, list);
+  }
+  // `matrix:<contactId>` stays exactly where it was the person's key before (a contact with no
+  // phone), so nobody's person key or id moves; the handle is the new key beside it.
+  const keysOfContact = (contactId: string, channel: string, handle: string | null, prefix: string, phone: string | null) => {
+    const h = handle ? handleOf(channel, handle, prefix) : null;
+    return [...(phone ? [] : [`matrix:${contactId}`]), ...(h ? [handleKey(h.network, h.id)] : [])];
+  };
   const presences: Presence[] = rows.map((r) => ({
     source: "matrix",
     sourceRef: r.contact_id,
@@ -308,20 +361,79 @@ export async function readMatrix(orgId: string, brandId: string): Promise<Source
     company: null,
     emails: [],
     phones: r.phone_e164 ? [r.phone_e164] : [],
+    keys: keysOfContact(r.contact_id, r.channel, r.channel_handle, r.counterpart_prefix, r.phone_e164),
     firstActivityAt: iso(r.first_message_at),
     lastActivityAt: iso(r.last_message_at),
     messageCount: Number(r.message_count),
     inboundCount: Number(r.inbound_count),
     outboundCount: Number(r.outbound_count),
     detail: {
+      kind: "dm",
       contactId: r.contact_id,
       conversationId: r.conversation_id,
       channel: r.channel,
       channelHandle: r.channel_handle,
       leadStatus: r.lead_status,
+      groups: groupsOf.get(r.contact_id) ?? [],
     },
   }));
-  return { ...base, status: "ok", presences, sourceCount: rows.length, error: null };
+  // A member the brand has no DM with is a person all the same: one presence per member contact.
+  const withDm = new Set(rows.map((r) => r.contact_id));
+  const seen = new Set<string>();
+  for (const m of memberRows) {
+    if (withDm.has(m.contact_id) || seen.has(m.contact_id)) continue;
+    seen.add(m.contact_id);
+    const groups = groupsOf.get(m.contact_id)!;
+    const authored = groups.reduce((n, g) => n + g.authoredCount, 0);
+    const firsts = groups.map((g) => g.firstAuthoredAt).filter((x): x is string => !!x).sort();
+    const lasts = groups.map((g) => g.lastAuthoredAt).filter((x): x is string => !!x).sort();
+    presences.push({
+      source: "matrix",
+      sourceRef: m.contact_id,
+      displayName: m.full_name,
+      company: null,
+      emails: [],
+      phones: m.phone_e164 ? [m.phone_e164] : [],
+      keys: keysOfContact(m.contact_id, m.channel, m.channel_handle, m.counterpart_prefix, m.phone_e164),
+      firstActivityAt: firsts[0] ?? null,
+      lastActivityAt: lasts[lasts.length - 1] ?? null,
+      messageCount: authored,
+      inboundCount: authored,
+      outboundCount: 0,
+      detail: {
+        kind: "group_member",
+        contactId: m.contact_id,
+        channel: m.channel,
+        channelHandle: m.channel_handle,
+        groups,
+      },
+    });
+  }
+  return { ...base, status: "ok", presences, sourceCount: rows.length + seen.size, error: null };
+}
+
+/** One group a Matrix contact is a member of (RELATIONSHIP-TAGS-1014). */
+export interface MatrixGroupMembership {
+  roomId: string;
+  name: string | null;
+  memberCount: number;
+  membership: string;
+  joinedAt: string | null;
+  /** Messages the person wrote in the group. */
+  authoredCount: number;
+  firstAuthoredAt: string | null;
+  lastAuthoredAt: string | null;
+}
+
+/**
+ * PURE: a person known ONLY as a member of the brand's groups, who never wrote
+ * a word there or anywhere else: listed only on demand (people.group_only).
+ */
+export function isGroupOnly(presences: Presence[]): boolean {
+  return (
+    presences.length > 0 &&
+    presences.every((p) => p.source === "matrix" && p.detail.kind === "group_member" && (p.messageCount ?? 0) === 0)
+  );
 }
 
 // ─── crm-service silver: GoHighLevel contacts ───────────────────────────────

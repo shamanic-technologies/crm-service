@@ -22,6 +22,7 @@ import { listMerges, mergeApplied, mergeView, stateMerge, undoMerge } from "../l
 import { OUTCOME_STEPS, readCampaignReach, readOutcomeCounts, readOutcomePeople, type CampaignReach, type OutcomeStep } from "../lib/people/outcomes.js";
 import { LEG_STEPS, listLegReachBrands, parseLegStep, readLegReach } from "../lib/people/leg-reach.js";
 import { familyOf, LEAD_FAMILIES, readBrandFamilies, type FamilyVerdict, type LeadFamily } from "../lib/people/families.js";
+import { readRelationships, RELATIONSHIP_TAGS, type Relationship, type RelationshipTag } from "../lib/people/relationships.js";
 import {
   matchesOf,
   messageHitsFor,
@@ -51,6 +52,11 @@ const listQuerySchema = z.object({
   q: z.string().max(SEARCH_MAX_LENGTH).optional(),
   // Unibox family filter (features-service's verdict on our lead). Absent = All.
   family: z.enum(LEAD_FAMILIES).optional(),
+  // Who the person is to the brand (lead-service's relationship tags): a tag, `untagged`
+  // (judged, no tag yet) or `unjudged` (lead-service never read their thread / no human id).
+  relationship: z.enum([...RELATIONSHIP_TAGS, "untagged", "unjudged"]).optional(),
+  // People known ONLY as members of the brand's messaging groups, who never wrote a word.
+  includeGroupMembers: z.enum(["true", "false"]).optional(),
 });
 
 const PRESENCE_CHANNEL: Partial<Record<Presence["source"], string>> = {
@@ -73,6 +79,10 @@ function presenceView(p: Presence) {
     inboundCount: p.inboundCount,
     outboundCount: p.outboundCount,
     channel: typeof p.detail.channel === "string" ? p.detail.channel : PRESENCE_CHANNEL[p.source] ?? "email",
+    // Matrix: a DM counterpart or a member of the brand's groups; the groups they are in.
+    ...(p.source === "matrix"
+      ? { kind: (p.detail.kind as string | undefined) ?? "dm", groups: (p.detail.groups as unknown[] | undefined) ?? [] }
+      : {}),
   };
 }
 
@@ -138,6 +148,7 @@ function personView(row: typeof people.$inferSelect) {
     automated: row.automated,
     automatedVerdict: row.automatedVerdict as { email: string; verdict: string | null; confidence: number | null }[] | null,
     notBusiness: row.notBusiness,
+    groupOnly: row.groupOnly,
     offerIds: row.offerIds as string[],
     relevance: row.relevance as PersonRelevance["relevance"],
     possibleLeads: row.possibleLeads as PossibleLead[],
@@ -172,9 +183,9 @@ router.get(
     if (!parsed.success) {
       return res.status(400).json({ type: "validation", error: `invalid query: ${parsed.error.message}` });
     }
-    const { brandId, source, family } = parsed.data;
+    const { brandId, source, family, relationship } = parsed.data;
     const includeAutomated = parsed.data.includeAutomated === "true";
-    const includeNotBusiness = parsed.data.includeNotBusiness === "true";
+    const includeGroupMembers = parsed.data.includeGroupMembers === "true";
     const offerId = parsed.data.offerId ?? null;
     const limit = parsed.data.limit ?? 100;
     const offset = parsed.data.offset ?? 0;
@@ -198,7 +209,7 @@ router.get(
         eq(people.scopeId, scope.id),
         source ? sql`${people.sources} @> ${JSON.stringify([source])}::jsonb` : sql`true`,
         includeAutomated ? sql`true` : eq(people.automated, false),
-        includeNotBusiness ? sql`true` : eq(people.notBusiness, false),
+        includeGroupMembers ? sql`true` : eq(people.groupOnly, false),
         offerId ? sql`${people.offerIds} @> ${JSON.stringify([offerId])}::jsonb` : sql`true`,
         q && keys ? searchPredicate(q, keys) : sql`true`,
       );
@@ -215,22 +226,69 @@ router.get(
                 q && keys ? searchPredicate(q, keys) : sql`true`,
               ),
             );
-      const [{ notBusinessHidden }] = includeNotBusiness
-        ? [{ notBusinessHidden: 0 }]
+      // RELATIONSHIP-TAGS-1014: no conversation verdict hides anyone (who a person is
+      // to the brand is the `relationship` filter). Kept in the shape for old readers.
+      const notBusinessHidden = 0;
+
+      const [{ groupMembersHidden }] = includeGroupMembers
+        ? [{ groupMembersHidden: 0 }]
         : await db
-            .select({ notBusinessHidden: sql<number>`count(*)::int` })
+            .select({ groupMembersHidden: sql<number>`count(*)::int` })
             .from(people)
             .where(
               and(
                 eq(people.scopeId, scope.id),
-                eq(people.notBusiness, true),
+                eq(people.groupOnly, true),
                 includeAutomated ? sql`true` : eq(people.automated, false),
                 q && keys ? searchPredicate(q, keys) : sql`true`,
               ),
             );
 
-      // Families: counted over the list's own population (source / automated / search
-      // applied, family not), so each button shows what it would return.
+      // The list's own population (source / automated / search applied, family and
+      // relationship not): what each family / relationship button would return.
+      const members = await db
+        .select({ personKey: people.personKey, emails: people.emails, humanId: people.humanId })
+        .from(people)
+        .where(where);
+      const population = members.length;
+
+      // Who each person is to the brand (lead-service's relationship tags, RELATIONSHIP-TAGS-1014).
+      const humanIds = [...new Set(members.map((m) => m.humanId).filter((h): h is string => !!h))];
+      const rel = await readRelationships({ orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId }, humanIds).then(
+        (byHuman) => ({ ok: true as const, byHuman }),
+        (err: Error) => ({ ok: false as const, error: err.message }),
+      );
+      if (relationship && !rel.ok) {
+        return res.status(502).json({
+          type: "upstream",
+          reason: "relationships_unavailable",
+          error: `cannot filter on relationship "${relationship}": ${rel.error}`,
+        });
+      }
+      const relationshipOf = (humanId: string | null): Relationship | null => (rel.ok && humanId ? rel.byHuman.get(humanId) ?? null : null);
+      const relationshipCounts = Object.fromEntries(RELATIONSHIP_TAGS.map((t) => [t, 0])) as Record<RelationshipTag, number>;
+      let untagged = 0;
+      let unjudged = 0;
+      const relationshipKeys = new Set<string>();
+      if (rel.ok) {
+        for (const m of members) {
+          const r = relationshipOf(m.humanId);
+          if (!r || !r.judgedAt) unjudged += 1;
+          else if (r.tags.length === 0) untagged += 1;
+          for (const t of r?.tags ?? []) relationshipCounts[t] += 1;
+          const hit =
+            relationship === "unjudged"
+              ? !r || !r.judgedAt
+              : relationship === "untagged"
+                ? !!r?.judgedAt && r.tags.length === 0
+                : !!relationship && (r?.tags ?? []).includes(relationship);
+          if (hit) relationshipKeys.add(m.personKey);
+        }
+      }
+      const relationships = rel.ok
+        ? { status: "ok" as const, error: null, filter: relationship ?? null, counts: relationshipCounts, untagged, unjudged, population }
+        : { status: "failed" as const, error: rel.error, filter: null, counts: null, untagged: null, unjudged: null, population };
+
       const fam = await familiesRead;
       if (family && !fam.ok) {
         return res.status(502).json({
@@ -241,10 +299,7 @@ router.get(
       }
       const verdicts = new Map<string, FamilyVerdict>();
       const familyCounts = Object.fromEntries(LEAD_FAMILIES.map((f) => [f, 0])) as Record<LeadFamily, number>;
-      let population = 0;
       if (fam.ok) {
-        const members = await db.select({ personKey: people.personKey, emails: people.emails }).from(people).where(where);
-        population = members.length;
         for (const m of members) {
           const v = familyOf(m.emails as string[], fam.f.byEmail);
           if (!v) continue;
@@ -253,9 +308,12 @@ router.get(
         }
       }
       const familyKeys = family ? [...verdicts].filter(([, v]) => v.family === family).map(([k]) => k) : null;
-      const listWhere = familyKeys
-        ? and(where, sql`${people.personKey} IN (SELECT jsonb_array_elements_text(${JSON.stringify(familyKeys)}::jsonb))`)
-        : where;
+      const keyed = (ks: string[]) => sql`${people.personKey} IN (SELECT jsonb_array_elements_text(${JSON.stringify(ks)}::jsonb))`;
+      const listWhere = and(
+        where,
+        familyKeys ? keyed(familyKeys) : sql`true`,
+        relationship ? keyed([...relationshipKeys]) : sql`true`,
+      );
       const withFamily = verdicts.size;
       const families = fam.ok
         ? {
@@ -297,7 +355,7 @@ router.get(
         SELECT s AS source, count(*)::int AS people
         FROM people, jsonb_array_elements_text(people.sources) s
         WHERE people.scope_id = ${scope.id} ${includeAutomated ? sql`` : sql`AND people.automated = false`}
-          ${includeNotBusiness ? sql`` : sql`AND people.not_business = false`}
+          ${includeGroupMembers ? sql`` : sql`AND people.group_only = false`}
         GROUP BY s
       `)) as unknown as { source: string; people: number }[];
       const reads = scope.sourceReads as BuildSummary | null;
@@ -351,6 +409,7 @@ router.get(
         automatedHidden,
         relevance: reads?.relevance ?? null,
         notBusinessHidden,
+        groupMembersHidden,
         offerId,
         total,
         limit,
@@ -358,8 +417,11 @@ router.get(
         nextOffset: offset + rows.length < total ? offset + rows.length : null,
         ...(search ? { search } : {}),
         families,
+        relationships,
         people: rows.map((r, i) => ({
           ...personView(r),
+          // lead-service's relationship block, verbatim (null: no human id yet, or the read failed: `relationships.status`).
+          relationship: relationshipOf(r.humanId),
           // null = not one of our leads, OR the family read failed (`families.status` says which).
           family: verdicts.get(r.personKey)?.family ?? null,
           familyLostReason: verdicts.get(r.personKey)?.lostReason ?? null,

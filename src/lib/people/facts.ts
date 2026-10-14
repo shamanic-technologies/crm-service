@@ -58,6 +58,10 @@ export const FACT_TYPES = [
   "signup",
   "message_in",
   "message_out",
+  // RELATIONSHIP-TAGS-1014: a message the person wrote in one of the brand's
+  // messaging GROUPS (never a DM reply to us), and their membership of it.
+  "group_message",
+  "group_member",
   "person_merged",
   "person_split",
   "withdrawn",
@@ -78,6 +82,7 @@ const FAMILIES = {
   ghl_funnel: { source: "gohighlevel", snapshot: true, immutable: false },
   ghl_history: { source: "gohighlevel", snapshot: false, immutable: false },
   matrix_message: { source: "matrix", snapshot: false, immutable: false },
+  matrix_membership: { source: "matrix", snapshot: false, immutable: false },
   gmail_message: { source: "gmail", snapshot: false, immutable: false },
   posthog_person: { source: "posthog", snapshot: true, immutable: false },
   posthog_visit: { source: "posthog", snapshot: true, immutable: false },
@@ -123,6 +128,12 @@ export interface CandidateFact {
   dateBasis: string;
   payload: Record<string, unknown>;
   subject: FactSubject;
+  /**
+   * The record is about NOBODY now (a message the brand's own account posted in
+   * a group): never emitted; a live fact an earlier rule filed on someone for it
+   * is withdrawn (`subject_changed`).
+   */
+  unattributed?: boolean;
 }
 
 export interface FactPerson {
@@ -420,6 +431,90 @@ async function matrixCandidates(orgId: string, brandId: string): Promise<Candida
     payload: { channel: e.channel, threadId: e.room_id, text: e.body, msgtype: e.msgtype },
     subject: presenceSubject("matrix", e.channel_handle, e.full_name),
   }));
+}
+
+/**
+ * The brand's messaging GROUPS (RELATIONSHIP-TAGS-1014): each member's
+ * membership, and each message as its WRITER's (`group_message`, never
+ * `message_in`: a word in a group is no reply to us). A message the brand's own
+ * account posted addresses the group, not a person: it is unattributed.
+ */
+async function matrixGroupCandidates(orgId: string, brandId: string): Promise<CandidateFact[]> {
+  const members = await rows<{
+    contact_id: string;
+    ghost_mxid: string;
+    full_name: string | null;
+    room_id: string;
+    group_name: string | null;
+    channel: string;
+    membership: string;
+    joined_at: string | Date | null;
+  }>(sql`
+    SELECT gm.contact_id, gm.ghost_mxid, c.full_name, g.room_id, g.name AS group_name, g.channel,
+           gm.membership, gm.joined_at
+    FROM matrix_group_members gm
+    JOIN matrix_groups g ON g.id = gm.group_id
+    JOIN contacts c ON c.id = gm.contact_id
+    WHERE gm.org_id = ${orgId} AND gm.brand_id = ${brandId}
+  `);
+  const out: CandidateFact[] = members.map((m) => ({
+    naturalKey: `matrix|member|${m.room_id}|${m.ghost_mxid}`,
+    family: "matrix_membership" as const,
+    type: "group_member" as const,
+    source: "matrix" as const,
+    sourceRef: `${m.room_id}|${m.ghost_mxid}`,
+    sourceContactId: m.ghost_mxid,
+    crmContactId: m.contact_id,
+    occurredAt: iso(m.joined_at),
+    dateBasis: "joined_at",
+    payload: {
+      channel: m.channel,
+      threadId: m.room_id,
+      groupName: m.group_name,
+      // join | invite = in the group now; leave / ban = was.
+      membership: m.membership,
+    },
+    subject: presenceSubject("matrix", m.ghost_mxid, m.full_name),
+  }));
+
+  const messages = await rows<{
+    event_id: string;
+    room_id: string;
+    sender: string;
+    origin_server_ts: string | Date;
+    body: string | null;
+    msgtype: string | null;
+    group_name: string | null;
+    channel: string;
+    contact_id: string | null;
+    full_name: string | null;
+  }>(sql`
+    SELECT e.event_id, e.room_id, e.sender, e.origin_server_ts,
+           e.payload->'content'->>'body' AS body, e.payload->'content'->>'msgtype' AS msgtype,
+           g.name AS group_name, g.channel, gm.contact_id, c.full_name
+    FROM matrix_raw_events e
+    JOIN matrix_groups g ON g.org_id = e.org_id AND g.brand_id = e.brand_id AND g.room_id = e.room_id
+    LEFT JOIN matrix_group_members gm ON gm.group_id = g.id AND gm.ghost_mxid = e.sender
+    LEFT JOIN contacts c ON c.id = gm.contact_id
+    WHERE e.org_id = ${orgId} AND e.brand_id = ${brandId} AND e.event_type = 'm.room.message'
+  `);
+  for (const e of messages) {
+    out.push({
+      naturalKey: `matrix|${e.event_id}`,
+      family: "matrix_message",
+      type: "group_message",
+      source: "matrix",
+      sourceRef: e.event_id,
+      sourceContactId: e.contact_id ? e.sender : null,
+      crmContactId: e.contact_id,
+      occurredAt: iso(e.origin_server_ts),
+      dateBasis: "sent_at",
+      payload: { channel: e.channel, threadId: e.room_id, groupName: e.group_name, text: e.body, msgtype: e.msgtype, direction: "inbound" },
+      subject: e.contact_id ? presenceSubject("matrix", e.sender, e.full_name) : presenceSubject("matrix-group", e.room_id),
+      ...(e.contact_id ? {} : { unattributed: true }),
+    });
+  }
+  return out;
 }
 
 /** Gmail messages from the scope's message store; `other` (a third party in the thread) is not the person. */
@@ -803,6 +898,8 @@ export interface FactEmissionSummary {
   humanIdentified: number;
   /** Candidates whose subject is nobody in the people build (e.g. the brand's own address). */
   held: number;
+  /** Records about nobody (the brand's own posts in a group); live facts filed for them are withdrawn. */
+  unattributed: number;
   duplicateKeys: number;
   gmailOtherSkipped: number;
   merged: number;
@@ -859,17 +956,15 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
   return db.transaction(async (tx) => {
     await tx.execute(FEED_LOCK);
 
-    // A person hidden as not about the brand (people/relevance.ts) is nobody to the
-    // feed: their messages are HELD (never emitted), their earlier facts stay put.
-    const personRows = await tx
-      .select()
-      .from(people)
-      .where(and(eq(people.scopeId, scope.id), eq(people.notBusiness, false)));
+    // Everyone the build holds is someone to the feed (RELATIONSHIP-TAGS-1014: no
+    // conversation verdict holds a person's facts back any more).
+    const personRows = await tx.select().from(people).where(eq(people.scopeId, scope.id));
     const index = new PersonIndex(personRows);
 
-    const [ghl, matrix, gmail, posthog, stripe, clerk, csv, connected] = await Promise.all([
+    const [ghl, matrix, matrixGroups, gmail, posthog, stripe, clerk, csv, connected] = await Promise.all([
       ghlCandidates(orgId, brandId),
       matrixCandidates(orgId, brandId),
+      matrixGroupCandidates(orgId, brandId),
       gmailCandidates(scope.id),
       posthogCandidates(orgId, brandId),
       stripeCandidates(orgId, brandId),
@@ -881,7 +976,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
     // teammates and staff; PostHog only knows who was identified). PostHog keeps
     // its visits; its signups are not emitted and live ones are withdrawn.
     const authStatesSignups = connected.has("clerk");
-    const all = [...ghl, ...matrix, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv].filter(
+    const all = [...ghl, ...matrix, ...matrixGroups, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv].filter(
       (c) => !(authStatesSignups && c.family === "posthog_person"),
     );
     const candidates = new Map<string, CandidateFact>();
@@ -980,14 +1075,21 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
         | "crm_contact_reminted"
         | "source_retired"
         | "signup_stated_by_auth_provider"
-        | "human_identified";
+        | "human_identified"
+        | "subject_changed";
     }[] = [];
     const fresh: (typeof peopleFacts.$inferInsert)[] = [];
     let unchanged = 0;
     let held = 0;
     const bySource: Record<string, number> = {};
+    let unattributed = 0;
     for (const c of candidates.values()) {
       const live = liveByKey.get(c.naturalKey);
+      if (c.unattributed) {
+        if (live) withdrawals.push({ fact: live, reason: "subject_changed" });
+        unattributed++;
+        continue;
+      }
       if (live && (FAMILIES[c.family].immutable || live.contentHash === contentHash(c))) {
         unchanged++;
         continue;
@@ -1161,6 +1263,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       emitted: fresh.length,
       unchanged,
       corrected: withdrawals.length - withdrawnGone - reminted - retired - humanIdentified,
+      unattributed,
       withdrawnGone,
       retired,
       reminted,

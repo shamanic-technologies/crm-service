@@ -81,12 +81,15 @@ export function resolveHuman(args: {
   orgId: string;
   emails: string[];
   phones: string[];
+  /** Weak keys (RELATIONSHIP-TAGS-1014): resolve / create, never auto-merge; an org judgment link merges them. */
+  messagingHandles?: { network: string; id: string }[];
   create: boolean;
 }): Promise<ResolveAnswer> {
   return call<ResolveAnswer>("POST", "/internal/human-identities/resolve", {
     orgId: args.orgId,
     ...(args.emails.length ? { emails: args.emails } : {}),
     ...(args.phones.length ? { phones: args.phones } : {}),
+    ...(args.messagingHandles?.length ? { messagingHandles: args.messagingHandles } : {}),
     source: HUMAN_SOURCE,
     create: args.create,
   });
