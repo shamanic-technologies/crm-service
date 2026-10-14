@@ -22,6 +22,10 @@ export function getSql(): Sql {
       max_lifetime: 300,
       connect_timeout: 30,
       max: 10,
+      // No JIT (DASH-LATENCY-1014): on this box's short reads, compiling the plan cost
+      // 2-3.4 s of CPU per heavy query (the outcomes read: 2.1 s of a 4 s run) and never
+      // paid back; the box runs CPU-saturated, so JIT only added load.
+      connection: { jit: "off" },
     });
   }
   return sqlClient;

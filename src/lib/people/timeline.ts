@@ -61,7 +61,7 @@ import { readFunnelEvents, type FunnelEvent } from "../gohighlevel/funnel-events
 import type { BuildSummary } from "./build.js";
 import { PEOPLE_SOURCES, type PeopleSource, type Presence } from "./identity.js";
 import type { SiblingIdentity } from "./siblings.js";
-import { readStoredTimeline, type StoredTimeline } from "./search.js";
+import { readStoredTimeline, type StoredReadOptions, type StoredTimeline } from "./search.js";
 import { lookupLeadStanding } from "./sources.js";
 import {
   COPILOT_CHANNEL,
@@ -77,6 +77,7 @@ import {
   sessionsOf,
 } from "../api-calls/calls.js";
 import { siblingGetOk } from "./siblings.js";
+import { deferApiAnswer } from "./item-fill.js";
 
 export const TIMELINE_SOURCE_STATUSES = ["ok", "empty", "not_connected", "failed"] as const;
 export type TimelineSourceStatus = (typeof TIMELINE_SOURCE_STATUSES)[number];
@@ -158,6 +159,8 @@ export interface TimelineSource {
   servedFrom: "store" | "mirror";
   /** store only: the oldest source read the items come from (null = never read). */
   readAt: string | null;
+  /** store only: a re-read of one of its threads was still running when the answer left (read again shortly). */
+  refreshing: boolean;
 }
 
 interface SourceResult {
@@ -166,6 +169,7 @@ interface SourceResult {
   error: string | null;
   asked: string[];
   readAt?: string | null;
+  refreshing?: boolean;
 }
 
 const notConnected = (asked: string[] = []): SourceResult => ({ status: "not_connected", items: [], error: null, asked });
@@ -520,10 +524,12 @@ export async function brandNamesFor(ids: string[], identity: SiblingIdentity): P
 export async function apiCallItems(
   person: Pick<Person, "orgId" | "brandId" | "emails">,
   identity: SiblingIdentity,
+  opts: { deferAnswers?: boolean } = {},
 ): Promise<SourceResult> {
   if (!isCopilotDestination(person.orgId, person.brandId)) return notConnected();
   const emails = person.emails as string[];
-  const rows = await readApiCallThread(person.orgId, person.brandId, emails);
+  // deferAnswers (paged read): the answer summary is computed for the page's items only (item-fill.ts).
+  const rows = await readApiCallThread(person.orgId, person.brandId, emails, { withoutBodies: opts.deferAnswers });
   const sessions = sessionsOf(rows);
   const brandNames = await brandNamesFor([...new Set(rows.flatMap((r) => (r.brandIds as string[]) ?? []))], identity);
   const items = rows.flatMap((c): TimelineItem[] => {
@@ -540,6 +546,22 @@ export async function apiCallItems(
     };
     const answeredAt = new Date(c.calledAt.getTime() + c.durationMs).toISOString();
     const asked = describeRequest(c, brandNames);
+    const answer: TimelineItem = {
+      at: answeredAt,
+      source: "api",
+      channel: c.channel,
+      kind: "message",
+      direction: "outbound",
+      subject: null,
+      text: opts.deferAnswers ? null : describeResponse(c),
+      from: API_SENDER_NAME,
+      to: [c.email],
+      ref,
+      textClean: null,
+      outreachFact: null,
+      event: null,
+    };
+    if (opts.deferAnswers) deferApiAnswer(answer, person.orgId, person.brandId, c.callId);
     return [
       {
         at: c.calledAt.toISOString(),
@@ -556,21 +578,7 @@ export async function apiCallItems(
         outreachFact: null,
         event: null,
       },
-      {
-        at: answeredAt,
-        source: "api",
-        channel: c.channel,
-        kind: "message",
-        direction: "outbound",
-        subject: null,
-        text: describeResponse(c),
-        from: API_SENDER_NAME,
-        to: [c.email],
-        ref,
-        textClean: null,
-        outreachFact: null,
-        event: null,
-      },
+      answer,
     ];
   });
   return { status: items.length ? "ok" : "empty", items, error: null, asked: emails };
@@ -654,6 +662,7 @@ export async function readTimeline(
   person: Person,
   sourceReads: BuildSummary | null,
   identity: SiblingIdentity,
+  opts: StoredReadOptions = {},
 ): Promise<{ sources: TimelineSource[]; items: TimelineItem[] }> {
   const presences = person.presences as Presence[];
   const of = (s: PeopleSource) => presences.filter((p) => p.source === s);
@@ -671,7 +680,11 @@ export async function readTimeline(
       const lead = await lookupLeadStanding(identity, email);
       return lead.found ? lead.campaignIds : [];
     },
+    opts,
   );
+  // CSV is no people source (it has no status row); its import dates ride in the thread. Read beside the sources.
+  const csvRead = csvEntryItems(person);
+  csvRead.catch(() => undefined);
   const fromStore = (pick: (t: StoredTimeline) => StoredTimeline["gmail"]) =>
     storedRead.then((t): SourceResult => pick(t)).catch((e) => toFailed(e, emails));
 
@@ -686,11 +699,10 @@ export async function readTimeline(
     connected("stripe") ? stripeItems(of("stripe")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
     connected("clerk") ? authItems("clerk", of("clerk")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
     copilotItems(person).catch((e) => toFailed(e, emails)),
-    apiCallItems(person, identity).catch((e) => toFailed(e, emails)),
+    apiCallItems(person, identity, { deferAnswers: opts.paged }).catch((e) => toFailed(e, emails)),
   ]);
   const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api };
-  // CSV is no people source (it has no status row); its import dates ride in the thread.
-  const csv = await csvEntryItems(person);
+  const csv = await csvRead;
 
   // Background pass: lead-service campaign discovery (+ any thread the deadline left unread).
   storedRead
@@ -719,7 +731,92 @@ export async function readTimeline(
       asked: bySource[s].asked,
       servedFrom: s === "gmail" || s === "instantly" ? ("store" as const) : ("mirror" as const),
       readAt: bySource[s].readAt ?? null,
+      refreshing: bySource[s].refreshing ?? false,
     })),
     items,
+  };
+}
+
+// ─── one page of the thread (DASH-LATENCY-1014) ────────────────────────────
+
+/**
+ * A person's thread can hold thousands of items (6,963 and 10.7 MB for one staff person):
+ * the Unibox shows the latest first and loads older ones on demand. A page is read off
+ * the same merged thread, in ONE total order: date (undated last, as in the whole
+ * thread), then the item's identity (`itemKey`), so a cursor names an exact position and
+ * a new message never shifts what "older than this" means.
+ */
+export function itemKey(i: TimelineItem): string {
+  return `${i.source}|${i.channel}|${i.kind}|${i.direction ?? ""}|${i.event?.step ?? ""}|${JSON.stringify(i.ref)}`;
+}
+
+interface Position {
+  at: number | null;
+  key: string;
+}
+
+const positionOf = (i: TimelineItem): Position => {
+  const t = i.at === null ? NaN : new Date(i.at).getTime();
+  return { at: Number.isNaN(t) ? null : t, key: itemKey(i) };
+};
+
+/** PURE: the thread's total order (oldest first, undated last). */
+export function comparePositions(a: Position, b: Position): number {
+  if (a.at !== b.at) {
+    if (a.at === null) return 1;
+    if (b.at === null) return -1;
+    return a.at - b.at;
+  }
+  return a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+}
+
+export function encodeCursor(p: Position): string {
+  return Buffer.from(JSON.stringify({ at: p.at, k: p.key }), "utf8").toString("base64url");
+}
+
+/** null = not a cursor this service minted. */
+export function decodeCursor(cursor: string): Position | null {
+  try {
+    const raw = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as { at?: unknown; k?: unknown };
+    if (typeof raw.k !== "string" || !(raw.at === null || typeof raw.at === "number")) return null;
+    return { at: raw.at, key: raw.k };
+  } catch {
+    return null;
+  }
+}
+
+export interface TimelinePage {
+  /** The page, oldest first (like the whole thread). */
+  items: TimelineItem[];
+  /** Items of the whole thread. */
+  totalItems: number;
+  /** Items older than this page exist. */
+  hasOlder: boolean;
+  /** Pass as `before` to read the page just older than this one; null when none. */
+  olderCursor: string | null;
+}
+
+/** PURE: the `limit` latest items strictly older than `before` (absent = the latest of the thread). */
+export function pageOf(items: TimelineItem[], limit: number, before: Position | null): TimelinePage {
+  const positioned = items.map((item) => ({ item, pos: positionOf(item) }));
+  positioned.sort((a, b) => comparePositions(a.pos, b.pos));
+  let end = positioned.length;
+  if (before) {
+    let lo = 0;
+    let hi = positioned.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (comparePositions(positioned[mid].pos, before) < 0) lo = mid + 1;
+      else hi = mid;
+    }
+    end = lo;
+  }
+  const start = Math.max(0, end - limit);
+  const page = positioned.slice(start, end);
+  return {
+    items: page.map((p) => p.item),
+    totalItems: positioned.length,
+    hasOlder: start > 0,
+    olderCursor: start > 0 && page.length ? encodeCursor(page[0].pos) : null,
   };
 }

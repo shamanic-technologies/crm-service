@@ -2226,10 +2226,25 @@ const PersonTimelineResponseSchema = registry.register(
               "mirror = crm-service's own synced data (Matrix, GoHighLevel, PostHog, Stripe), read in place.",
           }),
           readAt: z.string().nullable().openapi({ description: "store only: the oldest source read the served items come from. Null = never read (or a mirror source)." }),
+          refreshing: z.boolean().openapi({
+            description:
+              "store only: a re-read of one of this source's threads was still running when the answer left; it lands in the store, read again in a few seconds. " +
+              "On a PAGED read a thread with a good stored copy being re-read is `refreshing`, never `failed`.",
+          }),
         }),
       ),
-      itemCount: z.number().int(),
-      items: z.array(TimelineItemSchema),
+      itemCount: z.number().int().openapi({ description: "Items in THIS response (the page, on a paged read)." }),
+      totalItems: z.number().int().optional().openapi({ description: "Paged read only: items of the whole thread." }),
+      page: z
+        .object({
+          limit: z.number().int(),
+          before: z.string().nullable().openapi({ description: "The cursor this page was read before (null = the latest page)." }),
+          hasOlder: z.boolean(),
+          olderCursor: z.string().nullable().openapi({ description: "Pass as `before` to read the page just older than this one. Null when none." }),
+        })
+        .optional()
+        .openapi({ description: "Paged read only (`limit` or `before` given)." }),
+      items: z.array(TimelineItemSchema).openapi({ description: "Oldest first. On a paged read: the `limit` latest items older than `before`, still oldest first." }),
     })
     .openapi("PersonTimelineResponse"),
 );
@@ -2302,11 +2317,17 @@ registry.registerPath({
         description: "The person's opaque id (Person.personId). A retired id (merged away) opens the person it merged into.",
       }),
       personKey: z.string().optional().openapi({ example: "email:alice@acme.com", description: "Any identity key of the person." }),
+      limit: z.coerce.number().int().min(1).max(500).optional().openapi({
+        description:
+          "PAGED read: the `limit` latest items (default 10 when only `before` is given). The answer waits at most ~0.15 s for the threads' re-reads, then serves the store " +
+          "(`sources[].refreshing`). Absent with `before` absent = the whole thread, read-through as before (writers).",
+      }),
+      before: z.string().optional().openapi({ description: "PAGED read: the previous page's `page.olderCursor`; returns the items just older than it." }),
     }),
   },
   responses: {
     200: { description: "The merged thread", content: { "application/json": { schema: PersonTimelineResponseSchema } } },
-    400: { description: "Neither or both of personId / personKey, or a personId that is not a uuid" },
+    400: { description: "Neither or both of personId / personKey, a personId that is not a uuid, or a `before` this route did not serve" },
     404: { description: "reason=person_not_found: no person of this brand holds that key / id" },
   },
 });

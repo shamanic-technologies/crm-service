@@ -15,11 +15,20 @@ import { PEOPLE_SOURCES, type Presence } from "../lib/people/identity.js";
 import type { PossibleLead } from "../lib/people/sources.js";
 import type { LeadCompanyTags, LeadDisqualification, LeadHumanTags } from "../lib/people/state.js";
 import type { PersonRelevance } from "../lib/people/relevance.js";
-import { findPerson, readTimeline } from "../lib/people/timeline.js";
+import { decodeCursor, findPerson, pageOf, readTimeline } from "../lib/people/timeline.js";
+import { completeItems } from "../lib/people/item-fill.js";
 import { readFacts } from "../lib/people/facts.js";
 import { findPersonById } from "../lib/people/person-id.js";
 import { listMerges, mergeApplied, mergeView, stateMerge, undoMerge } from "../lib/people/merges.js";
-import { OUTCOME_STEPS, readCampaignReach, readOutcomeCounts, readOutcomePeople, type CampaignReach, type OutcomeStep } from "../lib/people/outcomes.js";
+import {
+  CampaignReachUnavailable,
+  cachedCampaignReach,
+  cachedOutcomeCounts,
+  OUTCOME_STEPS,
+  readOutcomePeople,
+  type CampaignReach,
+  type OutcomeStep,
+} from "../lib/people/outcomes.js";
 import { LEG_STEPS, listLegReachBrands, parseLegStep, readLegReach } from "../lib/people/leg-reach.js";
 import { familyOf, LEAD_FAMILIES, readBrandFamilies, type FamilyVerdict, type LeadFamily } from "../lib/people/families.js";
 import { readRelationships, RELATIONSHIP_TAGS, type Relationship, type RelationshipTag } from "../lib/people/relationships.js";
@@ -33,6 +42,45 @@ import {
 } from "../lib/people/search.js";
 
 const router = Router();
+
+/**
+ * The Unibox list's base reads (hidden counts, population, per-source counts) per scope and
+ * filter set, reused while the scope's build is the same one: `people` rows are only ever
+ * replaced by a build, in the transaction that sets `last_built_at` (DASH-LATENCY-1014: the
+ * population read alone was ~0.8 s on 9,890 people). `filters` null (a search) = never reused.
+ */
+type ListBase = {
+  automatedHidden: number;
+  groupMembersHidden: number;
+  members: { personKey: string; emails: unknown; humanId: string | null }[];
+  perSource: { source: string; people: number }[];
+};
+const LIST_BASE_MAX = 50;
+const listBaseCache = new Map<string, ListBase>();
+
+async function listBase(
+  scope: { id: string; lastBuiltAt: Date | null },
+  filters: string | null,
+  read: () => Promise<ListBase>,
+): Promise<ListBase> {
+  if (filters === null) return read();
+  const key = `${scope.id}|${scope.lastBuiltAt?.toISOString() ?? "never"}|${filters}`;
+  const hit = listBaseCache.get(key);
+  if (hit) return hit;
+  const base = await read();
+  listBaseCache.set(key, base);
+  // Oldest first out (Map keeps insertion order); an old build's entries are never asked again.
+  while (listBaseCache.size > LIST_BASE_MAX) listBaseCache.delete(listBaseCache.keys().next().value!);
+  return base;
+}
+
+/** Test seam: forget the list's cached base reads. */
+export function clearListBaseCache(): void {
+  listBaseCache.clear();
+}
+
+/** A paged timeline read without `limit`: the latest 10 (owner 2026-10-14). */
+const TIMELINE_PAGE_DEFAULT = 10;
 
 const brandIdSchema = z.string().uuid();
 const listQuerySchema = z.object({
@@ -213,43 +261,62 @@ router.get(
         offerId ? sql`${people.offerIds} @> ${JSON.stringify([offerId])}::jsonb` : sql`true`,
         q && keys ? searchPredicate(q, keys) : sql`true`,
       );
-      const [{ automatedHidden }] = includeAutomated
-        ? [{ automatedHidden: 0 }]
-        : await db
-            .select({ automatedHidden: sql<number>`count(*)::int` })
-            .from(people)
-            .where(
-              and(
-                eq(people.scopeId, scope.id),
-                eq(people.automated, true),
-                // Under a search: the automated people the search WOULD have returned.
-                q && keys ? searchPredicate(q, keys) : sql`true`,
-              ),
-            );
       // RELATIONSHIP-TAGS-1014: no conversation verdict hides anyone (who a person is
       // to the brand is the `relationship` filter). Kept in the shape for old readers.
       const notBusinessHidden = 0;
 
-      const [{ groupMembersHidden }] = includeGroupMembers
-        ? [{ groupMembersHidden: 0 }]
-        : await db
-            .select({ groupMembersHidden: sql<number>`count(*)::int` })
-            .from(people)
-            .where(
-              and(
-                eq(people.scopeId, scope.id),
-                eq(people.groupOnly, true),
-                includeAutomated ? sql`true` : eq(people.automated, false),
-                q && keys ? searchPredicate(q, keys) : sql`true`,
-              ),
-            );
-
-      // The list's own population (source / automated / search applied, family and
-      // relationship not): what each family / relationship button would return.
-      const members = await db
-        .select({ personKey: people.personKey, emails: people.emails, humanId: people.humanId })
-        .from(people)
-        .where(where);
+      // The hidden counts, the list's own population (source / automated / search applied,
+      // family and relationship not: what each family / relationship button would return) and
+      // the per-source counts. Read together; without a search, reused until the next build
+      // (people rows change only in a build, which moves lastBuiltAt: DASH-LATENCY-1014).
+      const { automatedHidden, groupMembersHidden, members, perSource } = await listBase(
+        scope,
+        q ? null : JSON.stringify([source ?? null, includeAutomated, includeGroupMembers, offerId]),
+        async () => {
+          const [automated, groupMembers, memberRows, perSourceRows] = await Promise.all([
+            includeAutomated
+              ? Promise.resolve([{ automatedHidden: 0 }])
+              : db
+                  .select({ automatedHidden: sql<number>`count(*)::int` })
+                  .from(people)
+                  .where(
+                    and(
+                      eq(people.scopeId, scope.id),
+                      eq(people.automated, true),
+                      // Under a search: the automated people the search WOULD have returned.
+                      q && keys ? searchPredicate(q, keys) : sql`true`,
+                    ),
+                  ),
+            includeGroupMembers
+              ? Promise.resolve([{ groupMembersHidden: 0 }])
+              : db
+                  .select({ groupMembersHidden: sql<number>`count(*)::int` })
+                  .from(people)
+                  .where(
+                    and(
+                      eq(people.scopeId, scope.id),
+                      eq(people.groupOnly, true),
+                      includeAutomated ? sql`true` : eq(people.automated, false),
+                      q && keys ? searchPredicate(q, keys) : sql`true`,
+                    ),
+                  ),
+            db.select({ personKey: people.personKey, emails: people.emails, humanId: people.humanId }).from(people).where(where),
+            db.execute(sql`
+              SELECT s AS source, count(*)::int AS people
+              FROM people, jsonb_array_elements_text(people.sources) s
+              WHERE people.scope_id = ${scope.id} ${includeAutomated ? sql`` : sql`AND people.automated = false`}
+                ${includeGroupMembers ? sql`` : sql`AND people.group_only = false`}
+              GROUP BY s
+            `) as unknown as Promise<{ source: string; people: number }[]>,
+          ]);
+          return {
+            automatedHidden: automated[0].automatedHidden,
+            groupMembersHidden: groupMembers[0].groupMembersHidden,
+            members: memberRows,
+            perSource: perSourceRows,
+          };
+        },
+      );
       const population = members.length;
 
       // Who each person is to the brand (lead-service's relationship tags, RELATIONSHIP-TAGS-1014).
@@ -342,22 +409,17 @@ router.get(
             readAt: null,
           };
 
-      const [{ total }] = await db.select({ total: sql<number>`count(*)::int` }).from(people).where(listWhere);
-      const rows = await db
-        .select()
-        .from(people)
-        .where(listWhere)
-        .orderBy(sql`${people.lastActivityAt} DESC NULLS LAST`, asc(people.personKey))
-        .limit(limit)
-        .offset(offset);
+      const [[{ total }], rows] = await Promise.all([
+        db.select({ total: sql<number>`count(*)::int` }).from(people).where(listWhere),
+        db
+          .select()
+          .from(people)
+          .where(listWhere)
+          .orderBy(sql`${people.lastActivityAt} DESC NULLS LAST`, asc(people.personKey))
+          .limit(limit)
+          .offset(offset),
+      ]);
 
-      const perSource = (await db.execute(sql`
-        SELECT s AS source, count(*)::int AS people
-        FROM people, jsonb_array_elements_text(people.sources) s
-        WHERE people.scope_id = ${scope.id} ${includeAutomated ? sql`` : sql`AND people.automated = false`}
-          ${includeGroupMembers ? sql`` : sql`AND people.group_only = false`}
-        GROUP BY s
-      `)) as unknown as { source: string; people: number }[];
       const reads = scope.sourceReads as BuildSummary | null;
 
       let search: { q: string; messageIndex: Awaited<ReturnType<typeof messageIndexCoverage>>; tookMs: number } | null = null;
@@ -441,6 +503,10 @@ const timelineQuerySchema = z
     brandId: brandIdSchema,
     personKey: z.string().min(3).max(320).optional(),
     personId: z.string().uuid().optional(),
+    // Paged read (DASH-LATENCY-1014): the `limit` latest items older than `before`.
+    // Neither = the whole thread, unchanged (every writer reads it whole).
+    limit: z.coerce.number().int().min(1).max(500).optional(),
+    before: z.string().min(1).max(2000).optional(),
   })
   .refine((q) => (q.personKey === undefined) !== (q.personId === undefined), {
     message: "exactly one of personId (uuid) or personKey is required",
@@ -462,6 +528,11 @@ router.get(
       return res.status(400).json({ type: "validation", error: `invalid query: ${parsed.error.message}` });
     }
     const { brandId, personKey, personId } = parsed.data;
+    const paged = parsed.data.limit !== undefined || parsed.data.before !== undefined;
+    const before = parsed.data.before !== undefined ? decodeCursor(parsed.data.before) : null;
+    if (parsed.data.before !== undefined && !before) {
+      return res.status(400).json({ type: "validation", error: "invalid query: before must be an olderCursor this route served" });
+    }
     try {
       const person = personId
         ? await findPersonById(req.orgId!, brandId, personId)
@@ -474,12 +545,29 @@ router.get(
         });
       }
       const { scope } = await ensureScope(req.orgId!, brandId, req.userId!);
-      const timeline = await readTimeline(scope, person, scope.sourceReads as BuildSummary | null, {
-        orgId: req.orgId!,
-        userId: req.userId!,
-        runId: req.runId!,
-        brandId,
-      });
+      const timeline = await readTimeline(
+        scope,
+        person,
+        scope.sourceReads as BuildSummary | null,
+        { orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId },
+        { paged },
+      );
+      if (paged) {
+        const limit = parsed.data.limit ?? TIMELINE_PAGE_DEFAULT;
+        const page = pageOf(timeline.items, limit, before);
+        // Only the page's items get their heavy part (message text, API answer summary).
+        await completeItems(page.items);
+        return res.json({
+          brandId,
+          person: personView(person),
+          builtAt: person.builtAt.toISOString(),
+          sources: timeline.sources,
+          itemCount: page.items.length,
+          totalItems: page.totalItems,
+          page: { limit, before: parsed.data.before ?? null, hasOlder: page.hasOlder, olderCursor: page.olderCursor },
+          items: page.items,
+        });
+      }
       res.json({
         brandId,
         person: personView(person),
@@ -507,20 +595,25 @@ async function openScope(req: AuthenticatedRequest, brandId: string) {
   return scopeView(scope, created || scope.status === "pending");
 }
 
+/** lead-service unreadable → 502: all sources without our campaigns would be a lower figure posing as the whole. */
+function campaignOutcomesUnavailable(res: Response, err: Error) {
+  res.status(502).json({
+    type: "upstream",
+    reason: "campaign_outcomes_unavailable",
+    error: `cannot read the people our campaigns brought to each step: ${err.message}`,
+  });
+}
+
 /**
- * The people OUR campaigns brought to these steps (lead-service's buckets).
- * Unreadable → null after answering 502: all sources without our campaigns
- * would be a lower figure posing as the whole.
+ * The people OUR campaigns brought to these steps (lead-service's buckets, cached
+ * per brand: outcomes.ts `cachedCampaignReach`). Unreadable → null after answering 502.
  */
 async function campaignReachOr502(req: AuthenticatedRequest, res: Response, brandId: string, steps: readonly OutcomeStep[]): Promise<CampaignReach[] | null> {
   try {
-    return await readCampaignReach({ orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId }, steps);
+    const all = await cachedCampaignReach({ orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId });
+    return all.filter((c) => steps.includes(c.step));
   } catch (err) {
-    res.status(502).json({
-      type: "upstream",
-      reason: "campaign_outcomes_unavailable",
-      error: `cannot read the people our campaigns brought to each step: ${(err as Error).message}`,
-    });
+    campaignOutcomesUnavailable(res, err as Error);
     return null;
   }
 }
@@ -537,11 +630,11 @@ router.get(
     }
     try {
       const scope = await openScope(req, parsed.data.brandId);
-      const campaigns = await campaignReachOr502(req, res, parsed.data.brandId, OUTCOME_STEPS);
-      if (!campaigns) return;
-      const steps = await readOutcomeCounts(req.orgId!, parsed.data.brandId, campaigns);
+      // Cached per brand (DASH-LATENCY-1014): recomputed only when its inputs moved.
+      const steps = await cachedOutcomeCounts({ orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId: parsed.data.brandId });
       res.json({ brandId: parsed.data.brandId, scope, steps });
     } catch (err) {
+      if (err instanceof CampaignReachUnavailable) return campaignOutcomesUnavailable(res, err);
       next(err);
     }
   },

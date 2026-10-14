@@ -1,4 +1,5 @@
 import { siblingGetOk, type SiblingIdentity } from "./siblings.js";
+import { SwrCache } from "./swr.js";
 
 /**
  * The Unibox family filters (owner 2026-10-08): Won clients, Hot leads, Lost
@@ -82,24 +83,25 @@ export function familyOf(emails: readonly string[], byEmail: Map<string, FamilyV
  */
 export const FAMILIES_TTL_MS = Number(process.env.PEOPLE_FAMILIES_TTL_MS) || 60_000;
 
-const cache = new Map<string, { at: number; promise: Promise<BrandFamilies> }>();
+/** Past the TTL and under this age, the cached read is served while ONE re-read runs behind it (DASH-LATENCY-1014). */
+export const FAMILIES_MAX_STALE_MS = Number(process.env.PEOPLE_FAMILIES_MAX_STALE_MS) || 2 * FAMILIES_TTL_MS;
 
-/** One shared, single-flight read per (org, brand); a failed read is not cached. */
+const cache = new SwrCache<BrandFamilies>("lead families", () => FAMILIES_TTL_MS, () => FAMILIES_MAX_STALE_MS);
+
+/**
+ * One shared, single-flight read per (org, brand); a failed read is not cached. Stale-while-
+ * revalidate (swr.ts): a cold features read is ~25 s, so once a brand is warm no Unibox list
+ * waits for it again; `readAt` says how old the served verdicts are.
+ */
 export function readBrandFamilies(identity: SiblingIdentity): Promise<BrandFamilies> {
-  const key = `${identity.orgId}:${identity.brandId}`;
-  const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < FAMILIES_TTL_MS) return hit.promise;
   const path = `/brands/${encodeURIComponent(identity.brandId)}/lead-families`;
-  const promise = siblingGetOk<LeadFamiliesBody>("features", path, identity).then((body) => ({
-    byEmail: indexFamilies(body),
-    producerCounts: body.counts,
-    readAt: new Date().toISOString(),
-  }));
-  cache.set(key, { at: Date.now(), promise });
-  promise.catch(() => {
-    if (cache.get(key)?.promise === promise) cache.delete(key);
-  });
-  return promise;
+  return cache.get(`${identity.orgId}:${identity.brandId}`, () =>
+    siblingGetOk<LeadFamiliesBody>("features", path, identity).then((body) => ({
+      byEmail: indexFamilies(body),
+      producerCounts: body.counts,
+      readAt: new Date().toISOString(),
+    })),
+  );
 }
 
 /** Test seam: forget every cached read. */

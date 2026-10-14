@@ -1559,6 +1559,10 @@ export const peopleFacts = pgTable(
       .on(table.orgId, table.brandId, table.naturalKey)
       .where(sql`${table.live} AND ${table.naturalKey} IS NOT NULL`),
     index("people_facts_org_brand_seq_idx").on(table.orgId, table.brandId, table.feedSeq),
+    // The outcomes read: live, owned step facts of a brand by type (DASH-LATENCY-1014).
+    index("people_facts_live_type_idx")
+      .on(table.orgId, table.brandId, table.type)
+      .where(sql`${table.live} AND ${table.ownerPersonKey} IS NOT NULL`),
   ],
 );
 

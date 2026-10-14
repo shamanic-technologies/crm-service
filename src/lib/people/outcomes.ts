@@ -40,6 +40,8 @@ import { sql, type SQL } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { normalizeEmail } from "./identity.js";
 import { mapLimit, siblingGetOk, type SiblingIdentity } from "./siblings.js";
+import { SwrCache } from "./swr.js";
+import { createHash } from "node:crypto";
 
 export const OUTCOME_STEPS = [
   "website_visit",
@@ -151,13 +153,22 @@ function evidence(orgId: string, brandId: string, step: OutcomeStep | null, camp
   const reach = JSON.stringify(campaigns.filter((c) => steps.includes(c.step)));
   // A campaigns reach is the person whose identity holds that address, else a
   // person of its own (`email:<addr>`, the key the people index would give them).
+  //
+  // The people holding one of those addresses are found FIRST, through the identity-key GIN
+  // index (`?|`), then each address is matched among them only: the plain join tested every
+  // address against every person of the brand (296 x 28,691 jsonb containment checks, 17-35 s
+  // on the distribute.you brand, DASH-LATENCY-1014). Same rows: `?|` is a superset prefilter
+  // of the very `@>` the join still applies.
   return sql`
     SELECT COALESCE(p.person_key, 'email:' || l.email) AS person_key, l.step, ${CAMPAIGNS_SOURCE}::text AS source,
            NULL::timestamptz AS occurred_at, 0::bigint AS feed_seq,
            jsonb_build_array(l.email) AS emails, l.name AS full_name
     FROM jsonb_to_recordset(${reach}::jsonb) AS l(step text, email text, name text)
-    LEFT JOIN people p ON p.org_id = ${orgId} AND p.brand_id = ${brandId}
-      AND p.identity_keys @> jsonb_build_array('email:' || l.email)
+    LEFT JOIN (
+      SELECT pp.person_key, pp.identity_keys FROM people pp
+      WHERE pp.org_id = ${orgId} AND pp.brand_id = ${brandId}
+        AND pp.identity_keys ?| ARRAY(SELECT 'email:' || x.email FROM jsonb_to_recordset(${reach}::jsonb) AS x(email text))
+    ) p ON p.identity_keys @> jsonb_build_array('email:' || l.email)
     UNION ALL
     SELECT f.owner_person_key AS person_key,
            CASE f.type WHEN 'form_submitted' THEN 'form_submission'
@@ -191,21 +202,24 @@ export interface OutcomeStepCount {
 
 export async function readOutcomeCounts(orgId: string, brandId: string, campaigns: CampaignReach[]): Promise<OutcomeStepCount[]> {
   const ev = evidence(orgId, brandId, null, campaigns);
-  const [totals, bySource] = await Promise.all([
-    rows<{ step: OutcomeStep; people: number; contacted: number }>(sql`
-      WITH e AS (${ev}),
-      r AS (SELECT step, person_key, bool_or(source = ${CAMPAIGNS_SOURCE}) AS ours FROM e GROUP BY step, person_key)
-      SELECT r.step, count(*)::int AS people,
-             count(*) FILTER (WHERE r.ours OR ${CONTACTED})::int AS contacted
-      FROM r LEFT JOIN people p ON p.org_id = ${orgId} AND p.brand_id = ${brandId} AND p.person_key = r.person_key
-      GROUP BY r.step
-    `),
-    rows<{ step: OutcomeStep; source: string; people: number }>(sql`
-      WITH e AS (${ev})
-      SELECT step, source, count(DISTINCT person_key)::int AS people
-      FROM e GROUP BY step, source ORDER BY step, people DESC, source
-    `),
-  ]);
+  // ONE statement, the evidence computed once (it used to run twice, in two parallel queries).
+  const all = await rows<{ kind: "total" | "source"; step: OutcomeStep; source: string | null; people: number; contacted: number }>(sql`
+    WITH e AS MATERIALIZED (${ev}),
+    r AS (SELECT step, person_key, bool_or(source = ${CAMPAIGNS_SOURCE}) AS ours FROM e GROUP BY step, person_key)
+    SELECT 'total'::text AS kind, r.step, NULL::text AS source, count(*)::int AS people,
+           count(*) FILTER (WHERE r.ours OR ${CONTACTED})::int AS contacted
+    FROM r LEFT JOIN people p ON p.org_id = ${orgId} AND p.brand_id = ${brandId} AND p.person_key = r.person_key
+    GROUP BY r.step
+    UNION ALL
+    SELECT 'source'::text AS kind, step, source, count(DISTINCT person_key)::int AS people, 0 AS contacted
+    FROM e GROUP BY step, source
+  `);
+  const totals = all.filter((x) => x.kind === "total");
+  // Per step: most people first, then source name (source tokens are lower-case ASCII).
+  const bySource = all
+    .filter((x) => x.kind === "source")
+    .map((x) => ({ step: x.step, source: x.source as string, people: x.people }))
+    .sort((a, b) => b.people - a.people || (a.source < b.source ? -1 : a.source > b.source ? 1 : 0));
   return OUTCOME_STEPS.map((step) => {
     const t = totals.find((x) => x.step === step);
     return {
@@ -308,4 +322,77 @@ export async function readOutcomePeople(
       stateSource: r.state_source,
     })),
   };
+}
+
+// ─── Cached reads (DASH-LATENCY-1014) ───────────────────────────────────────
+//
+// The dashboard reads a brand's outcomes on EVERY brand page, every few seconds per
+// open tab. Both inputs are cached per (org, brand), stale-while-revalidate (swr.ts):
+//  - lead-service's buckets: re-read at most every `outcomesFreshMs()`;
+//  - the counts: recomputed only when what they are computed FROM moved: the people
+//    build (`people_scopes.last_built_at`), the fact feed (`max(feed_seq)`: a
+//    withdrawal or a re-owning is always written beside a new fact, in the same
+//    transaction), the brand's GoHighLevel calendars (the booking-form rule), or the
+//    campaigns reach. Unchanged inputs reuse the figures, at most `outcomesReuseMaxMs()`.
+// A served figure is at most ~`outcomesFreshMs()` + one refresh old while a tab polls.
+
+export const outcomesFreshMs = () => Number(process.env.PEOPLE_OUTCOMES_FRESH_MS) || 10_000;
+/** Past fresh and under this age, the cached answer is served while ONE refresh runs behind it. */
+export const outcomesMaxStaleMs = () => Number(process.env.PEOPLE_OUTCOMES_MAX_STALE_MS) || 60_000;
+/** Unchanged inputs reuse the figures at most this long (a recompute still happens on a quiet brand). */
+export const outcomesReuseMaxMs = () => Number(process.env.PEOPLE_OUTCOMES_REUSE_MAX_MS) || 300_000;
+
+/** lead-service could not be read: the route answers 502 campaign_outcomes_unavailable. */
+export class CampaignReachUnavailable extends Error {}
+
+const reachCache = new SwrCache<CampaignReach[]>("outcomes campaign reach", outcomesFreshMs, outcomesMaxStaleMs);
+
+/** Every step's campaigns reach of the brand (readCampaignReach over all steps), cached. */
+export function cachedCampaignReach(identity: SiblingIdentity): Promise<CampaignReach[]> {
+  return reachCache.get(`${identity.orgId}|${identity.brandId}`, () =>
+    readCampaignReach(identity, OUTCOME_STEPS).catch((err: Error) => {
+      throw new CampaignReachUnavailable(err.message);
+    }),
+  );
+}
+
+/** What the counts are computed from, besides the campaigns reach. One indexed probe. */
+export async function outcomesFingerprint(orgId: string, brandId: string): Promise<string> {
+  const [r] = await rows<{ built: string | null; seq: string | null; calendars: string | null }>(sql`
+    SELECT (SELECT last_built_at::text FROM people_scopes WHERE org_id = ${orgId} AND brand_id = ${brandId}) AS built,
+           (SELECT max(feed_seq)::text FROM people_facts WHERE org_id = ${orgId} AND brand_id = ${brandId}) AS seq,
+           (SELECT md5(string_agg(external_id || ':' || content_hash, ',' ORDER BY external_id, content_hash))
+              FROM ghl_raw_records WHERE org_id = ${orgId} AND brand_id = ${brandId} AND kind = 'calendar') AS calendars
+  `);
+  return `${r?.built ?? ""}|${r?.seq ?? ""}|${r?.calendars ?? ""}`;
+}
+
+const reachDigest = (campaigns: CampaignReach[]) => createHash("sha256").update(JSON.stringify(campaigns)).digest("hex");
+
+interface CountsEntry {
+  steps: OutcomeStepCount[];
+  fingerprint: string;
+  computedAt: number;
+}
+
+const countsCache = new SwrCache<CountsEntry>("outcomes counts", outcomesFreshMs, outcomesMaxStaleMs);
+
+/** `readOutcomeCounts` for the brand, cached (figures identical to a fresh computation of the same inputs). */
+export async function cachedOutcomeCounts(identity: SiblingIdentity): Promise<OutcomeStepCount[]> {
+  const { orgId, brandId } = identity;
+  const entry = await countsCache.get(`${orgId}|${brandId}`, async (previous) => {
+    const startedAt = Date.now();
+    const campaigns = await cachedCampaignReach(identity);
+    const fingerprint = `${await outcomesFingerprint(orgId, brandId)}|${reachDigest(campaigns)}`;
+    const prev = previous?.value;
+    if (prev && prev.fingerprint === fingerprint && Date.now() - prev.computedAt < outcomesReuseMaxMs()) return prev;
+    return { steps: await readOutcomeCounts(orgId, brandId, campaigns), fingerprint, computedAt: startedAt };
+  });
+  return entry.steps;
+}
+
+/** Tests: forget every cached read. */
+export function clearOutcomesCache(): void {
+  reachCache.clear();
+  countsCache.clear();
 }

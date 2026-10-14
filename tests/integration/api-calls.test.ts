@@ -156,6 +156,16 @@ describe.skipIf(!RUN)("API / MCP calls on the staff Unibox", () => {
     expect(later.body.items.slice(-2).map((i: { text: string }) => i.text)).toEqual(["Listed emails for brand AscendQE", "Refused (404): Brand not found"]);
     expect(later.body.items.slice(-1)[0].ref.sessionId).toBe("call-1");
 
+    // DASH-LATENCY-1014: a paged read summarises the answers of its page only, to the same words.
+    const page = await request(app())
+      .get(`/orgs/people/timeline?brandId=${BRAND}&personKey=${encodeURIComponent("email:jane@prospect.io")}&limit=3`)
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", STAFF_ORG)
+      .set("x-user-id", USER);
+    expect(page.status).toBe(200);
+    expect(page.body.page).toMatchObject({ limit: 3, hasOlder: true });
+    expect(page.body.items.map((i: { text: string }) => i.text)).toEqual(later.body.items.slice(-3).map((i: { text: string }) => i.text));
+
     const d = await detail(STAFF_ORG, "call-1");
     expect(d.status).toBe(200);
     expect(d.body).toMatchObject({

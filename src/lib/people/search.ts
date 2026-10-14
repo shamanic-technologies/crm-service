@@ -27,6 +27,7 @@ import {
 import type { Presence } from "./identity.js";
 import type { OutreachFact, TextCleanStatus, TimelineItem } from "./timeline.js";
 import { mapLimit, siblingGet, type SiblingIdentity } from "./siblings.js";
+import { deferStoredText } from "./item-fill.js";
 
 // ─── the store ──────────────────────────────────────────────────────────────
 
@@ -419,6 +420,64 @@ export const TIMELINE_REFRESH_MS = Number(process.env.PEOPLE_TIMELINE_REFRESH_MS
 export const freshReadWindowMs = () => Number(process.env.PEOPLE_TIMELINE_FRESH_WINDOW_MS) || 10_000;
 /** The answer waits this long for the fresh reads; a Gmail thread not re-read by then is reported failed. */
 export const freshReadDeadlineMs = () => Number(process.env.PEOPLE_TIMELINE_FRESH_DEADLINE_MS) || 15_000;
+/**
+ * A PAGED read (the Unibox showing the latest messages, DASH-LATENCY-1014) waits this long for
+ * the same re-reads, then answers from the store while they finish behind it (`refreshing`).
+ * One person's Gmail thread of 943 messages took more than the 15 s deadline to re-read, on
+ * every open and every 60 s poll.
+ */
+export const pageFreshWaitMs = () => Number(process.env.PEOPLE_TIMELINE_PAGE_FRESH_WAIT_MS) || 150;
+
+/**
+ * Re-reads in flight, per (scope, source, unit). A read that wants a thread already being
+ * re-read (the Unibox poll, a writer, a second tab) joins that read instead of starting a
+ * second one: each re-read of a big thread deletes and re-writes every stored message.
+ * Joined only when it started within the freshness window of the joining read.
+ */
+const inflightReads = new Map<string, { startedAt: number; promise: Promise<UnitRefreshSummary> }>();
+
+async function refreshShared(
+  scopeId: string,
+  units: Unit[],
+  identity: SiblingIdentity,
+  startedAt: number,
+  windowMs: number,
+): Promise<UnitRefreshSummary> {
+  const keyOf = (u: Unit) => `${scopeId}|${u.source}|${u.unit}`;
+  const waits = new Set<Promise<UnitRefreshSummary>>();
+  const own: Unit[] = [];
+  for (const u of units) {
+    const running = inflightReads.get(keyOf(u));
+    if (running && running.startedAt >= startedAt - windowMs) waits.add(running.promise);
+    else own.push(u);
+  }
+  if (own.length) {
+    const promise = refreshUnits(scopeId, own, identity, { fresh: true });
+    const entry = { startedAt: Date.now(), promise };
+    for (const u of own) inflightReads.set(keyOf(u), entry);
+    promise
+      .finally(() => {
+        for (const u of own) if (inflightReads.get(keyOf(u)) === entry) inflightReads.delete(keyOf(u));
+      })
+      .catch(() => undefined);
+    waits.add(promise);
+  }
+  const all = await Promise.all(waits);
+  return {
+    read: all.reduce((n, r) => n + r.read, 0),
+    failed: all.reduce((n, r) => n + r.failed, 0),
+    gmailNotConnected: all.some((r) => r.gmailNotConnected),
+  };
+}
+
+export interface StoredReadOptions {
+  /**
+   * paged = the answer waits at most `pageFreshWaitMs()` for the re-reads; a thread whose stored
+   * copy is fine but not re-read in time is served `refreshing`, never `failed`. Default (the
+   * whole thread, every writer) = wait up to `freshReadDeadlineMs()`, Gmail fail-loud.
+   */
+  paged?: boolean;
+}
 
 type KnownUnit = { status: string; indexedAt: Date; format: number; changedAt: Date | null };
 
@@ -461,6 +520,8 @@ export interface StoredSource {
   asked: string[];
   /** The OLDEST read the served items come from: everything is at least this fresh. */
   readAt: string | null;
+  /** A re-read of one of these threads was still running when the answer left: read again shortly. */
+  refreshing: boolean;
 }
 
 export interface StoredTimeline {
@@ -492,10 +553,10 @@ export async function readStoredTimeline(
   gmailConnected: boolean,
   identity: SiblingIdentity,
   discoverCampaigns: (email: string) => Promise<string[]>,
+  opts: StoredReadOptions = {},
 ): Promise<StoredTimeline> {
   const startedAt = Date.now();
   const windowMs = freshReadWindowMs();
-  const leadCampaigns = await cachedLeadCampaigns(scope, person.emails);
   const loadUnits = () =>
     person.emails.length
       ? db
@@ -503,7 +564,27 @@ export async function readStoredTimeline(
           .from(peopleMessageUnits)
           .where(and(eq(peopleMessageUnits.scopeId, scope.id), inArray(peopleMessageUnits.address, person.emails)))
       : Promise.resolve([] as (typeof peopleMessageUnits.$inferSelect)[]);
-  let stored = await loadUnits();
+  // Paged: each message WITHOUT its text (the bulk of a stored item); the page's texts are read
+  // afterwards (item-fill.ts). Whole thread: the whole item.
+  const loadRows = () =>
+    person.emails.length
+      ? db
+          .select({
+            id: peopleMessageTexts.id,
+            source: peopleMessageTexts.source,
+            unit: peopleMessageTexts.unit,
+            messageKey: peopleMessageTexts.messageKey,
+            item: opts.paged ? sql<unknown>`${peopleMessageTexts.item} - 'text' - 'textClean'` : peopleMessageTexts.item,
+          })
+          .from(peopleMessageTexts)
+          .where(and(eq(peopleMessageTexts.scopeId, scope.id), inArray(peopleMessageTexts.address, person.emails)))
+      : Promise.resolve([]);
+  // A paged read reads the stored messages at once, beside the units (the snapshot it serves
+  // unless the re-reads land within its short wait).
+  const earlyRows = opts.paged ? loadRows() : null;
+  earlyRows?.catch(() => undefined);
+  const [leadCampaigns, firstUnits] = await Promise.all([cachedLeadCampaigns(scope, person.emails), loadUnits()]);
+  let stored = firstUnits;
   const extra = stored
     .filter((e) => e.source === "instantly")
     .map((e) => instantlyUnit(e.unit.split(":")[0], e.address, null));
@@ -518,22 +599,24 @@ export async function readStoredTimeline(
     .sort((a, b) => (a.source === b.source ? 0 : a.source === "gmail" ? -1 : 1));
   let readFailure: string | null = null;
   let gmailGone = false;
+  let timedOut = false;
+  // Paged and the re-reads did not land in time: serve the snapshot read at the start (units and
+  // messages of the same moment). Otherwise read the store again after the re-reads.
+  let reloaded = false;
   if (toRead.length) {
-    const deadline = freshReadDeadlineMs();
-    const r = await within(refreshUnits(scope.id, toRead, identity, { fresh: true }), deadline);
+    const deadline = opts.paged ? pageFreshWaitMs() : freshReadDeadlineMs();
+    const r = await within(refreshShared(scope.id, toRead, identity, startedAt, windowMs), deadline);
+    timedOut = r.kind === "timeout";
     if (r.kind === "timeout") readFailure = `not re-read within ${deadline / 1000}s`;
     else if (r.kind === "error") readFailure = `re-read failed: ${r.error.message}`;
     else gmailGone = r.value.gmailNotConnected;
-    stored = await loadUnits();
+    if (!(opts.paged && timedOut)) {
+      stored = await loadUnits();
+      reloaded = true;
+    }
   }
   const k1 = known();
-
-  const rows = person.emails.length
-    ? await db
-        .select({ source: peopleMessageTexts.source, unit: peopleMessageTexts.unit, messageKey: peopleMessageTexts.messageKey, item: peopleMessageTexts.item })
-        .from(peopleMessageTexts)
-        .where(and(eq(peopleMessageTexts.scopeId, scope.id), inArray(peopleMessageTexts.address, person.emails)))
-    : [];
+  const rows = reloaded || !earlyRows ? await loadRows() : await earlyRows;
 
   const sourceOf = (source: "gmail" | "instantly"): StoredSource => {
     const mine = units.filter((u) => u.source === source);
@@ -554,16 +637,29 @@ export async function readStoredTimeline(
       if (seen.has(key)) continue;
       seen.add(key);
       // A row stored before format 3 has no outreachFact yet (re-read in the background): served as null.
-      items.push({ ...item, outreachFact: item.outreachFact ?? null });
+      if (opts.paged) {
+        const lite: TimelineItem = { ...item, text: null, textClean: null, outreachFact: item.outreachFact ?? null };
+        deferStoredText(lite, r.id);
+        items.push(lite);
+      } else items.push({ ...item, outreachFact: item.outreachFact ?? null });
     }
     const okStates = states.filter((s) => s.status === "ok");
     const failedStates = states.filter((s) => s.status !== "ok");
     const error = failedStates.length ? failedStates.map((s) => s.error).join("; ") : null;
     const readAt = okStates.length ? new Date(Math.min(...okStates.map((s) => s.indexedAt.getTime()))).toISOString() : null;
+    const toReadKeys = new Set(toRead.map(keyOf));
+    const stillReading = timedOut && mine.some((u) => toReadKeys.has(keyOf(u)) && !freshFor(k1.get(keyOf(u)), startedAt, windowMs));
     if (source === "gmail") {
       const notFresh = mine.filter((u) => !freshFor(k1.get(keyOf(u)), startedAt, windowMs));
-      if (notFresh.length) {
-        const why = notFresh.map((u) => {
+      // Paged: a thread whose stored copy is good and is being re-read is `refreshing`, not failed.
+      const broken = opts.paged
+        ? notFresh.filter((u) => {
+            const k = k1.get(keyOf(u));
+            return gmailGone || !k || k.status !== "ok" || !(timedOut && toReadKeys.has(keyOf(u)));
+          })
+        : notFresh;
+      if (broken.length) {
+        const why = broken.map((u) => {
           const k = k1.get(keyOf(u));
           const reason = gmailGone
             ? "google-service answered no_google_account_connected"
@@ -578,13 +674,14 @@ export async function readStoredTimeline(
           error: `Gmail could not be read fresh, the stored thread may miss recent messages (${why.join("; ")})`,
           asked,
           readAt,
+          refreshing: stillReading,
         };
       }
     }
     if (items.length === 0 && failedStates.length && okStates.length === 0) {
-      return { status: "failed", items, error, asked, readAt };
+      return { status: "failed", items, error, asked, readAt, refreshing: stillReading };
     }
-    return { status: items.length ? "ok" : "empty", items, error, asked, readAt };
+    return { status: items.length ? "ok" : "empty", items, error, asked, readAt, refreshing: stillReading };
   };
 
   const stale = units.some((u) => unitDue(u, k0.get(keyOf(u)), startedAt, TIMELINE_REFRESH_MS));
