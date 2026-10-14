@@ -91,28 +91,63 @@ export async function queryRelationships(identity: SiblingIdentity, humanIds: st
 /** How long one answer serves the brand's lists (the tags move when lead-service re-judges a thread). */
 export const RELATIONSHIPS_TTL_MS = Number(process.env.PEOPLE_RELATIONSHIPS_TTL_MS) || 60_000;
 
-const cache = new Map<string, { at: number; byHuman: Map<string, Relationship> }>();
+/** Past the TTL and under this age, the cached answers are served while ONE re-read runs behind them (DASH-LATENCY-1014). */
+export const RELATIONSHIPS_MAX_STALE_MS = Number(process.env.PEOPLE_RELATIONSHIPS_MAX_STALE_MS) || 2 * RELATIONSHIPS_TTL_MS;
+
+/** `null` = asked, lead-service holds no relationship for that human (not re-asked until the entry expires). */
+interface Entry {
+  at: number;
+  byHuman: Map<string, Relationship | null>;
+  refreshing: boolean;
+}
+const cache = new Map<string, Entry>();
+
+const record = (byHuman: Map<string, Relationship | null>, asked: string[], got: Map<string, Relationship>) => {
+  for (const h of asked) byHuman.set(h, got.get(h) ?? null);
+};
 
 /**
  * The relationships of `humanIds`, re-using an answer younger than the TTL per
- * (org, brand, human). Only the missing / stale humans are asked.
+ * (org, brand, human). Only the missing humans are asked inline. Past the TTL
+ * (stale-while-revalidate, DASH-LATENCY-1014): the cached answers are served and
+ * ONE background re-read of every cached human replaces them; past
+ * `RELATIONSHIPS_MAX_STALE_MS` everything is asked again inline. A human asked and
+ * not answered is remembered as such (a brand of 9,846 humans re-asked its
+ * unjudged ones on every Unibox read).
  */
 export async function readRelationships(identity: SiblingIdentity, humanIds: string[]): Promise<Map<string, Relationship>> {
   const key = `${identity.orgId}:${identity.brandId}`;
   const now = Date.now();
   let entry = cache.get(key);
-  if (!entry || now - entry.at >= RELATIONSHIPS_TTL_MS) {
-    entry = { at: now, byHuman: new Map() };
+  if (!entry || now - entry.at >= RELATIONSHIPS_MAX_STALE_MS) {
+    entry = { at: now, byHuman: new Map(), refreshing: false };
     cache.set(key, entry);
+  } else if (now - entry.at >= RELATIONSHIPS_TTL_MS && !entry.refreshing) {
+    const old = entry;
+    old.refreshing = true;
+    const asked = [...old.byHuman.keys()];
+    queryRelationships(identity, asked)
+      .then((got) => {
+        const next: Entry = { at: now, byHuman: new Map(), refreshing: false };
+        record(next.byHuman, asked, got);
+        // Humans first asked while this re-read ran keep their (younger) answer.
+        for (const [h, r] of old.byHuman) if (!next.byHuman.has(h)) next.byHuman.set(h, r);
+        if (cache.get(key) === old) cache.set(key, next);
+      })
+      .catch((err: Error) => {
+        old.refreshing = false;
+        console.error(`[crm-service] relationships background re-read failed brand=${identity.brandId}:`, err.message);
+      });
   }
-  const missing = [...new Set(humanIds)].filter((h) => !entry!.byHuman.has(h));
+  const current = entry;
+  const missing = [...new Set(humanIds)].filter((h) => !current.byHuman.has(h));
   if (missing.length) {
     const got = await queryRelationships(identity, missing);
-    for (const [h, r] of got) entry.byHuman.set(h, r);
+    record(current.byHuman, missing, got);
   }
   const out = new Map<string, Relationship>();
   for (const h of humanIds) {
-    const r = entry.byHuman.get(h);
+    const r = current.byHuman.get(h);
     if (r) out.set(h, r);
   }
   return out;

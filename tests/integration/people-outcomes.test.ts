@@ -5,6 +5,7 @@ import { and, eq } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
 import { people, peopleFacts, peopleScopes } from "../../src/db/schema.js";
 import peopleRoutes from "../../src/routes/people.js";
+import { clearOutcomesCache } from "../../src/lib/people/outcomes.js";
 
 /**
  * GET /orgs/people/outcomes + /orgs/people/outcomes/people against a real
@@ -24,6 +25,7 @@ const lead = (email: string, firstName: string | null = null) => ({ email, lead:
 // lead-service's bucket of each step: the people OUR campaigns brought there.
 let BUCKETS: Record<string, ReturnType<typeof lead>[]> = {};
 let LEAD_DOWN = false;
+let LEAD_CALLS = 0;
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -35,6 +37,7 @@ function stubRuns() {
       return json({ id: "run-" + Math.random().toString(16).slice(2) });
     }
     if (url.host === "lead.test" && url.pathname === "/orgs/leads") {
+      LEAD_CALLS += 1;
       if (LEAD_DOWN) return json({ error: "boom" }, 500);
       expect(url.searchParams.get("brandId")).toBe(BRAND);
       expect(url.searchParams.get("view")).toBe("compact");
@@ -151,9 +154,42 @@ describe.skipIf(!RUN)("people outcomes (all sources)", () => {
     BUCKETS = {};
     LEAD_DOWN = false;
     stubRuns();
+    clearOutcomesCache();
     await wipe();
   });
   afterAll(wipe);
+
+  it("DASH-LATENCY-1014: a re-read within seconds is served from cache; a new fact shows once the cache is past fresh", async () => {
+    await seed();
+    const read = () => asOrg(request(app()).get("/orgs/people/outcomes").query({ brandId: BRAND }));
+    const visits = (r: request.Response) => r.body.steps.find((s: { step: string }) => s.step === "website_visit").people;
+    const first = await read();
+    expect(first.status).toBe(200);
+    expect(visits(first)).toBe(2);
+    const callsAfterFirst = LEAD_CALLS;
+    expect(callsAfterFirst).toBe(6); // one bucket per step
+    const again = await read();
+    expect(again.body.steps).toEqual(first.body.steps);
+    expect(LEAD_CALLS).toBe(callsAfterFirst); // nothing recomputed, lead-service not asked
+    await db.insert(peopleFacts).values(fact("email:fay@x.com", "website_visit", "posthog", "2026-09-08T00:00:00Z"));
+    const prev = { fresh: process.env.PEOPLE_OUTCOMES_FRESH_MS, stale: process.env.PEOPLE_OUTCOMES_MAX_STALE_MS };
+    process.env.PEOPLE_OUTCOMES_FRESH_MS = "1";
+    process.env.PEOPLE_OUTCOMES_MAX_STALE_MS = "1";
+    try {
+      await new Promise((r) => setTimeout(r, 5));
+      const after = await read();
+      expect(visits(after)).toBe(3);
+      // Everything else unchanged: the cache never changes a figure, it only reuses one.
+      expect(after.body.steps.filter((s: { step: string }) => s.step !== "website_visit")).toEqual(
+        first.body.steps.filter((s: { step: string }) => s.step !== "website_visit"),
+      );
+    } finally {
+      if (prev.fresh === undefined) delete process.env.PEOPLE_OUTCOMES_FRESH_MS;
+      else process.env.PEOPLE_OUTCOMES_FRESH_MS = prev.fresh;
+      if (prev.stale === undefined) delete process.env.PEOPLE_OUTCOMES_MAX_STALE_MS;
+      else process.env.PEOPLE_OUTCOMES_MAX_STALE_MS = prev.stale;
+    }
+  });
 
   it("counts distinct people per step, any source, one person once", async () => {
     await seed();

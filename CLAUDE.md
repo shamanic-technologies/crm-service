@@ -969,7 +969,15 @@ owner had written to. A recorded fact, never an address-shape guess.
   keeps "failed only when nothing ever read" (639 threads of cancelled Instantly
   plans can never be read; strict would block every writer on them). A
   background pass after the answer does lead-service campaign discovery only.
-  Sources carry `servedFrom: store|mirror` + `readAt`.
+  Sources carry `servedFrom: store|mirror` + `readAt` + `refreshing`.
+- **Paged timeline** (`limit` / `before`, DASH-LATENCY-1014, the Unibox: latest 10 first, older on
+  scroll): same merged thread, total order `(at, itemKey)`, opaque `page.olderCursor`. It waits only
+  `PEOPLE_TIMELINE_PAGE_FRESH_WAIT_MS` (150 ms) for the re-reads, then serves the store snapshot read
+  at its start: a good stored thread still being re-read is `refreshing`, never `failed` (the client
+  reads again shortly). The thread is built WITHOUT the heavy parts (stored message text, API answer
+  summaries); `completeItems` (`item-fill.ts`) fills them for the page only. Whole-thread reads (no
+  `limit`/`before`, every writer) are unchanged. Concurrent reads of one thread share ONE re-read
+  (`refreshShared`): each re-read deletes and re-writes every stored message of the thread.
   ⚠️ **One message is stored ONCE per (scope, source, address)**
   (`people_message_texts_address_message_uq`): instantly-service answers a
   campaign's WHOLE family, so two campaign units of one lead read the same
@@ -1128,6 +1136,10 @@ and the OLD code then wrote onto the NEW schema (0020, 2026-10-10).
   (written-to `lastSentAt` = last sequence step), so Robert Burke's automated
   follow-up stayed out of his thread 10 h (2026-10-10). Our own replies reach the
   fact feed only once instantly-service states them (UNIBOX-OUR-REPLIES-FACT-1010).
+- **The Unibox list's base reads** (hidden counts, population, per-source counts) are reused per
+  (scope, `last_built_at`, filters) without a search (`listBase`): `people` rows only change in a
+  build. Families and relationships are stale-while-revalidate past their 60 s TTL (served up to 2x
+  TTL while one re-read runs); a human lead-service holds no relationship for is remembered as such.
 - **Family filters (Unibox Won / Hot / Lost / Cold, `families.ts`)**: `GET /orgs/people?family=won|hot|lost|cold`
   (combines with `q`, `source`, paging). Each person carries `family` + `familyLostReason`
   = features-service's verdict (`GET /brands/{brandId}/lead-families`, read verbatim, matched on
@@ -1236,6 +1248,17 @@ this answers the same steps for everyone the brand's own tools state.
   lead-service unreadable → 502 `campaign_outcomes_unavailable`, never a lower
   figure posing as all sources.
 - Gateway: api-service `/v1/orgs/people/outcomes[/people]` (explicit proxies).
+- **Cached, never recomputed per request (DASH-LATENCY-1014)**: the dashboard reads it on every
+  brand page every few seconds per tab (4-5 copies of a 19-42 s query ran at once). `cachedOutcomeCounts`
+  / `cachedCampaignReach` are stale-while-revalidate per (org, brand) (`swr.ts`: fresh 10 s, served
+  stale up to 60 s while ONE refresh runs, env `PEOPLE_OUTCOMES_*`); a refresh recomputes only when
+  `outcomesFingerprint` (scope `last_built_at`, `max(feed_seq)`, GoHighLevel calendars) or the reach
+  digest moved (else reuses, at most 5 min). Valid ONLY because a withdrawal / re-owning of a fact is
+  always written beside a new fact in the same transaction and `people` only changes in a build: a
+  write path that breaks either must move the fingerprint. The campaigns join finds people through
+  the identity GIN (`?|` prefilter) and the fact scan uses `people_facts_live_type_idx`; JIT is off
+  for the whole service (`db/index.ts`: 2-3 s of compile per heavy query). Figures were proven
+  byte-equal old vs new SQL on 4 brands in prod before shipping.
 
 ## Leg reach — how the brand's OWN team converts on one leg (`src/lib/people/leg-reach.ts`)
 

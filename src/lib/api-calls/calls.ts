@@ -18,7 +18,7 @@
  * Idempotent: one row per api-service call id.
  */
 
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, getTableColumns, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { apiCalls, type ApiCall } from "../../db/schema.js";
 import { normalizeEmail, type Presence } from "../people/identity.js";
@@ -187,10 +187,20 @@ export async function readApiCallPresenceRows(orgId: string, brandId: string) {
 }
 
 /** Everything a thread item needs: the bodies only to summarise them, never served whole on the thread. */
-export async function readApiCallThread(orgId: string, brandId: string, emails: string[]): Promise<ApiCall[]> {
+export async function readApiCallThread(
+  orgId: string,
+  brandId: string,
+  emails: string[],
+  opts: { withoutBodies?: boolean } = {},
+): Promise<ApiCall[]> {
   if (!isCopilotDestination(orgId, brandId) || emails.length === 0) return [];
+  // withoutBodies (a paged thread read, DASH-LATENCY-1014): the request / response bodies stay
+  // in the database (null here); the page's answers are summarised from them afterwards.
+  const columns = opts.withoutBodies
+    ? { ...getTableColumns(apiCalls), requestBody: sql<string | null>`NULL::text`, responseBody: sql<string | null>`NULL::text` }
+    : getTableColumns(apiCalls);
   return db
-    .select()
+    .select(columns)
     .from(apiCalls)
     .where(
       and(

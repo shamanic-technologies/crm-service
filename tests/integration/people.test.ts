@@ -1724,6 +1724,98 @@ describe.skipIf(!RUN)("person layer", () => {
       }
     });
 
+    const paged = (q: string) =>
+      request(app())
+        .get(`/orgs/people/timeline?brandId=${BRAND}&personKey=${encodeURIComponent("email:alice@x.com")}&${q}`)
+        .set("x-api-key", API_KEY)
+        .set("x-org-id", ORG)
+        .set("x-user-id", USER);
+
+    it("DASH-LATENCY-1014: a paged read serves the latest items first; walking olderCursor covers the whole thread once", async () => {
+      const whole = await timeline();
+      const total = whole.body.items.length;
+      expect(total).toBeGreaterThan(3);
+      const first = await paged("limit=2");
+      expect(first.status).toBe(200);
+      expect(first.body.itemCount).toBe(2);
+      expect(first.body.totalItems).toBe(total);
+      expect(first.body.page).toMatchObject({ limit: 2, before: null, hasOlder: true });
+      // Oldest first inside the page; the page is the newest of the thread.
+      expect(first.body.items.map((i: { at: string | null }) => i.at)).toEqual(whole.body.items.slice(-2).map((i: { at: string | null }) => i.at));
+      const walked = [...first.body.items];
+      let cursor: string | null = first.body.page.olderCursor;
+      while (cursor) {
+        const next = await paged(`limit=2&before=${encodeURIComponent(cursor)}`);
+        expect(next.status).toBe(200);
+        expect(next.body.page.before).toBe(cursor);
+        walked.unshift(...next.body.items);
+        cursor = next.body.page.olderCursor;
+      }
+      expect(walked).toHaveLength(total);
+      // Same items, same values (key order aside: a page's texts are filled in after the order is known).
+      const sortKeys = (v: unknown): unknown =>
+        Array.isArray(v) ? v.map(sortKeys) : v && typeof v === "object" ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, x]) => [k, sortKeys(x)])) : v;
+      const canon = (xs: unknown[]) => xs.map((x) => JSON.stringify(sortKeys(x))).sort();
+      expect(canon(walked)).toEqual(canon(whole.body.items));
+      // The whole-thread read is unchanged: no page fields.
+      expect(whole.body.page).toBeUndefined();
+      expect(whole.body.itemCount).toBe(total);
+      // `before` alone pages too (default 10); a cursor we never served is a 400.
+      const byCursor = await paged(`before=${encodeURIComponent(first.body.page.olderCursor)}`);
+      expect(byCursor.body.page.limit).toBe(10);
+      expect(byCursor.body.items).toHaveLength(total - 2);
+      expect((await paged("before=not-a-cursor")).status).toBe(400);
+    });
+
+    it("DASH-LATENCY-1014: a paged read never waits for a slow Gmail re-read: stored thread served, gmail refreshing (not failed)", async () => {
+      const prev = process.env.PEOPLE_TIMELINE_PAGE_FRESH_WAIT_MS;
+      process.env.PEOPLE_TIMELINE_PAGE_FRESH_WAIT_MS = "100";
+      try {
+        await db.execute(sql`UPDATE people_message_units SET indexed_at = now() - interval '30 seconds'`);
+        aliceNewMessage = true;
+        gmailConversationDelayMs = 800;
+        const t0 = Date.now();
+        const page = await paged("limit=50");
+        expect(Date.now() - t0).toBeLessThan(700);
+        const gmail = page.body.sources.find((x: { source: string }) => x.source === "gmail");
+        expect(gmail).toMatchObject({ status: "ok", items: 2, error: null, refreshing: true });
+        expect(texts(page)).not.toContain("Send me the deck");
+        gmailConversationDelayMs = 0;
+        await vi.waitFor(
+          async () => {
+            const [row] = (await db.execute(
+              sql`SELECT count(*)::int AS n FROM people_message_units WHERE source = 'gmail' AND unit = 'alice@x.com' AND indexed_at > now() - interval '5 seconds'`,
+            )) as unknown as { n: number }[];
+            expect(row.n).toBe(1);
+          },
+          { timeout: 5000, interval: 50 },
+        );
+        const next = await paged("limit=50");
+        expect(next.body.sources.find((x: { source: string }) => x.source === "gmail")).toMatchObject({ status: "ok", refreshing: false });
+        expect(texts(next)).toContain("Send me the deck");
+      } finally {
+        if (prev === undefined) delete process.env.PEOPLE_TIMELINE_PAGE_FRESH_WAIT_MS;
+        else process.env.PEOPLE_TIMELINE_PAGE_FRESH_WAIT_MS = prev;
+      }
+    });
+
+    it("DASH-LATENCY-1014: two reads at once share ONE re-read of a thread", async () => {
+      await db.execute(sql`UPDATE people_message_units SET indexed_at = now() - interval '30 seconds'`);
+      aliceNewMessage = true;
+      gmailConversationDelayMs = 300;
+      gmailConversationQueries.length = 0;
+      try {
+        const [a, b] = await Promise.all([timeline(), timeline()]);
+        for (const r of [a, b]) {
+          expect(r.body.sources.find((x: { source: string }) => x.source === "gmail")).toMatchObject({ status: "ok", refreshing: false });
+          expect(texts(r)).toContain("Send me the deck");
+        }
+        expect(gmailConversationQueries).toHaveLength(1);
+      } finally {
+        gmailConversationDelayMs = 0;
+      }
+    });
+
     const factFor = (seq: number, email: string, campaignId: string, orgId = ORG, brandIds = [BRAND], recordedAt = new Date().toISOString()) => ({
       seq: String(seq),
       type: "email_sent",
