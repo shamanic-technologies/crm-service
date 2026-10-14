@@ -2951,6 +2951,53 @@ registry.registerPath({
   },
 });
 
+export const WhatsappSendsQueryRequestSchema = registry.register(
+  "WhatsappSendsQueryRequest",
+  z
+    .object({
+      brandId: z.string().uuid().openapi({ description: "The brand whose linked WhatsApp sent." }),
+      campaignId: z.string().min(1).openapi({ description: "Only sends recorded under this campaign (the x-campaign-id the send carried)." }),
+      emails: z.array(z.string()).min(1).max(500).openapi({ description: "The people, by email (matched case-folded). 1 to 500." }),
+    })
+    .openapi("WhatsappSendsQueryRequest"),
+);
+
+export const WhatsappSendsQueryResponseSchema = registry.register(
+  "WhatsappSendsQueryResponse",
+  z
+    .object({
+      sends: z
+        .array(
+          z.object({
+            email: z.string().openapi({ description: "The person's email, lower-cased." }),
+            sendId: z.string().uuid(),
+            status: z.enum(["sending", "sent", "refused", "failed"]).openapi({ description: "`sent` = delivered to WhatsApp. `sending` = in flight. `refused` / `failed` = nothing reached the person." }),
+            code: z.string().nullable().openapi({ description: "Refusal code (`no_phone_known`, `not_on_whatsapp`, …) or failure text; null when sent." }),
+            campaignId: z.string(),
+            sentAt: z.string().nullable(),
+            createdAt: z.string(),
+          }),
+        )
+        .openapi({ description: "Every send of this brand + campaign to a listed person, any status, newest first. A person with none is absent." }),
+      invalidEmails: z.array(z.string()).openapi({ description: "Entries of `emails` that are not an email, as given. Never matched." }),
+    })
+    .openapi("WhatsappSendsQueryResponse"),
+);
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/whatsapp/sends/query",
+  summary: "One campaign's WhatsApp sends to a list of people, in one call",
+  description:
+    "Which of these people this campaign has a WhatsApp send for, with each send's status and time. Read-only, no cost. Requires x-api-key, x-org-id (rows are scoped to that org); other identity headers forwarded as usual. One run per call.",
+  request: { body: { content: { "application/json": { schema: WhatsappSendsQueryRequestSchema } }, required: true } },
+  responses: {
+    200: { description: "Sends", content: { "application/json": { schema: WhatsappSendsQueryResponseSchema } } },
+    400: { description: "Bad request (`code: invalid_request`)", content: { "application/json": { schema: ErrorResponseSchema } } },
+    502: { description: "Run tracking failed", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
 registry.registerPath({
   method: "get",
   path: "/orgs/whatsapp/messages",
