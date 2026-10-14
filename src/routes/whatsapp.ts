@@ -1,9 +1,9 @@
 import { Router } from "express";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { peopleScopes, whatsappSends } from "../db/schema.js";
 import { apiKeyAuth, requireOrg, AuthenticatedRequest } from "../middleware/auth.js";
-import { WhatsappSendRequestSchema } from "../schemas.js";
+import { WhatsappSendRequestSchema, WhatsappSendsQueryRequestSchema } from "../schemas.js";
 import { BridgeError } from "../lib/matrix/bridge.js";
 import { runSyncPass } from "../lib/matrix/sync.js";
 import { runScopeBuild } from "../lib/people/build.js";
@@ -116,6 +116,56 @@ router.get("/orgs/whatsapp/messages", apiKeyAuth, requireOrg("whatsapp.sends.lis
       sentAt: r.sentAt?.toISOString() ?? null,
       createdAt: r.createdAt.toISOString(),
     })),
+  });
+});
+
+/**
+ * POST /orgs/whatsapp/sends/query — ONE campaign's sends to a LIST of people, in
+ * one call (lead-service asks this before handing a person back to a WhatsApp
+ * campaign; the per-person GET above cost one call and one run per person).
+ * Every send row of the brand + campaign whose email is in the list, any status,
+ * newest first; a person with no row is simply absent. Emails are matched
+ * case-folded (stored normalized); an entry that is not an email is named in
+ * `invalidEmails`, never silently dropped.
+ */
+router.post("/orgs/whatsapp/sends/query", apiKeyAuth, requireOrg("whatsapp.sends.query"), async (req: AuthenticatedRequest, res) => {
+  const parsed = WhatsappSendsQueryRequestSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ type: "validation", code: "invalid_request", error: parsed.error.message });
+  }
+  const { brandId, campaignId, emails } = parsed.data;
+  const wanted = new Set<string>();
+  const invalidEmails: string[] = [];
+  for (const raw of emails) {
+    const email = normalizeEmail(raw);
+    if (email) wanted.add(email);
+    else invalidEmails.push(raw);
+  }
+  const rows = wanted.size
+    ? await db
+        .select()
+        .from(whatsappSends)
+        .where(
+          and(
+            eq(whatsappSends.orgId, req.orgId!),
+            eq(whatsappSends.brandId, brandId),
+            eq(whatsappSends.campaignId, campaignId),
+            inArray(whatsappSends.email, [...wanted]),
+          ),
+        )
+        .orderBy(desc(whatsappSends.createdAt), desc(whatsappSends.id))
+    : [];
+  res.json({
+    sends: rows.map((r) => ({
+      email: r.email!,
+      sendId: r.id,
+      status: r.status,
+      code: r.errorCode,
+      campaignId: r.campaignId!,
+      sentAt: r.sentAt?.toISOString() ?? null,
+      createdAt: r.createdAt.toISOString(),
+    })),
+    invalidEmails,
   });
 });
 

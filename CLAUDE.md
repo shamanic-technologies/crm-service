@@ -986,6 +986,10 @@ code, error }`: `whatsapp_not_linked` | `whatsapp_not_connected` | `no_phone_kno
 `not_on_whatsapp` | `person_replied` (only with `skipIfReplied`) | `wrong_room`; 409 `send_in_progress`;
 400 `invalid_request`; 502 `bridge_error`. `GET /orgs/whatsapp/messages?brandId=&email=|phone=`
 lists the person's sends. No cost.
+`POST /orgs/whatsapp/sends/query {brandId, campaignId, emails[1..500]}` answers ONE campaign's
+sends to a LIST of people in one call and one run (lead-service's pool check, WA-SENDS-BATCH-1014):
+`{sends: [{email, sendId, status, code, campaignId, sentAt, createdAt}], invalidEmails}`, every status,
+newest first, a person with none absent; a send with no campaign never matches. Keep the GET as is.
 - Phone = `phone` if given, else the person's first phone from `people` (looked up by email).
 - Account = the brand's `matrix_links` whatsapp `linked` rows whose bridge login is
   `CONNECTED` (`/whoami`), oldest first; one already in a DM with the number wins.
