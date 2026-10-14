@@ -1,8 +1,8 @@
 /**
  * One person's whole exchange, every channel merged into ONE thread, oldest
  * first. Gmail and cold email are served from crm-service's message store
- * (people/search.ts), refreshed in the background, so a read never waits on a
- * slow sibling; every other source is crm-service's own mirror, read in place:
+ * (people/search.ts), re-read before the answer when older than a few seconds
+ * (bounded wait); every other source is crm-service's own mirror, read in place:
  *
  *  - gmail       google-service per-address conversation read (both directions)
  *  - instantly   instantly-service conversation read, per campaign the address is
@@ -32,11 +32,12 @@
  * So a person is never an empty thread while any of their records is dated.
  *
  * Gmail and cold-email items carry `servedFrom: "store"` and `readAt` (the
- * oldest read they come from). The freshness watch (people/freshness.ts) re-reads
- * a stored thread within about a minute of its source moving, and an open that
- * finds a thread stored before a known move re-reads it first, so a message that
- * exists is in the thread on the first open. A store older than
- * TIMELINE_REFRESH_MS is also re-read in the background after the answer. Each source answers a status, so "not connected",
+ * oldest read they come from). A read is a READ-THROUGH (RIGHT-MOMENT-OR-LATER-1014):
+ * every stored thread of the person read more than `freshReadWindowMs()` ago is
+ * re-read before the answer (Gmail with google-service's fresh mirror), so a writer
+ * sees an answer the owner sent by hand seconds ago; a Gmail thread that could not
+ * be re-read makes the gmail source `failed` (people/search.ts). The freshness
+ * watch (people/freshness.ts) keeps the store warm between reads. Each source answers a status, so "not connected",
  * "connected, nothing with this person" and "could not read it" never collapse
  * into an empty thread.
  */
@@ -691,7 +692,7 @@ export async function readTimeline(
   // CSV is no people source (it has no status row); its import dates ride in the thread.
   const csv = await csvEntryItems(person);
 
-  // Stale store: re-read in the background; this read is answered from what is stored.
+  // Background pass: lead-service campaign discovery (+ any thread the deadline left unread).
   storedRead
     .then((t) => {
       if (t.stale) {

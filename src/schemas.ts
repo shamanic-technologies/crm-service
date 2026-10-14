@@ -2211,15 +2211,18 @@ const PersonTimelineResponseSchema = registry.register(
         z.object({
           source: PeopleSourceSchema,
           status: z.enum(TIMELINE_SOURCE_STATUSES).openapi({
-            description: "ok = items served; empty = connected, nothing with this person; not_connected; failed = could not be read (error).",
+            description:
+              "ok = items served; empty = connected, nothing with this person; not_connected; failed = could not be read (error). " +
+              "Gmail is also failed when its thread could not be re-read for THIS answer (source error, 15s deadline, mailbox gone): " +
+              "the stored items are still served beside the error, so a writer never takes a stale thread for a complete one.",
           }),
           items: z.number().int(),
           error: z.string().nullable(),
           asked: z.array(z.string()).openapi({ description: "What was asked (addresses, campaign:address pairs, conversations, contacts), so an empty answer is auditable." }),
           servedFrom: z.enum(["store", "mirror"]).openapi({
             description:
-              "store = Gmail / cold email, served from crm-service's message store (never waits on google-service / instantly-service): " +
-              "re-read in the background when older than 60s on a read (the NEXT read shows a new message) and by the 15-minute build when the person's activity moved. " +
+              "store = Gmail / cold email, served from crm-service's message store, READ-THROUGH: every thread of the person read more than 10s ago is re-read " +
+              "from its source before the answer (Gmail asking google-service for a fresh mirror), so a message sent seconds ago is on this read. " +
               "mirror = crm-service's own synced data (Matrix, GoHighLevel, PostHog, Stripe), read in place.",
           }),
           readAt: z.string().nullable().openapi({ description: "store only: the oldest source read the served items come from. Null = never read (or a mirror source)." }),
