@@ -59,6 +59,10 @@ let leadServiceDown = false;
 /** lead-service's CRM pairings for the brand (served on `?state=paired`, filtered like the real route). */
 let leadPairings: { crmContact: { id: string; email: string | null; phone: string | null; fullName: string | null; company: string | null }; pairing: { state: string; toConfirm: boolean; lead: { leadId?: string; email: string | null; fullName: string | null; company: string | null } | null } }[] = [];
 let gmailConversationDown = false;
+/** google-service takes this long to answer a conversation read (0 = at once). */
+let gmailConversationDelayMs = 0;
+/** The query of every google-service conversation read. */
+const gmailConversationQueries: URLSearchParams[] = [];
 let aliceNewMessage = false;
 /** Our own reply to Alice exists in instantly-service's thread (sent after the store read it). */
 let aliceOurReply = false;
@@ -190,6 +194,8 @@ function installFetchStub() {
         return json({ items: [], nextCursor: null });
       }
       if (url.pathname === "/orgs/google/conversation") {
+        gmailConversationQueries.push(url.searchParams);
+        if (gmailConversationDelayMs) await new Promise((r) => setTimeout(r, gmailConversationDelayMs));
         if (gmailConversationDown) return json({ error: "boom" }, 500);
         if (!gmailConnected) return json({ reason: "no_google_account_connected" }, 404);
         if (url.searchParams.get("email") === DIGEST) {
@@ -486,6 +492,8 @@ describe.skipIf(!RUN)("person layer", () => {
     leadServiceDown = false;
     leadPairings = [];
     gmailConversationDown = false;
+    gmailConversationDelayMs = 0;
+    gmailConversationQueries.length = 0;
     aliceNewMessage = false;
     aliceOurReply = false;
     aliceTwinCampaign = false;
@@ -1646,25 +1654,74 @@ describe.skipIf(!RUN)("person layer", () => {
       expect(sources.matrix).toMatchObject({ status: "ok", servedFrom: "mirror", readAt: null });
     });
 
-    it("a stale store is served as is and re-read in the background: the next read shows the new message", async () => {
+    it("RIGHT-MOMENT-OR-LATER-1014: a message sent by hand seconds ago is on the FIRST read (read-through, fresh mirror asked)", async () => {
+      // The store read Alice's thread 30s ago; the owner has answered her by hand since.
+      await db.execute(sql`UPDATE people_message_units SET indexed_at = now() - interval '30 seconds'`);
       aliceNewMessage = true;
-      await db.execute(sql`UPDATE people_message_units SET indexed_at = now() - interval '5 minutes'`);
-      const stale = await timeline();
-      expect(texts(stale)).not.toContain("Send me the deck");
-      await vi.waitFor(
-        async () => {
-          const [row] = (await db.execute(
-            sql`SELECT count(*)::int AS n FROM people_message_units WHERE source = 'gmail' AND unit = 'alice@x.com' AND indexed_at > now() - interval '1 minute'`,
-          )) as unknown as { n: number }[];
-          expect(row.n).toBe(1);
-        },
-        { timeout: 5000, interval: 50 },
-      );
-      const fresh = await timeline();
-      expect(texts(fresh)).toContain("Send me the deck");
+      gmailConversationQueries.length = 0;
+      const first = await timeline();
+      expect(texts(first)).toContain("Send me the deck");
+      const gmail = first.body.sources.find((x: { source: string }) => x.source === "gmail");
+      expect(gmail).toMatchObject({ status: "ok", servedFrom: "store", items: 3, error: null });
+      expect(Date.now() - new Date(gmail.readAt).getTime()).toBeLessThan(10_000);
+      // google-service was asked to bring its mirror up to date before answering.
+      expect(gmailConversationQueries).toHaveLength(1);
+      expect(gmailConversationQueries[0].get("fresh")).toBe("true");
       // and the search sees it too
       const found = await request(app()).get(`/orgs/people?brandId=${BRAND}&q=deck`).set("x-api-key", API_KEY).set("x-org-id", ORG).set("x-user-id", USER);
       expect(found.body.people.map((p: { personKey: string }) => p.personKey)).toEqual(["email:alice@x.com"]);
+      // A second read seconds later shares that read: no new sibling call.
+      calls.length = 0;
+      expect(texts(await timeline())).toContain("Send me the deck");
+      expect(siblingReads()).toEqual([]);
+    });
+
+    it("a fresh Gmail read that fails says gmail failed, the stored thread beside it, never a complete-looking ok", async () => {
+      await db.execute(sql`UPDATE people_message_units SET indexed_at = now() - interval '30 seconds'`);
+      gmailConversationDown = true;
+      const res = await timeline();
+      expect(res.status).toBe(200);
+      const sources = Object.fromEntries(res.body.sources.map((x: { source: string }) => [x.source, x]));
+      expect(sources.gmail).toMatchObject({ status: "failed", items: 2 });
+      expect(sources.gmail.error).toContain("could not be read fresh");
+      expect(sources.gmail.error).toContain("returned 500");
+      expect(texts(res)).toContain("Sure, call me"); // what was stored is still shown, flagged
+      expect(sources.instantly).toMatchObject({ status: "ok" });
+      // The source answers again: the next read is ok.
+      gmailConversationDown = false;
+      const back = await timeline();
+      expect(back.body.sources.find((x: { source: string }) => x.source === "gmail")).toMatchObject({ status: "ok", error: null });
+    });
+
+    it("a fresh Gmail read slower than the deadline says gmail failed; the late read lands for the next one", async () => {
+      const prev = process.env.PEOPLE_TIMELINE_FRESH_DEADLINE_MS;
+      process.env.PEOPLE_TIMELINE_FRESH_DEADLINE_MS = "200";
+      try {
+        await db.execute(sql`UPDATE people_message_units SET indexed_at = now() - interval '30 seconds'`);
+        aliceNewMessage = true;
+        gmailConversationDelayMs = 800;
+        const slow = await timeline();
+        const gmail = slow.body.sources.find((x: { source: string }) => x.source === "gmail");
+        expect(gmail).toMatchObject({ status: "failed", items: 2 });
+        expect(gmail.error).toContain("not re-read within 0.2s");
+        expect(texts(slow)).not.toContain("Send me the deck");
+        gmailConversationDelayMs = 0;
+        await vi.waitFor(
+          async () => {
+            const [row] = (await db.execute(
+              sql`SELECT count(*)::int AS n FROM people_message_units WHERE source = 'gmail' AND unit = 'alice@x.com' AND indexed_at > now() - interval '5 seconds'`,
+            )) as unknown as { n: number }[];
+            expect(row.n).toBe(1);
+          },
+          { timeout: 5000, interval: 50 },
+        );
+        const next = await timeline();
+        expect(next.body.sources.find((x: { source: string }) => x.source === "gmail")).toMatchObject({ status: "ok" });
+        expect(texts(next)).toContain("Send me the deck");
+      } finally {
+        if (prev === undefined) delete process.env.PEOPLE_TIMELINE_FRESH_DEADLINE_MS;
+        else process.env.PEOPLE_TIMELINE_FRESH_DEADLINE_MS = prev;
+      }
     });
 
     const factFor = (seq: number, email: string, campaignId: string, orgId = ORG, brandIds = [BRAND], recordedAt = new Date().toISOString()) => ({
@@ -1710,7 +1767,8 @@ describe.skipIf(!RUN)("person layer", () => {
 
     it("an open that finds a thread stored before a known move re-reads that thread first, and only it", async () => {
       aliceOurReply = true;
-      await db.execute(sql`UPDATE people_message_units SET indexed_at = now() - interval '30 seconds'`);
+      // Read 5s ago (inside the read-through window), but the cold-email thread moved since.
+      await db.execute(sql`UPDATE people_message_units SET indexed_at = now() - interval '5 seconds'`);
       await db.execute(sql`UPDATE people_message_units SET changed_at = now() WHERE source = 'instantly' AND unit = 'camp-1:alice@x.com'`);
       calls.length = 0;
       const first = await timeline();
@@ -1725,8 +1783,8 @@ describe.skipIf(!RUN)("person layer", () => {
       await runFreshnessPass();
       calls.length = 0;
       expect(texts(await timeline())).toContain("Send me the deck");
-      // The open answered from the store the watch refreshed (the 10-hour-old cold-email copy
-      // is only re-read in the background, after the answer).
+      // The open answered from the Gmail copy the watch refreshed seconds ago (the 10-hour-old
+      // cold-email copy is re-read before the answer, Gmail is not).
       expect(calls.filter((c) => c.endsWith("/orgs/google/conversation"))).toEqual([]);
       // Same last message on the next pass: nothing to re-read.
       calls.length = 0;
@@ -1755,14 +1813,14 @@ describe.skipIf(!RUN)("person layer", () => {
       expect(gmail).toMatchObject({ status: "failed", items: 0, readAt: null });
       expect(gmail.error).toContain("returned 500");
 
-      // Once failed, the next read does not wait on the source again: it answers and retries in the background.
+      // Each read retries the failed thread once, before answering.
       calls.length = 0;
       await timeline();
       expect(calls.filter((c) => c.endsWith("/orgs/google/conversation")).length).toBeLessThanOrEqual(1);
       gmailConversationDown = false;
       await vi.waitFor(
         async () => {
-          await timeline(); // each read retries the failed unit in the background
+          await timeline(); // each read retries the failed unit
           const [row] = (await db.execute(sql`SELECT status FROM people_message_units WHERE source = 'gmail' AND unit = 'alice@x.com'`)) as unknown as { status: string }[];
           expect(row.status).toBe("ok");
         },

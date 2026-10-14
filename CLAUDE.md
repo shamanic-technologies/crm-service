@@ -956,12 +956,20 @@ owner had written to. A recorded fact, never an address-shape guess.
   old text and shows in `search.messageIndex.failed`. Matrix text is searched
   in place. Each person gets `matches` (field + value, or message excerpt);
   blank `q` = the list byte for byte. The gateway forwards the query verbatim.
-- **The timeline serves Gmail + cold email FROM THAT STORE** (`readStoredTimeline`,
-  each stored row carries the full item, `format` 2): no sibling call on a read.
-  A never-read address is read once on the spot; a store older than 60s
-  (`PEOPLE_TIMELINE_REFRESH_MS`) is re-read in the background after the answer;
-  lead-service campaign discovery runs there too. Sources carry
-  `servedFrom: store|mirror` + `readAt`.
+- **The timeline serves Gmail + cold email FROM THAT STORE, READ-THROUGH**
+  (`readStoredTimeline`, RIGHT-MOMENT-OR-LATER-1014): every thread of the person
+  read more than 10s ago (`PEOPLE_TIMELINE_FRESH_WINDOW_MS`; never read, failed,
+  older format or moved since also count) is re-read BEFORE the answer, Gmail
+  with `fresh=true` (google-service: bring the mirror up to date first), bounded
+  by `PEOPLE_TIMELINE_FRESH_DEADLINE_MS` (15s). Every writer reads this right
+  before writing and holds back when the owner just answered by hand: a store
+  re-read AFTER the answer let a writer miss a Gmail answer for 15 min
+  (2026-10-14). Gmail is fail-loud: a Gmail thread not re-read for this answer
+  makes `gmail` `failed`, stored items still served beside the error. Cold email
+  keeps "failed only when nothing ever read" (639 threads of cancelled Instantly
+  plans can never be read; strict would block every writer on them). A
+  background pass after the answer does lead-service campaign discovery only.
+  Sources carry `servedFrom: store|mirror` + `readAt`.
   ⚠️ **One message is stored ONCE per (scope, source, address)**
   (`people_message_texts_address_message_uq`): instantly-service answers a
   campaign's WHOLE family, so two campaign units of one lead read the same

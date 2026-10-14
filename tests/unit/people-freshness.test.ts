@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { changePending, CHANGE_CONFIRM_MS, unitsFromFacts } from "../../src/lib/people/freshness.js";
-import { storedBeforeChange } from "../../src/lib/people/search.js";
+import { freshFor, freshReadDue, STORE_FORMAT, storedBeforeChange } from "../../src/lib/people/search.js";
 
 const ORG = "aaaaaaaa-2222-4222-8222-000000000001";
 const BRAND = "aaaaaaaa-2222-4222-8222-000000000002";
@@ -55,5 +55,35 @@ describe("changePending / storedBeforeChange", () => {
     expect(changePending(readSoon, t + 2000)).toBe(false);
     expect(changePending(readSoon, t + CHANGE_CONFIRM_MS)).toBe(true);
     expect(changePending({ changedAt, indexedAt: new Date(t + CHANGE_CONFIRM_MS + 1) }, t + CHANGE_CONFIRM_MS + 5000)).toBe(false);
+  });
+});
+
+describe("read-through (RIGHT-MOMENT-OR-LATER-1014)", () => {
+  const now = Date.parse("2026-10-14T14:24:38.000Z");
+  const W = 10_000;
+  const unit = (agoMs: number, over: Record<string, unknown> = {}) => ({
+    status: "ok",
+    indexedAt: new Date(now - agoMs),
+    format: STORE_FORMAT,
+    changedAt: null as Date | null,
+    ...over,
+  });
+  it("a thread read inside the window is not re-read; one read before it is", () => {
+    expect(freshReadDue(unit(3_000), now, W)).toBe(false);
+    expect(freshReadDue(unit(30_000), now, W)).toBe(true);
+  });
+  it("a never-read, failed, older-format or moved-since thread is re-read", () => {
+    expect(freshReadDue(undefined, now, W)).toBe(true);
+    expect(freshReadDue(unit(1_000, { status: "failed" }), now, W)).toBe(true);
+    expect(freshReadDue(unit(1_000, { format: STORE_FORMAT - 1 }), now, W)).toBe(true);
+    expect(freshReadDue(unit(1_000, { changedAt: new Date(now) }), now, W)).toBe(true);
+  });
+  it("only a successful read inside the window, not before a known move, answers as fresh", () => {
+    expect(freshFor(unit(-500), now, W)).toBe(true); // re-read during this answer
+    expect(freshFor(unit(9_000), now, W)).toBe(true);
+    expect(freshFor(unit(30_000), now, W)).toBe(false);
+    expect(freshFor(unit(-500, { status: "failed" }), now, W)).toBe(false);
+    expect(freshFor(unit(1_000, { changedAt: new Date(now) }), now, W)).toBe(false);
+    expect(freshFor(undefined, now, W)).toBe(false);
   });
 });

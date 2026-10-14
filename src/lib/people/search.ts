@@ -165,10 +165,21 @@ interface StoredMessage {
   item: TimelineItem;
 }
 
+export interface RefreshOptions {
+  /**
+   * A thread read for a writer or an open (RIGHT-MOMENT-OR-LATER-1014): ask google-service to
+   * bring its Gmail mirror up to date for the org before answering (`fresh=true`), so a message
+   * sent by hand seconds ago is in the answer. A google-service that does not know the parameter
+   * ignores it (its query schema is not strict) and answers from its mirror as before.
+   */
+  fresh?: boolean;
+}
+
 /** One unit's messages, as timeline items. `null` = Gmail is not connected. */
-async function readUnit(identity: SiblingIdentity, u: Unit): Promise<StoredMessage[] | null> {
+async function readUnit(identity: SiblingIdentity, u: Unit, opts: RefreshOptions = {}): Promise<StoredMessage[] | null> {
   if (u.source === "gmail") {
-    const r = await siblingGet("google", `/orgs/google/conversation?email=${encodeURIComponent(u.address)}&limit=500`, identity);
+    const fresh = opts.fresh ? "&fresh=true" : "";
+    const r = await siblingGet("google", `/orgs/google/conversation?email=${encodeURIComponent(u.address)}&limit=500${fresh}`, identity);
     const reason = (r.body as { reason?: string } | null)?.reason;
     if (r.status === 404 && reason === "no_google_account_connected") return null;
     if (r.status === 404 && reason === "no_messages") return [];
@@ -254,7 +265,12 @@ const validDate = (s: string | null) => {
 };
 
 /** Read the given units from their source and replace what the store holds for each. */
-export async function refreshUnits(scopeId: string, units: Unit[], identity: SiblingIdentity): Promise<UnitRefreshSummary> {
+export async function refreshUnits(
+  scopeId: string,
+  units: Unit[],
+  identity: SiblingIdentity,
+  opts: RefreshOptions = {},
+): Promise<UnitRefreshSummary> {
   let failed = 0;
   let read = 0;
   let gmailNotConnected = false;
@@ -262,7 +278,7 @@ export async function refreshUnits(scopeId: string, units: Unit[], identity: Sib
     if (u.source === "gmail" && gmailNotConnected) return;
     let messages: StoredMessage[] | null;
     try {
-      messages = await readUnit(identity, u);
+      messages = await readUnit(identity, u, opts);
     } catch (err) {
       failed++;
       await db
@@ -388,11 +404,57 @@ export async function indexScopeMessages(
 
 // ─── one person, from the store ─────────────────────────────────────────────
 
-/** A person's stored timeline is re-read in the background once older than this. */
+/** A person's stored timeline older than this also gets a background pass (lead-service campaign discovery). */
 export const TIMELINE_REFRESH_MS = Number(process.env.PEOPLE_TIMELINE_REFRESH_MS) || 60_000;
 
+/**
+ * RIGHT-MOMENT-OR-LATER-1014. Every writer of the fleet reads the person's thread right before
+ * writing and holds back when the owner or his team just answered by hand. So a thread read is a
+ * READ-THROUGH: every stored Gmail / cold-email thread of the person read longer ago than this is
+ * re-read from its source BEFORE the answer (Gmail with `fresh=true`), never served stale and
+ * re-read after. Two reads seconds apart (a writer and the Unibox) share one read.
+ * Measured 2026-10-14: an answer sent from the owner's Gmail at 14:24:35 was on the thread only at
+ * 14:39:12; a writer starting at 14:24:38 would have written a second email on the same point.
+ */
+export const freshReadWindowMs = () => Number(process.env.PEOPLE_TIMELINE_FRESH_WINDOW_MS) || 10_000;
+/** The answer waits this long for the fresh reads; a Gmail thread not re-read by then is reported failed. */
+export const freshReadDeadlineMs = () => Number(process.env.PEOPLE_TIMELINE_FRESH_DEADLINE_MS) || 15_000;
+
+type KnownUnit = { status: string; indexedAt: Date; format: number; changedAt: Date | null };
+
+/** PURE: the stored thread must be re-read before this answer. */
+export function freshReadDue(known: KnownUnit | undefined, now: number, windowMs: number): boolean {
+  if (!known || known.status !== "ok" || known.format < STORE_FORMAT) return true;
+  if (storedBeforeChange(known)) return true;
+  return now - known.indexedAt.getTime() >= windowMs;
+}
+
+/** PURE: the stored thread is fresh enough to answer a read that started at `startedAt`. */
+export function freshFor(known: KnownUnit | undefined, startedAt: number, windowMs: number): boolean {
+  return !!known && known.status === "ok" && !storedBeforeChange(known) && known.indexedAt.getTime() >= startedAt - windowMs;
+}
+
+type Bounded<T> = { kind: "done"; value: T } | { kind: "error"; error: Error } | { kind: "timeout" };
+
+/** Wait for `work` at most `ms`; the work itself carries on (and stores what it reads) after the deadline. */
+async function within<T>(work: Promise<T>, ms: number): Promise<Bounded<T>> {
+  let timer: NodeJS.Timeout | undefined;
+  const settled = work.then(
+    (value): Bounded<T> => ({ kind: "done", value }),
+    (error): Bounded<T> => ({ kind: "error", error: error as Error }),
+  );
+  const timeout = new Promise<Bounded<T>>((resolve) => {
+    timer = setTimeout(() => resolve({ kind: "timeout" }), ms);
+  });
+  try {
+    return await Promise.race([settled, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export interface StoredSource {
-  /** ok = served from the store; failed = never read successfully (error). */
+  /** ok = served from the store; failed = could not be read (error), or (Gmail) not re-read for this answer. */
   status: "ok" | "empty" | "failed";
   items: TimelineItem[];
   error: string | null;
@@ -404,7 +466,7 @@ export interface StoredSource {
 export interface StoredTimeline {
   gmail: StoredSource;
   instantly: StoredSource;
-  /** Units older than TIMELINE_REFRESH_MS (or never read with a lead-service discovery pending). */
+  /** Background pass: lead-service campaign discovery + any unit still due. */
   refresh: () => Promise<void>;
   stale: boolean;
 }
@@ -412,11 +474,17 @@ export interface StoredTimeline {
 const refreshing = new Set<string>();
 
 /**
- * One person's Gmail + cold-email messages, from the store. A unit never read
- * yet, or stored before a move the freshness watch saw, is read NOW; everything else is served as
- * stored and, when older than TIMELINE_REFRESH_MS, re-read in the background
- * through `refresh()` (which also asks lead-service for cold-email campaigns
- * the build's cache did not know).
+ * One person's Gmail + cold-email messages. Every thread not read within
+ * `freshReadWindowMs()` is re-read from its source first (bounded by
+ * `freshReadDeadlineMs()`), then the answer is served from the store.
+ *
+ * Gmail is fail-loud: a Gmail thread that could not be re-read for this answer
+ * (source error, deadline, mailbox gone) makes the gmail source `failed`, its
+ * stored items still served beside the error, so a reader never takes a stale
+ * thread for a complete one. Cold email keeps its rule (failed only when nothing
+ * could ever be read): 639 cold-email threads of cancelled Instantly plans can
+ * never be read again (2026-10-14), and a strict rule there would stop every
+ * writer on those people for good.
  */
 export async function readStoredTimeline(
   scope: PeopleScope,
@@ -425,6 +493,8 @@ export async function readStoredTimeline(
   identity: SiblingIdentity,
   discoverCampaigns: (email: string) => Promise<string[]>,
 ): Promise<StoredTimeline> {
+  const startedAt = Date.now();
+  const windowMs = freshReadWindowMs();
   const leadCampaigns = await cachedLeadCampaigns(scope, person.emails);
   const loadUnits = () =>
     person.emails.length
@@ -438,21 +508,22 @@ export async function readStoredTimeline(
     .filter((e) => e.source === "instantly")
     .map((e) => instantlyUnit(e.unit.split(":")[0], e.address, null));
   const units = unitsOfPerson(person, gmailConnected, leadCampaigns, extra);
+  const keyOf = (u: { source: string; unit: string }) => `${u.source}|${u.unit}`;
+  const known = () => new Map(stored.map((e) => [keyOf(e), e]));
 
-  // A unit never attempted is read now, once; so is a unit stored BEFORE a move
-  // the freshness watch learned of (people/freshness.ts), so a message that
-  // exists is in the thread on the first open. A failed or older-format unit
-  // is NOT: it is served as stored and re-read in the background, so one slow
-  // mailbox (a 30s timeout) never makes every click wait. A thread nobody saw
-  // move is served as stored: no wait on an unchanged thread.
-  const known = () => new Map(stored.map((e) => [`${e.source}|${e.unit}`, e]));
   const k0 = known();
-  const missing = units.filter((u) => {
-    const k = k0.get(`${u.source}|${u.unit}`);
-    return !k || (k.status === "ok" && storedBeforeChange(k));
-  });
-  if (missing.length) {
-    await refreshUnits(scope.id, missing, identity);
+  // Gmail first: it is where a hand-written answer lands, and it decides the strict status.
+  const toRead = units
+    .filter((u) => freshReadDue(k0.get(keyOf(u)), startedAt, windowMs))
+    .sort((a, b) => (a.source === b.source ? 0 : a.source === "gmail" ? -1 : 1));
+  let readFailure: string | null = null;
+  let gmailGone = false;
+  if (toRead.length) {
+    const deadline = freshReadDeadlineMs();
+    const r = await within(refreshUnits(scope.id, toRead, identity, { fresh: true }), deadline);
+    if (r.kind === "timeout") readFailure = `not re-read within ${deadline / 1000}s`;
+    else if (r.kind === "error") readFailure = `re-read failed: ${r.error.message}`;
+    else gmailGone = r.value.gmailNotConnected;
     stored = await loadUnits();
   }
   const k1 = known();
@@ -467,7 +538,7 @@ export async function readStoredTimeline(
   const sourceOf = (source: "gmail" | "instantly"): StoredSource => {
     const mine = units.filter((u) => u.source === source);
     const asked = mine.map((u) => u.unit);
-    const states = mine.map((u) => k1.get(`${u.source}|${u.unit}`)).filter((x): x is NonNullable<typeof x> => !!x);
+    const states = mine.map((u) => k1.get(keyOf(u))).filter((x): x is NonNullable<typeof x> => !!x);
     const seen = new Set<string>();
     const items: TimelineItem[] = [];
     for (const r of rows) {
@@ -489,14 +560,34 @@ export async function readStoredTimeline(
     const failedStates = states.filter((s) => s.status !== "ok");
     const error = failedStates.length ? failedStates.map((s) => s.error).join("; ") : null;
     const readAt = okStates.length ? new Date(Math.min(...okStates.map((s) => s.indexedAt.getTime()))).toISOString() : null;
+    if (source === "gmail") {
+      const notFresh = mine.filter((u) => !freshFor(k1.get(keyOf(u)), startedAt, windowMs));
+      if (notFresh.length) {
+        const why = notFresh.map((u) => {
+          const k = k1.get(keyOf(u));
+          const reason = gmailGone
+            ? "google-service answered no_google_account_connected"
+            : k && k.status !== "ok"
+              ? (k.error ?? "read failed")
+              : (readFailure ?? "not re-read");
+          return `${u.unit}: ${reason}`;
+        });
+        return {
+          status: "failed",
+          items,
+          error: `Gmail could not be read fresh, the stored thread may miss recent messages (${why.join("; ")})`,
+          asked,
+          readAt,
+        };
+      }
+    }
     if (items.length === 0 && failedStates.length && okStates.length === 0) {
       return { status: "failed", items, error, asked, readAt };
     }
     return { status: items.length ? "ok" : "empty", items, error, asked, readAt };
   };
 
-  const now = Date.now();
-  const due = units.filter((u) => unitDue(u, k1.get(`${u.source}|${u.unit}`), now, TIMELINE_REFRESH_MS));
+  const stale = units.some((u) => unitDue(u, k0.get(keyOf(u)), startedAt, TIMELINE_REFRESH_MS));
   const key = `${scope.id}|${person.personKey}`;
   const refresh = async () => {
     if (refreshing.has(key)) return;
@@ -507,16 +598,21 @@ export async function readStoredTimeline(
         for (const c of await discoverCampaigns(email)) found.push(instantlyUnit(c, email, person.lastActivityAt));
       }
       const fresh = await loadUnits();
-      const kf = new Map(fresh.map((e) => [`${e.source}|${e.unit}`, e]));
-      const todo = new Map(due.map((u) => [`${u.source}|${u.unit}`, u]));
-      for (const u of found) if (!kf.has(`${u.source}|${u.unit}`)) todo.set(`${u.source}|${u.unit}`, u);
+      const kf = new Map(fresh.map((e) => [keyOf(e), e]));
+      const now = Date.now();
+      // A thread this answer already tried (ok or failed) is not read a second time.
+      const tried = (u: Unit) => (kf.get(keyOf(u))?.indexedAt.getTime() ?? 0) >= startedAt - windowMs;
+      const todo = new Map(
+        units.filter((u) => !tried(u) && unitDue(u, kf.get(keyOf(u)), now, TIMELINE_REFRESH_MS)).map((u) => [keyOf(u), u]),
+      );
+      for (const u of found) if (!kf.has(keyOf(u))) todo.set(keyOf(u), u);
       await refreshUnits(scope.id, [...todo.values()], identity);
     } finally {
       refreshing.delete(key);
     }
   };
 
-  return { gmail: sourceOf("gmail"), instantly: sourceOf("instantly"), refresh, stale: due.length > 0 };
+  return { gmail: sourceOf("gmail"), instantly: sourceOf("instantly"), refresh, stale };
 }
 
 /** How complete the index is for a scope, so a search never claims coverage it does not have. */
