@@ -1128,7 +1128,8 @@ kind `reported`, reportedBy crm-service, fromStep `lead_found`), within ~1 min. 
 - **PostHog reads phones**: a person with a phone property is read like an identified one, its first `+` number lands in
   `contacts.phone_e164` (people key `phone:`); one known by the phone ALONE (`raw_attributes.phoneOnly`) emits no `signup`.
 - Delivery: one org run per (org, brand), offer = the brand's only active offer (else `offer_unknown`, retried), body
-  `person {phone, email?, name?}` + `item {kind: "phone_given", phone, source, sourceContactId, crmContactId, givenAt}`.
+  `person {phone, email?, name?}` + `item {kind: "phone_given", phone, firstName, lastName, source, sourceContactId, crmContactId, givenAt}`
+  (first / last name as the source states them: PostHog `first_name`/`last_name`/`name`, Clerk's own; a greeting says "Hi Marie").
   Retries 1→60 min for 24h; 400/422 final. Read: `GET /orgs/phone-triggers?brandId=[&includeHistory=true]`; a pass now:
   `POST /internal/phone-triggers/watch`.
 

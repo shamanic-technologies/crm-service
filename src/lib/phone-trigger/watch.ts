@@ -143,9 +143,9 @@ async function baselineNewArtifacts(now: number): Promise<PhoneWatchResult["base
         .returning({ id: phoneWatchArtifacts.id });
       if (claimed.length === 0) return null;
       const inserted = (await tx.execute(sql`
-        INSERT INTO phone_given_reports (org_id, brand_id, phone, source, contact_id, source_contact_id, artifact_id, full_name, email, detected_at, status, reason)
+        INSERT INTO phone_given_reports (org_id, brand_id, phone, source, contact_id, source_contact_id, artifact_id, full_name, first_name, last_name, email, detected_at, status, reason)
         SELECT DISTINCT ON (c.phone_e164) c.org_id, c.brand_id, c.phone_e164, c.source, c.id, c.external_id,
-               ${a.id}::uuid, c.full_name, c.primary_email, ${new Date(now).toISOString()}::timestamptz,
+               ${a.id}::uuid, c.full_name, c.first_name, c.last_name, c.primary_email, ${new Date(now).toISOString()}::timestamptz,
                ${PHONE_STATUS.SKIPPED}, ${PHONE_REASONS.BEFORE_WATCH}
         FROM contacts c
         WHERE c.org_id = ${a.org_id} AND c.brand_id = ${a.brand_id} AND c.phone_e164 IS NOT NULL
@@ -171,7 +171,8 @@ export async function detectNewPhones(now: number = Date.now()): Promise<Pick<Ph
   // Only contacts of a WATCHED artifact (one still on its first load waits: its numbers are not news yet),
   // or learned from a chat (skipped whatever its connection's state).
   const found = await rows<Row>(sql`
-    SELECT c.id, c.org_id, c.brand_id, c.source, c.channel, c.phone_e164, c.primary_email, c.full_name, c.external_id,
+    SELECT c.id, c.org_id, c.brand_id, c.source, c.channel, c.phone_e164, c.primary_email, c.full_name,
+           c.first_name, c.last_name, c.external_id,
            coalesce(c.source_upload_id, c.source_connection_id) AS artifact_id
     FROM contacts c
     WHERE c.phone_e164 IS NOT NULL
@@ -198,6 +199,8 @@ export async function detectNewPhones(now: number = Date.now()): Promise<Pick<Ph
       phone: String(r.phone_e164),
       email: (r.primary_email as string | null) ?? null,
       fullName: (r.full_name as string | null) ?? null,
+      firstName: (r.first_name as string | null) ?? null,
+      lastName: (r.last_name as string | null) ?? null,
       sourceContactId: (r.external_id as string | null) ?? null,
       artifactId: (r.artifact_id as string | null) ?? null,
     };
@@ -213,6 +216,8 @@ export async function detectNewPhones(now: number = Date.now()): Promise<Pick<Ph
         sourceContactId: c.sourceContactId,
         artifactId: c.artifactId,
         fullName: c.fullName,
+        firstName: c.firstName,
+        lastName: c.lastName,
         email: c.email,
         detectedAt,
         status: skip ? PHONE_STATUS.SKIPPED : PHONE_STATUS.PENDING,
@@ -338,6 +343,8 @@ async function deliverOne(
         source: r.source,
         email: r.email,
         fullName: r.fullName,
+        firstName: r.firstName,
+        lastName: r.lastName,
         contactId: r.contactId,
         sourceContactId: r.sourceContactId,
         detectedAt: r.detectedAt,

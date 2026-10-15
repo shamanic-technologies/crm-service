@@ -37,7 +37,7 @@ router.get("/orgs/phone-triggers", apiKeyAuth, requireOrg("phone-triggers.list")
         id: r.id,
         phone: r.phone,
         source: r.source,
-        person: { fullName: r.fullName, email: r.email, contactId: r.contactId, sourceContactId: r.sourceContactId },
+        person: { fullName: r.fullName, firstName: r.firstName, lastName: r.lastName, email: r.email, contactId: r.contactId, sourceContactId: r.sourceContactId },
         status: r.status,
         reason: r.reason,
         lastError: r.lastError,

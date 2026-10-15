@@ -3175,6 +3175,8 @@ export const PhoneTriggerReportSchema = z.object({
   source: z.string().describe("The connector that stated the number first: `posthog`, `clerk`, `gohighlevel`, `stripe`, `csv`, `matrix`..."),
   person: z.object({
     fullName: z.string().nullable(),
+    firstName: z.string().nullable(),
+    lastName: z.string().nullable(),
     email: z.string().nullable(),
     contactId: z.string().uuid().nullable(),
     sourceContactId: z.string().nullable(),

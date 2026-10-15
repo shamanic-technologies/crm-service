@@ -159,7 +159,7 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
       offerId: OFFER,
       idempotencyKey: `crm:phone_given:${BRAND}:+447700900002`,
       person: { phone: "+447700900002", email: "user_new@example.com", name: "Test user_new" },
-      item: { kind: "phone_given", phone: "+447700900002", source: "clerk", sourceContactId: "user_new" },
+      item: { kind: "phone_given", phone: "+447700900002", firstName: "Test", lastName: "user_new", source: "clerk", sourceContactId: "user_new" },
     });
     const [row] = (await reports()).filter((r) => r.phone === "+447700900002");
     expect(row).toMatchObject({ status: "reported", campaignEventId: "ev-1" });
@@ -172,7 +172,7 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
   it("a PostHog visitor known only by the phone they typed is reported; signing up later with that number is the SAME occurrence", async () => {
     await runPhoneWatchPass(T0);
     posthogPersons = [{
-      id: "ph-anon-1", email: null, name: null, first_name: null, last_name: null, created_at: new Date(T0).toISOString(),
+      id: "ph-anon-1", email: null, name: "Marie Curie", first_name: "Marie", last_name: "Curie", created_at: new Date(T0).toISOString(),
       prop_phone: "+447700900003", prop_phone_number: null, prop_phoneNumber: null, is_identified: false, distinct_ids: ["anon-abc"],
     }];
     await runPhoneWatchPass(min(1));
@@ -180,7 +180,7 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     expect(c).toMatchObject({ phoneE164: "+447700900003", primaryEmail: null });
     expect((c.rawAttributes as Record<string, unknown>).phoneOnly).toBe(true);
     expect(campaignCalls).toHaveLength(1);
-    expect(campaignCalls[0]).toMatchObject({ person: { phone: "+447700900003" }, item: { source: "posthog" } });
+    expect(campaignCalls[0]).toMatchObject({ person: { phone: "+447700900003", name: "Marie Curie" }, item: { source: "posthog", firstName: "Marie", lastName: "Curie" } });
     expect((campaignCalls[0].person as Record<string, unknown>).email).toBeUndefined();
 
     clerkUsers = [clerkUser("user_signup", "+447700900003", min(5))];

@@ -44,6 +44,8 @@ export interface PhoneCandidate {
   phone: string;
   email: string | null;
   fullName: string | null;
+  firstName: string | null;
+  lastName: string | null;
   sourceContactId: string | null;
   artifactId: string | null;
 }
@@ -70,6 +72,8 @@ export interface PhoneOccurrence {
   source: string;
   email: string | null;
   fullName: string | null;
+  firstName: string | null;
+  lastName: string | null;
   contactId: string | null;
   sourceContactId: string | null;
   detectedAt: Date;
@@ -83,7 +87,8 @@ export interface PhoneOccurrence {
 export function phoneOccurrenceBody(o: PhoneOccurrence): Record<string, unknown> {
   const person: Record<string, unknown> = { phone: o.phone };
   if (o.email) person.email = o.email;
-  if (o.fullName) person.name = o.fullName.slice(0, 300);
+  const name = o.fullName ?? ([o.firstName, o.lastName].filter(Boolean).join(" ") || null);
+  if (name) person.name = name.slice(0, 300);
   return {
     triggerId: PHONE_GIVEN_TRIGGER,
     brandId: o.brandId,
@@ -94,6 +99,9 @@ export function phoneOccurrenceBody(o: PhoneOccurrence): Record<string, unknown>
     item: {
       kind: "phone_given",
       phone: o.phone,
+      // What a greeting reads ("Hi Marie"): the source's own first / last name, null when it states none.
+      firstName: o.firstName,
+      lastName: o.lastName,
       source: o.source,
       sourceContactId: o.sourceContactId,
       crmContactId: o.contactId,

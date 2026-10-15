@@ -1300,6 +1300,9 @@ export const phoneGivenReports = pgTable(
     // The source artifact (CSV upload or connection) the contact came from.
     artifactId: uuid("artifact_id"),
     fullName: text("full_name"),
+    // The person's first / last name as the source states them (a WhatsApp greeting says "Hi Marie").
+    firstName: text("first_name"),
+    lastName: text("last_name"),
     email: text("email"),
     detectedAt: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
     status: text("status").notNull(),

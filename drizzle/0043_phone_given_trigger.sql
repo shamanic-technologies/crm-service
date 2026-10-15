@@ -9,6 +9,8 @@ CREATE TABLE IF NOT EXISTS "phone_given_reports" (
 	"source_contact_id" text,
 	"artifact_id" uuid,
 	"full_name" text,
+	"first_name" text,
+	"last_name" text,
 	"email" text,
 	"detected_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"status" text NOT NULL,

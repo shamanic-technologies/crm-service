@@ -5,7 +5,7 @@ import { derivePosthogContact } from "../../src/lib/posthog/records.js";
 
 const base: PhoneCandidate = {
   contactId: "c1", orgId: "o", brandId: "b", source: "clerk", channel: null, phone: "+447700900001",
-  email: "a@example.com", fullName: "A B", sourceContactId: "user_1", artifactId: "art",
+  email: "a@example.com", fullName: "A B", firstName: "A", lastName: "B", sourceContactId: "user_1", artifactId: "art",
 };
 
 describe("phone given rules (WA-GIVEN-TRIGGER-1015)", () => {
@@ -20,17 +20,17 @@ describe("phone given rules (WA-GIVEN-TRIGGER-1015)", () => {
 
   it("names the person by the number, adds the email when held, omits absent values", () => {
     const at = new Date("2026-10-15T15:00:00Z");
-    const body = phoneOccurrenceBody({ brandId: "b", offerId: "o1", phone: "+447700900001", source: "posthog", email: null, fullName: null, contactId: "c1", sourceContactId: "ph-1", detectedAt: at });
+    const body = phoneOccurrenceBody({ brandId: "b", offerId: "o1", phone: "+447700900001", source: "posthog", email: null, fullName: null, firstName: "Marie", lastName: null, contactId: "c1", sourceContactId: "ph-1", detectedAt: at });
     expect(body).toEqual({
       triggerId: PHONE_GIVEN_TRIGGER,
       brandId: "b",
       offerId: "o1",
       idempotencyKey: "crm:phone_given:b:+447700900001",
       occurredAt: at.toISOString(),
-      person: { phone: "+447700900001" },
-      item: { kind: "phone_given", phone: "+447700900001", source: "posthog", sourceContactId: "ph-1", crmContactId: "c1", givenAt: at.toISOString() },
+      person: { phone: "+447700900001", name: "Marie" },
+      item: { kind: "phone_given", phone: "+447700900001", firstName: "Marie", lastName: null, source: "posthog", sourceContactId: "ph-1", crmContactId: "c1", givenAt: at.toISOString() },
     });
-    expect(phoneOccurrenceBody({ brandId: "b", offerId: "o1", phone: "+1", source: "clerk", email: "a@x.com", fullName: "A", contactId: null, sourceContactId: null, detectedAt: at }).person)
+    expect(phoneOccurrenceBody({ brandId: "b", offerId: "o1", phone: "+1", source: "clerk", email: "a@x.com", fullName: "A", firstName: null, lastName: null, contactId: null, sourceContactId: null, detectedAt: at }).person)
       .toEqual({ phone: "+1", email: "a@x.com", name: "A" });
   });
 
