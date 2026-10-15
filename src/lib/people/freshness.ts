@@ -36,6 +36,7 @@ import { createRun, updateRun } from "../runs-client.js";
 import { refreshUnits, UNIT_REFRESH_MS, type Unit } from "./search.js";
 import { siblingGet, type SiblingIdentity } from "./siblings.js";
 import type { BuildSummary } from "./build.js";
+import { deliverDueGmailReplies, detectGmailRepliesWithRun } from "../reply-trigger/gmail.js";
 
 const SERVICE_NAME = "crm-service";
 
@@ -52,6 +53,12 @@ const FACT_PAGE = 1000;
 const FACT_WALK_BUDGET_MS = 30_000;
 /** Gmail correspondents read per tick (most recent first). */
 const GMAIL_RECENT = 200;
+/**
+ * The mailbox's latest messages read per tick (`GET /orgs/google/messages`, newest first). The
+ * correspondents read only lists addresses the owner WROTE to: a lead who writes to the mailbox
+ * first is no correspondent, and the reply trigger must still see their mail within a minute.
+ */
+const GMAIL_LATEST_MESSAGES = 25;
 
 interface OutreachFact {
   seq: string;
@@ -137,6 +144,31 @@ async function gmailMoved(scope: PeopleScope, identity: SiblingIdentity): Promis
   return recent.filter((c) => marks.has(c.unit) && (marks.get(c.unit) ?? "") < c.mark);
 }
 
+/**
+ * The stored Gmail threads whose person just SENT a mail the store does not hold yet: the
+ * mailbox's latest messages, matched on their sender, read after the thread was stored.
+ */
+async function gmailSendersMoved(scope: PeopleScope, identity: SiblingIdentity): Promise<{ unit: string }[]> {
+  const r = await siblingGet("google", `/orgs/google/messages?limit=${GMAIL_LATEST_MESSAGES}`, identity);
+  if (r.status === 404) return [];
+  if (r.status !== 200) {
+    throw new Error(`google-service messages returned ${r.status}: ${JSON.stringify(r.body).slice(0, 300)}`);
+  }
+  const latest = new Map<string, number>();
+  for (const m of (r.body as { items: { fromEmail: string | null; sentAt: string | null }[] }).items) {
+    const from = m.fromEmail?.trim().toLowerCase();
+    const at = m.sentAt ? Date.parse(m.sentAt) : NaN;
+    if (!from || Number.isNaN(at)) continue;
+    latest.set(from, Math.max(latest.get(from) ?? 0, at));
+  }
+  if (latest.size === 0) return [];
+  const known = await db
+    .select({ unit: peopleMessageUnits.unit, indexedAt: peopleMessageUnits.indexedAt })
+    .from(peopleMessageUnits)
+    .where(and(eq(peopleMessageUnits.scopeId, scope.id), eq(peopleMessageUnits.source, "gmail"), inArray(peopleMessageUnits.unit, [...latest.keys()])));
+  return known.filter((k) => k.indexedAt.getTime() < (latest.get(k.unit) ?? 0)).map((k) => ({ unit: k.unit }));
+}
+
 /** Record that these stored threads moved now. Threads never stored are left to the open (read on first sight). */
 async function markChanged(scopeId: string, source: "gmail" | "instantly", moved: { unit: string; mark?: string }[]): Promise<void> {
   const now = new Date();
@@ -182,7 +214,16 @@ export async function watchScope(scope: PeopleScope): Promise<FreshnessScopeResu
   const instantly = await instantlyMoved(scope, pollIdentity);
   await markChanged(scope.id, "instantly", instantly.map((unit) => ({ unit })));
   const gmailStatus = (scope.sourceReads as BuildSummary | null)?.sources.find((s) => s.source === "gmail")?.status;
-  const gmail = gmailStatus && gmailStatus !== "not_connected" ? await gmailMoved(scope, pollIdentity) : [];
+  const gmailConnected = !!gmailStatus && gmailStatus !== "not_connected";
+  const gmail: { unit: string; mark?: string }[] = gmailConnected ? await gmailMoved(scope, pollIdentity) : [];
+  if (gmailConnected) {
+    // Additive to the correspondents read: its failure is logged, never fails the watch.
+    const senders = await gmailSendersMoved(scope, pollIdentity).catch((err) => {
+      console.error(`[crm-service] people freshness: Gmail latest messages unreadable scope=${scope.id}: ${(err as Error).message}`);
+      return [] as { unit: string }[];
+    });
+    for (const m of senders) if (!gmail.some((g) => g.unit === m.unit)) gmail.push(m);
+  }
   await markChanged(scope.id, "gmail", gmail);
   result.moved = instantly.length + gmail.length;
 
@@ -224,6 +265,11 @@ export async function watchScope(scope: PeopleScope): Promise<FreshnessScopeResu
   return result;
 }
 
+function gmailConnectedScope(scope: PeopleScope): boolean {
+  const status = (scope.sourceReads as BuildSummary | null)?.sources.find((s) => s.source === "gmail")?.status;
+  return !!status && status !== "not_connected";
+}
+
 let running = false;
 
 /** One watch pass over every scope; one failing scope does not stop the others. */
@@ -244,7 +290,17 @@ export async function runFreshnessPass(): Promise<FreshnessScopeResult[] | null>
         console.error(`[crm-service] people freshness failed scope=${scope.id}:`, err);
         results.push({ scopeId: scope.id, moved: 0, refreshed: 0, failed: 0, error: (err as Error).message });
       }
+      // The Gmail reply trigger reads the store the watch just brought up to date (even when the watch failed:
+      // a failed pass is healed by the next, over everything that moved in the lookback).
+      if (gmailConnectedScope(scope)) {
+        try {
+          await detectGmailRepliesWithRun(scope);
+        } catch (err) {
+          console.error(`[crm-service][reply-trigger] Gmail detection failed scope=${scope.id}:`, err);
+        }
+      }
     }
+    await deliverDueGmailReplies().catch((err) => console.error("[crm-service][reply-trigger] Gmail delivery failed:", err));
     return results;
   } finally {
     running = false;

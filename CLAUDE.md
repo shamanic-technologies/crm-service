@@ -1135,6 +1135,20 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   campaign|not_campaign, personId, conversationId, roomId, firstMessageAt, lastMessageAt, messages}` (latest 10,
   2000 chars each). Delivery waits until `people` hold the conversation (`person_not_built` → rebuild → deliver).
   Retries 1→60 min for 24h; 400/422 final. Read: `GET /orgs/matrix/reply-triggers?brandId=`.
+- **Gmail** (`gmail.ts` + pure `email-thread.ts`, GMAIL-REPLY-ANY-LEAD-1015): same rules on the org's connected
+  mailbox, read from OUR Gmail store (`people_message_texts` source gmail, one conversation per (scope, address)),
+  right after the freshness watch re-reads it (correspondents + the mailbox's latest 25 messages by sender, so a
+  person who writes first is seen within a minute). Any outbound mail (typed in Gmail, sent by the responder through
+  google-service) ends the burst; `other` (third-party) mails are nobody's word. Rows: `source gmail`, `scope_id` +
+  `address`, no connection / room; `people_scopes.gmail_reply_watch_since` = never history; key
+  `crm:gmail:reply:<brandId>:<gmail message id>`. **A cold-email reply is the EMAIL PATH's**: a mail addressed to one
+  of our sending mailboxes (instantly-service `/internal/accounts`) is recorded `cold_email_path`, never reported
+  here (instantly-service fires it from that mailbox): the mailbox the person wrote TO decides the owner. Own
+  addresses (sending mailboxes, brand domain) = `own_team`; `sender_verdicts` automated >= 0.75 or Jev on the burst =
+  `automated_reply`. **Gmail is per ORG**: reported under every brand whose people know the person OUTSIDE the mailbox
+  (any non-gmail presence), else the ONE brand with the highest `conversation_verdicts` brand probability, else the
+  oldest scope; other brands record nothing. Offer: conversation tag > only active offer. Delivery: one org run per
+  scope, `person_not_built` → rebuild → deliver.
 
 ## Boot: the port binds BEFORE migrations
 
