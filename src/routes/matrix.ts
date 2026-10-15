@@ -32,7 +32,7 @@ const router = Router();
 const brandIdSchema = z.string().uuid();
 
 // ─── GET /orgs/matrix/reply-triggers ─────────────────────────────────────────
-// Answers in threads our campaigns opened (lib/reply-trigger/): what was detected,
+// What people wrote to the brand on a mirrored channel or its connected Gmail (lib/reply-trigger/): what was detected,
 // skipped (and why) and reported to campaign-service, with the timings.
 
 router.get(
@@ -52,7 +52,9 @@ router.get(
     res.json({
       reports: rows.map((r) => ({
         id: r.id,
+        source: r.source,
         channel: r.channel,
+        address: r.address,
         campaignId: r.campaignId,
         offerId: r.offerId,
         offerBasis: r.offerBasis,

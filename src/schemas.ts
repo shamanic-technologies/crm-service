@@ -3171,19 +3171,27 @@ registry.registerPath({
 
 export const ReplyTriggerReportSchema = z.object({
   id: z.string().uuid(),
+  source: z.string().describe("`matrix` (WhatsApp, LinkedIn) | `gmail` (the org's connected mailbox)."),
   channel: z.string(),
+  address: z.string().nullable().describe("gmail: the person's address (the conversation). matrix: null."),
   campaignId: z.string().nullable().describe("The last campaign that wrote in the thread before the burst; null = none did."),
   offerId: z.string().uuid().nullable(),
   offerBasis: z.string().nullable().describe("What decided the offer: `campaign` | `conversation` (Jev's offer tag) | `only_offer`."),
   conversationId: z.string().uuid().nullable(),
   person: z.object({ personId: z.string().uuid().nullable(), fullName: z.string().nullable(), email: z.string().nullable(), phone: z.string().nullable() }),
-  messages: z.array(z.object({ eventId: z.string(), at: z.string(), text: z.string() })),
+  messages: z.array(z.object({
+    eventId: z.string().optional().describe("matrix: the Matrix event id."),
+    messageId: z.string().optional().describe("gmail: the Gmail message id."),
+    at: z.string(),
+    subject: z.string().nullable().optional(),
+    text: z.string(),
+  })),
   firstMessageAt: z.string(),
   lastMessageAt: z.string(),
   judgment: z.unknown(),
   status: z.enum(["pending", "reported", "skipped", "failed"]),
   reason: z.string().nullable().describe(
-    "`own_team` | `automated_reply` | `before_watch` | `no_email` | `person_not_built` | `offer_unknown` | `campaign_refused` | `campaign_unreachable`",
+    "`own_team` | `automated_reply` | `before_watch` | `no_email` | `cold_email_path` (gmail: addressed to one of our sending mailboxes, the email path reports it) | `person_not_built` | `offer_unknown` | `campaign_refused` | `campaign_unreachable`",
   ),
   lastError: z.string().nullable(),
   attempts: z.number().int(),
@@ -3196,13 +3204,15 @@ export const ReplyTriggerReportSchema = z.object({
 registry.registerPath({
   method: "get",
   path: "/orgs/matrix/reply-triggers",
-  summary: "Messages people wrote to the brand on a personal channel, and their `positive_reply_received` reports",
+  summary: "Messages people wrote to the brand on a personal channel or its connected Gmail, and their `positive_reply_received` reports",
   description:
     "Every one-to-one thread is read as it is mirrored (the live watch, every ~10 s; the 5-min pass heals), whoever " +
     "opened it. The person's words since our last message (a send or a message typed by hand on the account) are ONE " +
     "burst, reported ONCE to campaign-service (`POST /internal/trigger-events`, trigger `positive_reply_received`), naming " +
     "the person by email, for an offer (`offerBasis`). Who is answered is the answering pipe's strategy there. An " +
-    "auto-reply is not an answer (`automated_reply`, Jev); the brand's own team is never reported (`own_team`). Newest first.",
+    "auto-reply is not an answer (`automated_reply`, Jev); the brand's own team is never reported (`own_team`). Gmail " +
+    "(`source: gmail`): every mail a person sends to the org's connected mailbox, same rules, under the brand(s) whose " +
+    "people know the person; a reply to our cold email (addressed to a sending mailbox) is the email path's (`cold_email_path`). Newest first.",
   request: { query: z.object({ brandId: z.string().uuid(), limit: z.coerce.number().int().min(1).max(200).optional() }) },
   responses: {
     200: { description: "Reports", content: { "application/json": { schema: z.object({ reports: z.array(ReplyTriggerReportSchema) }) } } },

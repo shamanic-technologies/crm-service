@@ -145,7 +145,7 @@ async function threadsThatMoved(
   return rows.map((r) => ({ roomId: r.room_id, campaign: r.campaign === true }));
 }
 
-interface Judgment {
+export interface Judgment {
   status: "ok" | "failed";
   choice: string | null;
   confidence: number | null;
@@ -153,13 +153,23 @@ interface Judgment {
   error: string | null;
 }
 
+/** Who a burst's Jev call is billed to and which channel it was written on. */
+export interface BurstJudgeIdentity {
+  orgId: string;
+  userId: string;
+  brandId: string;
+  channel: string;
+  /** For the log line: the connection / scope the burst was read from. */
+  where: string;
+}
+
 /** Jev: did a PERSON write this burst, or is it an automatic reply? One call per burst. */
-async function judgeBurst(conn: MatrixConnection, runId: () => Promise<string>, burst: BurstMessage[]): Promise<Judgment> {
+export async function judgeBurst(who: BurstJudgeIdentity, runId: () => Promise<string>, burst: BurstMessage[]): Promise<Judgment> {
   try {
     const result = await judgeChoices(
       {
         context:
-          `A business talks with someone on ${conn.channel}. These are the messages that came from that ` +
+          `A business talks with someone on ${who.channel}. These are the messages that came from that ` +
           "person's account since the business last wrote (or since the start), in order.",
         messages: burst.map((m) => ({ at: m.at, text: m.text })),
       },
@@ -177,7 +187,7 @@ async function judgeBurst(conn: MatrixConnection, runId: () => Promise<string>, 
           },
         },
       },
-      { orgId: conn.orgId, userId: conn.createdByUserId, runId: await runId(), brandIds: [conn.brandId] },
+      { orgId: who.orgId, userId: who.userId, runId: await runId(), brandIds: [who.brandId] },
     );
     const a = result.answers?.sender;
     if (!a || (a.choice !== "person" && a.choice !== "automated")) throw new Error(`unexpected answer ${JSON.stringify(a)}`);
@@ -185,7 +195,7 @@ async function judgeBurst(conn: MatrixConnection, runId: () => Promise<string>, 
   } catch (err) {
     // Jev down = a person (never silence someone because a judge was unavailable).
     const error = (err as Error).message.slice(0, 500);
-    console.error(`[crm-service][reply-trigger] Jev on a burst failed (connection ${conn.id}), treated as a person: ${error}`);
+    console.error(`[crm-service][reply-trigger] Jev on a burst failed (${who.where}), treated as a person: ${error}`);
     return { status: "failed", choice: null, confidence: null, model: null, error };
   }
 }
@@ -328,7 +338,11 @@ export async function detectReplies(
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.OWN_TEAM;
     } else {
-      judgment = await judgeBurst(conn, runId, burst);
+      judgment = await judgeBurst(
+        { orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId, channel: conn.channel, where: `connection ${conn.id}` },
+        runId,
+        burst,
+      );
       if (judgment.choice === "automated" && (judgment.confidence ?? 0) >= AUTOMATED_MIN_CONFIDENCE) {
         status = REPLY_STATUS.SKIPPED;
         reason = REPLY_REASONS.AUTOMATED_REPLY;
@@ -371,6 +385,9 @@ export async function detectReplies(
 
 // ─── delivery ───────────────────────────────────────────────────────────────
 
+/** A report of a Matrix thread (source `matrix`): its connection and room are always set. */
+type MatrixReport = ReplyTriggerReport & { connectionId: string; roomId: string };
+
 interface PersonRow {
   personId: string | null;
   displayName: string | null;
@@ -409,7 +426,7 @@ async function personOfConversation(orgId: string, brandId: string, conversation
 }
 
 /** The burst as bronze holds it NOW (it may have grown since detection), from its first message. */
-async function currentBurst(r: ReplyTriggerReport, ownMxid: string): Promise<BurstMessage[]> {
+async function currentBurst(r: MatrixReport, ownMxid: string): Promise<BurstMessage[]> {
   const rows = await db
     .select({ payload: matrixRawEvents.payload })
     .from(matrixRawEvents)
@@ -431,7 +448,7 @@ async function currentBurst(r: ReplyTriggerReport, ownMxid: string): Promise<Bur
   return from >= 0 ? burst.slice(from) : (r.messages as BurstMessage[]);
 }
 
-async function settle(r: ReplyTriggerReport, now: number, set: Partial<ReplyTriggerReport>): Promise<void> {
+export async function settle(r: ReplyTriggerReport, now: number, set: Partial<ReplyTriggerReport>): Promise<void> {
   await db
     .update(replyTriggerReports)
     .set({ ...set, attempts: r.attempts + 1, lastAttemptAt: new Date(now) })
@@ -445,12 +462,14 @@ async function settle(r: ReplyTriggerReport, now: number, set: Partial<ReplyTrig
  *  3. the brand's ONLY active offer.
  * Nothing else: `offerId: null` = offer_unknown, never a guess.
  */
-async function resolveReplyOffer(
+export async function resolveReplyOffer(
   identity: DoorIdentity,
   r: ReplyTriggerReport,
 ): Promise<{ offerId: string | null; offerBasis: string | null }> {
   if (r.campaignId) return { offerId: await readCampaignOffer(identity, r.campaignId), offerBasis: "campaign" };
-  if (r.conversationId) {
+  // The conversation Jev judged (people/relevance.ts): a Matrix conversation, or a Gmail address.
+  const conversationKey = r.source === "gmail" ? (r.address ? `gmail:${r.address}` : null) : r.conversationId ? `matrix:${r.conversationId}` : null;
+  if (conversationKey) {
     const [v] = await db
       .select({ offerIds: conversationVerdicts.offerIds, offerScores: conversationVerdicts.offerScores })
       .from(conversationVerdicts)
@@ -458,7 +477,7 @@ async function resolveReplyOffer(
         and(
           eq(conversationVerdicts.orgId, r.orgId),
           eq(conversationVerdicts.brandId, r.brandId),
-          eq(conversationVerdicts.conversationKey, `matrix:${r.conversationId}`),
+          eq(conversationVerdicts.conversationKey, conversationKey),
         ),
       );
     const tagged = pickTaggedOffer((v?.offerIds as string[] | undefined) ?? [], (v?.offerScores as Record<string, number> | null) ?? null);
@@ -519,7 +538,7 @@ export function replyOccurrenceBody(input: {
  * `person_not_built` asks the caller to rebuild the brand's people and retry.
  */
 export async function deliverReply(
-  r: ReplyTriggerReport,
+  r: MatrixReport,
   conn: MatrixConnection,
   identity: DoorIdentity,
   now: number,
@@ -627,13 +646,14 @@ export async function deliverReply(
   }
 }
 
-/** Recorded bursts due a delivery: pending, or failed and past their backoff, inside the window. */
-async function dueReports(now: number): Promise<ReplyTriggerReport[]> {
+/** Recorded bursts of `source` due a delivery: pending, or failed and past their backoff, inside the window. */
+export async function dueReports(now: number, source: string): Promise<ReplyTriggerReport[]> {
   const rows = await db
     .select()
     .from(replyTriggerReports)
     .where(
       and(
+        eq(replyTriggerReports.source, source),
         inArray(replyTriggerReports.status, [REPLY_STATUS.PENDING, REPLY_STATUS.FAILED]),
         or(isNull(replyTriggerReports.reason), ne(replyTriggerReports.reason, REPLY_REASONS.CAMPAIGN_REFUSED)),
         gt(replyTriggerReports.firstMessageAt, new Date(now - REPORT_RETRY_WINDOW_MS)),
@@ -657,8 +677,8 @@ export async function deliverDueReplies(
   delivering = true;
   try {
     const delivered: { reportId: string; status: string; reason: string | null }[] = [];
-    const groups = new Map<string, ReplyTriggerReport[]>();
-    for (const r of await dueReports(now)) groups.set(`${r.orgId}|${r.brandId}`, [...(groups.get(`${r.orgId}|${r.brandId}`) ?? []), r]);
+    const groups = new Map<string, MatrixReport[]>();
+    for (const r of (await dueReports(now, SOURCE)) as MatrixReport[]) groups.set(`${r.orgId}|${r.brandId}`, [...(groups.get(`${r.orgId}|${r.brandId}`) ?? []), r]);
     for (const reports of groups.values()) {
       const { orgId, brandId } = reports[0];
       const conns = await db
@@ -672,7 +692,7 @@ export async function deliverDueReplies(
       const run = await createRun({ ...ids, serviceName: SERVICE_NAME, taskName: "reply-trigger.report" });
       const identity = { orgId, brandId, userId, runId: run.id };
       let failed = false;
-      const notBuilt: ReplyTriggerReport[] = [];
+      const notBuilt: MatrixReport[] = [];
       for (const r of reports) {
         const conn = byId.get(r.connectionId);
         if (!conn) continue;
@@ -684,7 +704,7 @@ export async function deliverDueReplies(
       if (notBuilt.length > 0) {
         await (opts.rebuild ?? rebuildBrandPeople)(orgId, brandId);
         for (const stale of notBuilt) {
-          const [r] = await db.select().from(replyTriggerReports).where(eq(replyTriggerReports.id, stale.id));
+          const [r] = (await db.select().from(replyTriggerReports).where(eq(replyTriggerReports.id, stale.id))) as MatrixReport[];
           const outcome = await deliverReply(r, byId.get(r.connectionId)!, identity, Date.now());
           if (outcome.status !== REPLY_STATUS.REPORTED && outcome.status !== REPLY_STATUS.SKIPPED) failed = true;
           delivered.push({ reportId: r.id, ...outcome });
@@ -698,7 +718,7 @@ export async function deliverDueReplies(
   }
 }
 
-async function rebuildBrandPeople(orgId: string, brandId: string): Promise<void> {
+export async function rebuildBrandPeople(orgId: string, brandId: string): Promise<void> {
   const [scope] = await db
     .select()
     .from(peopleScopes)

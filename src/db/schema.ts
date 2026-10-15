@@ -1055,6 +1055,8 @@ export const peopleScopes = pgTable(
     lastRunId: text("last_run_id"),
     // instantly-service outreach fact feed position this scope's freshness watch has read up to.
     outreachFactsCursor: text("outreach_facts_cursor"),
+    // When the Gmail reply trigger first looked at this scope (lib/reply-trigger/gmail.ts): earlier mail is history.
+    gmailReplyWatchSince: timestamp("gmail_reply_watch_since", { withTimezone: true }),
 
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1310,11 +1312,15 @@ export const replyTriggerReports = pgTable(
     id: uuid("id").primaryKey().defaultRandom(),
     orgId: uuid("org_id").notNull(),
     brandId: uuid("brand_id").notNull(),
-    // 'matrix' today (WhatsApp; LinkedIn when a send route writes there).
+    // 'matrix' (WhatsApp, LinkedIn) | 'gmail' (the org's connected mailbox, lib/reply-trigger/gmail.ts).
     source: text("source").notNull(),
     channel: text("channel").notNull(),
-    connectionId: uuid("connection_id").notNull(),
-    roomId: text("room_id").notNull(),
+    // matrix: the connection + room of the thread. gmail: null.
+    connectionId: uuid("connection_id"),
+    roomId: text("room_id"),
+    // gmail: the people scope (org, brand) whose store holds the thread, and the person's address (the thread).
+    scopeId: uuid("scope_id"),
+    address: text("address"),
     conversationId: uuid("conversation_id"),
     // The burst's first message: the row's identity.
     anchorEventId: text("anchor_event_id").notNull(),
@@ -1350,6 +1356,7 @@ export const replyTriggerReports = pgTable(
   (table) => [
     uniqueIndex("reply_trigger_reports_anchor_uq").on(table.orgId, table.brandId, table.source, table.anchorEventId),
     index("reply_trigger_reports_room_idx").on(table.connectionId, table.roomId),
+    index("reply_trigger_reports_scope_address_idx").on(table.scopeId, table.address),
     index("reply_trigger_reports_status_idx").on(table.status),
   ],
 );
