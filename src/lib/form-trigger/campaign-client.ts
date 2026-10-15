@@ -9,7 +9,7 @@
  * (`replayed: true`) and nothing fires twice.
  */
 import type { FormAnswer } from "./submission.js";
-import { CampaignRefusal, campaignServiceConfigured, recordTriggerEvent, type RecordedOccurrence } from "../trigger-door.js";
+import { CampaignRefusal, campaignServiceConfigured, doorPersonKey, recordTriggerEvent, type RecordedOccurrence } from "../trigger-door.js";
 
 export const FORM_SUBMITTED_TRIGGER = "form_submitted";
 export { CampaignRefusal, campaignServiceConfigured, type RecordedOccurrence };
@@ -45,9 +45,11 @@ export function occurrenceIdempotencyKey(o: Pick<FormOccurrence, "source" | "sub
  */
 export function occurrenceBody(o: FormOccurrence): Record<string, unknown> {
   const person: Record<string, unknown> = {};
-  if (o.person.email) person.email = o.person.email;
+  // Email when held (byte-identical to before), else the E.164 phone the door names them by.
+  const key = doorPersonKey(o.person.email, o.person.phone);
+  if (key?.email) person.email = key.email;
   if (o.person.fullName) person.name = o.person.fullName.slice(0, 300);
-  if (o.person.phone) person.phone = o.person.phone.slice(0, 50);
+  if (key?.phone) person.phone = key.phone.slice(0, 50);
   if (o.person.sourceContactId) person.crmContact = { provider: o.source, contactId: o.person.sourceContactId };
   return {
     triggerId: FORM_SUBMITTED_TRIGGER,

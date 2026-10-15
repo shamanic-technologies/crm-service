@@ -1,6 +1,7 @@
 /**
  * campaign-service's generic trigger door (`POST /internal/trigger-events`), the
- * ONE way crm-service tells campaign-service "this happened to this person":
+ * ONE way crm-service tells campaign-service "this happened to this person"
+ * (named by email, else by E.164 phone: `doorPersonKey`):
  * a new CRM form fill (`form_submitted`, lib/form-trigger/) and a person
  * answering a thread a campaign opened on a personal channel
  * (`positive_reply_received`, lib/reply-trigger/). Nothing here is specific to
@@ -11,7 +12,29 @@
  * campaign-service's FIRST event (`replayed: true`) and nothing fires twice.
  */
 
+import { normalizePhone } from "./people/identity.js";
+
 const TIMEOUT_MS = Number(process.env.CAMPAIGN_SERVICE_TIMEOUT_MS) || 30_000;
+
+/**
+ * The skip every caller records when the door cannot name the person: no email
+ * AND no international phone (REPLY-PHONE-ONLY-1015). Before it, `no_email`
+ * (kept on older rows, never written again).
+ */
+export const NO_EMAIL_OR_PHONE = "no_email_or_phone";
+
+/**
+ * How the door names a person (campaign-service v0.75.81, any trigger): by
+ * email when one is held (byte-identical to before), else by an E.164 phone
+ * (`+` + country code). Null = neither: nobody campaign-service can file.
+ * A national number carries no country and is no phone the door accepts.
+ * Never an email made up from a phone.
+ */
+export function doorPersonKey(email: string | null | undefined, phone: string | null | undefined): { email: string | null; phone: string | null } | null {
+  if (email) return { email, phone: phone ?? null };
+  const e164 = normalizePhone(phone);
+  return e164 ? { email: null, phone: e164 } : null;
+}
 
 export interface DoorIdentity {
   orgId: string;

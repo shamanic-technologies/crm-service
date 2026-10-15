@@ -109,6 +109,18 @@ describe("readThreadForReply", () => {
 });
 
 describe("replyOccurrenceBody", () => {
+  it("names a WhatsApp writer with no email by phone + name, no email key (REPLY-PHONE-ONLY-1015)", () => {
+    const body = replyOccurrenceBody({
+      brandId: "b",
+      offerId: "of",
+      report: { anchorEventId: "$p", channel: "whatsapp", campaignId: null, conversationId: "c1", roomId: "!r", source: "matrix" },
+      person: { email: null, name: "Velveteen (WA)", phone: "+447700900123", personId: "p1" },
+      messages: [{ eventId: "$p", at: "2026-10-15T15:37:59.000Z", text: "Hi" }],
+    });
+    expect(body.person).toEqual({ name: "Velveteen (WA)", phone: "+447700900123" });
+    expect(body.triggerId).toBe("positive_reply_received");
+  });
+
   it("is campaign-service's strict body: positive_reply_received, person by email, the burst as item", () => {
     const body = replyOccurrenceBody({
       brandId: "f4d73dab-1f9d-49b2-b16e-63ecde76a5eb",

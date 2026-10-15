@@ -108,6 +108,16 @@ describe("occurrenceBody", () => {
     expect(body.person).toEqual({ email: "jane@x.com", name: "Jane Doe", phone: "+15550100199", crmContact: { provider: "gohighlevel", contactId: "c1" } });
     expect(body.item).toMatchObject({ formName: "Meta Ads", submissionId: "s1", crmContactId: null, answers: [{ key: "k", label: "L", value: "v" }] });
   });
+
+  it("names a fill with no email by its E.164 phone, never a made-up email (REPLY-PHONE-ONLY-1015)", () => {
+    const base = {
+      orgId: "o", userId: "u", runId: "r", brandId: "b", offerId: "of",
+      source: "gohighlevel", submissionId: "s2", submittedAt: new Date("2026-10-07T14:34:21.802Z"),
+      form: { formId: "f1", formName: "Meta Ads", answers: [] },
+    };
+    const body = occurrenceBody({ ...base, person: { fullName: "Jane Doe", email: null, phone: "+1 (555) 010-0199", sourceContactId: null, crmContactId: null } });
+    expect(body.person).toEqual({ name: "Jane Doe", phone: "+15550100199" });
+  });
 });
 
 describe("nextAttemptDue", () => {
