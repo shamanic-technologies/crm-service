@@ -26,6 +26,7 @@ import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { personReplied } from "./people/conversation.js";
 import type { Presence } from "./people/identity.js";
+import { csvStepFilterSql, type StepFilter } from "./people/segment.js";
 import { peoplePoolClauses, type PeopleFilter } from "./serve.js";
 
 export interface FailedClause {
@@ -116,16 +117,24 @@ interface ContactRow {
   unsubscribed: boolean;
   consent_status: string;
   in_files: boolean;
+  steps_ok: boolean;
 }
 
-export async function stillFitsCsv(orgId: string, brandId: string, email: string, uploadIds?: string[]): Promise<StillFits | null> {
+export async function stillFitsCsv(
+  orgId: string,
+  brandId: string,
+  email: string,
+  uploadIds?: string[],
+  steps?: StepFilter,
+): Promise<StillFits | null> {
   const files =
     uploadIds && uploadIds.length > 0
       ? sql`c.source_upload_id IN (${sql.join(uploadIds.map((id) => sql`${id}::uuid`), sql`, `)})`
       : sql`true`;
   const rows = (await db.execute(sql`
     SELECT EXISTS (SELECT 1 FROM sendable_contacts s WHERE s.id = c.id) AS sendable,
-           c.unsubscribed, c.consent_status, (${files}) AS in_files
+           c.unsubscribed, c.consent_status, (${files}) AS in_files,
+           (true${csvStepFilterSql(orgId, brandId, steps)}) AS steps_ok
     FROM contacts c
     WHERE c.org_id = ${orgId} AND c.brand_id = ${brandId} AND c.source = 'csv'
       AND lower(c.primary_email) = ${email.trim().toLowerCase()}
@@ -139,6 +148,7 @@ export async function stillFitsCsv(orgId: string, brandId: string, email: string
   if (r.consent_status === "denied") failed.push({ code: "consent_denied", reason: "Refused consent in the brand's CRM" });
   if (!r.sendable && failed.length === 0) failed.push({ code: "not_sendable", reason: "No longer holds a usable email address" });
   if (!r.in_files) failed.push({ code: "not_in_file", reason: "No longer in the imported file the audience uses" });
+  if (!r.steps_ok) failed.push({ code: "step_filter", reason: "No longer at the funnel steps the pipe serves (or became a client)" });
   if (failed.length === 0) return { fits: true, pool: "csv" };
   return { fits: false, pool: "csv", reason: summarize(failed), failed };
 }

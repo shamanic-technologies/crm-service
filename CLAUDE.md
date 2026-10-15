@@ -191,6 +191,20 @@ unless `includeClients`; opted-out out unless `includeOptedOut`. Stats with `dea
 with `people` + `inPool`. The scope reaches a campaign through a human-service CRM audience
 (`crmPeople.segment`) the campaign targets (`audienceIds`).
 
+### Step filter (`stepFilter`) — the serving PIPE's cross-org funnel-step filter (CRM-WARM-NURTURE-1015)
+
+Owner 2026-10-15 (Doc Dinners warm nurture): who a pipe reaches is its play's, never a per-brand list. Top-level
+`stepFilter {reached?, notReached?}` on serve-next / still-fits (body) and serve-stats (`?stepFilter=<json>`), both
+pools (a CSV row is judged on the person holding its address), forwarded verbatim by human-service from lead-service
+buffer/next (the play's workflow states it). Steps = `SEGMENT_STEPS` incl. `disqualified`; clients ALWAYS out when
+present. ANDed with the audience's `people` filter. `lib/people/segment.ts` (`stepFilterClauses`, `csvStepFilterSql`).
+**CRM labels → client / disqualified** (`lib/gohighlevel/label-verdicts.ts`, table `crm_label_verdicts`): every stage AND
+every tag of a GoHighLevel connection gets ONE Jev `choice` `client | disqualified | none` (stages + tags as state),
+recorded once per label, decided each sync after stage meanings (0 calls once all decided). >= 0.5 confidence → facts
+`client` / `disqualified` (family `ghl_funnel`; stage entries dated, tags undated, withdrawn when the tag goes). The
+serve's `sale` step = sale | standing payment | `client` fact. Read: `GET /orgs/gohighlevel/label-verdicts?brandId=`.
+Doc Dinners: tag `client.` = 41 clients with no sale fact; stage/tag "Unqualified" judged `none` by stage meanings.
+
 ### Relationships (`relationships: "business_only"`) — a business pipe never writes to a friend
 
 RELATIONSHIP-TAGS-1014 (owner 2026-10-14): top-level `relationships` on serve-next (forwarded by

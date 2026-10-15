@@ -145,6 +145,14 @@ const STAGE_ANSWERS: Record<string, [string, number]> = {
 let vendorCalls = 0;
 let chatCalls = 0;
 let chatStageNames: string[][] = [];
+let labelCalls = 0;
+let labelQuestions: string[] = [];
+
+/** What the stubbed judgment model answers per CRM label (stage name / tag): [verdict, confidence]. */
+const LABEL_ANSWERS: Record<string, [string, number]> = {
+  Won: ["client", 1],
+  "Deal signed": ["client", 1],
+};
 let keyServiceStatus = 200;
 let contactsProbeStatus = 200;
 let contactsProbeBody = "";
@@ -153,6 +161,8 @@ function installFetchStub() {
   vendorCalls = 0;
   chatCalls = 0;
   chatStageNames = [];
+  labelCalls = 0;
+  labelQuestions = [];
   keyServiceStatus = 200;
   contactsProbeStatus = 200;
   contactsProbeBody = "";
@@ -161,10 +171,22 @@ function installFetchStub() {
     const url = String(input);
 
     if (url.endsWith("/orgs/judgments")) {
-      chatCalls += 1;
       const body = JSON.parse(String(init?.body)) as {
-        questions: Record<string, { instructions: string }>;
+        questions: Record<string, { instructions: string; criteria: Record<string, string> }>;
       };
+      // The CRM label verdicts (label-verdicts.ts) ask their own question: client | disqualified | none.
+      if (Object.values(body.questions).some((q) => "disqualified" in q.criteria)) {
+        labelCalls += 1;
+        const answers: Record<string, unknown> = {};
+        for (const [key, question] of Object.entries(body.questions)) {
+          const label = /(?:stage|tag) "([^"]*)"/.exec(question.instructions)![1];
+          labelQuestions.push(label);
+          const [verdict, confidence] = LABEL_ANSWERS[label] ?? ["none", 1];
+          answers[key] = { type: "choice", choice: verdict, confidence, probabilities: { [verdict]: confidence } };
+        }
+        return json({ model: "jev-1.13.0", answers, usage: { inputTokens: 10, outputTokens: 5 } });
+      }
+      chatCalls += 1;
       const names: string[] = [];
       const answers: Record<string, unknown> = {};
       for (const [key, question] of Object.entries(body.questions)) {
@@ -643,6 +665,7 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
       // The history already holds every observation: a rebuild appends nothing.
       historyAppended: 0,
       stageMeaningsDecided: 0,
+      labelVerdictsDecided: 0,
     });
 
     const after = {
@@ -979,6 +1002,36 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
 
     const again = await runSyncPass(connectionId);
     expect(again.results[0].historyAppended).toBe(0);
+  });
+
+  it("judges each CRM label (stage, tag) once as client | disqualified | none, and serves the record", async () => {
+    const connectionId = await seedConnection();
+    const first = await runSyncPass(connectionId);
+    expect(first.results[0].labelVerdictsDecided).toBe(5);
+    expect(labelCalls).toBe(1);
+    // Every stage by its own name and every tag in the customer's spelling, in ONE call.
+    expect([...labelQuestions].sort()).toEqual(["New lead", "Quote sent", "Won", "vip", "wedding"]);
+
+    const second = await runSyncPass(connectionId);
+    expect(second.results[0].labelVerdictsDecided).toBe(0);
+    expect(labelCalls).toBe(1);
+
+    const res = await request(app())
+      .get(`/orgs/gohighlevel/label-verdicts?brandId=${BRAND}`)
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", ORG);
+    expect(res.status).toBe(200);
+    expect(res.body.minConfidence).toBe(0.5);
+    const byLabel = Object.fromEntries(
+      res.body.labelVerdicts.map((v: { kind: string; label: string; verdict: string }) => [`${v.kind}:${v.label}`, v.verdict]),
+    );
+    expect(byLabel).toEqual({
+      "stage:New lead": "none",
+      "stage:Quote sent": "none",
+      "stage:Won": "client",
+      "tag:vip": "none",
+      "tag:wedding": "none",
+    });
   });
 
   it("decides each stage's meaning once, records the model, and never re-asks", async () => {

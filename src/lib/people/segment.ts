@@ -44,10 +44,15 @@ export const SEGMENT_STEPS = [
   "meeting_attended",
   "meeting_not_held",
   "sale",
+  "disqualified",
 ] as const;
 export type SegmentStep = (typeof SEGMENT_STEPS)[number];
 
-/** Which fact types state each step (`form_submission` = fact `form_submitted`, `sale` = sale | standing payment). */
+/**
+ * Which fact types state each step (`form_submission` = fact `form_submitted`, `sale` = sale | standing
+ * payment | a CRM stage / tag Jev judged `client`; `disqualified` = a CRM stage / tag Jev judged
+ * `disqualified`: lib/gohighlevel/label-verdicts.ts, CRM-WARM-NURTURE-1015).
+ */
 const STEP_FACTS: Record<SegmentStep, readonly string[]> = {
   website_visit: ["website_visit"],
   signup: ["signup"],
@@ -55,7 +60,8 @@ const STEP_FACTS: Record<SegmentStep, readonly string[]> = {
   meeting_booked: ["meeting_booked"],
   meeting_attended: ["meeting_attended"],
   meeting_not_held: ["meeting_not_held"],
-  sale: ["sale", "payment"],
+  sale: ["sale", "payment", "client"],
+  disqualified: ["disqualified"],
 };
 
 const name = z.string().trim().min(1).max(200);
@@ -84,7 +90,7 @@ const list = (values: string[]) => sql.join(values.map((v) => sql`${v}`), sql`, 
 const PRESENCE_REFS = sql`(SELECT pr->>'sourceRef' FROM jsonb_array_elements(p.presences) pr)`;
 
 /** People (by person key) who reached any of `steps`, live facts only. */
-function reachedSql(orgId: string, brandId: string, steps: readonly SegmentStep[]): SQL {
+export function reachedSql(orgId: string, brandId: string, steps: readonly SegmentStep[]): SQL {
   const types = [...new Set(steps.flatMap((s) => STEP_FACTS[s]))];
   return sql`p.person_key IN (
     SELECT f.owner_person_key FROM people_facts f
@@ -240,4 +246,56 @@ export async function readSegmentCatalogue(
     tags: tags.map((t) => ({ tag: t.tag, people: t.people, inPool: t.in_pool })),
     steps,
   };
+}
+
+// ─── The serving PIPE's step filter (CRM-WARM-NURTURE-1015) ──────────────────
+
+/**
+ * `stepFilter` — stated by the serving pipe's play (the workflow, through
+ * lead-service and human-service), top-level on serve-next / serve-stats /
+ * still-fits, ANDed with whatever the pool and the audience filter. Cross-org
+ * words only (funnel steps, never a client's stage or tag name): "reached a form
+ * or a meeting, never a sale, never disqualified". Clients are always out of a
+ * serve stating it.
+ */
+export const stepFilterSchema = z
+  .object({
+    reached: z.array(z.enum(SEGMENT_STEPS)).min(1).optional(),
+    notReached: z.array(z.enum(SEGMENT_STEPS)).min(1).optional(),
+  })
+  .strict()
+  .refine((f) => f.reached || f.notReached, { message: "stepFilter needs reached and/or notReached" });
+export type StepFilter = z.infer<typeof stepFilterSchema>;
+
+/** The pipe's step filter as named clauses on a `people p` row. */
+export function stepFilterClauses(orgId: string, brandId: string, filter: StepFilter | undefined): PoolClause[] {
+  if (!filter) return [];
+  const parts: PoolClause[] = [];
+  if (filter.reached) {
+    parts.push({ code: "step_reached", reason: "Has not reached the funnel step the pipe serves", sql: reachedSql(orgId, brandId, filter.reached) });
+  }
+  if (filter.notReached) {
+    parts.push({ code: "step_not_reached", reason: "Reached a funnel step the pipe leaves out", sql: sql`NOT ${reachedSql(orgId, brandId, filter.notReached)}` });
+  }
+  parts.push({ code: "step_client", reason: "Became a client", sql: sql`NOT ${reachedSql(orgId, brandId, ["sale"])}` });
+  return parts;
+}
+
+/**
+ * The same filter on a CSV row (alias `c` on `sendable_contacts`): judged on the
+ * PERSON holding its address (a CSV row nobody else knows reached nothing).
+ */
+export function csvStepFilterSql(orgId: string, brandId: string, filter: StepFilter | undefined): SQL {
+  if (!filter) return sql.empty();
+  const person = (cond: SQL) => sql`EXISTS (
+    SELECT 1 FROM people p
+    WHERE p.org_id = ${orgId} AND p.brand_id = ${brandId}
+      AND p.identity_keys @> jsonb_build_array('email:' || lower(c.primary_email))
+      AND ${cond}
+  )`;
+  const parts: SQL[] = [];
+  if (filter.reached) parts.push(person(reachedSql(orgId, brandId, filter.reached)));
+  if (filter.notReached) parts.push(sql`NOT ${person(reachedSql(orgId, brandId, filter.notReached))}`);
+  parts.push(sql`NOT ${person(reachedSql(orgId, brandId, ["sale"]))}`);
+  return sql` AND ${sql.join(parts, sql` AND `)}`;
 }

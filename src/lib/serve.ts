@@ -5,7 +5,18 @@ import { PERSON_REPLIED_SQL } from "./people/conversation.js";
 import { STAFF_DOMAIN, STAFF_EMAIL_LIST } from "./owner-telegram.js";
 import { businessOnlyVerdict, queryRelationships, type Relationship, type RelationshipPolicy } from "./people/relationships.js";
 import type { SiblingIdentity } from "./people/siblings.js";
-import { perStageSegments, personOptedOut, readSegmentCatalogue, segmentClauses, type PoolClause, type Segment, type SegmentCatalogue } from "./people/segment.js";
+import {
+  csvStepFilterSql,
+  perStageSegments,
+  personOptedOut,
+  readSegmentCatalogue,
+  segmentClauses,
+  stepFilterClauses,
+  type PoolClause,
+  type Segment,
+  type SegmentCatalogue,
+  type StepFilter,
+} from "./people/segment.js";
 
 /**
  * SERVE — hand out the next batch of not-yet-served sendable contacts for a
@@ -192,8 +203,9 @@ export async function serveNext(
   uploadIds?: string[],
   reach: readonly Reach[] = [],
   onlyIds?: string[],
+  steps?: StepFilter,
 ): Promise<ServeNextResult> {
-  const files = sql`${uploadFilter(uploadIds)}${csvReachFilter(reach)}${idFilter("c", onlyIds)}`;
+  const files = sql`${uploadFilter(uploadIds)}${csvReachFilter(reach)}${csvStepFilterSql(orgId, brandId, steps)}${idFilter("c", onlyIds)}`;
   const rows = (await db.execute(sql`
     WITH candidate AS (
       SELECT c.id, c.org_id, c.brand_id, c.primary_email, c.phone_e164,
@@ -228,7 +240,7 @@ export async function serveNext(
   // serve. Zero → the pool is drained. Computed live, never fabricated. Under a
   // file restriction the pool IS the restricted one, so `exhausted` answers
   // "these files are drained" — the question the caller actually asked.
-  const remaining = await countRemaining(orgId, brandId, uploadIds, reach);
+  const remaining = await countRemaining(orgId, brandId, uploadIds, reach, steps);
 
   return { contacts, served: contacts.length, exhausted: remaining === 0 };
 }
@@ -238,8 +250,9 @@ async function countRemaining(
   brandId: string,
   uploadIds?: string[],
   reach: readonly Reach[] = [],
+  steps?: StepFilter,
 ): Promise<number> {
-  const files = sql`${uploadFilter(uploadIds)}${csvReachFilter(reach)}`;
+  const files = sql`${uploadFilter(uploadIds)}${csvReachFilter(reach)}${csvStepFilterSql(orgId, brandId, steps)}`;
   const res = (await db.execute(sql`
     SELECT count(*)::int AS remaining
     FROM sendable_contacts c
@@ -278,9 +291,10 @@ export async function serveStats(
   brandId: string,
   uploadIds?: string[],
   reach: readonly Reach[] = [],
+  steps?: StepFilter,
 ): Promise<ServeStats> {
-  if (uploadIds && uploadIds.length > 0) return serveStatsForFiles(orgId, brandId, uploadIds, reach);
-  const reachSql = csvReachFilter(reach);
+  if (uploadIds && uploadIds.length > 0) return serveStatsForFiles(orgId, brandId, uploadIds, reach, steps);
+  const reachSql = sql`${csvReachFilter(reach)}${csvStepFilterSql(orgId, brandId, steps)}`;
 
   const res = (await db.execute(sql`
     SELECT
@@ -309,8 +323,9 @@ async function serveStatsForFiles(
   brandId: string,
   uploadIds: string[],
   reach: readonly Reach[] = [],
+  steps?: StepFilter,
 ): Promise<ServeStats> {
-  const files = sql`${uploadFilter(uploadIds)}${csvReachFilter(reach)}`;
+  const files = sql`${uploadFilter(uploadIds)}${csvReachFilter(reach)}${csvStepFilterSql(orgId, brandId, steps)}`;
   const res = (await db.execute(sql`
     SELECT
       count(*)::int AS total_sendable,
@@ -369,6 +384,8 @@ export interface PeopleFilter {
   replied?: boolean;
   reachableBy?: Reach | Reach[];
   segment?: Segment;
+  /** The serving pipe's step filter (top-level on the routes, never inside `people`). */
+  stepFilter?: StepFilter;
 }
 
 const reachList = (r: PeopleFilter["reachableBy"]): Reach[] => (r === undefined ? [] : Array.isArray(r) ? r : [r]);
@@ -505,6 +522,7 @@ export function peoplePoolClauses(orgId: string, brandId: string, filter: People
     parts.push({ code: "opted_out", reason: "Marked do not contact in the brand's CRM", sql: sql`NOT ${personOptedOut(orgId, brandId)}` });
   }
   parts.push(...segmentClauses(orgId, brandId, filter.segment));
+  parts.push(...stepFilterClauses(orgId, brandId, filter.stepFilter));
   return parts;
 }
 
@@ -686,9 +704,10 @@ export async function serveNextBusinessOnly(
   runId: string,
   uploadIds?: string[],
   reach: readonly Reach[] = [],
+  steps?: StepFilter,
 ): Promise<ServeNextResult & { relationships: RelationshipsServeSummary }> {
   const { orgId, brandId } = identity;
-  const files = sql`${uploadFilter(uploadIds)}${csvReachFilter(reach)}`;
+  const files = sql`${uploadFilter(uploadIds)}${csvReachFilter(reach)}${csvStepFilterSql(orgId, brandId, steps)}`;
   const pick = await pickBusinessOnly(identity, limit, async (offset, size) =>
     (await db.execute(sql`
       SELECT c.id, hk.human_id
@@ -700,7 +719,7 @@ export async function serveNextBusinessOnly(
       LIMIT ${size} OFFSET ${offset}
     `)) as unknown as { id: string; human_id: string | null }[],
   );
-  const served = await serveNext(orgId, brandId, limit, runId, uploadIds, reach, pick.allowed);
+  const served = await serveNext(orgId, brandId, limit, runId, uploadIds, reach, pick.allowed, steps);
   // Exhausted only when nothing is left that may ever be served under this policy.
   const exhausted = pick.walkedAll && pick.waiting === 0 && pick.allowed.length <= served.served;
   return { ...served, exhausted, relationships: pick.summary };

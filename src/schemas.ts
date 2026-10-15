@@ -152,6 +152,29 @@ export const SegmentSchema = registry.register(
     }),
 );
 
+export const StepFilterSchema = registry.register(
+  "StepFilter",
+  z
+    .object({
+      reached: z.array(z.enum(SEGMENT_STEPS)).min(1).optional().openapi({
+        description: "The person reached one of these steps (any source the brand connected).",
+        example: ["form_submission", "meeting_booked", "meeting_attended", "meeting_not_held"],
+      }),
+      notReached: z.array(z.enum(SEGMENT_STEPS)).min(1).optional().openapi({
+        description: "The person reached none of these steps.",
+        example: ["sale", "disqualified"],
+      }),
+    })
+    .openapi({
+      description:
+        "The SERVING PIPE's funnel-step filter (stated by the play's workflow, forwarded by lead-service and human-service), " +
+        "cross-org words only: never a client's stage or tag name. ANDed with the pool and the audience's own filter, on BOTH pools " +
+        "(a CSV row is judged on the person holding its address). Clients are ALWAYS out when it is present. " +
+        "`sale` = a deal won, a payment that stands, or a CRM stage / tag Jev judged `client`; `disqualified` = a CRM stage / tag " +
+        "Jev judged `disqualified` (unqualified, bad fit, blocked: GET /orgs/gohighlevel/label-verdicts).",
+    }),
+);
+
 // ─── Serve ─────────────────────────────────────────────────────────────────
 
 export const ServeNextRequestSchema = registry.register(
@@ -210,6 +233,9 @@ export const ServeNextRequestSchema = registry.register(
         description:
           "The pipe's relationship policy (its lead strategy, forwarded by human-service). `business_only`: lead-service is asked who each candidate is to the brand (POST /internal/brands/{brandId}/relationships/query); nobody tagged personal, investor, supplier, team, partner or advisor (sure or unsure), nobody lead-service never judged, nobody without a human id is handed out, on BOTH pools. Such a person is NOT marked served (another pipe may still write to them). lead-service unreadable = 502 relationships_unavailable, nothing served. Omit = unchanged behaviour.",
       }),
+      stepFilter: StepFilterSchema.optional().openapi({
+        description: "The serving pipe's funnel-step filter (see StepFilter). A person outside it is skipped and NOT marked served. Omit = unchanged behaviour.",
+      }),
     })
     .openapi("ServeNextRequest"),
 );
@@ -258,6 +284,7 @@ export const StillFitsRequestSchema = registry.register(
       email: z.string().openapi({ description: "Any address of the person (case-insensitive)." }),
       people: ServeNextRequestSchema.shape.people.openapi({ description: "Judge against the people pool under this filter (the audience's stored filter, verbatim). Exclusive with uploadIds." }),
       uploadIds: ServeNextRequestSchema.shape.uploadIds.openapi({ description: "CSV pool restricted to these imported files. Omit both people and uploadIds for the brand's whole CSV pool." }),
+      stepFilter: StepFilterSchema.optional().openapi({ description: "The serving pipe's step filter, as on serve-next (failed codes step_reached, step_not_reached, step_client; CSV: step_filter)." }),
     })
     .openapi("StillFitsRequest"),
 );
@@ -272,7 +299,7 @@ export const StillFitsResponseSchema = registry.register(
       failed: z
         .array(z.object({ code: z.string(), reason: z.string() }))
         .optional()
-        .openapi({ description: "fits=false only: every rule the person fails (code: automated, not_business, no_email, staff, signed_up, replied, no_phone, opted_out, segment_deal, segment_tag, segment_reached, segment_not_reached, client; CSV: opted_out, consent_denied, not_sendable, not_in_file)." }),
+        .openapi({ description: "fits=false only: every rule the person fails (code: automated, not_business, no_email, staff, signed_up, replied, no_phone, opted_out, segment_deal, segment_tag, segment_reached, segment_not_reached, client, step_reached, step_not_reached, step_client; CSV: opted_out, consent_denied, not_sendable, not_in_file, step_filter)." }),
     })
     .openapi("StillFitsResponse"),
 );
@@ -462,6 +489,9 @@ registry.registerPath({
       }),
       reachableBy: z.string().optional().openapi({
         description: "phone, email, or phone,email: count only what a pipe writing on those channels can reach (both pools).",
+      }),
+      stepFilter: z.string().optional().openapi({
+        description: "The pipe's StepFilter as URL-encoded JSON (both pools), e.g. {\"reached\":[\"form_submission\"],\"notReached\":[\"sale\",\"disqualified\"]}.",
       }),
     }),
   },
@@ -1788,6 +1818,42 @@ registry.registerPath({
     200: {
       description: "Stage meanings",
       content: { "application/json": { schema: GhlStageMeaningsResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/gohighlevel/label-verdicts",
+  summary: "What each of a brand's CRM labels (pipeline stage, contact tag) says about the person: client | disqualified | none",
+  description:
+    "Decided once per label by TypeSafe Jev (chat-service /orgs/judgments) with the brand's pipelines and tags as context, recorded " +
+    "with its confidence; re-decided only when a new label appears. A verdict below `minConfidence` is never served as evidence. " +
+    "`client` / `disqualified` labels become `client` / `disqualified` facts on the people fact feed, and the serve's `sale` / " +
+    "`disqualified` steps read them (StepFilter, PeopleSegment), so no consumer reads a client's own words.",
+  request: { query: z.object({ brandId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Label verdicts",
+      content: {
+        "application/json": {
+          schema: z.object({
+            brandId: z.string().uuid(),
+            minConfidence: z.number(),
+            labelVerdicts: z.array(
+              z.object({
+                kind: z.enum(["stage", "tag"]),
+                label: z.string().openapi({ description: "Stage name verbatim, or the tag trimmed + lower-cased." }),
+                pipelineName: z.string().nullable(),
+                verdict: z.enum(["client", "disqualified", "none"]),
+                confidence: z.number(),
+                model: z.string(),
+                decidedAt: z.string(),
+              }),
+            ),
+          }),
+        },
+      },
     },
   },
 });

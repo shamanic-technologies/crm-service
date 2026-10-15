@@ -982,6 +982,47 @@ export const ghlStageMeanings = pgTable(
 );
 
 /**
+ * What each of a customer's CRM LABELS (a pipeline stage, a contact tag) says
+ * about the PERSON's standing with the business, normalized for every org
+ * (CRM-WARM-NURTURE-1015): `client` (is or was a paying customer),
+ * `disqualified` (the business judged the person not a fit: unqualified,
+ * blocked...), or `none`. The words are the customer's own; Jev decides once per
+ * label (lib/gohighlevel/label-verdicts.ts) and the decision is recorded with its
+ * confidence, so a consumer excludes clients / disqualified people without ever
+ * reading a client's words.
+ *
+ * `label_ref` = the stage's GoHighLevel id ('' for a tag); `label` = the stage
+ * name verbatim, or the tag trimmed + lower-cased (tags match case-insensitive).
+ */
+export const crmLabelVerdicts = pgTable(
+  "crm_label_verdicts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    connectionId: uuid("connection_id")
+      .notNull()
+      .references(() => ghlConnections.id, { onDelete: "cascade" }),
+    // 'stage' | 'tag'
+    kind: text("kind").notNull(),
+    labelRef: text("label_ref").notNull(),
+    label: text("label").notNull(),
+    pipelineName: text("pipeline_name"),
+    // See LABEL_VERDICTS: client | disqualified | none
+    verdict: text("verdict").notNull(),
+    confidence: doublePrecision("confidence").notNull(),
+    probabilities: jsonb("probabilities").notNull(),
+    model: text("model").notNull(),
+    runId: text("run_id").notNull(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("crm_label_verdicts_conn_label_uq").on(table.connectionId, table.kind, table.labelRef, table.label),
+    index("crm_label_verdicts_org_brand_idx").on(table.orgId, table.brandId),
+  ],
+);
+
+/**
  * GOLD — the merged PERSON layer: one person, every channel, one thread.
  *
  * A people scope is one (org, brand) whose people are indexed. It is the source

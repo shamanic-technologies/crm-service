@@ -58,6 +58,7 @@ import {
   type DerivedPipeline,
   type GhlRecordKind,
 } from "./records.js";
+import { decideLabelVerdicts } from "./label-verdicts.js";
 import { decideStageMeanings } from "./stage-meanings.js";
 
 export interface ConnectionSyncResult {
@@ -83,6 +84,8 @@ export interface ConnectionSyncResult {
   historyAppended: number;
   /** Stages given a recorded meaning this pass (0 once every stage is decided). */
   stageMeaningsDecided: number;
+  /** Stages / tags given a recorded client | disqualified | none verdict this pass (label-verdicts.ts). */
+  labelVerdictsDecided: number;
 }
 
 /**
@@ -751,6 +754,7 @@ export async function syncConnection(conn: GhlConnection): Promise<ConnectionSyn
       form_submission: mirrored.form_submission.changed,
     });
     const stageMeaningsDecided = await decideStageMeanings(conn, run.id);
+    const labelVerdictsDecided = await decideLabelVerdicts(conn, run.id);
 
     await db
       .update(ghlConnections)
@@ -784,6 +788,7 @@ export async function syncConnection(conn: GhlConnection): Promise<ConnectionSyn
       formSubmissionsDerived: derived.formSubmissions,
       historyAppended: derived.historyAppended,
       stageMeaningsDecided,
+      labelVerdictsDecided,
     };
   } catch (err) {
     const message = (err as Error).message;
@@ -846,7 +851,7 @@ export async function runSyncPass(connectionId?: string): Promise<SyncPassResult
  */
 export async function rebuildFromBronze(
   conn: GhlConnection,
-): Promise<DerivedCounts & { stageMeaningsDecided: number }> {
+): Promise<DerivedCounts & { stageMeaningsDecided: number; labelVerdictsDecided: number }> {
   const run = await createRun({
     orgId: conn.orgId,
     userId: conn.createdByUserId,
@@ -865,8 +870,9 @@ export async function rebuildFromBronze(
   try {
     const derived = await deriveSilver(conn);
     const stageMeaningsDecided = await decideStageMeanings(conn, run.id);
+    const labelVerdictsDecided = await decideLabelVerdicts(conn, run.id);
     await updateRun(run.id, "completed", identity);
-    return { ...derived, stageMeaningsDecided };
+    return { ...derived, stageMeaningsDecided, labelVerdictsDecided };
   } catch (err) {
     await updateRun(run.id, "failed", identity).catch((e) =>
       console.error("[crm-service][ghl] failed to close run:", e),

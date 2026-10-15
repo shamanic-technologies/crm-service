@@ -85,6 +85,28 @@ export interface StageDecision {
  * recorded decision yet.
  */
 export async function findUndecidedStages(conn: GhlConnection): Promise<StageToDecide[]> {
+  const candidates = new Map<string, StageToDecide>();
+  const keyOf = (id: string, name: string) => `${id}\u0000${name}`;
+  for (const stage of await findConnectionStages(conn)) candidates.set(keyOf(stage.stageExternalId, stage.stageName), stage);
+  if (candidates.size === 0) return [];
+
+  const decided = await db
+    .select({
+      stageExternalId: ghlStageMeanings.stageExternalId,
+      stageName: ghlStageMeanings.stageName,
+    })
+    .from(ghlStageMeanings)
+    .where(eq(ghlStageMeanings.connectionId, conn.id));
+  for (const row of decided) candidates.delete(keyOf(row.stageExternalId, row.stageName));
+
+  return [...candidates.values()];
+}
+
+/**
+ * Every (stage id, stage name) the connection has: in its pipelines today, and
+ * in the history of what its opportunities were observed in.
+ */
+export async function findConnectionStages(conn: GhlConnection): Promise<StageToDecide[]> {
   const pipelines = await db
     .select()
     .from(ghlPipelines)
@@ -134,17 +156,6 @@ export async function findUndecidedStages(conn: GhlConnection): Promise<StageToD
       });
     }
   }
-
-  if (candidates.size === 0) return [];
-
-  const decided = await db
-    .select({
-      stageExternalId: ghlStageMeanings.stageExternalId,
-      stageName: ghlStageMeanings.stageName,
-    })
-    .from(ghlStageMeanings)
-    .where(eq(ghlStageMeanings.connectionId, conn.id));
-  for (const row of decided) candidates.delete(keyOf(row.stageExternalId, row.stageName));
 
   return [...candidates.values()];
 }
