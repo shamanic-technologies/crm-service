@@ -62,6 +62,7 @@ import { leadAddressesFirst, resolvePersonState, type GhlDeal, type LeadObservat
 import { indexScopeMessages, type MessageIndexSummary } from "./search.js";
 import { emitScopeFacts, type FactEmissionSummary } from "./facts.js";
 import { persistPersonIds } from "./person-id.js";
+import { visitorLabel } from "../posthog/records.js";
 import {
   humanEvidence,
   judgmentId,
@@ -245,9 +246,25 @@ async function observeStandings(
   return { observations, asked: toAsk.length, reused, failed };
 }
 
-/** PURE: a cluster of PostHog presences alone, holding no email and no phone. */
+/** The website a PostHog presence's person typed (sources.ts readPosthog). */
+const presenceWebsite = (p: { detail: Record<string, unknown> }) => (typeof p.detail?.website === "string" ? p.detail.website : null);
+
+/**
+ * PURE: a cluster of PostHog presences alone that says nothing about who they are: no
+ * email, no phone, no name, no website (ONBOARDING-IN-UNIBOX-1015: a visitor who typed
+ * their name or website is a person, account or not).
+ */
 export function isUnnamedPosthogOnly(c: PersonCluster): boolean {
-  return c.emails.length === 0 && c.phones.length === 0 && c.presences.every((p) => p.source === "posthog");
+  return (
+    c.emails.length === 0 &&
+    c.phones.length === 0 &&
+    c.presences.every((p) => p.source === "posthog" && !p.displayName?.trim() && !visitorLabel(presenceWebsite(p)))
+  );
+}
+
+/** PURE: the person's name, else "Visitor from <domain>" when a presence carries the website they typed. */
+export function personDisplayName(c: PersonCluster): string | null {
+  return firstNonNull(c, "displayName") ?? c.presences.map((p) => visitorLabel(presenceWebsite(p))).find((v) => !!v) ?? null;
 }
 
 /** Read, merge, resolve, write. Returns what the build saw, per source. */
@@ -437,7 +454,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       personKey: c.personKey,
       humanId: personHumanId(c.identityKeys, humans.humanOf),
       identityKeys: c.identityKeys,
-      displayName: firstNonNull(c, "displayName"),
+      displayName: personDisplayName(c),
       company: firstNonNull(c, "company"),
       emails: leadAddressesFirst(c.emails, standings.observations),
       phones: c.phones,
@@ -544,14 +561,24 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
 }
 
 const building = new Set<string>();
+/** Scopes asked to build again once the running build ends (`followUp`). */
+const buildAgain = new Set<string>();
 
 /**
  * One build of one scope under its own ORG run (the org that owns the scope,
  * attributed to the user who opened it). A build already running for the scope
- * in this process is not started twice.
+ * in this process is not started twice. `followUp`: the caller learned something
+ * the running build may have read too early (a person mirrored mid-build), so ONE
+ * more build runs right after it (coalesced, never queued twice).
  */
-export async function runScopeBuild(scope: PeopleScope): Promise<{ scopeId: string; ok: boolean; summary?: BuildSummary; error?: string; skipped?: boolean }> {
-  if (building.has(scope.id)) return { scopeId: scope.id, ok: true, skipped: true };
+export async function runScopeBuild(
+  scope: PeopleScope,
+  opts: { followUp?: boolean } = {},
+): Promise<{ scopeId: string; ok: boolean; summary?: BuildSummary; error?: string; skipped?: boolean }> {
+  if (building.has(scope.id)) {
+    if (opts.followUp) buildAgain.add(scope.id);
+    return { scopeId: scope.id, ok: true, skipped: true };
+  }
   building.add(scope.id);
   let runId: string | null = null;
   try {
@@ -586,6 +613,7 @@ export async function runScopeBuild(scope: PeopleScope): Promise<{ scopeId: stri
     return { scopeId: scope.id, ok: false, error: message };
   } finally {
     building.delete(scope.id);
+    if (buildAgain.delete(scope.id)) void runScopeBuild(scope);
   }
 }
 

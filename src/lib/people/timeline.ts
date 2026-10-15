@@ -44,6 +44,7 @@
 
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
+import { describeKeyEvent } from "../posthog/records.js";
 import {
   contacts,
   contactUploads,
@@ -320,6 +321,11 @@ export async function entryItems(source: keyof typeof ENTRY, presences: Presence
     .filter((r) => r.createdAt !== null)
     // An invited teammate's account is no signup (auth/provider.ts isSignup).
     .filter((r) => !(source === "clerk" && (r.rawAttributes as { signedUp?: boolean } | null)?.signedUp === false))
+    // A PostHog person known only by what they typed (no identify, no email) did not sign up (posthog/records.ts notSignup).
+    .filter((r) => {
+      const a = r.rawAttributes as { notSignup?: boolean; phoneOnly?: boolean } | null;
+      return !(source === "posthog" && (a?.notSignup === true || a?.phoneOnly === true));
+    })
     .map((r) =>
       entryEvent(
         source,
@@ -416,7 +422,8 @@ async function posthogItems(presences: Presence[], authStatesSignups: boolean): 
     kind: "event",
     direction: null,
     subject: null,
-    text: a.name,
+    // A custom event reads as its name and what it carried (ONBOARDING-IN-UNIBOX-1015: the step and what was entered).
+    text: a.kind === "event" ? describeKeyEvent(a.name, (a.detail as { properties?: Record<string, unknown> } | null)?.properties) : a.name,
     from: null,
     to: [],
     ref: { contactId: a.contactId, externalId: a.externalId, externalPersonId: a.externalPersonId },

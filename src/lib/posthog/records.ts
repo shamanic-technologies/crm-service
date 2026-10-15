@@ -38,6 +38,15 @@ export interface DerivedPosthogContact {
    * who typed a number on a form, NOT a signup (facts.ts emits no PostHog `signup` for them).
    */
   phoneOnly: boolean;
+  /**
+   * Not a signup: PostHog was never told who they are (no `identify`, no email), the
+   * person is known only by what they typed (a phone, a name, their website) on the
+   * brand's forms (ONBOARDING-IN-UNIBOX-1015). facts.ts / the timeline emit no PostHog
+   * `signup` for them.
+   */
+  notSignup: boolean;
+  /** The website the person typed (`website` property), verbatim. */
+  website: string | null;
   /** PostHog's distinct ids of the person, verbatim (the brand's own user ids among them). */
   distinctIds: string[];
   fullName: string | null;
@@ -58,6 +67,8 @@ export function derivePosthogContact(payload: Record<string, unknown>): DerivedP
     externalId,
     primaryEmail: email,
     phoneOnly: !identified && !email && phones.length > 0,
+    notSignup: !identified && !email,
+    website: str(payload.prop_website),
     phones,
     distinctIds: Array.isArray(payload.distinct_ids)
       ? [...new Set(payload.distinct_ids.map((d) => str(d)).filter((d): d is string => !!d))].sort()
@@ -119,6 +130,46 @@ export function deriveKeyEvent(payload: Record<string, unknown>): DerivedActivit
     name,
     url: str(payload.url),
     pageviews: null,
-    detail: { path: str(payload.path), sessionId: str(payload.session_id) },
+    detail: {
+      path: str(payload.path),
+      sessionId: str(payload.session_id),
+      // The brand's own properties on the event (client.ts ownEventProperties): what was entered.
+      properties: payload.properties && typeof payload.properties === "object" && !Array.isArray(payload.properties) ? payload.properties : {},
+    },
   };
+}
+
+/**
+ * PURE: the bare domain of a website a person typed ("https://www.Acme.com/x" →
+ * "acme.com"), null when it names no host.
+ */
+export function websiteDomain(website: string | null | undefined): string | null {
+  const raw = website?.trim();
+  if (!raw) return null;
+  try {
+    const host = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`).hostname.toLowerCase();
+    const bare = host.replace(/^www\./, "");
+    return bare.includes(".") ? bare : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A person known by the website they typed and no name: "Visitor from acme.com". */
+export const visitorLabel = (website: string | null | undefined): string | null => {
+  const domain = websiteDomain(website);
+  return domain ? `Visitor from ${domain}` : null;
+};
+
+/**
+ * PURE: a key event as one readable line, generic for any brand's events: its name in
+ * words, then what it carried ("Get started step done · step: company · name: Acme").
+ */
+export function describeKeyEvent(name: string, properties: Record<string, unknown> | null | undefined): string {
+  const words = name.replace(/[_.:-]+/g, " ").replace(/\s+/g, " ").trim();
+  const title = words ? words[0].toUpperCase() + words.slice(1) : name;
+  const parts = Object.entries(properties ?? {})
+    .filter(([, v]) => v !== null && v !== undefined && v !== "")
+    .map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : String(v)}`);
+  return [title, ...parts].join(" · ");
 }

@@ -1122,7 +1122,7 @@ kind `reported`, reportedBy crm-service, fromStep `lead_found`), within ~1 min. 
   (a Matrix contact: the person WROTE, the reply trigger's), `staff` (`isStaffEmail`; a `+tag` sending mailbox is not
   staff), `own_team` (linked WhatsApp numbers, sales rep phone, at delivery).
 - **Fast mirror, every 60s** (`PHONE_WATCH_INTERVAL_MS`, first 60s after boot; `PHONE_WATCH=off` stops it): PostHog
-  persons whose events SET a phone property in the last 10 min (`$set`/`$set_once` keys `phone|phone_number|phoneNumber`)
+  persons whose events SET a known property (phone, email, name, website) or fired a custom event in the last 10 min
   and auth-provider users changed in the last 10 min (Clerk `order_by=-updated_at`) are mirrored now (bronze + silver,
   no-churn upserts); every other connector is seen at its own sync. A new detection kicks the brand's people build.
 - **PostHog reads phones**: a person with a phone property is read like an identified one, its first `+` number lands in
@@ -1452,6 +1452,23 @@ fact source literal (`"clerk"`) is the one per-provider line in `identity.ts` /
   PostHog holds no email for to the signed-up user. A cluster of PostHog
   presences alone with no email and no phone is nobody (`isUnnamedPosthogOnly`),
   its facts are held until the auth provider names it.
+
+### A product's signup walk on the person (ONBOARDING-IN-UNIBOX-1015, owner 2026-10-15)
+
+A PostHog person is KNOWN (mirrored, a person of the Unibox) as soon as it carries ANY of:
+`identify`, an email, a phone, a name (`name`/`first_name`/`last_name`) or the `website` they
+typed (`client.ts` `IDENTIFIED`); none of these = an anonymous visit, never mirrored. Named by
+their name, else "Visitor from <domain>" (`build.ts` `personDisplayName`, any real name of
+any source wins). One known only by what they typed (no identify, no email) is no signup
+(`raw_attributes.notSignup`: no `signup` fact, no timeline signup). Each CUSTOM event (`$`-events
+never) carries the brand's own properties (`ownEventProperties`: `$`/`__` keys dropped, 50 keys,
+strings cut at 1000) in `detail.properties`; the timeline item's `text` reads it
+(`describeKeyEvent`: "Get started step done · step: company · name: Acme"). Generic, no event
+name of any brand in code. Within a minute: the phone watch's fast mirror
+(`mirrorRecentPersons`) reads every person who SET a known property or fired a custom event in
+the last 10 min, mirrors their events, and kicks the people build when a person is new or
+changed (`followUp`: one more build right after a running one). A later Clerk signup merges on
+the PostHog distinct id (`uid:`), the phone or the email, as before.
 
 ### PostHog "identified" (fixed 2026-10-11)
 
