@@ -478,6 +478,26 @@ describe.skipIf(!RUN)("self-serve Matrix linking", () => {
     expect(both.every((a: { status: string }) => a.status === "linked")).toBe(true);
     expect(both.map((a: { account: { id: string } }) => a.account.id).sort()).toEqual(["33611111111", "33622222222"]);
     expect(both[0].linkedAccounts).toBe(2);
+
+    // The channel's tile names every account with its own number and the outreach default.
+    const second0 = both.find((a: { account: { id: string } }) => a.account.id === "33622222222");
+    const marked = await request(app())
+      .patch(`/orgs/matrix/links/${second0.linkId}`)
+      .set(headers)
+      .send({ brandId: BRAND, outreachDefault: true });
+    expect(marked.status).toBe(200);
+    const tiles = await request(app()).get(`/orgs/matrix/links?brandId=${BRAND}`).set(headers);
+    const tile = tiles.body.links.find((l: { channel: string }) => l.channel === "whatsapp");
+    expect(
+      tile.channelAccounts
+        .map((a: { phone: string; outreachDefault: boolean; status: string }) => [a.phone, a.outreachDefault, a.status])
+        .sort(),
+    ).toEqual([
+      ["+33611111111", false, "linked"],
+      ["+33622222222", true, "linked"],
+    ]);
+    expect(tile.channelAccounts.every((a: Record<string, unknown>) => !("accessToken" in a))).toBe(true);
+    expect(tiles.body.links.find((l: { channel: string }) => l.channel === "discord").channelAccounts).toEqual([]);
     const conns = await db.select().from(matrixConnections).where(eq(matrixConnections.orgId, ORG));
     expect(new Set(conns.map((c) => c.matrixUserId))).toEqual(new Set(registered));
 

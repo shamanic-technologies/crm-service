@@ -585,6 +585,17 @@ export interface LinkInputView {
   } | null;
 }
 
+/** One account of a channel, as named in every tile of that channel. */
+export interface ChannelAccount {
+  linkId: string;
+  status: "waiting" | "linked" | "failed";
+  account: { id: string; name: string | null } | null;
+  /** WhatsApp only: the account's own number in E.164 (its login id is the number). */
+  phone: string | null;
+  outreachDefault: boolean;
+  needsRelink: boolean;
+}
+
 export interface LinkView {
   channel: MatrixChannel;
   /** This account's link. Null on a channel with nothing linked or attempted yet. */
@@ -607,6 +618,8 @@ export interface LinkView {
   needsRelink: boolean;
   /** Accounts currently linked on this channel for the brand (every link, not only this one). */
   linkedAccounts: number;
+  /** Every account of this channel for the brand (linked or in progress), each with its own number / handle. */
+  channelAccounts: ChannelAccount[];
   /** First messages go out from this account when no account already talks with the person. */
   outreachDefault: boolean;
   connection: {
@@ -676,6 +689,8 @@ export async function brandLinks(orgId: string, brandId: string): Promise<BrandL
       const conn = link.connectionId ? conns.find((c) => c.id === link.connectionId) : undefined;
       views.push(await toView(channel, link, conn, linkedAccounts));
     }
+    const channelAccounts = views.map(toChannelAccount);
+    for (const v of views) v.channelAccounts = channelAccounts;
     accounts.push(...views);
     const latest = (status: string, at: (v: LinkView) => Date | null) =>
       views
@@ -685,10 +700,21 @@ export async function brandLinks(orgId: string, brandId: string): Promise<BrandL
       latest("waiting", (v) => v.startedAt) ??
         latest("linked", (v) => v.linkedAt) ??
         latest("failed", (v) => v.startedAt) ??
-        (await toView(channel, undefined, undefined, 0)),
+        { ...(await toView(channel, undefined, undefined, 0)), channelAccounts },
     );
   }
   return { links, accounts };
+}
+
+function toChannelAccount(v: LinkView): ChannelAccount {
+  return {
+    linkId: v.linkId!,
+    status: v.status as ChannelAccount["status"],
+    account: v.account,
+    phone: v.channel === "whatsapp" && v.account && /^\d{6,15}$/.test(v.account.id) ? `+${v.account.id}` : null,
+    outreachDefault: v.outreachDefault,
+    needsRelink: v.needsRelink,
+  };
 }
 
 /** Every channel for one brand, one entry each (see `brandLinks`). */
@@ -820,6 +846,7 @@ export async function toView(
     bridgeStateError,
     needsRelink: status === "linked" && !!bridgeState?.state && RELINK_STATES.has(bridgeState.state),
     linkedAccounts,
+    channelAccounts: [],
     outreachDefault: link?.outreachDefault ?? false,
     connection: conn
       ? {
