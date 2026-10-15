@@ -21,6 +21,7 @@ import apiCallsRoutes from "./routes/api-calls.js";
 import formTriggerRoutes from "./routes/form-triggers.js";
 import { startFreshnessWatch } from "./lib/people/freshness.js";
 import { startFormWatch } from "./lib/form-trigger/watch.js";
+import { startMatrixLiveWatch } from "./lib/matrix/sync.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -104,6 +105,8 @@ if (process.env.NODE_ENV !== "test") {
         startFreshnessWatch();
         // Reports each new CRM form submission as a `form_submitted` trigger, within a minute.
         startFormWatch();
+        // Mirrors every linked chat account every ~10s and reports a person's new message at once.
+        startMatrixLiveWatch();
       })
       .catch((err) => {
         console.error("[crm-service] Migration failed:", err);

@@ -3172,8 +3172,9 @@ registry.registerPath({
 export const ReplyTriggerReportSchema = z.object({
   id: z.string().uuid(),
   channel: z.string(),
-  campaignId: z.string(),
+  campaignId: z.string().nullable().describe("The last campaign that wrote in the thread before the burst; null = none did."),
   offerId: z.string().uuid().nullable(),
+  offerBasis: z.string().nullable().describe("What decided the offer: `campaign` | `conversation` (Jev's offer tag) | `only_offer`."),
   conversationId: z.string().uuid().nullable(),
   person: z.object({ personId: z.string().uuid().nullable(), fullName: z.string().nullable(), email: z.string().nullable(), phone: z.string().nullable() }),
   messages: z.array(z.object({ eventId: z.string(), at: z.string(), text: z.string() })),
@@ -3182,7 +3183,7 @@ export const ReplyTriggerReportSchema = z.object({
   judgment: z.unknown(),
   status: z.enum(["pending", "reported", "skipped", "failed"]),
   reason: z.string().nullable().describe(
-    "`human_took_over` | `automated_reply` | `before_watch` | `no_email` | `person_not_built` | `offer_unknown` | `campaign_refused` | `campaign_unreachable`",
+    "`own_team` | `automated_reply` | `before_watch` | `no_email` | `person_not_built` | `offer_unknown` | `campaign_refused` | `campaign_unreachable`",
   ),
   lastError: z.string().nullable(),
   attempts: z.number().int(),
@@ -3195,13 +3196,13 @@ export const ReplyTriggerReportSchema = z.object({
 registry.registerPath({
   method: "get",
   path: "/orgs/matrix/reply-triggers",
-  summary: "Answers in threads our campaigns opened on a personal channel, and their `positive_reply_received` reports",
+  summary: "Messages people wrote to the brand on a personal channel, and their `positive_reply_received` reports",
   description:
-    "After each Matrix sync pass (every 5 min, and right after each of our sends), every thread a campaign wrote to " +
-    "through our send route is read. The person's words since our last message are ONE burst, reported ONCE to " +
-    "campaign-service (`POST /internal/trigger-events`, trigger `positive_reply_received`) for the offer of the campaign " +
-    "that wrote, naming the person by email. A thread a person of ours typed in by hand after the campaign wrote is " +
-    "theirs (`human_took_over`); an auto-reply is not an answer (`automated_reply`, Jev). Newest first.",
+    "Every one-to-one thread is read as it is mirrored (the live watch, every ~10 s; the 5-min pass heals), whoever " +
+    "opened it. The person's words since our last message (a send or a message typed by hand on the account) are ONE " +
+    "burst, reported ONCE to campaign-service (`POST /internal/trigger-events`, trigger `positive_reply_received`), naming " +
+    "the person by email, for an offer (`offerBasis`). Who is answered is the answering pipe's strategy there. An " +
+    "auto-reply is not an answer (`automated_reply`, Jev); the brand's own team is never reported (`own_team`). Newest first.",
   request: { query: z.object({ brandId: z.string().uuid(), limit: z.coerce.number().int().min(1).max(200).optional() }) },
   responses: {
     200: { description: "Reports", content: { "application/json": { schema: z.object({ reports: z.array(ReplyTriggerReportSchema) }) } } },

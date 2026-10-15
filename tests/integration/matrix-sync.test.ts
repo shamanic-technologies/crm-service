@@ -92,7 +92,7 @@ let chatReply = {
 };
 
 function installFetchStub() {
-  vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.includes("/_matrix/client/v3/sync")) {
       const next = syncPages.shift() ?? emptyPage("s-end");
@@ -123,6 +123,13 @@ function installFetchStub() {
           ? { brands: [{ id: BRAND, name: "Acme", domain: "acme.test" }] }
           : { brand: { name: "Acme", domain: "acme.test", url: "https://acme.test" } };
       return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    if (url.includes("/orgs/judgments") && String(init?.body ?? "").includes('"sender"')) {
+      // The reply watch asking whether a person wrote a burst (every thread is read since REPLY-ANY-LEAD-1015).
+      return new Response(
+        JSON.stringify({ model: "jev-test", answers: { sender: { type: "choice", choice: "person", confidence: 0.9, probabilities: {} } } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
     }
     if (url.includes("/orgs/judgments")) {
       judgeCalls += 1;

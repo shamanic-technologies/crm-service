@@ -55,6 +55,7 @@ router.get(
         channel: r.channel,
         campaignId: r.campaignId,
         offerId: r.offerId,
+        offerBasis: r.offerBasis,
         conversationId: r.conversationId,
         person: { personId: r.personId, fullName: r.fullName, email: r.email, phone: r.phone },
         messages: r.messages,

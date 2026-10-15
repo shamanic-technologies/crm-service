@@ -57,6 +57,27 @@ import {
   type JudgePassSummary,
 } from "../people/relevance.js";
 
+/**
+ * One mirror at a time per connection: the live watch and the 5-min pass share
+ * the `/sync` cursor. The pass waits for a live tick in flight; the live watch
+ * skips a connection the pass holds.
+ */
+const connectionLocks = new Map<string, Promise<unknown>>();
+
+async function withConnectionLock<T>(connectionId: string, fn: () => Promise<T>): Promise<T> {
+  while (connectionLocks.has(connectionId)) await connectionLocks.get(connectionId)!.catch(() => undefined);
+  const p = fn();
+  connectionLocks.set(connectionId, p);
+  try {
+    return await p;
+  } finally {
+    connectionLocks.delete(connectionId);
+  }
+}
+
+/** Rooms each connection already mirrors, read once per process then kept up to date by the ingest. */
+const knownRoomsCache = new Map<string, Set<string>>();
+
 /** Hard ceiling on /sync pages drained in one pass — a cron re-runs every 5 min. */
 const MAX_PAGES = Number(process.env.MATRIX_SYNC_MAX_PAGES) || 20;
 
@@ -169,14 +190,19 @@ async function ingestBronze(
   // dropped every message of a known room that arrived without a membership
   // change (a message we sent, 2026-10-12, and incoming DMs alike). A room
   // routed once stays this connection's; its counterpart is re-read from bronze.
-  const knownRooms = new Set(
-    (
-      await db
-        .selectDistinct({ roomId: matrixRawEvents.roomId })
-        .from(matrixRawEvents)
-        .where(eq(matrixRawEvents.connectionId, conn.id))
-    ).map((r) => r.roomId),
-  );
+  // Read once per process (the live watch calls this every few seconds), then grown below.
+  let knownRooms = knownRoomsCache.get(conn.id);
+  if (!knownRooms) {
+    knownRooms = new Set(
+      (
+        await db
+          .selectDistinct({ roomId: matrixRawEvents.roomId })
+          .from(matrixRawEvents)
+          .where(eq(matrixRawEvents.connectionId, conn.id))
+      ).map((r) => r.roomId),
+    );
+    knownRoomsCache.set(conn.id, knownRooms);
+  }
 
   for (let page = 0; page < MAX_PAGES; page++) {
     const response = await sync(cursor, token);
@@ -625,6 +651,14 @@ async function computeLead(
  * run, and rethrows to the caller.
  */
 export async function syncConnection(conn: MatrixConnection): Promise<ConnectionSyncResult> {
+  return withConnectionLock(conn.id, async () => {
+    // Re-read: the live watch may have moved the cursor while this pass waited.
+    const [fresh] = await db.select().from(matrixConnections).where(eq(matrixConnections.id, conn.id));
+    return syncConnectionLocked(fresh ?? conn);
+  });
+}
+
+async function syncConnectionLocked(conn: MatrixConnection): Promise<ConnectionSyncResult> {
   const run = await createRun({
     orgId: conn.orgId,
     userId: conn.createdByUserId,
@@ -654,7 +688,7 @@ export async function syncConnection(conn: MatrixConnection): Promise<Connection
     // After bronze + silver: the timeline already serves what we are about to report.
     let replies: ReplyDetection | null = null;
     try {
-      replies = await detectReplies(conn, run.id);
+      replies = await detectReplies(conn, async () => run.id);
     } catch (err) {
       // The mirror itself is fine; the next pass re-reads every campaign thread that moved.
       console.error(`[crm-service][reply-trigger] detection failed for connection ${conn.id}:`, err);
@@ -743,6 +777,78 @@ export async function runSyncPass(connectionId?: string): Promise<SyncPassResult
   }
 
   return { connections: connections.length, results, failures };
+}
+
+// ─── the live watch ─────────────────────────────────────────────────────────
+
+/** How often the live watch mirrors every connection (REPLY-ANY-LEAD-1015: a lead's message is answered in seconds). */
+export const MATRIX_LIVE_INTERVAL_MS = Number(process.env.MATRIX_LIVE_INTERVAL_MS) || 10_000;
+
+/**
+ * The live half of the mirror, for one connection: bronze, silver of the rooms
+ * that moved, and the reply watch on those rooms. No lead reading (paid, done by
+ * the 5-min pass on every conversation whose lead is behind) and no run unless
+ * something needs one (a Jev call, a rep phone read): a quiet tick opens nothing.
+ * Returns the bursts it recorded as pending.
+ */
+export async function liveSyncConnection(conn: MatrixConnection): Promise<number> {
+  if (connectionLocks.has(conn.id)) return 0; // the 5-min pass holds it
+  return withConnectionLock(conn.id, async () => {
+    const [current] = await db.select().from(matrixConnections).where(eq(matrixConnections.id, conn.id));
+    if (!current || current.status === "paused") return 0;
+    const bronze = await ingestBronze(current);
+    if (bronze.eventsIngested === 0) return 0;
+    for (const roomId of bronze.rooms) await rebuildRoom(current, roomId);
+
+    const ids = { orgId: current.orgId, userId: current.createdByUserId, brandIds: [current.brandId] };
+    let runId: Promise<string> | null = null;
+    const lazyRun = () =>
+      (runId ??= createRun({ ...ids, serviceName: SERVICE_NAME, taskName: "matrix.live" }).then((r) => r.id));
+    try {
+      const replies = await detectReplies(current, lazyRun, Date.now(), { rooms: [...bronze.rooms] });
+      if (runId) await updateRun(await runId, "completed", { ...ids, runId: await runId });
+      return replies.detected;
+    } catch (err) {
+      if (runId) await updateRun(await runId, "failed", { ...ids, runId: await runId }).catch(() => undefined);
+      throw err;
+    }
+  });
+}
+
+let liveRunning = false;
+
+/** One live tick over every active connection; then reports what it found. Never two at once. */
+export async function runLiveTick(): Promise<void> {
+  if (liveRunning) return;
+  liveRunning = true;
+  try {
+    const connections = await db
+      .select()
+      .from(matrixConnections)
+      .where(inArray(matrixConnections.status, ["active", "error"]));
+    let detected = 0;
+    for (const conn of connections) {
+      try {
+        detected += await liveSyncConnection(conn);
+      } catch (err) {
+        // The 5-min pass records a broken connection on its row; the live watch only logs.
+        console.error(`[crm-service][matrix-live] connection ${conn.id}: ${(err as Error).message}`);
+      }
+    }
+    if (detected > 0 && process.env.REPLY_TRIGGER_DELIVERY !== "off") await deliverDueReplies();
+  } finally {
+    liveRunning = false;
+  }
+}
+
+/** In-process, every MATRIX_LIVE_INTERVAL_MS, first tick 60s after boot. */
+export function startMatrixLiveWatch(): void {
+  if (process.env.MATRIX_LIVE_WATCH === "off") return;
+  const tick = () => runLiveTick().catch((e) => console.error("[crm-service][matrix-live] tick failed:", e));
+  setTimeout(() => {
+    tick();
+    setInterval(tick, MATRIX_LIVE_INTERVAL_MS).unref();
+  }, 60_000).unref();
 }
 
 /**
