@@ -25,7 +25,8 @@
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { contacts, matrixGhostPhones, whatsappPhoneLookups } from "../../db/schema.js";
-import { BridgeError, resolveIdentifier } from "../matrix/bridge.js";
+import { resolveIdentifier } from "../matrix/bridge.js";
+import { bridgeSaysNoSuchNumber } from "./number-validity.js";
 import { connectedOnly, linkedWhatsappAccounts } from "./accounts.js";
 
 const MAX_PER_PASS = Number(process.env.WHATSAPP_PHONE_LOOKUPS_PER_PASS) || 150;
@@ -91,8 +92,9 @@ async function phonesToAsk(orgId: string, brandId: string): Promise<string[]> {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * One pass for one brand. A bridge failure other than "not on WhatsApp" stops
- * the pass and throws (the caller logs it; the next pass resumes).
+ * One pass for one brand. A bridge failure other than "no such number" (404, or
+ * a 500 on a number that cannot exist: number-validity.ts) stops the pass and
+ * throws (the caller logs it; the next pass resumes).
  */
 export async function resolveBrandWhatsappPhones(orgId: string, brandId: string): Promise<PhoneResolutionResult> {
   const empty = { asked: 0, found: 0, notOnWhatsapp: 0, contactsUpdated: 0, remaining: 0 };
@@ -116,11 +118,12 @@ export async function resolveBrandWhatsappPhones(orgId: string, brandId: string)
       result.found += 1;
       result.contactsUpdated += await recordGhostPhone(who.mxid, phone, orgId, brandId);
     } catch (err) {
-      if (err instanceof BridgeError && err.status === 404) {
+      const outcome = bridgeSaysNoSuchNumber(err, phone);
+      if (outcome) {
         await db
           .insert(whatsappPhoneLookups)
-          .values({ phone, ghostMxid: null, outcome: "not_on_whatsapp" })
-          .onConflictDoUpdate({ target: whatsappPhoneLookups.phone, set: { ghostMxid: null, outcome: "not_on_whatsapp", lookedUpAt: new Date() } });
+          .values({ phone, ghostMxid: null, outcome })
+          .onConflictDoUpdate({ target: whatsappPhoneLookups.phone, set: { ghostMxid: null, outcome, lookedUpAt: new Date() } });
         result.notOnWhatsapp += 1;
         continue;
       }

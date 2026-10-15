@@ -2098,9 +2098,23 @@ export const matrixGhostPhones = pgTable(
 export const whatsappPhoneLookups = pgTable("whatsapp_phone_lookups", {
   phone: text("phone").primaryKey(),
   ghostMxid: text("ghost_mxid"),
-  // 'found' | 'not_on_whatsapp'
+  // 'found' | 'not_on_whatsapp' | 'invalid_number' (re-asked after 30 days like not_on_whatsapp)
   outcome: text("outcome").notNull(),
   lookedUpAt: timestamp("looked_up_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * WHATSAPP-RESOLVE-1015: owner alerts claimed before they are sent, so one
+ * alert key (what, brand, UTC day) is told at most once. No brand column on
+ * purpose: the key names the brand, and the row is a record of a Telegram
+ * message, not brand data (nothing to move on a brand transfer).
+ */
+export const staffAlerts = pgTable("staff_alerts", {
+  alertKey: text("alert_key").primaryKey(),
+  // 'sending' | 'sent' | 'failed' | 'unconfigured'
+  status: text("status").notNull(),
+  error: text("error"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
 export type ContactUpload = typeof contactUploads.$inferSelect;

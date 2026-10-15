@@ -13,8 +13,10 @@ import {
   matrixLinks,
   people,
   peopleScopes,
+  staffAlerts,
   whatsappSends,
 } from "../../src/db/schema.js";
+import { like } from "drizzle-orm";
 import whatsappRoutes from "../../src/routes/whatsapp.js";
 import contactsRoutes from "../../src/routes/contacts.js";
 import matrixRoutes from "../../src/routes/matrix.js";
@@ -53,6 +55,9 @@ const ACCOUNT = "@crm_wa_a:matrix.test";
 const ACCOUNT_PRO = "@crm_wa_pro:matrix.test";
 const LOGIN_OF: Record<string, string> = { [ACCOUNT]: "33611111111", [ACCOUNT_PRO]: "33622222222" };
 let lookups: string[] = [];
+let telegrams: string[] = [];
+/** Digits the stub bridge answers 500 M_UNKNOWN for (what mautrix-whatsapp answers when WhatsApp says the contact is "invalid"). */
+const BRIDGE_500 = new Set(["2541110229905", "33600000009"]);
 const KNOWN_ROOM = "!known:matrix.test";
 let sends: { room: string; txn: string; body: string; auth: string | null }[] = [];
 let createdDms: string[] = [];
@@ -72,6 +77,7 @@ function installFetchStub() {
   sends = [];
   createdDms = [];
   lookups = [];
+  telegrams = [];
   loginState = "CONNECTED";
   roomChannelOverride = {};
   createDmRoomOverride = {};
@@ -80,6 +86,10 @@ function installFetchStub() {
     const auth = new Headers(init?.headers).get("authorization");
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
       return json({ id: "run-" + Math.random().toString(16).slice(2) });
+    }
+    if (url.host === "api.telegram.org") {
+      telegrams.push(JSON.parse(String(init?.body)).text as string);
+      return json({ ok: true, result: { message_id: telegrams.length } });
     }
     if (url.host === "wa.test") {
       expect(auth).toBe(`Bearer ${SECRET}`);
@@ -93,6 +103,7 @@ function installFetchStub() {
         expect(url.searchParams.get("login_id")).toBe(LOGIN_OF[url.searchParams.get("user_id")!] ?? "33611111111");
         lookups.push(decodeURIComponent(m[2]));
         const digits = decodeURIComponent(m[2]).replace(/\D/g, "");
+        if (BRIDGE_500.has(digits)) return json({ errcode: "M_UNKNOWN", error: "Internal error resolving identifier" }, 500);
         const who = NETWORK[digits];
         if (!who) return json({ errcode: "M_NOT_FOUND", error: `the server said +${digits} is not on WhatsApp` }, 404);
         let room = who.room;
@@ -148,7 +159,8 @@ const headers = { "x-api-key": API_KEY, "x-org-id": ORG, "x-user-id": USER };
 async function wipe() {
   await db.delete(whatsappSends).where(eq(whatsappSends.orgId, ORG));
   await db.delete(conversations).where(eq(conversations.orgId, ORG));
-  await db.delete(whatsappPhoneLookups).where(inArray(whatsappPhoneLookups.phone, ["+33600000001", "+33600000002", "+33699999999"]));
+  await db.delete(whatsappPhoneLookups).where(inArray(whatsappPhoneLookups.phone, ["+33600000001", "+33600000002", "+33699999999", "+2541110229905"]));
+  await db.delete(staffAlerts).where(like(staffAlerts.alertKey, "%babababa-1111-4111-8111-%"));
   await db.delete(matrixLinks).where(eq(matrixLinks.orgId, ORG));
   await db.delete(matrixConnections).where(eq(matrixConnections.orgId, ORG));
   await db.delete(contactServes).where(eq(contactServes.orgId, ORG));
@@ -437,6 +449,56 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
     expect(offline.body.code).toBe("whatsapp_not_connected");
     expect(sends).toHaveLength(0);
   });
+
+  it("a number that cannot exist is 'not on WhatsApp', a bridge 500 on a valid one stays a bridge error (WHATSAPP-RESOLVE-1015)", async () => {
+    await linkAccount();
+    // Kenya: 9-digit national numbers; this one has 10. WhatsApp answers "invalid", the bridge a 500.
+    const invalid = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+2541110229905", text: "x", idempotencyKey: "inv-1" });
+    expect(invalid.status).toBe(422);
+    expect(invalid.body.code).toBe("not_on_whatsapp");
+    expect(invalid.body.error).toContain("not a valid phone number");
+
+    const outage = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000009", text: "x", idempotencyKey: "inv-2" });
+    expect(outage.status).toBe(502);
+    expect(outage.body.code).toBe("bridge_error");
+    expect(sends).toHaveLength(0);
+  });
+
+  it("tells staff once a day per brand when a campaign cannot write because WhatsApp is not linked", async () => {
+    process.env.TELEGRAM_BOT_TOKEN = "tg-token";
+    process.env.TELEGRAM_OWNER_CHAT_ID = "42";
+    try {
+      // Not a campaign: no alert.
+      await request(app())
+        .post("/orgs/whatsapp/messages")
+        .set(headers)
+        .send({ brandId: BRAND_UNLINKED, phone: "+33600000001", text: "x", idempotencyKey: "al-0" });
+      for (const k of ["al-1", "al-2"]) {
+        const r = await request(app())
+          .post("/orgs/whatsapp/messages")
+          .set({ ...headers, "x-campaign-id": "camp-1" })
+          .send({ brandId: BRAND_UNLINKED, phone: "+33600000001", text: "x", idempotencyKey: k });
+        expect(r.body.code).toBe("whatsapp_not_linked");
+      }
+      await vi.waitFor(async () => {
+        const [row] = await db.select().from(staffAlerts).where(like(staffAlerts.alertKey, `%${BRAND_UNLINKED}%`));
+        expect(row?.status).toBe("sent");
+      });
+      await new Promise((r) => setTimeout(r, 100));
+      expect(telegrams).toHaveLength(1);
+      expect(telegrams[0]).toContain("no WhatsApp account linked");
+      expect(telegrams[0]).toContain("link their WhatsApp");
+    } finally {
+      delete process.env.TELEGRAM_BOT_TOKEN;
+      delete process.env.TELEGRAM_OWNER_CHAT_ID;
+    }
+  });
 });
 
 describe.skipIf(!RUN)("WhatsApp threads merge into the person by phone (DB)", () => {
@@ -452,10 +514,14 @@ describe.skipIf(!RUN)("WhatsApp threads merge into the person by phone (DB)", ()
     await seedPeople([
       { key: "email:ann@x.com", phones: ["+33600000001"], presences: [clerk(["+33600000001"])], at: "2026-09-01T00:00:00Z" },
       { key: "email:zed@x.com", phones: ["+33699999999"], presences: [clerk(["+33699999999"])], at: "2026-09-02T00:00:00Z" },
+      // A number that cannot exist sorts FIRST and must not stop the pass (WHATSAPP-RESOLVE-1015).
+      { key: "email:ke@x.com", phones: ["+2541110229905"], presences: [clerk(["+2541110229905"])], at: "2026-09-03T00:00:00Z" },
     ]);
 
     const first = await resolveBrandWhatsappPhones(ORG, BRAND);
-    expect(first).toMatchObject({ status: "ok", asked: 2, found: 1, notOnWhatsapp: 1, contactsUpdated: 1 });
+    expect(first).toMatchObject({ status: "ok", asked: 3, found: 1, notOnWhatsapp: 2, contactsUpdated: 1 });
+    const [ke] = await db.select().from(whatsappPhoneLookups).where(eq(whatsappPhoneLookups.phone, "+2541110229905"));
+    expect(ke.outcome).toBe("invalid_number");
     const [c] = await db.select().from(contacts).where(eq(contacts.id, contactId));
     expect(c.phoneE164).toBe("+33600000001");
 

@@ -65,6 +65,7 @@ router.post("/orgs/whatsapp/messages", apiKeyAuth, requireOrg("whatsapp.send"), 
       phone: body.phone ?? null,
       fromAccount: body.fromAccount ?? null,
       skipIfReplied: body.skipIfReplied ?? false,
+      userId: req.userId ?? null,
     });
     res.json(result);
     if (!result.duplicate && process.env.WHATSAPP_SEND_REFRESH !== "off") void refreshAfterSend(req.orgId!, brandId, result.sendId);

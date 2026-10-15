@@ -1034,6 +1034,14 @@ newest first, a person with none absent; a send with no campaign never matches. 
   4 such rooms found on 2026-10-13 (a bridge restart's resync made one more), repaired bridge-side (portal
   `mxid` nulled, bridge restarted); the homeserver now creates room v11 (random ids,
   `CONTINUWUITY_DEFAULT_ROOM_VERSION`, `docker-compose.matrix.yml`, project `-p matrix`).
+- **A number that cannot exist = `not_on_whatsapp`, never a bridge error** (`number-validity.ts`, WHATSAPP-RESOLVE-1015): WhatsApp
+  answers a malformed number `contact type="invalid"`, which mautrix-whatsapp turns into a bare `500 M_UNKNOWN "Internal error
+  resolving identifier"`. A bridge 500 on a number libphonenumber (full metadata) calls invalid = refused `not_on_whatsapp` (the
+  workflow skips it) / phone lookup `invalid_number`; a 500 on a VALID number stays 502 `bridge_error`. Prod 2026-10-14: a signup's
+  `+254 111 022 9905` (Kenya, 10 digits instead of 9) failed 2 sends and stopped Distribute.you's phone resolution every build.
+- **Staff told when the CUSTOMER must act** (`staff-alert.ts`): a fresh `whatsapp_not_linked` / `whatsapp_not_connected` refusal on a
+  send carrying `x-campaign-id` = one owner Telegram per (code, brand, UTC day), claimed in `staff_alerts`, with the brand's
+  Integrations page link (where WhatsApp is linked). Prod 2026-10-15: Doc Dinners' form answer, WhatsApp never linked, skipped silently.
 - Idempotent: `whatsapp_sends` UNIQUE (org, brand, key); sent → same answer `duplicate: true`;
   refused → same refusal; failed or stuck `sending` > 2 min → retried.
 - Into the thread: WhatsApp names counterparts by opaque LID ghosts (all 514 prod WhatsApp

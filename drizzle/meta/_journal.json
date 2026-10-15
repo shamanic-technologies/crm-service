@@ -281,6 +281,13 @@
       "when": 1791970000000,
       "tag": "0039_crm_label_verdicts",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1791980000000,
+      "tag": "0040_staff_alerts",
+      "breakpoints": true
     }
   ]
 }
