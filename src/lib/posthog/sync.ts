@@ -35,7 +35,7 @@ import { canonicalHash } from "../gohighlevel/records.js";
 import {
   listIdentifiedPersons,
   listKeyEvents,
-  listPersonIdsGivenPhoneSince,
+  listPersonIdsTouchedSince,
   listPersonsByIds,
   listPersonsByDistinctIds,
   listVisits,
@@ -147,7 +147,7 @@ async function deriveContacts(conn: PosthogConnection, externalIds?: string[]): 
       fullName: c.fullName,
       firstName: c.firstName,
       lastName: c.lastName,
-      rawAttributes: { distinctIds: c.distinctIds, phones: c.phones, phoneOnly: c.phoneOnly },
+      rawAttributes: { distinctIds: c.distinctIds, phones: c.phones, phoneOnly: c.phoneOnly, notSignup: c.notSignup, website: c.website },
       sourceCreatedAt: c.sourceCreatedAt,
       sourceConnectionId: conn.id,
       lastRebuiltAt: now,
@@ -384,21 +384,33 @@ export async function rebuildPosthogFromBronze(conn: PosthogConnection) {
   return { contactsDerived, activitiesDerived, activitiesLinked };
 }
 
+export interface FastMirrorResult {
+  /** Persons whose bronze moved (new, or a property changed). */
+  changed: string[];
+  /** Of the persons touched, those mirrored for the first time (their whole history read). */
+  created: number;
+  /** Custom events mirrored for persons already known (they show on the thread at once). */
+  eventsChanged: number;
+}
+
 /**
- * The phone watch's fast path (WA-GIVEN-TRIGGER-1015, lib/phone-trigger/): mirror NOW
- * the persons who were given a phone since `since`, bronze + silver, without
- * waiting for the 15-min pass. A person mirrored here for the first time also gets
- * their whole activity history read (the full pass would otherwise treat them as
- * already known and never backfill it). Returns the person ids whose bronze moved.
+ * The fast path (WA-GIVEN-TRIGGER-1015, ONBOARDING-IN-UNIBOX-1015), asked every minute
+ * by the phone watch (lib/phone-trigger/): mirror NOW, bronze + silver, without
+ * waiting for the 15-min pass, the persons the brand learned something about since
+ * `since` (`listPersonIdsTouchedSince`: a phone / email / name / website set, or a
+ * custom event of a known person) and their custom events since `since`. A person
+ * mirrored here for the first time gets their whole activity history read (the full
+ * pass would otherwise treat them as already known and never backfill it): the steps
+ * an anonymous visitor walked before saying who they are land on their thread too.
  */
-export async function mirrorPersonsGivenPhone(conn: PosthogConnection, since: Date): Promise<string[]> {
+export async function mirrorRecentPersons(conn: PosthogConnection, since: Date): Promise<FastMirrorResult> {
   const apiKey = await resolveBrandCredential(POSTHOG_PROVIDER, "PostHog", conn.brandId, {
     orgId: conn.orgId,
     userId: conn.createdByUserId,
   });
   const target = targetOf(conn, apiKey);
-  const ids = await listPersonIdsGivenPhoneSince(target, since);
-  if (ids.length === 0) return [];
+  const ids = await listPersonIdsTouchedSince(target, since);
+  if (ids.length === 0) return { changed: [], created: 0, eventsChanged: 0 };
   const known = new Set(
     (
       await db
@@ -408,10 +420,15 @@ export async function mirrorPersonsGivenPhone(conn: PosthogConnection, since: Da
     ).map((r) => r.externalId),
   );
   const changed: string[] = [];
+  const listed = new Set<string>();
   for (const part of chunks(ids)) {
-    changed.push(...(await mirrorBatch(conn, "person", await listPersonsByIds(target, part), (r) => String(r.id))));
+    const persons = await listPersonsByIds(target, part);
+    for (const r of persons) listed.add(String(r.id));
+    changed.push(...(await mirrorBatch(conn, "person", persons, (r) => String(r.id))));
   }
-  const fresh = ids.filter((id) => !known.has(id));
+  // A person PostHog does not hold as known (yet) is not mirrored, nor is their activity.
+  const fresh = ids.filter((id) => listed.has(id) && !known.has(id));
+  const already = ids.filter((id) => listed.has(id) && known.has(id));
   const visits: string[] = [];
   const events: string[] = [];
   for (const part of chunks(fresh)) {
@@ -422,9 +439,17 @@ export async function mirrorPersonsGivenPhone(conn: PosthogConnection, since: Da
       events.push(...(await mirrorBatch(conn, "event", page, (r) => String(r.id))));
     }
   }
+  let eventsChanged = 0;
+  for (const part of chunks(already)) {
+    for await (const page of listKeyEvents(target, since, { kind: "ids", ids: part })) {
+      const moved = await mirrorBatch(conn, "event", page, (r) => String(r.id));
+      eventsChanged += moved.length;
+      events.push(...moved);
+    }
+  }
   await deriveContacts(conn, changed);
   await deriveActivities(conn, "visit", visits);
   await deriveActivities(conn, "event", events);
   await linkActivities(conn);
-  return changed;
+  return { changed, created: fresh.length, eventsChanged };
 }

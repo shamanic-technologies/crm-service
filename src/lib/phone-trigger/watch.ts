@@ -35,7 +35,7 @@ import {
   posthogConnections,
   type PhoneGivenReport,
 } from "../../db/schema.js";
-import { mirrorPersonsGivenPhone } from "../posthog/sync.js";
+import { mirrorRecentPersons } from "../posthog/sync.js";
 import { mirrorRecentlyUpdatedUsers } from "../auth/sync.js";
 import { runScopeBuild } from "../people/build.js";
 import { createRun, updateRun } from "../runs-client.js";
@@ -66,7 +66,7 @@ const MAX_BACKOFF_MS = 60 * 60_000;
 const DETECT_BATCH = 10_000;
 
 export interface PhoneWatchResult {
-  mirrored: { source: string; connectionId: string; changed: number; error?: string }[];
+  mirrored: { source: string; connectionId: string; orgId: string; brandId: string; changed: number; created?: number; eventsChanged?: number; error?: string }[];
   baselined: { artifactId: string; source: string; phones: number }[];
   detected: number;
   skipped: Record<string, number>;
@@ -89,10 +89,11 @@ async function fastMirror(now: number): Promise<PhoneWatchResult["mirrored"]> {
     .where(and(inArray(posthogConnections.status, ["active", "error"]), sql`${posthogConnections.lastSyncedAt} IS NOT NULL`));
   for (const conn of ph) {
     try {
-      out.push({ source: "posthog", connectionId: conn.id, changed: (await mirrorPersonsGivenPhone(conn, new Date(since))).length });
+      const r = await mirrorRecentPersons(conn, new Date(since));
+      out.push({ source: "posthog", connectionId: conn.id, orgId: conn.orgId, brandId: conn.brandId, changed: r.changed.length, created: r.created, eventsChanged: r.eventsChanged });
     } catch (err) {
       console.warn(`[crm-service][phone-trigger] PostHog fast mirror of ${conn.id} (brand ${conn.brandId}) failed: ${(err as Error).message}`);
-      out.push({ source: "posthog", connectionId: conn.id, changed: 0, error: (err as Error).message });
+      out.push({ source: "posthog", connectionId: conn.id, orgId: conn.orgId, brandId: conn.brandId, changed: 0, error: (err as Error).message });
     }
   }
   const auth = await db
@@ -101,10 +102,10 @@ async function fastMirror(now: number): Promise<PhoneWatchResult["mirrored"]> {
     .where(and(inArray(authConnections.status, ["active", "error"]), sql`${authConnections.lastSyncedAt} IS NOT NULL`));
   for (const conn of auth) {
     try {
-      out.push({ source: conn.provider, connectionId: conn.id, changed: (await mirrorRecentlyUpdatedUsers(conn, since)).length });
+      out.push({ source: conn.provider, connectionId: conn.id, orgId: conn.orgId, brandId: conn.brandId, changed: (await mirrorRecentlyUpdatedUsers(conn, since)).length });
     } catch (err) {
       console.warn(`[crm-service][phone-trigger] ${conn.provider} fast mirror of ${conn.id} (brand ${conn.brandId}) failed: ${(err as Error).message}`);
-      out.push({ source: conn.provider, connectionId: conn.id, changed: 0, error: (err as Error).message });
+      out.push({ source: conn.provider, connectionId: conn.id, orgId: conn.orgId, brandId: conn.brandId, changed: 0, error: (err as Error).message });
     }
   }
   return out;
@@ -381,7 +382,7 @@ async function deliverOne(
 async function refreshBrandPeople(orgId: string, brandId: string): Promise<void> {
   try {
     const [scope] = await db.select().from(peopleScopes).where(and(eq(peopleScopes.orgId, orgId), eq(peopleScopes.brandId, brandId)));
-    if (scope) await runScopeBuild(scope);
+    if (scope) await runScopeBuild(scope, { followUp: true });
   } catch (err) {
     console.error(`[crm-service][phone-trigger] people build of brand ${brandId} after a new number failed:`, err);
   }
@@ -391,8 +392,13 @@ async function refreshBrandPeople(orgId: string, brandId: string): Promise<void>
 export async function runPhoneWatchPass(now: number = Date.now()): Promise<PhoneWatchResult> {
   const mirrored = process.env.PHONE_WATCH_FAST_MIRROR === "off" ? [] : await fastMirror(now);
   const { brands, ...detected } = await detectNewPhones(now);
+  // A PostHog person new or changed (a visitor who typed their website, name, email...:
+  // ONBOARDING-IN-UNIBOX-1015) becomes a person of the brand's Unibox at the build; their
+  // later events need none (the thread reads the mirror live).
+  const refresh = new Set(brands);
+  for (const m of mirrored) if (m.source === "posthog" && m.changed > 0) refresh.add(`${m.orgId}|${m.brandId}`);
   if (process.env.PHONE_TRIGGER_REFRESH !== "off") {
-    for (const b of brands) {
+    for (const b of refresh) {
       const [orgId, brandId] = b.split("|");
       void refreshBrandPeople(orgId, brandId);
     }

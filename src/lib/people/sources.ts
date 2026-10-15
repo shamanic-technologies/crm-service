@@ -548,7 +548,7 @@ export async function readPosthog(orgId: string, brandId: string): Promise<Sourc
   const base = {
     source: "posthog" as const,
     scope: "brand" as const,
-    sourceCountBasis: "crm-service mirrored PostHog identified persons (identified, an email, or named by an auth user id)",
+    sourceCountBasis: "crm-service mirrored PostHog known persons (identified, an email, a phone, a name, a website, or named by an auth user id)",
   };
   const conns = await db
     .select({ status: posthogConnections.status, lastError: posthogConnections.lastError, lastSyncedAt: posthogConnections.lastSyncedAt })
@@ -559,7 +559,7 @@ export async function readPosthog(orgId: string, brandId: string): Promise<Sourc
   if (health.status === "failed") return { ...base, status: "failed", presences: [], sourceCount: null, error: health.error };
   const rows = (await db.execute(sql`
     SELECT c.id, c.external_id, c.full_name, c.primary_email, c.phone_e164, c.source_created_at,
-           c.raw_attributes->'distinctIds' AS distinct_ids,
+           c.raw_attributes->'distinctIds' AS distinct_ids, c.raw_attributes->>'website' AS website,
            min(a.occurred_at) AS first_at, max(coalesce(a.ended_at, a.occurred_at)) AS last_at,
            count(a.id) FILTER (WHERE a.kind = 'visit')::int AS visits,
            count(a.id) FILTER (WHERE a.kind = 'event')::int AS events
@@ -576,6 +576,7 @@ export async function readPosthog(orgId: string, brandId: string): Promise<Sourc
     phone_e164: string | null;
     source_created_at: string | Date | null;
     distinct_ids: string[] | null;
+    website: string | null;
     first_at: string | Date | null;
     last_at: string | Date | null;
     visits: number;
@@ -595,7 +596,8 @@ export async function readPosthog(orgId: string, brandId: string): Promise<Sourc
     messageCount: null,
     inboundCount: null,
     outboundCount: null,
-    detail: { contactId: r.id, externalId: r.external_id, visits: Number(r.visits), events: Number(r.events) },
+    // The website they typed (ONBOARDING-IN-UNIBOX-1015): a visitor known by it is a person, "Visitor from <domain>".
+    detail: { contactId: r.id, externalId: r.external_id, visits: Number(r.visits), events: Number(r.events), website: r.website },
   }));
   return { ...base, status: "ok", presences, sourceCount: rows.length, error: health.error };
 }

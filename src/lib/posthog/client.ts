@@ -18,6 +18,12 @@
  * visitor who typed their WhatsApp number before any account exists is known by
  * that number alone (distribute.you's /get-started sets `phone` on the person).
  *
+ * So does a person carrying a NAME or the WEBSITE they typed (ONBOARDING-IN-UNIBOX-1015,
+ * owner 2026-10-15): a visitor walking a product's signup steps is a person of the
+ * brand from the first page where they say who they are, account or not. A person
+ * PostHog knows by none of these (email, phone, name, website, identify) stays an
+ * anonymous visit and never reaches this service.
+ *
  * Why not "has an email" alone (the rule until 2026-10-11): measured on
  * distribute.you's own project, 151 persons, 136 carrying a Clerk user id, only
  * 56 with an email property — 80 signed-up users were never mirrored.
@@ -119,7 +125,16 @@ const HAS_EMAIL = (alias: string) => `ifNull(toString(${alias}properties.email),
 export const PHONE_PROPERTY_KEYS = ["phone", "phone_number", "phoneNumber"] as const;
 const HAS_PHONE = (alias: string) =>
   `(${PHONE_PROPERTY_KEYS.map((k) => `ifNull(toString(${alias}properties.${k}), '') != ''`).join(" OR ")})`;
-const IS_IDENTIFIED = (alias: string) => `(ifNull(${alias}is_identified, 0) = 1 OR ${HAS_EMAIL(alias)} OR ${HAS_PHONE(alias)})`;
+/** The person properties a product names a person by (a name) or their website by. */
+export const NAME_PROPERTY_KEYS = ["name", "first_name", "last_name"] as const;
+export const WEBSITE_PROPERTY_KEYS = ["website"] as const;
+const HAS_ANY = (alias: string, keys: readonly string[]) =>
+  `(${keys.map((k) => `ifNull(toString(${alias}properties.${k}), '') != ''`).join(" OR ")})`;
+const IS_IDENTIFIED = (alias: string) =>
+  `(ifNull(${alias}is_identified, 0) = 1 OR ${HAS_EMAIL(alias)} OR ${HAS_PHONE(alias)}` +
+  ` OR ${HAS_ANY(alias, NAME_PROPERTY_KEYS)} OR ${HAS_ANY(alias, WEBSITE_PROPERTY_KEYS)})`;
+/** Every person property that makes a person known: setting one is what the fast mirror watches. */
+export const KNOWN_PROPERTY_KEYS = ["email", ...PHONE_PROPERTY_KEYS, ...NAME_PROPERTY_KEYS, ...WEBSITE_PROPERTY_KEYS] as const;
 export const IDENTIFIED = IS_IDENTIFIED("");
 
 /** Which persons an activity read covers: the identified ones, or an explicit id list. */
@@ -158,7 +173,7 @@ const PERSON_COLUMNS = `
   toString(p.id) AS id, toString(p.properties.email) AS email,
   toString(p.properties.name) AS name, toString(p.properties.first_name) AS first_name,
   toString(p.properties.last_name) AS last_name, p.created_at AS created_at,
-  ${PHONE_PROPERTY_KEYS.map((k) => `toString(p.properties.${k}) AS prop_${k}`).join(", ")},
+  ${[...PHONE_PROPERTY_KEYS, ...WEBSITE_PROPERTY_KEYS].map((k) => `toString(p.properties.${k}) AS prop_${k}`).join(", ")},
   p.is_identified AS is_identified, d.ids AS distinct_ids`;
 
 /** Up to 50 distinct ids per person: the ids another tool of the brand may name them by. */
@@ -230,35 +245,78 @@ export function listVisits(target: PosthogTarget, since: Date, scope: PersonScop
   );
 }
 
+/** At most this many of an event's own properties are kept, each string cut at `EVENT_PROPERTY_MAX_CHARS`. */
+export const EVENT_PROPERTY_MAX_KEYS = 50;
+export const EVENT_PROPERTY_MAX_CHARS = 1000;
+
+/**
+ * PURE: the properties the BRAND put on an event (what the visitor typed, the step):
+ * every key PostHog's own SDK did not add (`$`-prefixed: `$current_url`, `$set`,
+ * `$browser`...), in their order, strings cut at `EVENT_PROPERTY_MAX_CHARS`.
+ * HogQL serves `properties` as a JSON string.
+ */
+export function ownEventProperties(raw: unknown): Record<string, unknown> {
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return {};
+    }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const cut = (v: unknown): unknown => {
+    if (typeof v === "string") return v.length > EVENT_PROPERTY_MAX_CHARS ? `${v.slice(0, EVENT_PROPERTY_MAX_CHARS)}…` : v;
+    if (v && typeof v === "object") {
+      const text = JSON.stringify(v);
+      return text.length > EVENT_PROPERTY_MAX_CHARS ? `${text.slice(0, EVENT_PROPERTY_MAX_CHARS)}…` : v;
+    }
+    return v;
+  };
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+    if (k.startsWith("$") || k.startsWith("__")) continue;
+    if (Object.keys(out).length >= EVENT_PROPERTY_MAX_KEYS) break;
+    out[k] = cut(v);
+  }
+  return out;
+}
+
 /**
  * Key events of identified people since `since`: every CUSTOM event (one the
  * brand named itself). PostHog's own `$`-prefixed events (pageview, autocapture,
- * pageleave…) are not key events; pageviews arrive as visits.
+ * pageleave…) are not key events; pageviews arrive as visits. Each carries the
+ * brand's own properties (`ownEventProperties`), what the visitor entered on that
+ * step (ONBOARDING-IN-UNIBOX-1015); PostHog's `$` properties never leave PostHog.
  */
-export function listKeyEvents(target: PosthogTarget, since: Date, scope: PersonScope) {
-  return keysetPages(
+export async function* listKeyEvents(target: PosthogTarget, since: Date, scope: PersonScope): AsyncGenerator<Record<string, unknown>[]> {
+  for await (const page of keysetPages(
     target,
     (after) => `
       SELECT toString(uuid) AS id, event, timestamp, toString(person_id) AS person_id,
              toString(properties.$current_url) AS url, toString(properties.$pathname) AS path,
-             toString($session_id) AS session_id
+             toString($session_id) AS session_id, properties AS properties
       FROM events
       WHERE event NOT LIKE '$%' AND ${personScopeSql(scope)} AND timestamp >= ${ts(since)}
         ${after ? `AND (timestamp, toString(uuid)) > (${ts(new Date(String(after.timestamp)))}, ${lit(String(after.id))})` : ""}
       ORDER BY timestamp, id
       LIMIT ${POSTHOG_PAGE_SIZE}`,
-  );
+  )) {
+    yield page.map((r) => ({ ...r, properties: ownEventProperties(r.properties) }));
+  }
 }
 
 /**
- * The persons who were given a phone property since `since` (WA-GIVEN-TRIGGER-1015):
- * any event that SET one (`$set` / `$set_once`: `identify`, `setPersonProperties`, a
- * capture carrying `$set`). A cheap read on the events table, asked every minute
- * by the phone watch so a number typed on a form reaches us within a minute,
- * whatever the person's other properties. Returns PostHog person ids.
+ * The persons the brand learned something about since `since`, for the fast mirror
+ * (WA-GIVEN-TRIGGER-1015, ONBOARDING-IN-UNIBOX-1015): any event that SET a property
+ * making a person known (`$set` / `$set_once` of an email, phone, name or website:
+ * `identify`, `setPersonProperties`, a capture carrying `$set`), plus every custom
+ * event of a person already known. A cheap read on the events table, asked every
+ * minute, so a number or a website typed on a form, and each step after it, reach
+ * us within a minute. Returns PostHog person ids.
  */
-export async function listPersonIdsGivenPhoneSince(target: PosthogTarget, since: Date): Promise<string[]> {
-  const setsPhone = PHONE_PROPERTY_KEYS.flatMap((k) =>
+export async function listPersonIdsTouchedSince(target: PosthogTarget, since: Date): Promise<string[]> {
+  const setsKnown = KNOWN_PROPERTY_KEYS.flatMap((k) =>
     ["$set", "$set_once"].map((op) => `ifNull(toString(properties.${op}.${k}), '') != ''`),
   ).join(" OR ");
   const rows = await hogql(
@@ -266,13 +324,14 @@ export async function listPersonIdsGivenPhoneSince(target: PosthogTarget, since:
     `
       SELECT DISTINCT toString(person_id) AS id
       FROM events
-      WHERE timestamp >= ${ts(since)} AND (${setsPhone})
+      WHERE timestamp >= ${ts(since)}
+        AND ((${setsKnown}) OR (event NOT LIKE '$%' AND person.id IN (SELECT id FROM persons WHERE ${IDENTIFIED})))
       LIMIT ${POSTHOG_PAGE_SIZE}`,
   );
   return rows.map((r) => String(r.id)).filter((id) => !!id);
 }
 
-/** These persons (PostHog ids), with the same columns as every person read. */
+/** These persons (PostHog ids) when they are known (`IDENTIFIED`), with the same columns as every person read. */
 export async function listPersonsByIds(target: PosthogTarget, ids: string[]) {
   if (ids.length === 0) return [];
   const match = `toString(id) IN (${ids.map(lit).join(", ")})`;
@@ -281,7 +340,7 @@ export async function listPersonsByIds(target: PosthogTarget, ids: string[]) {
     `
       SELECT ${PERSON_COLUMNS}
       FROM persons AS p ${distinctIdsOf(match)}
-      WHERE toString(p.id) IN (${ids.map(lit).join(", ")})
+      WHERE toString(p.id) IN (${ids.map(lit).join(", ")}) AND ${IS_IDENTIFIED("p.")}
       ORDER BY id
       LIMIT ${POSTHOG_PAGE_SIZE}`,
   );
