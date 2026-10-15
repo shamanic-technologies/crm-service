@@ -213,7 +213,7 @@ export async function isStaffActor(email: string, userId: string): Promise<boole
 const LOOKUP_TTL_MS = 60 * 60 * 1000;
 const orgCache = new Map<string, { at: number; org: { externalId: string | null; name: string | null } | null }>();
 
-async function readOrg(orgId: string, identity: SiblingIdentity): Promise<{ externalId: string | null; name: string | null } | null> {
+export async function readOrg(orgId: string, identity: SiblingIdentity): Promise<{ externalId: string | null; name: string | null } | null> {
   const hit = orgCache.get(orgId);
   if (hit && Date.now() - hit.at < LOOKUP_TTL_MS) return hit.org;
   const r = await siblingGet("client", `/internal/orgs/${encodeURIComponent(orgId)}`, identity);

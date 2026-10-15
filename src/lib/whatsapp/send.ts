@@ -23,7 +23,9 @@ import { createHash } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { people, whatsappSends } from "../../db/schema.js";
-import { BridgeError, createDm, resolveIdentifier } from "../matrix/bridge.js";
+import { createDm, resolveIdentifier } from "../matrix/bridge.js";
+import { bridgeSaysNoSuchNumber } from "./number-validity.js";
+import { alertRefusal } from "./staff-alert.js";
 import { connectedOnly, linkedWhatsappAccounts, type WhatsappAccount } from "./accounts.js";
 import { recordGhostPhone } from "./phone-resolution.js";
 import { joinRoom, readRoomBridgeInfo, sendText } from "../matrix/client.js";
@@ -38,7 +40,7 @@ export const SEND_REFUSAL_CODES = [
   "whatsapp_not_connected",
   /** No phone given and none known for this person in the brand's CRM. */
   "no_phone_known",
-  /** WhatsApp says the number has no WhatsApp account. */
+  /** WhatsApp says the number has no WhatsApp account (or the number cannot exist: number-validity.ts). */
   "not_on_whatsapp",
   /** `skipIfReplied` and the person has written to the brand on some channel. */
   "person_replied",
@@ -75,6 +77,8 @@ export interface SendRequest {
   /** The linked account to send from, as its own number (digits, `+` optional). */
   fromAccount: string | null;
   skipIfReplied: boolean;
+  /** Who asked (`x-user-id`), only to read names for a staff alert. */
+  userId: string | null;
 }
 
 export interface SendResult {
@@ -368,8 +372,10 @@ export async function sendWhatsApp(req: SendRequest): Promise<SendResult> {
     try {
       who = await resolveIdentifier("whatsapp", accounts[0].matrixUserId, accounts[0].loginId, phone);
     } catch (err) {
-      if (err instanceof BridgeError && err.status === 404) {
-        throw new SendRefusal("not_on_whatsapp", `${phone} is not on WhatsApp.`);
+      const none = bridgeSaysNoSuchNumber(err, phone);
+      if (none === "not_on_whatsapp") throw new SendRefusal("not_on_whatsapp", `${phone} is not on WhatsApp.`);
+      if (none === "invalid_number") {
+        throw new SendRefusal("not_on_whatsapp", `${phone} is not a valid phone number: WhatsApp has no account for it.`);
       }
       throw err;
     }
@@ -408,6 +414,15 @@ export async function sendWhatsApp(req: SendRequest): Promise<SendResult> {
   } catch (err) {
     if (err instanceof SendRefusal) {
       await finish(row.id, { status: "refused", errorCode: err.code, error: err.message });
+      void alertRefusal({
+        code: err.code,
+        orgId: req.orgId,
+        brandId: req.brandId,
+        campaignId: req.campaignId,
+        runId: req.runId,
+        userId: req.userId,
+        at: new Date(),
+      });
     } else {
       await finish(row.id, { status: "failed", error: (err as Error).message.slice(0, 1000) }).catch((e) =>
         console.error(`[crm-service][whatsapp] could not record failed send ${row.id}:`, e),
