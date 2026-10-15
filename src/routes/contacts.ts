@@ -20,7 +20,7 @@ import {
   ColumnMapping,
 } from "../lib/column-typing.js";
 import { promoteUpload } from "../lib/promote.js";
-import { segmentSchema } from "../lib/people/segment.js";
+import { segmentSchema, stepFilterSchema, type StepFilter } from "../lib/people/segment.js";
 import { RELATIONSHIP_POLICIES } from "../lib/people/relationships.js";
 import {
   RelationshipsUnavailableError,
@@ -257,10 +257,27 @@ const serveNextBodySchema = z
     // The pipe's relationship policy (forwarded by human-service): business_only = never a
     // friend / investor / supplier / team / partner / advisor, never someone never judged.
     relationships: z.enum(RELATIONSHIP_POLICIES).optional(),
+    // The pipe's funnel-step filter (forwarded by human-service from the play's workflow,
+    // CRM-WARM-NURTURE-1015): ANDed with the pool; clients always out when present.
+    stepFilter: stepFilterSchema.optional(),
   })
   .refine((b) => !(b.uploadIds && b.people), { message: "uploadIds and people are exclusive" });
 
 const boolQuery = z.enum(["true", "false"]).transform((v) => v === "true");
+
+/** `?stepFilter=<json>` (URL-encoded) → the pipe's step filter; absent = none. */
+function stepFilterFromQuery(raw: unknown): { filter?: StepFilter; error?: string } {
+  if (raw === undefined) return {};
+  let value: unknown;
+  try {
+    value = JSON.parse(String(raw));
+  } catch {
+    return { error: "stepFilter must be a JSON object (URL-encoded)" };
+  }
+  const parsed = stepFilterSchema.safeParse(value);
+  if (!parsed.success) return { error: `stepFilter invalid: ${parsed.error.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}` };
+  return { filter: parsed.data };
+}
 
 /** `?pool=people&signedUp=&replied=&segment=<json>` → the people filter; null = the CSV pool. */
 function peopleFilterFromQuery(q: Record<string, unknown>): { filter: PeopleFilter | null; error?: string } {
@@ -297,7 +314,8 @@ router.post(
         error: `brandId (uuid) required; limit optional 1..5000; uploadIds optional array of 1..${MAX_UPLOAD_IDS} uuids; people optional {signedUp?, replied?, reachableBy?, segment?}, exclusive with uploadIds; reachableBy optional phone|email or a list: ${parsed.error.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`,
       });
     }
-    const { brandId, uploadIds, people } = parsed.data;
+    const { brandId, uploadIds, stepFilter } = parsed.data;
+    const people = parsed.data.people ? { ...parsed.data.people, stepFilter } : undefined;
     const limit = parsed.data.limit ?? 100;
     const reach = reachOf(parsed.data.reachableBy);
 
@@ -308,7 +326,7 @@ router.post(
         res.json(
           people
             ? await serveNextPeopleBusinessOnly(identity, limit, req.runId!, people, reach)
-            : await serveNextBusinessOnly(identity, limit, req.runId!, uploadIds, reach),
+            : await serveNextBusinessOnly(identity, limit, req.runId!, uploadIds, reach, stepFilter),
         );
       } catch (e) {
         if (e instanceof RelationshipsUnavailableError) {
@@ -323,7 +341,7 @@ router.post(
       res.json(await serveNextPeople(req.orgId!, brandId, limit, req.runId!, people, reach));
       return;
     }
-    const result = await serveNext(req.orgId!, brandId, limit, req.runId!, uploadIds, reach);
+    const result = await serveNext(req.orgId!, brandId, limit, req.runId!, uploadIds, reach, undefined, stepFilter);
     res.json(result);
   },
 );
@@ -338,6 +356,7 @@ const stillFitsBodySchema = z
     email: z.string().trim().min(3).max(320).regex(/@/),
     uploadIds: uploadIdsSchema.optional(),
     people: peopleFilterSchema.optional(),
+    stepFilter: stepFilterSchema.optional(),
   })
   .strict()
   .refine((b) => !(b.uploadIds && b.people), { message: "uploadIds and people are exclusive" });
@@ -354,11 +373,11 @@ router.post(
         error: `brandId (uuid) and email required; people {signedUp?, replied?, reachableBy?, segment?} or uploadIds, exclusive: ${parsed.error.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`,
       });
     }
-    const { brandId, email, uploadIds, people } = parsed.data;
+    const { brandId, email, uploadIds, people, stepFilter } = parsed.data;
     try {
       const answer = people
-        ? await stillFitsPeople(req.orgId!, brandId, email, people)
-        : await stillFitsCsv(req.orgId!, brandId, email, uploadIds);
+        ? await stillFitsPeople(req.orgId!, brandId, email, { ...people, stepFilter })
+        : await stillFitsCsv(req.orgId!, brandId, email, uploadIds, stepFilter);
       if (!answer) {
         return res.status(404).json({
           type: "person_not_found",
@@ -410,9 +429,14 @@ router.get(
     }
     const reach = reachParse.data;
 
+    const steps = stepFilterFromQuery(req.query.stepFilter);
+    if (steps.error) return res.status(400).json({ type: "validation", error: steps.error });
+    const stepFilter = steps.filter;
+
     const pool = peopleFilterFromQuery(req.query as Record<string, unknown>);
     if (pool.error) return res.status(400).json({ type: "validation", error: pool.error });
     if (pool.filter) {
+      pool.filter.stepFilter = stepFilter;
       if (req.query.uploadIds !== undefined) {
         return res.status(400).json({ type: "validation", error: "uploadIds and pool=people are exclusive" });
       }
@@ -437,7 +461,7 @@ router.get(
       uploadIds = idsParse.data;
     }
 
-    const stats = await serveStats(req.orgId!, brandParse.data, uploadIds, reach);
+    const stats = await serveStats(req.orgId!, brandParse.data, uploadIds, reach, stepFilter);
     res.json(stats);
   },
 );

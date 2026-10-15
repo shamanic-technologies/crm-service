@@ -37,6 +37,7 @@ import { and, asc, eq, gt, inArray, sql, type SQL } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { people, peopleFacts, type PeopleFact, type PeopleScope, type Person } from "../../db/schema.js";
 import { eventsQuery, type FunnelEventSource } from "../gohighlevel/funnel-events.js";
+import { labelEventsQuery, type LabelEventRow } from "../gohighlevel/label-verdicts.js";
 import { GHL_SOURCE } from "../gohighlevel/records.js";
 import { POSTHOG_SOURCE } from "../posthog/records.js";
 import { STRIPE_SOURCE } from "../stripe/records.js";
@@ -51,6 +52,10 @@ export const FACT_TYPES = [
   "deal_status_changed",
   "sale",
   "deal_lost",
+  // CRM-WARM-NURTURE-1015: a CRM stage / tag Jev judged as "is or was a paying customer" /
+  // "the business judged the person not a fit" (lib/gohighlevel/label-verdicts.ts).
+  "client",
+  "disqualified",
   "payment",
   "refund",
   "subscription_changed",
@@ -343,6 +348,35 @@ async function ghlCandidates(orgId: string, brandId: string): Promise<CandidateF
       occurredAt: at,
       dateBasis: e.date_basis,
       payload,
+      subject: presenceSubject("gohighlevel", e.external_contact_id, e.full_name),
+    });
+  }
+
+  // client / disqualified — a stage entry or a tag Jev judged as saying so (label-verdicts.ts,
+  // CRM-WARM-NURTURE-1015): the client's words normalized, so a consumer never reads them.
+  for (const e of await rows<LabelEventRow>(labelEventsQuery(orgId, brandId))) {
+    const at = iso(e.occurred_at);
+    out.push({
+      naturalKey:
+        e.source === "stage_label"
+          ? `gohighlevel|stage_label|${e.source_id}|${e.pipeline_name}|${e.stage_name}|${at}|${e.step}`
+          : `gohighlevel|contact_tag|${e.source_id}|${e.tag}|${e.step}`,
+      family: "ghl_funnel",
+      type: e.step,
+      source: "gohighlevel",
+      sourceRef: e.source_id,
+      sourceContactId: e.external_contact_id,
+      crmContactId: e.contact_id,
+      occurredAt: at,
+      dateBasis: e.date_basis,
+      payload: {
+        via: e.source,
+        pipelineName: e.pipeline_name,
+        stageName: e.stage_name,
+        tag: e.tag,
+        verdictConfidence: Number(e.confidence),
+        observedAt: iso(e.observed_at),
+      },
       subject: presenceSubject("gohighlevel", e.external_contact_id, e.full_name),
     });
   }

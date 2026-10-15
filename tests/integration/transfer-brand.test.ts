@@ -78,6 +78,9 @@ async function seedBrand(org: string, brand: string, tag: string) {
   await db.execute(sql`
     INSERT INTO ghl_stage_meanings (org_id, brand_id, connection_id, stage_external_id, stage_name, meaning, confidence, probabilities, model, run_id)
     VALUES (${org}, ${brand}, ${ghl.id}, 's1', 'Booked', 'meeting_booked', 1, '{}', 'jev', 'run')`);
+  await db.execute(sql`
+    INSERT INTO crm_label_verdicts (org_id, brand_id, connection_id, kind, label_ref, label, verdict, confidence, probabilities, model, run_id)
+    VALUES (${org}, ${brand}, ${ghl.id}, 'tag', '', 'unqualified', 'disqualified', 1, '{}', 'jev', 'run')`);
 
   const [scope] = await db.execute<{ id: string }>(sql`
     INSERT INTO people_scopes (org_id, brand_id, created_by_user_id)

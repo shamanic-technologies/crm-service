@@ -18,6 +18,7 @@ import { readContactOrigins } from "../lib/gohighlevel/origins.js";
 import { readPipelineView } from "../lib/gohighlevel/view.js";
 import { readFunnelReach } from "../lib/gohighlevel/funnel-reach.js";
 import { STAGE_MEANING_MIN_CONFIDENCE } from "../lib/gohighlevel/stage-meanings.js";
+import { LABEL_VERDICT_MIN_CONFIDENCE, readLabelVerdicts } from "../lib/gohighlevel/label-verdicts.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 
 const router = Router();
@@ -463,6 +464,26 @@ router.get("/internal/gohighlevel/funnel-reach", apiKeyAuth, async (req, res, ne
     next(err);
   }
 });
+
+// ─── GET /orgs/gohighlevel/label-verdicts?brandId= ───────────────────────────
+
+/** What each CRM label (stage, tag) says about the person: client | disqualified | none (label-verdicts.ts). */
+router.get(
+  "/orgs/gohighlevel/label-verdicts",
+  apiKeyAuth,
+  requireOrg("gohighlevel.label-verdicts.list"),
+  async (req: AuthenticatedRequest, res) => {
+    const brandParse = brandIdSchema.safeParse(req.query.brandId);
+    if (!brandParse.success) {
+      return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
+    }
+    res.json({
+      brandId: brandParse.data,
+      minConfidence: LABEL_VERDICT_MIN_CONFIDENCE,
+      labelVerdicts: await readLabelVerdicts(req.orgId!, brandParse.data),
+    });
+  },
+);
 
 // ─── GET /orgs/gohighlevel/stage-meanings?brandId= ───────────────────────────
 
