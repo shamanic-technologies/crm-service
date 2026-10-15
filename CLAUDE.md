@@ -461,7 +461,10 @@ Connecting an account is a product feature, never a staff step (owner rule
 - `GET /orgs/matrix/links?brandId=` → `{ links, accounts }`: `accounts` = every
   account (each its `linkId`, `account`, `needsRelink` when the bridge says
   BAD_CREDENTIALS / LOGGED_OUT); `links` = one tile per channel (in-progress >
-  latest linked > latest failed), the pre-multi-account shape. Each: `available`, `status`
+  latest linked > latest failed), the pre-multi-account shape; every entry carries
+  `channelAccounts` = each account of its channel `{linkId, status, account, phone (WhatsApp
+  E.164), outreachDefault, needsRelink}` (MCP-LINKED-ACCOUNTS-1015: a reader of the tile saw
+  `linkedAccounts: 2` and one number). Each: `available`, `status`
   (`not_linked|waiting|linked|failed`), the CURRENT code (WhatsApp refreshes the
   QR at 60s then every 20s, then times out ~2m40s → `failed`, start again), the
   bridge's own `error {code, message}`, and once linked `account` + live

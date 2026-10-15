@@ -1100,6 +1100,21 @@ export const MatrixLinkSchema = registry.register(
         description: "The bridge says the session is gone (BAD_CREDENTIALS / LOGGED_OUT): POST {channel, method, linkId} to relink it.",
       }),
       linkedAccounts: z.number().int().openapi({ description: "Accounts currently linked on this channel for the brand." }),
+      channelAccounts: z
+        .array(
+          z.object({
+            linkId: z.string().uuid(),
+            status: z.enum(["waiting", "linked", "failed"]),
+            account: z.object({ id: z.string(), name: z.string().nullable() }).nullable(),
+            phone: z.string().nullable().openapi({ description: "WhatsApp only: the account's own number, E.164." }),
+            outreachDefault: z.boolean(),
+            needsRelink: z.boolean(),
+          }),
+        )
+        .openapi({
+          description:
+            "Every account of this channel for the brand (linked or in progress), each with its own number / handle and whether it is the outreach default. Same list on every entry of the channel.",
+        }),
       outreachDefault: z.boolean().openapi({
         description: "First messages go out from this account when no linked account already has a conversation with the person. Set with PATCH /orgs/matrix/links/{linkId}.",
       }),
@@ -1161,7 +1176,7 @@ registry.registerPath({
   request: { query: z.object({ brandId: z.string().uuid() }) },
   responses: {
     200: {
-      description: "`links` = one entry per channel (its tile); `accounts` = every account linked or in progress",
+      description: "`links` = one entry per channel (its tile), each naming every account of its channel in `channelAccounts` (number / handle, status, outreach default); `accounts` = every account linked or in progress, full view",
       content: {
         "application/json": {
           schema: z.object({ links: z.array(MatrixLinkSchema), accounts: z.array(MatrixLinkSchema) }),
