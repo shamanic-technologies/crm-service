@@ -318,6 +318,9 @@ export const matrixConnections = pgTable(
     // When the reply watch first looked at this connection (lib/reply-trigger/):
     // a message mirrored before it is history and is never reported.
     replyWatchSince: timestamp("reply_watch_since", { withTimezone: true }),
+    // When the watch first looked at threads NO campaign opened (REPLY-ANY-LEAD-1015): those were
+    // never read before, so their messages mirrored before it are history, never reported.
+    openReplyWatchSince: timestamp("open_reply_watch_since", { withTimezone: true }),
 
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -1315,9 +1318,11 @@ export const replyTriggerReports = pgTable(
     conversationId: uuid("conversation_id"),
     // The burst's first message: the row's identity.
     anchorEventId: text("anchor_event_id").notNull(),
-    // The campaign whose send preceded the burst, and its offer once read.
-    campaignId: text("campaign_id").notNull(),
+    // The last campaign whose send preceded the burst (null: no campaign wrote in the thread), and
+    // the offer once resolved, with what decided it (campaign | conversation | only_offer).
+    campaignId: text("campaign_id"),
     offerId: uuid("offer_id"),
+    offerBasis: text("offer_basis"),
     // [{ eventId, at, text }] as detected (delivery re-reads the burst from bronze).
     messages: jsonb("messages").notNull(),
     firstMessageAt: timestamp("first_message_at", { withTimezone: true }).notNull(),

@@ -1,35 +1,43 @@
 /**
- * THE REPLY TRIGGER (owner 2026-10-12, WA-RESPONDER-1012): a person who answers,
- * on a personal channel we mirror, a thread one of our campaigns opened through
- * our send route is reported to campaign-service's trigger door as
+ * THE REPLY TRIGGER: a person who writes to the brand on a personal channel we
+ * mirror (WhatsApp today) is reported to campaign-service's trigger door as
  * `positive_reply_received` (the trigger the email path fires for an answer),
- * for the brand and the OFFER of the campaign that wrote to them. campaign-service
- * files the person on the responder campaign, makes them due and dispatches it;
- * the responder reads the person's merged timeline from us and answers.
+ * for the brand and an OFFER. campaign-service files the person on the
+ * answering campaign, whose pipe's strategy decides whether to answer them; the
+ * responder reads the person's merged timeline from us and answers.
  *
- * WHERE IT RUNS: inside the Matrix sync pass (cron every 5 min, and right after
- * each of our sends), AFTER the mirror wrote the new messages to bronze and
- * rebuilt the conversations. Detection reads bronze, so when we report, the
+ * EVERY THREAD (owner 2026-10-15, REPLY-ANY-LEAD-1015, « NE CRÉE PLUS JAMAIS DES
+ * CAS PARTICULIERS »): whoever opened the thread (one of our campaigns, the
+ * owner by hand, the person themselves). Who is answered is the answering
+ * pipe's strategy at campaign-service (leads only), never filtered here. What
+ * stays here is FACT, not targeting: a human wrote it (Jev: an away message is
+ * no answer), one report per unanswered burst, history before the watch never
+ * reported, the brand's own team is not a person writing to the brand.
+ *
+ * WHERE IT RUNS: inside the Matrix sync (the live watch every ~10s on the rooms
+ * that just moved, and the 5-min pass over every thread that moved in 24h, which
+ * heals a failed live pass), AFTER the mirror wrote the new messages to bronze
+ * and rebuilt the conversations. Detection reads bronze, so when we report, the
  * person's timeline (which serves Matrix messages live from bronze) already
- * holds the message. Delivery runs at the end of the pass and refuses to report
- * a person whose merged record does not hold the thread yet (`person_not_built`:
- * the brand's people are rebuilt, then it is delivered).
+ * holds the message. Delivery refuses to report a person whose merged record
+ * does not hold the thread yet (`person_not_built`: the brand's people are
+ * rebuilt, then it is delivered).
  *
- * Every rule of a thread (campaign-opened only, one report per unanswered burst,
- * hand-typed = taken over for good, human words only) is `thread.ts`, pure.
- * Here: which threads to read, Jev on whether a PERSON wrote the burst (an
- * auto-reply / away message is not an answer), the record, the delivery.
+ * Every rule of a thread is `thread.ts`, pure. Here: which threads to read, Jev
+ * on whether a PERSON wrote the burst, the record, the offer, the delivery.
  *
- * NEW, ONCE, NEVER HISTORY: `matrix_connections.reply_watch_since` is set the
- * first time the watch looks at a connection; a burst none of whose messages
- * was mirrored after it is history (`before_watch`, never reported).
- * One row per burst (UNIQUE on its first message), and campaign-service gets
- * `idempotencyKey = crm:<source>:reply:<first message event id>`.
+ * NEW, ONCE, NEVER HISTORY: `matrix_connections.reply_watch_since` (threads a
+ * campaign wrote to, read since 2026-10-12) and `open_reply_watch_since` (every
+ * other thread, read since REPLY-ANY-LEAD-1015) are set the first time the watch
+ * looks; a message mirrored before them is history (`before_watch`, never
+ * reported). One row per burst (UNIQUE on its first message), and
+ * campaign-service gets `idempotencyKey = crm:<source>:reply:<first message event id>`.
  */
 import { and, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import {
   contacts,
+  conversationVerdicts,
   conversations,
   matrixConnections,
   matrixRawEvents,
@@ -54,6 +62,7 @@ import {
   type DoorIdentity,
 } from "../trigger-door.js";
 import { phoneFromMxid } from "../matrix/events.js";
+import { readBrandOffers } from "../form-trigger/offer.js";
 import { ownTeamMatch, readOwnTeam, type OwnTeam } from "./own-team.js";
 import { readThreadForReply, type BurstMessage, type RoomSend } from "./thread.js";
 
@@ -69,10 +78,11 @@ const IN_FLIGHT_MS = 2 * 60_000;
 /** Below this, an `automated` verdict does not silence a person (coin flips stay human). */
 export const AUTOMATED_MIN_CONFIDENCE = 0.75;
 
+/** At most this many messages of one burst are carried to campaign-service (the latest ones). */
+export const MAX_REPORT_MESSAGES = 10;
+
 export const REPLY_STATUS = { PENDING: "pending", REPORTED: "reported", SKIPPED: "skipped", FAILED: "failed" } as const;
 export const REPLY_REASONS = {
-  /** A person of ours typed in the thread by hand after the campaign wrote: theirs for good. */
-  HUMAN_TOOK_OVER: "human_took_over",
   /** The other side is the brand's own team (a linked account or its sales rep phone): never a prospect. */
   OWN_TEAM: "own_team",
   /** Jev: no person wrote it (away message, greeting, auto-reply). */
@@ -105,18 +115,34 @@ export function nextAttemptDue(attempts: number, lastAttemptAt: Date | null): nu
 
 export const idempotencyKeyFor = (anchorEventId: string) => `crm:${SOURCE}:reply:${anchorEventId}`;
 
-/** Rooms of this connection one of our CAMPAIGNS wrote to, whose thread moved in the lookback. */
-async function campaignRoomsThatMoved(conn: MatrixConnection, now: number): Promise<string[]> {
+/**
+ * The threads (one-to-one conversations: a group is no conversation) of this
+ * connection that moved in the lookback, restricted to `onlyRooms` when given
+ * (the live watch reads only what it just mirrored). `campaign` = one of our
+ * campaigns wrote in it through our send route (its watch started earlier).
+ */
+async function threadsThatMoved(
+  conn: MatrixConnection,
+  now: number,
+  onlyRooms?: string[],
+): Promise<{ roomId: string; campaign: boolean }[]> {
+  if (onlyRooms && onlyRooms.length === 0) return [];
   const rows = (await db.execute(sql`
-    SELECT DISTINCT s.room_id FROM whatsapp_sends s
-    WHERE s.connection_id = ${conn.id} AND s.status = 'sent' AND s.campaign_id IS NOT NULL AND s.room_id IS NOT NULL
+    SELECT v.room_id,
+      EXISTS (
+        SELECT 1 FROM whatsapp_sends s
+        WHERE s.connection_id = v.connection_id AND s.room_id = v.room_id AND s.status = 'sent' AND s.campaign_id IS NOT NULL
+      ) AS campaign
+    FROM conversations v
+    WHERE v.connection_id = ${conn.id} AND v.room_id IS NOT NULL
+      ${onlyRooms ? sql`AND v.room_id IN (${sql.join(onlyRooms.map((r) => sql`${r}`), sql`, `)})` : sql``}
       AND EXISTS (
         SELECT 1 FROM matrix_raw_events e
-        WHERE e.connection_id = s.connection_id AND e.room_id = s.room_id AND e.event_type = 'm.room.message'
+        WHERE e.connection_id = v.connection_id AND e.room_id = v.room_id AND e.event_type = 'm.room.message'
           AND e.ingested_at > ${new Date(now - REPLY_LOOKBACK_MS).toISOString()}::timestamptz
       )
-  `)) as unknown as { room_id: string }[];
-  return rows.map((r) => r.room_id);
+  `)) as unknown as { room_id: string; campaign: boolean }[];
+  return rows.map((r) => ({ roomId: r.room_id, campaign: r.campaign === true }));
 }
 
 interface Judgment {
@@ -128,13 +154,13 @@ interface Judgment {
 }
 
 /** Jev: did a PERSON write this burst, or is it an automatic reply? One call per burst. */
-async function judgeBurst(conn: MatrixConnection, runId: string, burst: BurstMessage[]): Promise<Judgment> {
+async function judgeBurst(conn: MatrixConnection, runId: () => Promise<string>, burst: BurstMessage[]): Promise<Judgment> {
   try {
     const result = await judgeChoices(
       {
         context:
-          `A business wrote first to someone on ${conn.channel}. These are the messages that came back from that ` +
-          "person's account since, in order.",
+          `A business talks with someone on ${conn.channel}. These are the messages that came from that ` +
+          "person's account since the business last wrote (or since the start), in order.",
         messages: burst.map((m) => ({ at: m.at, text: m.text })),
       },
       {
@@ -151,7 +177,7 @@ async function judgeBurst(conn: MatrixConnection, runId: string, burst: BurstMes
           },
         },
       },
-      { orgId: conn.orgId, userId: conn.createdByUserId, runId, brandIds: [conn.brandId] },
+      { orgId: conn.orgId, userId: conn.createdByUserId, runId: await runId(), brandIds: [conn.brandId] },
     );
     const a = result.answers?.sender;
     if (!a || (a.choice !== "person" && a.choice !== "automated")) throw new Error(`unexpected answer ${JSON.stringify(a)}`);
@@ -165,23 +191,38 @@ async function judgeBurst(conn: MatrixConnection, runId: string, burst: BurstMes
 }
 
 /**
- * Read every campaign thread of this connection that moved, and record each
- * unanswered burst once (pending) or skipped with its reason. Called by the
- * Matrix sync pass after bronze + silver; never sends anything.
+ * Read every thread of this connection that moved (or only `opts.rooms`), and
+ * record each unanswered burst once (pending) or skipped with its reason.
+ * Called by the Matrix sync after bronze + silver; never sends anything.
+ * `runId` is asked only when a run is needed (a Jev call, the rep phone read).
  */
-export async function detectReplies(conn: MatrixConnection, runId: string, now: number = Date.now()): Promise<ReplyDetection> {
+export async function detectReplies(
+  conn: MatrixConnection,
+  runId: () => Promise<string>,
+  now: number = Date.now(),
+  opts: { rooms?: string[] } = {},
+): Promise<ReplyDetection> {
   const out: ReplyDetection = { connectionId: conn.id, baseline: false, threadsRead: 0, detected: 0, skipped: [] };
-  if (!conn.replyWatchSince) {
-    await db
-      .update(matrixConnections)
-      .set({ replyWatchSince: new Date(now) })
-      .where(and(eq(matrixConnections.id, conn.id), isNull(matrixConnections.replyWatchSince)));
+  if (!conn.replyWatchSince || !conn.openReplyWatchSince) {
+    const at = new Date(now);
+    if (!conn.replyWatchSince) {
+      await db
+        .update(matrixConnections)
+        .set({ replyWatchSince: at })
+        .where(and(eq(matrixConnections.id, conn.id), isNull(matrixConnections.replyWatchSince)));
+    }
+    if (!conn.openReplyWatchSince) {
+      await db
+        .update(matrixConnections)
+        .set({ openReplyWatchSince: at })
+        .where(and(eq(matrixConnections.id, conn.id), isNull(matrixConnections.openReplyWatchSince)));
+    }
     out.baseline = true;
     return out;
   }
-  const since = conn.replyWatchSince.getTime();
-  const roomIds = await campaignRoomsThatMoved(conn, now);
-  if (roomIds.length === 0) return out;
+  const threads = await threadsThatMoved(conn, now, opts.rooms);
+  if (threads.length === 0) return out;
+  const roomIds = threads.map((t) => t.roomId);
 
   const sends = await db
     .select({
@@ -197,7 +238,7 @@ export async function detectReplies(conn: MatrixConnection, runId: string, now: 
   // Read once, only when a burst is about to be recorded (brand-service owns the rep phone).
   let ownTeam: OwnTeam | null = null;
   const team = async () =>
-    (ownTeam ??= await readOwnTeam({ orgId: conn.orgId, userId: conn.createdByUserId, runId, brandId: conn.brandId }));
+    (ownTeam ??= await readOwnTeam({ orgId: conn.orgId, userId: conn.createdByUserId, runId: await runId(), brandId: conn.brandId }));
   // A send still in flight carries no room yet: any of ours for this brand in flight holds the pass back
   // (its message, mirrored before the send recorded its event id, would read as typed by hand).
   const inFlight = await db
@@ -214,7 +255,8 @@ export async function detectReplies(conn: MatrixConnection, runId: string, now: 
     )
     .limit(1);
 
-  for (const roomId of roomIds) {
+  for (const { roomId, campaign } of threads) {
+    const since = (campaign ? conn.replyWatchSince : conn.openReplyWatchSince).getTime();
     const roomSends: RoomSend[] = sends.filter((s) => s.roomId === roomId);
     if (inFlight.length > 0) roomSends.push({ eventId: null, campaignId: null, status: "sending", sentAt: null });
     const rows = await db
@@ -238,11 +280,10 @@ export async function detectReplies(conn: MatrixConnection, runId: string, now: 
       conn.matrixUserId,
       roomSends,
     );
-    if (reading.kind !== "unanswered" && reading.kind !== "taken_over") continue;
-    if (reading.burst.length === 0) continue;
+    if (reading.kind !== "unanswered") continue;
 
-    // What of this burst is already recorded: a reported / pending / skipped row ends it,
-    // except an auto-reply, after which a person may still write in the same burst.
+    // What of this burst is already recorded: a reported / pending / skipped row ends it, except an
+    // auto-reply or history, after which a person may still write in the same burst.
     const existing = await db
       .select()
       .from(replyTriggerReports)
@@ -253,13 +294,16 @@ export async function detectReplies(conn: MatrixConnection, runId: string, now: 
           inArray(replyTriggerReports.anchorEventId, reading.burst.map((m) => m.eventId)),
         ),
       );
-    if (existing.some((r) => r.reason !== REPLY_REASONS.AUTOMATED_REPLY)) continue;
+    const passThrough: string[] = [REPLY_REASONS.AUTOMATED_REPLY, REPLY_REASONS.BEFORE_WATCH];
+    if (existing.some((r) => !passThrough.includes(r.reason ?? ""))) continue;
     const coveredThrough = Math.max(0, ...existing.map((r) => r.lastMessageAt.getTime()));
     const uncovered = reading.burst.filter((m) => Date.parse(m.at) > coveredThrough);
     if (uncovered.length === 0) continue;
 
+    // Only what was mirrored after the watch started is new; anything before it is history.
     const ingested = new Map(rows.map((r) => [r.eventId, r.ingestedAt.getTime()]));
-    const fresh = uncovered.some((m) => (ingested.get(m.eventId) ?? 0) >= since);
+    const fresh = uncovered.filter((m) => (ingested.get(m.eventId) ?? 0) >= since);
+    const burst = fresh.length > 0 ? fresh : uncovered;
     const [conversation] = await db
       .select({ id: conversations.id, contactPhone: contacts.phoneE164 })
       .from(conversations)
@@ -272,31 +316,24 @@ export async function detectReplies(conn: MatrixConnection, runId: string, now: 
       conversation?.contactPhone,
       ...rows.filter((r) => r.sender !== conn.matrixUserId).map((r) => phoneFromMxid(r.sender, conn.counterpartPrefix)),
     ];
-    const own = fresh ? ownTeamMatch(otherSide, await team()) : null;
+    const own = fresh.length > 0 ? ownTeamMatch(otherSide, await team()) : null;
 
     let status: string = REPLY_STATUS.PENDING;
     let reason: string | null = null;
     let judgment: Judgment | null = null;
-    if (!fresh) {
+    if (fresh.length === 0) {
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.BEFORE_WATCH;
     } else if (own) {
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.OWN_TEAM;
-    } else if (reading.kind === "taken_over") {
-      status = REPLY_STATUS.SKIPPED;
-      reason = REPLY_REASONS.HUMAN_TOOK_OVER;
     } else {
-      judgment = await judgeBurst(conn, runId, uncovered);
+      judgment = await judgeBurst(conn, runId, burst);
       if (judgment.choice === "automated" && (judgment.confidence ?? 0) >= AUTOMATED_MIN_CONFIDENCE) {
         status = REPLY_STATUS.SKIPPED;
         reason = REPLY_REASONS.AUTOMATED_REPLY;
       }
     }
-    const campaignId =
-      reading.kind === "unanswered"
-        ? reading.campaignId
-        : (roomSends.filter((s) => s.campaignId && s.status === "sent").at(-1)?.campaignId ?? "");
     const inserted = await db
       .insert(replyTriggerReports)
       .values({
@@ -307,11 +344,11 @@ export async function detectReplies(conn: MatrixConnection, runId: string, now: 
         connectionId: conn.id,
         roomId,
         conversationId: conversation?.id ?? null,
-        anchorEventId: uncovered[0].eventId,
-        campaignId,
-        messages: uncovered,
-        firstMessageAt: new Date(uncovered[0].at),
-        lastMessageAt: new Date(uncovered[uncovered.length - 1].at),
+        anchorEventId: burst[0].eventId,
+        campaignId: reading.campaignId,
+        messages: burst,
+        firstMessageAt: new Date(burst[0].at),
+        lastMessageAt: new Date(burst[burst.length - 1].at),
         judgment,
         detectedAt: new Date(now),
         status,
@@ -324,10 +361,9 @@ export async function detectReplies(conn: MatrixConnection, runId: string, now: 
     else out.skipped.push({ reason: reason!, roomId });
     console.log(
       `[crm-service][reply-trigger] ${status === REPLY_STATUS.PENDING ? "detected" : `skipped (${reason})`} a reply burst of ` +
-        `${uncovered.length} message(s) in ${conn.channel} room ${roomId} (brand ${conn.brandId}, campaign ${campaignId || "-"}), ` +
-        `first ${uncovered[0].at}` +
-        (own ? `: ${own.phone} is ${own.role}, never a prospect` : "") +
-        (!own && reading.kind === "taken_over" ? `: the thread was taken over by hand at ${reading.takenOverBy.at}` : ""),
+        `${burst.length} message(s) in ${conn.channel} room ${roomId} (brand ${conn.brandId}, ` +
+        `${reading.campaignId ? `campaign ${reading.campaignId}` : "no campaign wrote in it"}), first ${burst[0].at}` +
+        (own ? `: ${own.phone} is ${own.role}, never a prospect` : ""),
     );
   }
   return out;
@@ -402,6 +438,43 @@ async function settle(r: ReplyTriggerReport, now: number, set: Partial<ReplyTrig
     .where(eq(replyTriggerReports.id, r.id));
 }
 
+/**
+ * Which offer the burst is about (campaign-service runs a campaign per (brand, offer)), the first that answers:
+ *  1. the offer of the last campaign that wrote in the thread;
+ *  2. the offer Jev tagged this conversation about (people/relevance.ts, highest yes-probability);
+ *  3. the brand's ONLY active offer.
+ * Nothing else: `offerId: null` = offer_unknown, never a guess.
+ */
+async function resolveReplyOffer(
+  identity: DoorIdentity,
+  r: ReplyTriggerReport,
+): Promise<{ offerId: string | null; offerBasis: string | null }> {
+  if (r.campaignId) return { offerId: await readCampaignOffer(identity, r.campaignId), offerBasis: "campaign" };
+  if (r.conversationId) {
+    const [v] = await db
+      .select({ offerIds: conversationVerdicts.offerIds, offerScores: conversationVerdicts.offerScores })
+      .from(conversationVerdicts)
+      .where(
+        and(
+          eq(conversationVerdicts.orgId, r.orgId),
+          eq(conversationVerdicts.brandId, r.brandId),
+          eq(conversationVerdicts.conversationKey, `matrix:${r.conversationId}`),
+        ),
+      );
+    const tagged = pickTaggedOffer((v?.offerIds as string[] | undefined) ?? [], (v?.offerScores as Record<string, number> | null) ?? null);
+    if (tagged) return { offerId: tagged, offerBasis: "conversation" };
+  }
+  const active = (await readBrandOffers(identity)).filter((o) => o.status === "active");
+  if (active.length === 1) return { offerId: active[0].offerId, offerBasis: "only_offer" };
+  return { offerId: null, offerBasis: null };
+}
+
+/** PURE: of the offers Jev tagged a conversation about, the one it is most sure of. */
+export function pickTaggedOffer(offerIds: string[], scores: Record<string, number> | null): string | null {
+  if (offerIds.length === 0) return null;
+  return [...offerIds].sort((a, b) => (scores?.[b] ?? 0) - (scores?.[a] ?? 0) || (a < b ? -1 : 1))[0];
+}
+
 /** PURE: the door's body (campaign-service `RecordTriggerEventBody`). Absent values OMITTED, never null. */
 export function replyOccurrenceBody(input: {
   brandId: string;
@@ -413,8 +486,10 @@ export function replyOccurrenceBody(input: {
   const person: Record<string, unknown> = { email: input.person.email };
   if (input.person.name) person.name = input.person.name.slice(0, 300);
   if (input.person.phone) person.phone = input.person.phone.slice(0, 50);
-  const first = input.messages[0];
-  const last = input.messages[input.messages.length - 1];
+  // The latest words of a long burst: what there is to answer.
+  const messages = input.messages.slice(-MAX_REPORT_MESSAGES);
+  const first = messages[0];
+  const last = messages[messages.length - 1];
   return {
     triggerId: POSITIVE_REPLY_TRIGGER,
     brandId: input.brandId,
@@ -426,14 +501,15 @@ export function replyOccurrenceBody(input: {
       kind: "reply",
       source: input.report.source,
       channel: input.report.channel,
-      // The campaign whose message they answered (the thread's opener or its latest writer).
+      // The last campaign that wrote in the thread before the burst; null = none did (hand-written or person-opened).
       campaignId: input.report.campaignId,
+      openedBy: input.report.campaignId ? "campaign" : "not_campaign",
       personId: input.person.personId,
       conversationId: input.report.conversationId,
       roomId: input.report.roomId,
       firstMessageAt: first.at,
       lastMessageAt: last.at,
-      messages: input.messages,
+      messages,
     },
   };
 }
@@ -478,7 +554,7 @@ export async function deliverReply(
   const who = { personId: person.personId, fullName: person.displayName, email, phone, conversationId: r.conversationId };
   if (!email) {
     console.warn(
-      `[crm-service][reply-trigger] ${person.displayName ?? phone ?? "a person"} (brand ${r.brandId}) answered campaign ${r.campaignId} ` +
+      `[crm-service][reply-trigger] ${person.displayName ?? phone ?? "a person"} (brand ${r.brandId}) wrote${r.campaignId ? ` after campaign ${r.campaignId}` : ""} ` +
         `on ${r.channel} but holds no email: not reported (campaign-service files a person by email only). Report ${r.id}`,
     );
     await settle(r, now, { ...who, status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.NO_EMAIL, lastError: null, runId: identity.runId });
@@ -486,8 +562,9 @@ export async function deliverReply(
   }
 
   let offerId = r.offerId;
+  let offerBasis = r.offerBasis;
   try {
-    offerId ??= await readCampaignOffer(identity, r.campaignId);
+    if (!offerId) ({ offerId, offerBasis } = await resolveReplyOffer(identity, r));
   } catch (err) {
     const final = err instanceof CampaignRefusal && err.status === 404;
     await settle(r, now, {
@@ -500,7 +577,9 @@ export async function deliverReply(
     return { status: REPLY_STATUS.FAILED, reason: final ? REPLY_REASONS.OFFER_UNKNOWN : REPLY_REASONS.CAMPAIGN_UNREACHABLE };
   }
   if (!offerId) {
-    const lastError = `campaign ${r.campaignId} states no offer`;
+    const lastError = r.campaignId
+      ? `campaign ${r.campaignId} states no offer`
+      : "no campaign wrote in this thread, Jev tagged it with no offer, and the brand has no single active offer";
     console.warn(`[crm-service][reply-trigger] report ${r.id} (brand ${r.brandId}) not reported: ${lastError}`);
     await settle(r, now, { ...who, status: REPLY_STATUS.FAILED, reason: REPLY_REASONS.OFFER_UNKNOWN, lastError, runId: identity.runId });
     return { status: REPLY_STATUS.FAILED, reason: REPLY_REASONS.OFFER_UNKNOWN };
@@ -520,6 +599,7 @@ export async function deliverReply(
     await settle(r, now, {
       ...who,
       offerId,
+      offerBasis,
       messages,
       lastMessageAt: new Date(messages[messages.length - 1].at),
       status: REPLY_STATUS.REPORTED,
@@ -533,7 +613,7 @@ export async function deliverReply(
     });
     console.log(
       `[crm-service][reply-trigger] reported ${messages.length} message(s) from ${email} (brand ${r.brandId}, offer ${offerId}, ` +
-        `campaign ${r.campaignId}) as event ${recorded.eventId}${recorded.replayed ? " (replayed)" : ""}: first message ` +
+        `campaign ${r.campaignId ?? "-"}, offer from ${offerBasis}) as event ${recorded.eventId}${recorded.replayed ? " (replayed)" : ""}: first message ` +
         `${messages[0].at}, detected ${r.detectedAt.toISOString()}, reported ${reportedAt.toISOString()}, outcome ` +
         `${String(recorded.event.outcome ?? recorded.event.status ?? "-")}${recorded.event.skipReason ? `/${String(recorded.event.skipReason)}` : ""}`,
     );
@@ -542,7 +622,7 @@ export async function deliverReply(
     const final = err instanceof CampaignRefusal && FINAL_REFUSAL_STATUSES.has(err.status);
     const reason = final ? REPLY_REASONS.CAMPAIGN_REFUSED : REPLY_REASONS.CAMPAIGN_UNREACHABLE;
     console.warn(`[crm-service][reply-trigger] report ${r.id} (brand ${r.brandId}) not reported: ${(err as Error).message}`);
-    await settle(r, now, { ...who, offerId, status: REPLY_STATUS.FAILED, reason, lastError: (err as Error).message.slice(0, 1000), runId: identity.runId });
+    await settle(r, now, { ...who, offerId, offerBasis, status: REPLY_STATUS.FAILED, reason, lastError: (err as Error).message.slice(0, 1000), runId: identity.runId });
     return { status: REPLY_STATUS.FAILED, reason };
   }
 }

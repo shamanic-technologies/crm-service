@@ -416,7 +416,8 @@ Materialized (not a view) because the value is an LLM reading, not SQL: `status`
 
 ### Ingestion trigger + cron
 
-`POST /internal/matrix/sync` (apiKeyAuth, optional `connectionId`, `resync: true` =
+The live watch (see "Reply trigger") mirrors every connection every ~10s in-process; the cron below is the
+full pass (lead reading, 24h reply heal). `POST /internal/matrix/sync` (apiKeyAuth, optional `connectionId`, `resync: true` =
 restart from an initial sync to recover skipped messages) runs a pass in the
 background and 202s. ⚠️ An INCREMENTAL page carries a room's new messages WITHOUT its
 member state: a room already in this connection's bronze stays routed to it (before
@@ -1104,42 +1105,36 @@ in a brand's CRM is reported to campaign-service's generic trigger door
 - Reads: `GET /orgs/gohighlevel/form-triggers?brandId=` (submittedAt / detectedAt / reportedAt /
   campaign event). `POST /internal/form-triggers/watch` runs a pass now.
 
-## Reply trigger — a person answering a thread our campaign opened gets the AI responder (`src/lib/reply-trigger/`)
+## Reply trigger — a person writing to the brand on a mirrored channel is reported at once (`src/lib/reply-trigger/`)
 
-Owner 2026-10-12 (WA-RESPONDER-1012): a person who answers, on a personal channel we mirror, a
-thread one of our campaigns wrote to THROUGH OUR SEND ROUTE is reported to campaign-service's
-trigger door as `positive_reply_received` (what the email path fires for an answer) for the
-offer of the campaign that wrote (`GET /campaigns/{id}` `offerId`). Same door as the form trigger
-(`lib/trigger-door.ts`, the one client of `POST /internal/trigger-events`).
+REPLY-ANY-LEAD-1015 (owner 2026-10-15, « NE CRÉE PLUS JAMAIS DES CAS PARTICULIERS »; replaces WA-RESPONDER-1012's
+campaign-thread gate and "hand-typed = taken over"): every human burst in ANY one-to-one thread (a campaign opened it,
+the owner wrote by hand, or the person wrote first) is reported to campaign-service's trigger door as
+`positive_reply_received`. WHO is answered is the answering pipe's strategy there (lead-service refuses a non-lead:
+skip `person_not_admitted`), never filtered here. Same door as the form trigger (`lib/trigger-door.ts`).
 
-- **Runs inside the Matrix sync pass** (cron 5 min + right after each of our sends), after bronze +
-  silver: `detectReplies` per connection, `deliverDueReplies` at the end of `runSyncPass`. The
-  timeline serves Matrix live from bronze, so it holds the message when we report; delivery waits
-  until the brand's `people` hold the conversation (`person_not_built` → rebuild → deliver).
-- **Rules = `thread.ts`, pure, channel-agnostic** (a room + our sends in it, `whatsapp_sends`
-  today): no campaign send in the room = never read (personal chats); only what follows the FIRST
-  campaign send counts; the person's human words since our last outbound = ONE burst = ONE row
-  (`reply_trigger_reports`, UNIQUE on its first message, `idempotencyKey crm:matrix:reply:<event>`);
-  any outbound of ours ends it; an account message that is NOT one of our sends after the campaign
-  wrote (typed on the phone) = `human_took_over`, for good; bridge notices / uncaptioned media /
-  edits are no answer; any brand send `sending` < 2 min holds the pass (its event would read as
-  hand-typed). Jev (`person|automated`, one call per burst, >= 0.75 silences; Jev down = person)
-  drops auto-replies (`automated_reply`; a person writing after it in the burst is still reported).
-- **Never history**: `matrix_connections.reply_watch_since` set at first look; a burst none of whose
-  messages was mirrored after it = `before_watch`. Rooms re-read = campaign rooms with a message
-  ingested in 24h, so a failed pass heals on the next.
-- **Body**: `person {email, name?, phone?}` (email = the address the campaign sent to when the
-  person holds it, else their first; none = `no_email`, logged by name, not sent) + `item {kind:
-  "reply", source, channel, campaignId, personId, conversationId, roomId, firstMessageAt,
-  lastMessageAt, messages [{eventId, at, text}]}` (burst re-read at delivery, 2000 chars/message).
-  Retries 1→60 min for 24h; 400/422 final `campaign_refused`. Read: `GET /orgs/matrix/reply-triggers?brandId=`.
-- **The brand's own team is never a prospect** (`own-team.ts`, 2026-10-13): a burst whose other side
-  (numbers our sends addressed, the mirrored contact, the ghost MXID) is one of the brand's linked
-  WhatsApp accounts (`matrix_links.remote_login_id`) or its sales rep phone (READ from brand-service
-  `GET /orgs/brands/{id}/sales-rep`, never copied) = skipped `own_team`, named in the log, no Jev.
-  Digits compared. brand-service unreadable = detection throws, nothing recorded, next pass re-reads.
-  Why: workflow-service alerts the rep on WhatsApp when the AI escalates; their "ok" was a "reply".
-- A LinkedIn (or any) send route only has to land its sends in the lookup `thread.ts` reads.
+- **Live** (`matrix/sync.ts` `startMatrixLiveWatch`, every `MATRIX_LIVE_INTERVAL_MS` 10s, first 60s after boot): per
+  connection one `/sync`, bronze, silver of the rooms that moved, `detectReplies` on THOSE rooms, delivery if any. No
+  lead reading (the 5-min pass reads every conversation whose lead is behind), no run unless Jev / brand-service is
+  asked. The 5-min pass re-reads every thread that moved in 24h (heals). One mirror at a time per connection
+  (`withConnectionLock`, the cursor is shared); `MATRIX_LIVE_WATCH=off` stops it.
+- **Rules = `thread.ts`, pure**: threads = `conversations` rows (a group is no conversation, never read); the person's
+  human words since our last outbound = ONE burst = ONE row (`reply_trigger_reports`, UNIQUE on its first message,
+  `idempotencyKey crm:matrix:reply:<event>`); ANY outbound ends it: one of our sends OR a message typed by hand on the
+  account (just one of ours, never a takeover); bridge notices / uncaptioned media / edits are no answer; any brand
+  send `sending` < 2 min holds the pass. Jev (`person|automated`, >= 0.75 silences; down = person) drops auto-replies.
+- **Never history**: `reply_watch_since` (campaign threads, since 2026-10-12) / `open_reply_watch_since` (every other
+  thread, since REPLY-ANY-LEAD-1015), set at first look; only messages mirrored after them are reported, the rest is
+  `before_watch` (does not block a later message of the same burst). The brand's own team (`own-team.ts`: linked
+  WhatsApp numbers, brand-service sales rep phone) = `own_team`: identity, not targeting.
+- **Offer** (`resolveReplyOffer`, `offer_basis`): last campaign that wrote in the thread (`GET /campaigns/{id}`) >
+  the offer Jev tagged the conversation about (`conversation_verdicts`, highest score) > the brand's only active offer
+  > `offer_unknown` (retried, loud).
+- **Body**: `person {email, name?, phone?}` (email = the address our sends used when held, else the person's first;
+  none = `no_email`) + `item {kind: "reply", source, channel, campaignId (null = no campaign wrote), openedBy
+  campaign|not_campaign, personId, conversationId, roomId, firstMessageAt, lastMessageAt, messages}` (latest 10,
+  2000 chars each). Delivery waits until `people` hold the conversation (`person_not_built` → rebuild → deliver).
+  Retries 1→60 min for 24h; 400/422 final. Read: `GET /orgs/matrix/reply-triggers?brandId=`.
 
 ## Boot: the port binds BEFORE migrations
 

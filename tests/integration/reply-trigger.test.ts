@@ -4,6 +4,7 @@ import { db } from "../../src/db/index.js";
 import {
   contacts,
   conversations,
+  conversationVerdicts,
   matrixConnections,
   matrixLinks,
   matrixRawEvents,
@@ -22,10 +23,13 @@ import { deliverDueReplies, detectReplies } from "../../src/lib/reply-trigger/wa
  * chat-service (Jev) and campaign-service are stubbed at `fetch`.
  */
 const RUN = !!process.env.CRM_TEST_DB;
+const run1 = async () => "run-1";
 
 const ORG = "a7c1d2e3-2222-4222-8222-000000000001";
 const BRAND = "a7c1d2e3-2222-4222-8222-000000000002";
 const OFFER = "a7c1d2e3-2222-4222-8222-0000000000a1";
+const TAGGED_OFFER = "a7c1d2e3-2222-4222-8222-0000000000a2";
+const ONLY_OFFER = "a7c1d2e3-2222-4222-8222-0000000000a3";
 const CAMPAIGN = "a7c1d2e3-2222-4222-8222-0000000000c1";
 const USER = "user-reply-1";
 const OWN = "@crm_reply_own:hs";
@@ -59,6 +63,9 @@ function installFetchStub() {
     if (url.host === "brand.test" && url.pathname === `/orgs/brands/${BRAND}/sales-rep`) {
       if (typeof repPhone === "number") return json({ error: "down" }, repPhone);
       return json({ salesRepEmail: null, salesRepPhone: repPhone, salesRepFirstName: null, salesRepRole: null });
+    }
+    if (url.host === "brand.test" && url.pathname === `/internal/brands/${BRAND}/offers`) {
+      return json({ offers: [{ offerId: ONLY_OFFER, name: "Only", status: "active" }, { offerId: OFFER, name: "Old", status: "archived" }] });
     }
     if (url.pathname === "/orgs/judgments") {
       jevCalls += 1;
@@ -107,6 +114,7 @@ async function reports() {
 
 async function cleanup() {
   await db.delete(replyTriggerReports).where(eq(replyTriggerReports.brandId, BRAND));
+  await db.delete(conversationVerdicts).where(eq(conversationVerdicts.brandId, BRAND));
   await db.delete(whatsappSends).where(eq(whatsappSends.brandId, BRAND));
   await db.delete(people).where(eq(people.brandId, BRAND));
   await db.delete(matrixLinks).where(eq(matrixLinks.brandId, BRAND));
@@ -161,20 +169,20 @@ describe.skipIf(!RUN)("reply trigger", () => {
   it("the first look is a baseline; a burst of two after the campaign wrote is reported ONCE, with the person and the words", async () => {
     await send("$c", min(0), CAMPAIGN);
     await event("$c", OWN, min(0), "Hi, it's Kevin from Distribute.you");
-    expect((await detectReplies(conn, "run-1", min(0))).baseline).toBe(true);
+    expect((await detectReplies(conn, run1, min(0))).baseline).toBe(true);
     conn = await fresh();
     await buildPerson();
 
     // History mirrored before the watch is never reported...
-    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 1000) }).where(eq(matrixConnections.id, conn.id));
+    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 1000), openReplyWatchSince: new Date(Date.now() - 1000) }).where(eq(matrixConnections.id, conn.id));
     conn = await fresh();
     await event("$a", GHOST, min(2), "Hi! Who is this?");
     await event("$b", GHOST, min(3), "And what does it cost?");
-    const d = await detectReplies(conn, "run-1");
+    const d = await detectReplies(conn, run1);
     expect(d).toMatchObject({ detected: 1, threadsRead: 1 });
     expect(jevCalls).toBe(1);
     // ...a second pass over the same burst records nothing more.
-    expect((await detectReplies(conn, "run-1")).detected).toBe(0);
+    expect((await detectReplies(conn, run1)).detected).toBe(0);
 
     await deliverDueReplies();
     await deliverDueReplies();
@@ -195,59 +203,112 @@ describe.skipIf(!RUN)("reply trigger", () => {
 
     // A third message in the same burst: still one report.
     await event("$d", GHOST, min(4), "Hello?");
-    expect((await detectReplies(conn, "run-1")).detected).toBe(0);
+    expect((await detectReplies(conn, run1)).detected).toBe(0);
 
     // We answer through the route; their next message is a new burst, a new report.
     await send("$r", min(6), "responder-campaign-id");
     await event("$r", OWN, min(6), "AI answer");
     await event("$n", GHOST, min(8), "Thanks, Friday works");
-    expect((await detectReplies(conn, "run-1")).detected).toBe(1);
+    expect((await detectReplies(conn, run1)).detected).toBe(1);
   });
 
-  it("a thread no campaign opened is never read; a hand-typed message after the campaign wrote = taken over for good", async () => {
-    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
+  it("a thread no campaign opened is reported (the person wrote first), offer = the one Jev tagged the conversation about", async () => {
+    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
     conn = await fresh();
     await buildPerson();
-    // Personal room: a staff send with no campaign, then an answer.
-    await send("$p", min(0), null, PERSONAL_ROOM);
-    await event("$p", OWN, min(0), "hey", PERSONAL_ROOM);
-    await event("$pa", GHOST, min(1), "hey you", PERSONAL_ROOM);
-    // Campaign room taken by hand.
+    await event("$q", GHOST, min(1), "Hi, do you have customer references?");
+    const d = await detectReplies(conn, run1);
+    expect(d.detected).toBe(1);
+    await db.insert(conversationVerdicts).values({
+      orgId: ORG, brandId: BRAND, conversationKey: `matrix:${conversationId}`, source: "matrix", topic: "this_brand",
+      offerScores: { [OFFER]: 0.6, [TAGGED_OFFER]: 0.9 }, offerIds: [OFFER, TAGGED_OFFER], contextHash: "h", judgedThrough: "$q", input: {}, runId: "r",
+    });
+    await deliverDueReplies();
+    expect(campaignCalls).toHaveLength(1);
+    expect(campaignCalls[0].body).toMatchObject({
+      offerId: TAGGED_OFFER,
+      idempotencyKey: "crm:matrix:reply:$q",
+      item: { campaignId: null, openedBy: "not_campaign", conversationId },
+    });
+    expect((await reports())[0]).toMatchObject({ status: "reported", campaignId: null, offerBasis: "conversation" });
+  });
+
+  it("no campaign and no offer tag: the brand's only active offer", async () => {
+    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
+    conn = await fresh();
+    await buildPerson();
+    await event("$h", OWN, min(0), "Hey Noah, typed by hand");
+    await event("$q", GHOST, min(1), "Who are your customers?");
+    expect((await detectReplies(conn, run1)).detected).toBe(1);
+    await deliverDueReplies();
+    expect(campaignCalls[0].body).toMatchObject({ offerId: ONLY_OFFER, item: { campaignId: null } });
+    expect((await reports())[0]).toMatchObject({ offerBasis: "only_offer" });
+  });
+
+  it("a hand-typed message is just one of ours: it ends the burst, and the person's next message is reported", async () => {
+    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
+    conn = await fresh();
+    await buildPerson();
     await send("$c", min(0), CAMPAIGN);
     await event("$c", OWN, min(0), "Hi");
-    await event("$h", OWN, min(1), "typed on my phone");
-    await event("$x", GHOST, min(2), "ok!");
-    const d = await detectReplies(conn, "run-1");
-    expect(d.detected).toBe(0);
-    expect(d.skipped).toEqual([{ reason: "human_took_over", roomId: ROOM }]);
+    await event("$a", GHOST, min(1), "who is this?");
+    expect((await detectReplies(conn, run1)).detected).toBe(1);
+    await event("$h", OWN, min(2), "typed on my phone");
+    expect((await detectReplies(conn, run1)).detected).toBe(0); // answered by hand: nobody waiting
+    await event("$x", GHOST, min(3), "ok, send me references");
+    const d = await detectReplies(conn, run1);
+    expect(d).toMatchObject({ detected: 1, skipped: [] });
     await deliverDueReplies();
-    expect(campaignCalls).toHaveLength(0);
+    expect(campaignCalls.map((c) => c.body.idempotencyKey)).toEqual(["crm:matrix:reply:$a", "crm:matrix:reply:$x"]);
+    expect(campaignCalls[1].body).toMatchObject({ offerId: OFFER, item: { campaignId: CAMPAIGN, openedBy: "campaign" } });
+  });
+
+  it("history of a thread no campaign opened (mirrored before the open watch started) is never reported; a later message is", async () => {
+    await event("$old", GHOST, min(-5), "an old unanswered message");
+    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() + 1000) }).where(eq(matrixConnections.id, conn.id));
+    conn = await fresh();
+    await buildPerson();
+    expect((await detectReplies(conn, run1)).skipped).toEqual([{ reason: "before_watch", roomId: ROOM }]);
+    await db.update(matrixConnections).set({ openReplyWatchSince: new Date(Date.now() - 1000) }).where(eq(matrixConnections.id, conn.id));
+    conn = await fresh();
+    await event("$new", GHOST, min(1), "hello again");
+    expect((await detectReplies(conn, run1)).detected).toBe(1);
+    await deliverDueReplies();
+    expect(campaignCalls).toHaveLength(1);
+    expect((campaignCalls[0].body.item as { messages: { text: string }[] }).messages.map((m) => m.text)).toEqual(["hello again"]);
+  });
+
+  it("only one-to-one threads are read: a room with no conversation (a group) is not", async () => {
+    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
+    conn = await fresh();
+    await event("$g", GHOST, min(1), "hello group", PERSONAL_ROOM);
+    expect(await detectReplies(conn, run1)).toMatchObject({ detected: 0, threadsRead: 0 });
   });
 
   it("an auto-reply is not an answer; a person writing after it in the same burst is", async () => {
-    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
+    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
     conn = await fresh();
     await buildPerson();
     await send("$c", min(0), CAMPAIGN);
     await event("$c", OWN, min(0), "Hi");
     await event("$auto", GHOST, min(1), "Thanks for contacting us! We will get back to you soon.");
     jevChoice = "automated";
-    expect((await detectReplies(conn, "run-1")).skipped).toEqual([{ reason: "automated_reply", roomId: ROOM }]);
+    expect((await detectReplies(conn, run1)).skipped).toEqual([{ reason: "automated_reply", roomId: ROOM }]);
     jevChoice = "person";
     await event("$real", GHOST, min(9), "Hi, Kevin here, tell me more");
-    expect((await detectReplies(conn, "run-1")).detected).toBe(1);
+    expect((await detectReplies(conn, run1)).detected).toBe(1);
     await deliverDueReplies();
     expect(campaignCalls).toHaveLength(1);
     expect(campaignCalls[0].body.idempotencyKey).toBe("crm:matrix:reply:$real");
   });
 
   it("a person with no email is not reported, named in the log; a person not built yet waits for the rebuild", async () => {
-    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
+    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
     conn = await fresh();
     await send("$c", min(0), CAMPAIGN);
     await event("$c", OWN, min(0), "Hi");
     await event("$a", GHOST, min(1), "yes?");
-    expect((await detectReplies(conn, "run-1")).detected).toBe(1);
+    expect((await detectReplies(conn, run1)).detected).toBe(1);
 
     // Not built: the rebuild is asked, then the report goes out.
     let rebuilt = 0;
@@ -261,7 +322,7 @@ describe.skipIf(!RUN)("reply trigger", () => {
     await send("$r", min(3), null);
     await event("$r", OWN, min(3), "answer");
     await event("$b", GHOST, min(4), "and again");
-    expect((await detectReplies(conn, "run-1")).detected).toBe(1);
+    expect((await detectReplies(conn, run1)).detected).toBe(1);
     const warn = vi.spyOn(console, "warn");
     await deliverDueReplies();
     expect(campaignCalls).toHaveLength(1);
@@ -271,7 +332,7 @@ describe.skipIf(!RUN)("reply trigger", () => {
 
   describe("the brand's own team is never a prospect", () => {
     async function campaignThreadAnswered() {
-      await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
+      await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
       conn = await fresh();
       await buildPerson();
       await send("$c", min(0), CAMPAIGN); // addressed to +33770657585
@@ -285,7 +346,7 @@ describe.skipIf(!RUN)("reply trigger", () => {
       });
       await campaignThreadAnswered();
       const log = vi.spyOn(console, "log");
-      const d = await detectReplies(conn, "run-1");
+      const d = await detectReplies(conn, run1);
       expect(d.detected).toBe(0);
       expect(d.skipped).toEqual([{ reason: "own_team", roomId: ROOM }]);
       expect(jevCalls).toBe(0);
@@ -298,7 +359,7 @@ describe.skipIf(!RUN)("reply trigger", () => {
     it("a burst from the brand's sales rep phone (read from brand-service, any spelling) is skipped as own_team", async () => {
       repPhone = "+33 7 70 65 75 85";
       await campaignThreadAnswered();
-      const d = await detectReplies(conn, "run-1");
+      const d = await detectReplies(conn, run1);
       expect(d.skipped).toEqual([{ reason: "own_team", roomId: ROOM }]);
       await deliverDueReplies();
       expect(campaignCalls).toHaveLength(0);
@@ -310,7 +371,7 @@ describe.skipIf(!RUN)("reply trigger", () => {
         orgId: ORG, brandId: BRAND, channel: "whatsapp", createdByUserId: USER, status: "linked", method: "qr", remoteLoginId: "33680478702",
       });
       await campaignThreadAnswered();
-      expect((await detectReplies(conn, "run-1")).detected).toBe(1);
+      expect((await detectReplies(conn, run1)).detected).toBe(1);
       await deliverDueReplies();
       expect(campaignCalls).toHaveLength(1);
     });
@@ -318,10 +379,10 @@ describe.skipIf(!RUN)("reply trigger", () => {
     it("brand-service unable to say who the rep is: nothing recorded this pass, the next pass reads it again", async () => {
       repPhone = 503;
       await campaignThreadAnswered();
-      await expect(detectReplies(conn, "run-1")).rejects.toThrow(/sales-rep returned 503/);
+      await expect(detectReplies(conn, run1)).rejects.toThrow(/sales-rep returned 503/);
       expect(await reports()).toHaveLength(0);
       repPhone = null;
-      expect((await detectReplies(conn, "run-1")).detected).toBe(1);
+      expect((await detectReplies(conn, run1)).detected).toBe(1);
     });
   });
 });

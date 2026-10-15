@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { readThreadForReply, type RoomSend } from "../../src/lib/reply-trigger/thread.js";
-import { idempotencyKeyFor, nextAttemptDue, replyOccurrenceBody } from "../../src/lib/reply-trigger/watch.js";
+import { idempotencyKeyFor, nextAttemptDue, pickTaggedOffer, replyOccurrenceBody } from "../../src/lib/reply-trigger/watch.js";
 import type { MatrixEvent } from "../../src/lib/matrix/client.js";
 
 const OWN = "@crm_own:hs";
@@ -20,11 +20,24 @@ const sent = (eventId: string, min: number, campaignId: string | null = CAMPAIGN
 });
 
 describe("readThreadForReply", () => {
-  it("never reads a thread no campaign wrote to (the owner's personal chats)", () => {
-    const events = [msg("$1", GHOST, 0, "hey"), msg("$2", OWN, 1, "hi!")];
-    expect(readThreadForReply(events, OWN, [])).toEqual({ kind: "not_campaign_thread" });
-    // A staff probe through the route with no campaign does not make it a campaign thread either.
-    expect(readThreadForReply(events, OWN, [sent("$2", 1, null)])).toEqual({ kind: "not_campaign_thread" });
+  it("reads every thread: one nobody of ours opened (the person wrote first) is an unanswered burst", () => {
+    const events = [msg("$1", GHOST, 0, "hey, do you have references?")];
+    expect(readThreadForReply(events, OWN, [])).toEqual({
+      kind: "unanswered",
+      campaignId: null,
+      burst: [{ eventId: "$1", at: new Date(at(0)).toISOString(), text: "hey, do you have references?" }],
+    });
+    // Answered by hand: nobody waiting. A send with no campaign: the burst after it names no campaign.
+    expect(readThreadForReply([...events, msg("$2", OWN, 1, "hi!")], OWN, [])).toEqual({ kind: "answered" });
+    const r = readThreadForReply([msg("$2", OWN, 1, "hi!"), msg("$3", GHOST, 2, "thanks")], OWN, [sent("$2", 1, null)]);
+    expect(r).toMatchObject({ kind: "unanswered", campaignId: null });
+  });
+
+  it("the whole unanswered history is one burst (the watch keeps only what was mirrored after it started)", () => {
+    const events = [msg("$old", GHOST, -100, "personal history"), msg("$c", OWN, 0, "Hi"), msg("$a", GHOST, 2, "Hi!")];
+    const r = readThreadForReply([events[0]], OWN, []);
+    expect(r).toMatchObject({ kind: "unanswered", campaignId: null });
+    expect(readThreadForReply(events, OWN, [sent("$c", 0)])).toMatchObject({ kind: "unanswered", campaignId: CAMPAIGN });
   });
 
   it("an answer after the campaign wrote is one unanswered burst, three messages included", () => {
@@ -64,24 +77,17 @@ describe("readThreadForReply", () => {
     expect(readThreadForReply(events, OWN, [sent("$c", 0), sent("$r-not-mirrored", 5, null)])).toEqual({ kind: "answered" });
   });
 
-  it("a message typed by hand on the account after the campaign wrote = taken over, for good", () => {
+  it("a message typed by hand on the account is one of ours: it ends the burst, never takes the thread over", () => {
     const events = [
       msg("$c", OWN, 0, "Hi"),
       msg("$a", GHOST, 2, "Hi!"),
       msg("$h", OWN, 3, "Hey it's me, typing on my phone"),
       msg("$x", GHOST, 6, "Great"),
     ];
+    expect(readThreadForReply(events.slice(0, 3), OWN, [sent("$c", 0)])).toEqual({ kind: "answered" });
     const r = readThreadForReply(events, OWN, [sent("$c", 0)]);
-    expect(r.kind).toBe("taken_over");
-    if (r.kind === "taken_over") {
-      expect(r.takenOverBy.eventId).toBe("$h");
-      expect(r.burst.map((m) => m.eventId)).toEqual(["$x"]);
-    }
-  });
-
-  it("hand-typed messages BEFORE the campaign wrote are history, not a takeover", () => {
-    const events = [msg("$h", OWN, -10, "(misclick)"), msg("$c", OWN, 0, "Hi"), msg("$a", GHOST, 2, "Yes")];
-    expect(readThreadForReply(events, OWN, [sent("$c", 0)]).kind).toBe("unanswered");
+    expect(r).toMatchObject({ kind: "unanswered", campaignId: CAMPAIGN });
+    if (r.kind === "unanswered") expect(r.burst.map((m) => m.eventId)).toEqual(["$x"]);
   });
 
   it("machine lines are not an answer: a bridge notice, an uncaptioned photo, an edit", () => {
@@ -123,6 +129,7 @@ describe("replyOccurrenceBody", () => {
         source: "matrix",
         channel: "whatsapp",
         campaignId: CAMPAIGN,
+        openedBy: "campaign",
         personId: "p1",
         conversationId: "c1",
         roomId: "!r",
@@ -132,6 +139,27 @@ describe("replyOccurrenceBody", () => {
       },
     });
     expect(idempotencyKeyFor("$a")).toBe("crm:matrix:reply:$a");
+  });
+
+  it("carries the latest 10 messages of a long burst, and openedBy not_campaign when no campaign wrote", () => {
+    const messages = Array.from({ length: 14 }, (_, i) => ({ eventId: `$${i}`, at: new Date(at(i)).toISOString(), text: `m${i}` }));
+    const body = replyOccurrenceBody({
+      brandId: "f4d73dab-1f9d-49b2-b16e-63ecde76a5eb",
+      offerId: "5a2868bb-ac88-42f6-a00a-e49b89b04079",
+      report: { anchorEventId: "$0", channel: "whatsapp", campaignId: null, conversationId: "c1", roomId: "!r", source: "matrix" },
+      person: { email: "a@b.com", name: null, phone: null, personId: null },
+      messages,
+    });
+    const item = body.item as { messages: { text: string }[]; openedBy: string; campaignId: string | null };
+    expect(item.messages.map((m) => m.text)).toEqual(["m4", "m5", "m6", "m7", "m8", "m9", "m10", "m11", "m12", "m13"]);
+    expect(item).toMatchObject({ openedBy: "not_campaign", campaignId: null });
+    expect(body.idempotencyKey).toBe("crm:matrix:reply:$0");
+  });
+
+  it("picks the offer Jev is most sure the conversation is about", () => {
+    expect(pickTaggedOffer([], null)).toBeNull();
+    expect(pickTaggedOffer(["a", "b"], { a: 0.6, b: 0.9 })).toBe("b");
+    expect(pickTaggedOffer(["b", "a"], null)).toBe("a");
   });
 
   it("backs off 1, 2, 4... minutes, capped at an hour", () => {
