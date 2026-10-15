@@ -239,15 +239,20 @@ describe.skipIf(!RUN)("form trigger watch", () => {
     expect(campaignCalls.length).toBe(calls);
   });
 
-  it("a fill with no email is recorded skipped no_email, never sent", async () => {
+  it("a fill with no email is reported by its E.164 phone (REPLY-PHONE-ONLY-1015); neither = skipped no_email_or_phone, never sent", async () => {
     await runFormWatchPass(T0);
     const s = submission("phone-only", new Date(min(1)).toISOString()) as Record<string, unknown>;
     delete s.email;
-    submissions = [s];
+    const n = submission("nobody", new Date(min(1)).toISOString(), META_FORM, { phone: "06 12 34 56 78" }) as Record<string, unknown>;
+    delete n.email;
+    submissions = [s, n];
     const pass = await runFormWatchPass(min(2));
-    expect(pass.connections.find((c) => c.connectionId === connId)).toMatchObject({ detected: 0, skippedNoEmail: 1 });
-    expect(campaignCalls).toHaveLength(0);
-    expect((await reports())[0]).toMatchObject({ status: "skipped", reason: "no_email", phone: "+15550100199" });
+    expect(pass.connections.find((c) => c.connectionId === connId)).toMatchObject({ detected: 1, skippedNoEmail: 1 });
+    expect(campaignCalls).toHaveLength(1);
+    expect(campaignCalls[0].body.person).toEqual({ name: "Person phone-only", phone: "+15550100199", crmContact: { provider: "gohighlevel", contactId: "contact-phone-only" } });
+    const rows = await reports();
+    expect(rows.find((r) => r.submissionId === "phone-only")).toMatchObject({ status: "reported", email: null, phone: "+15550100199" });
+    expect(rows.find((r) => r.submissionId === "nobody")).toMatchObject({ status: "skipped", reason: "no_email_or_phone" });
   });
 
   it("a paused connection is not watched", async () => {

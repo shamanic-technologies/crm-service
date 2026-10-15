@@ -56,7 +56,9 @@ import { createRun, updateRun } from "../runs-client.js";
 import {
   CampaignRefusal,
   campaignServiceConfigured,
+  doorPersonKey,
   FINAL_REFUSAL_STATUSES,
+  NO_EMAIL_OR_PHONE,
   readCampaignOffer,
   recordTriggerEvent,
   type DoorIdentity,
@@ -89,8 +91,11 @@ export const REPLY_REASONS = {
   AUTOMATED_REPLY: "automated_reply",
   /** Every message of the burst was mirrored before the watch started. */
   BEFORE_WATCH: "before_watch",
-  /** The person holds no email: the door files a person by email only. */
-  NO_EMAIL: "no_email",
+  /**
+   * The person holds no email AND no international phone: the door cannot name them
+   * (REPLY-PHONE-ONLY-1015; a phone-only writer is reported by phone). Older rows say `no_email`.
+   */
+  NO_EMAIL_OR_PHONE,
   /** The brand's people do not hold this thread yet: rebuilt, then delivered. */
   PERSON_NOT_BUILT: "person_not_built",
   OFFER_UNKNOWN: "offer_unknown",
@@ -499,10 +504,12 @@ export function replyOccurrenceBody(input: {
   brandId: string;
   offerId: string;
   report: Pick<ReplyTriggerReport, "anchorEventId" | "channel" | "campaignId" | "conversationId" | "roomId" | "source">;
-  person: { email: string; name: string | null; phone: string | null; personId: string | null };
+  /** Email when held; else `phone` is the E.164 number the door names them by (`doorPersonKey`). */
+  person: { email: string | null; name: string | null; phone: string | null; personId: string | null };
   messages: BurstMessage[];
 }): Record<string, unknown> {
-  const person: Record<string, unknown> = { email: input.person.email };
+  const person: Record<string, unknown> = {};
+  if (input.person.email) person.email = input.person.email;
   if (input.person.name) person.name = input.person.name.slice(0, 300);
   if (input.person.phone) person.phone = input.person.phone.slice(0, 50);
   // The latest words of a long burst: what there is to answer.
@@ -570,14 +577,16 @@ export async function deliverReply(
   const held = new Set(person.emails.map((e) => normalizeEmail(e)).filter((e): e is string => !!e));
   const email = sentTo.map((s) => normalizeEmail(s.email)).find((e): e is string => !!e && held.has(e)) ?? [...held][0] ?? null;
   const phone = person.presences.find((p) => p.source === "matrix" && p.detail.conversationId === r.conversationId)?.phones[0] ?? person.phones[0] ?? null;
-  const who = { personId: person.personId, fullName: person.displayName, email, phone, conversationId: r.conversationId };
-  if (!email) {
+  // Named by email when held, else by their E.164 phone (a WhatsApp writer usually has only that).
+  const key = doorPersonKey(email, phone);
+  const who = { personId: person.personId, fullName: person.displayName, email, phone: key?.phone ?? phone, conversationId: r.conversationId };
+  if (!key) {
     console.warn(
       `[crm-service][reply-trigger] ${person.displayName ?? phone ?? "a person"} (brand ${r.brandId}) wrote${r.campaignId ? ` after campaign ${r.campaignId}` : ""} ` +
-        `on ${r.channel} but holds no email: not reported (campaign-service files a person by email only). Report ${r.id}`,
+        `on ${r.channel} but holds neither an email nor an international phone: not reported (campaign-service cannot name them). Report ${r.id}`,
     );
-    await settle(r, now, { ...who, status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.NO_EMAIL, lastError: null, runId: identity.runId });
-    return { status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.NO_EMAIL };
+    await settle(r, now, { ...who, status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.NO_EMAIL_OR_PHONE, lastError: null, runId: identity.runId });
+    return { status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.NO_EMAIL_OR_PHONE };
   }
 
   let offerId = r.offerId;
@@ -609,7 +618,7 @@ export async function deliverReply(
     brandId: r.brandId,
     offerId,
     report: r,
-    person: { email, name: person.displayName, phone, personId: person.personId },
+    person: { email: key.email, name: person.displayName, phone: key.phone, personId: person.personId },
     messages,
   });
   try {
@@ -631,7 +640,7 @@ export async function deliverReply(
       campaignOutcome: recorded.event,
     });
     console.log(
-      `[crm-service][reply-trigger] reported ${messages.length} message(s) from ${email} (brand ${r.brandId}, offer ${offerId}, ` +
+      `[crm-service][reply-trigger] reported ${messages.length} message(s) from ${key.email ?? key.phone} (brand ${r.brandId}, offer ${offerId}, ` +
         `campaign ${r.campaignId ?? "-"}, offer from ${offerBasis}) as event ${recorded.eventId}${recorded.replayed ? " (replayed)" : ""}: first message ` +
         `${messages[0].at}, detected ${r.detectedAt.toISOString()}, reported ${reportedAt.toISOString()}, outcome ` +
         `${String(recorded.event.outcome ?? recorded.event.status ?? "-")}${recorded.event.skipReason ? `/${String(recorded.event.skipReason)}` : ""}`,

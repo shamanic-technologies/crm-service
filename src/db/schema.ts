@@ -1302,7 +1302,7 @@ export const formOfferMappings = pgTable(
  * person in a personal-channel thread one of our campaigns opened through our
  * send route, reported to campaign-service as `positive_reply_received`, or
  * recorded skipped with its reason (`human_took_over`, `automated_reply`,
- * `no_email`, `before_watch`). Keyed on the burst's first message: a burst is
+ * `no_email_or_phone`, `before_watch`). Keyed on the burst's first message: a burst is
  * reported once, however many messages it grows to; the next burst (after any
  * outbound in the thread) is a new row.
  */

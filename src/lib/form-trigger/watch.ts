@@ -25,8 +25,9 @@
  *  - a calendar's own booking form is the booking, never a form step: recorded
  *    `skipped / calendar_booking_form`, never reported.
  *
- * A fill with no email is recorded `skipped / no_email` and logged (campaign-service
- * files a person by email only). Each detection kicks the brand's GoHighLevel sync
+ * A fill with no email is reported by its E.164 phone (REPLY-PHONE-ONLY-1015); one
+ * with neither is recorded `skipped / no_email_or_phone` and logged (older rows:
+ * `no_email`). Each detection kicks the brand's GoHighLevel sync
  * + people build (the fact lead-service needs to know the person), then reports.
  *
  * A report that fails (offer unknown, campaign-service unreachable / 5xx) stays
@@ -58,7 +59,7 @@ import {
   reportOccurrence,
 } from "./campaign-client.js";
 import { resolveOffer } from "./offer.js";
-import { FINAL_REFUSAL_STATUSES } from "../trigger-door.js";
+import { doorPersonKey, FINAL_REFUSAL_STATUSES, NO_EMAIL_OR_PHONE } from "../trigger-door.js";
 import { isCalendarBookingForm, submissionAnswers, submissionPerson } from "./submission.js";
 
 const SERVICE_NAME = "crm-service";
@@ -77,8 +78,8 @@ export const REPORT_REASONS = {
   CAMPAIGN_REFUSED: "campaign_refused",
   CAMPAIGN_UNREACHABLE: "campaign_unreachable",
   CONNECTION_GONE: "connection_gone",
-  /** campaign-service files a person by email only (lead-service has no phone door): a phone-only fill is not sent. */
-  NO_EMAIL: "no_email",
+  /** Neither an email nor an international phone: the door cannot name the person (a phone-only fill IS sent). */
+  NO_EMAIL_OR_PHONE,
 } as const;
 
 
@@ -196,7 +197,7 @@ export async function watchConnection(conn: GhlConnection, now: number = Date.no
     const d = derived!;
     const person = submissionPerson(payload);
     const calendar = isCalendarBookingForm(payload, calendarFormIds);
-    const skipReason = calendar ? REPORT_REASONS.CALENDAR_BOOKING_FORM : !person.email ? REPORT_REASONS.NO_EMAIL : null;
+    const skipReason = calendar ? REPORT_REASONS.CALENDAR_BOOKING_FORM : !doorPersonKey(person.email, person.phone) ? REPORT_REASONS.NO_EMAIL_OR_PHONE : null;
     const inserted = await db
       .insert(formTriggerReports)
       .values({
@@ -223,10 +224,10 @@ export async function watchConnection(conn: GhlConnection, now: number = Date.no
     if (calendar) out.skippedCalendar += 1;
     else if (skipReason) out.skippedNoEmail += 1;
     else out.detected += 1;
-    if (skipReason === REPORT_REASONS.NO_EMAIL) {
+    if (skipReason === REPORT_REASONS.NO_EMAIL_OR_PHONE) {
       console.warn(
-        `[crm-service][form-trigger] submission ${d.externalId} (brand ${conn.brandId}) carries no email: not reported ` +
-          `(campaign-service files a person by email only). Count: GET /orgs/gohighlevel/form-triggers reason no_email`,
+        `[crm-service][form-trigger] submission ${d.externalId} (brand ${conn.brandId}) carries neither an email nor an international phone: ` +
+          `not reported (campaign-service cannot name the person). Count: GET /orgs/gohighlevel/form-triggers reason no_email_or_phone`,
       );
     }
     console.log(

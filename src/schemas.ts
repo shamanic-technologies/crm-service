@@ -3142,7 +3142,7 @@ const FormTriggerReportSchema = z.object({
   }),
   answers: z.array(z.object({ key: z.string(), label: z.string().nullable(), value: z.unknown() })),
   status: z.enum(["pending", "reported", "skipped", "failed"]),
-  reason: z.string().nullable().describe("calendar_booking_form | offer_unknown | campaign_refused | campaign_unreachable | connection_gone"),
+  reason: z.string().nullable().describe("calendar_booking_form | no_email_or_phone (neither an email nor an E.164 phone; older rows no_email) | offer_unknown | campaign_refused | campaign_unreachable | connection_gone"),
   lastError: z.string().nullable(),
   attempts: z.number().int(),
   offerId: z.string().nullable(),
@@ -3191,7 +3191,7 @@ export const ReplyTriggerReportSchema = z.object({
   judgment: z.unknown(),
   status: z.enum(["pending", "reported", "skipped", "failed"]),
   reason: z.string().nullable().describe(
-    "`own_team` | `automated_reply` | `before_watch` | `no_email` | `cold_email_path` (gmail: addressed to one of our sending mailboxes, the email path reports it) | `person_not_built` | `offer_unknown` | `campaign_refused` | `campaign_unreachable`",
+    "`own_team` | `automated_reply` | `before_watch` | `no_email_or_phone` (neither an email nor an E.164 phone; older rows `no_email`) | `cold_email_path` (gmail: addressed to one of our sending mailboxes, the email path reports it) | `person_not_built` | `offer_unknown` | `campaign_refused` | `campaign_unreachable`",
   ),
   lastError: z.string().nullable(),
   attempts: z.number().int(),

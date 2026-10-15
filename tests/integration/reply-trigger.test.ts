@@ -302,7 +302,7 @@ describe.skipIf(!RUN)("reply trigger", () => {
     expect(campaignCalls[0].body.idempotencyKey).toBe("crm:matrix:reply:$real");
   });
 
-  it("a person with no email is not reported, named in the log; a person not built yet waits for the rebuild", async () => {
+  it("a person with no email is reported by phone + name (REPLY-PHONE-ONLY-1015); neither = skipped, named in the log; a person not built yet waits for the rebuild", async () => {
     await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
     conn = await fresh();
     await send("$c", min(0), CAMPAIGN);
@@ -316,18 +316,34 @@ describe.skipIf(!RUN)("reply trigger", () => {
     expect(rebuilt).toBe(1);
     expect(campaignCalls).toHaveLength(1);
 
-    // No email.
+    // No email, a phone: reported by phone + name, never a made-up email.
     await db.update(people).set({ emails: [], identityKeys: ["phone:+33770657585"] }).where(eq(people.brandId, BRAND));
     await db.update(whatsappSends).set({ email: null }).where(eq(whatsappSends.brandId, BRAND));
     await send("$r", min(3), null);
     await event("$r", OWN, min(3), "answer");
     await event("$b", GHOST, min(4), "and again");
     expect((await detectReplies(conn, run1)).detected).toBe(1);
+    await deliverDueReplies();
+    expect(campaignCalls).toHaveLength(2);
+    expect(campaignCalls[1].body.triggerId).toBe("positive_reply_received");
+    expect(campaignCalls[1].body.person).toEqual({ name: "Kevin (WA)", phone: "+33770657585" });
+    expect((await reports()).find((r) => r.anchorEventId === "$b")).toMatchObject({ status: "reported", email: null, phone: "+33770657585" });
+
+    // Neither an email nor a phone: a named skip, never sent.
+    await db
+      .update(people)
+      .set({ phones: [], identityKeys: [], presences: [{ source: "matrix", sourceRef: "x", displayName: "Kevin (WA)", company: null, emails: [], phones: [],
+        firstActivityAt: null, lastActivityAt: null, messageCount: 1, inboundCount: 1, outboundCount: 1, detail: { conversationId } }] })
+      .where(eq(people.brandId, BRAND));
+    await send("$r2", min(5), null);
+    await event("$r2", OWN, min(5), "answer");
+    await event("$n", GHOST, min(6), "still me");
+    expect((await detectReplies(conn, run1)).detected).toBe(1);
     const warn = vi.spyOn(console, "warn");
     await deliverDueReplies();
-    expect(campaignCalls).toHaveLength(1);
-    expect(warn.mock.calls.some((c) => String(c[0]).includes("Kevin (WA)") && String(c[0]).includes("holds no email"))).toBe(true);
-    expect((await reports()).find((r) => r.anchorEventId === "$b")).toMatchObject({ status: "skipped", reason: "no_email" });
+    expect(campaignCalls).toHaveLength(2);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes("Kevin (WA)") && String(c[0]).includes("neither an email nor an international phone"))).toBe(true);
+    expect((await reports()).find((r) => r.anchorEventId === "$n")).toMatchObject({ status: "skipped", reason: "no_email_or_phone" });
   });
 
   describe("the brand's own team is never a prospect", () => {

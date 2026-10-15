@@ -1089,8 +1089,9 @@ in a brand's CRM is reported to campaign-service's generic trigger door
   `idempotencyKey = crm:<source>:form_submission:<id>` (replay = its first event).
 - **Skipped, recorded, never sent**: a calendar's own booking form (`calendar_booking_form`:
   a mirrored calendar's `formId`, or the record's `others.internalSource.type = "calendars"`),
-  a fill with no email (`no_email`, logged: campaign-service files a person by email only).
-- **Body** (campaign-service's `RecordTriggerEventBody`, strict): `person {email, name?, phone?,
+  a fill with neither an email nor an E.164 phone (`no_email_or_phone`, logged; older rows `no_email`).
+  A fill with no email but an international phone IS reported, named by phone (REPLY-PHONE-ONLY-1015).
+- **Body** (campaign-service's `RecordTriggerEventBody`, strict): `person {email?, name?, phone?,
   crmContact {provider, contactId}}` (absent values OMITTED, never null) + opaque `item {source,
   submissionId, formId, formName, submittedAt, answers [{key, label, value}], crmContactId}`
   handed verbatim to the workflow. `answers` = `others.fieldsOriSequance` order minus identity
@@ -1130,8 +1131,10 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
 - **Offer** (`resolveReplyOffer`, `offer_basis`): last campaign that wrote in the thread (`GET /campaigns/{id}`) >
   the offer Jev tagged the conversation about (`conversation_verdicts`, highest score) > the brand's only active offer
   > `offer_unknown` (retried, loud).
-- **Body**: `person {email, name?, phone?}` (email = the address our sends used when held, else the person's first;
-  none = `no_email`) + `item {kind: "reply", source, channel, campaignId (null = no campaign wrote), openedBy
+- **Body**: `person {email?, name?, phone?}` (email = the address our sends used when held, else the person's first;
+  none = named by E.164 phone + name, REPLY-PHONE-ONLY-1015: most WhatsApp writers hold no email, campaign-service
+  v0.75.81 accepts it; neither = `no_email_or_phone`, older rows `no_email`. ONE rule for every trigger:
+  `trigger-door.ts` `doorPersonKey`; never an email made up from a phone) + `item {kind: "reply", source, channel, campaignId (null = no campaign wrote), openedBy
   campaign|not_campaign, personId, conversationId, roomId, firstMessageAt, lastMessageAt, messages}` (latest 10,
   2000 chars each). Delivery waits until `people` hold the conversation (`person_not_built` → rebuild → deliver).
   Retries 1→60 min for 24h; 400/422 final. Read: `GET /orgs/matrix/reply-triggers?brandId=`.
