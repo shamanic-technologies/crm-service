@@ -19,8 +19,10 @@ import copilotRoutes from "./routes/copilot.js";
 import whatsappRoutes from "./routes/whatsapp.js";
 import apiCallsRoutes from "./routes/api-calls.js";
 import formTriggerRoutes from "./routes/form-triggers.js";
+import phoneTriggerRoutes from "./routes/phone-triggers.js";
 import { startFreshnessWatch } from "./lib/people/freshness.js";
 import { startFormWatch } from "./lib/form-trigger/watch.js";
+import { startPhoneWatch } from "./lib/phone-trigger/watch.js";
 import { startMatrixLiveWatch } from "./lib/matrix/sync.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -73,6 +75,7 @@ app.use(authProviderRoutes);
 app.use(copilotRoutes);
 app.use(whatsappRoutes);
 app.use(formTriggerRoutes);
+app.use(phoneTriggerRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ type: "not_found", error: "Not found" });
@@ -105,6 +108,8 @@ if (process.env.NODE_ENV !== "test") {
         startFreshnessWatch();
         // Reports each new CRM form submission as a `form_submitted` trigger, within a minute.
         startFormWatch();
+        // Reports a person giving the brand their phone number (any connector) as `whatsapp_number_given`, within a minute.
+        startPhoneWatch();
         // Mirrors every linked chat account every ~10s and reports a person's new message at once.
         startMatrixLiveWatch();
       })

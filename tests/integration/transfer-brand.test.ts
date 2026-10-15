@@ -139,6 +139,12 @@ async function seedBrand(org: string, brand: string, tag: string) {
       messages, first_message_at, last_message_at, status)
     VALUES (${org}, ${brand}, 'matrix', 'whatsapp', gen_random_uuid(), '!room', ${"$ev-" + tag}, 'camp-1', '[]', now(), now(), 'reported')`);
   await db.execute(sql`
+    INSERT INTO phone_given_reports (org_id, brand_id, phone, source, status)
+    VALUES (${org}, ${brand}, ${"+4477009" + String(Math.floor(Math.random() * 1e5)).padStart(5, "0")}, 'clerk', 'reported')`);
+  await db.execute(sql`
+    INSERT INTO phone_watch_artifacts (org_id, brand_id, artifact_id, source)
+    VALUES (${org}, ${brand}, gen_random_uuid(), 'clerk')`);
+  await db.execute(sql`
     INSERT INTO conversation_verdicts (org_id, brand_id, conversation_key, source, topic, confidence, probabilities,
       brand_probability, offer_scores, offer_ids, context_hash, judged_through, input, model, run_id)
     VALUES (${org}, ${brand}, 'gmail:a@b.co', 'gmail', 'this_brand', 0.9, '{}', 0.9, '{}', '[]', 'h', 'm', '{}', 'jev', 'run-1')`);

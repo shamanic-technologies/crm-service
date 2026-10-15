@@ -11,7 +11,7 @@ feed the same registry, both layered bronze/silver/gold:
 | `csv`    | OUTBOUND | a client's own B2C CRM export, uploaded as a file | YES — feeds `serve-next` → human-service → cold email |
 | `matrix` | INBOUND  | direct messages the client RECEIVED on WhatsApp / Telegram / Discord, mirrored into Matrix | NEVER — these people wrote first and are already in conversation |
 | `gohighlevel` | MIRROR | the client's live GoHighLevel CRM: their contacts, sales pipeline and calendar appointments, read-only | NEVER — these are the client's own people, already theirs |
-| `posthog` | MIRROR | the brand's PostHog project: IDENTIFIED persons (email known), their visits and custom events, read-only | NEVER |
+| `posthog` | MIRROR | the brand's PostHog project: IDENTIFIED persons (email known, or a phone property), their visits and custom events, read-only | NEVER |
 | `stripe` | MIRROR | the brand's Stripe account (restricted key): customers, charges, refunds, subscriptions, read-only | NEVER |
 | `clerk` | MIRROR | the brand's AUTH PROVIDER: every user who signed up to its product, history included, read-only | NEVER |
 | `copilot` | PUSHED | each distribute.you Copilot chat turn (user message + answer), pushed by chat-service, filed ONLY under the staff Unibox scope | NEVER |
@@ -1105,6 +1105,33 @@ in a brand's CRM is reported to campaign-service's generic trigger door
   400/422 = final `campaign_refused`. One ORG run per (org, brand) per delivery batch.
 - Reads: `GET /orgs/gohighlevel/form-triggers?brandId=` (submittedAt / detectedAt / reportedAt /
   campaign event). `POST /internal/form-triggers/watch` runs a pass now.
+
+## Phone given trigger — a person giving the brand their number is reported (`src/lib/phone-trigger/`)
+
+WA-GIVEN-TRIGGER-1015 (owner 2026-10-15: « dès qu'un lead nous donne son WA, une campagne WA lui écrit »): the first
+time ANY connector of a brand states a phone on a person (PostHog person property, Clerk profile, GoHighLevel / Stripe
+contact...), campaign-service's trigger door gets ONE `whatsapp_number_given` occurrence (declared in features-service,
+kind `reported`, reportedBy crm-service, fromStep `lead_found`), within ~1 min. Same door as the form / reply triggers.
+
+- **Ledger** `phone_given_reports` UNIQUE (org, brand, phone): a number is reported at most once per brand, whichever
+  connector states it first or again (a PostHog visitor who later signs up on Clerk with the same number = ONE occurrence).
+  Key `crm:phone_given:<brandId>:<phone>`. Detection = generic over silver `contacts` (any source), no per-source code.
+- **Never history**: every source ARTIFACT (promoted CSV upload, connection synced once) is baselined at the first pass
+  that sees it loaded (`phone_watch_artifacts`): every number it holds then = `skipped / before_watch`. So connecting a CRM
+  or importing a file never fires on its backlog; an artifact still on its first sync waits. Skips: `conversation_channel`
+  (a Matrix contact: the person WROTE, the reply trigger's), `staff` (`isStaffEmail`; a `+tag` sending mailbox is not
+  staff), `own_team` (linked WhatsApp numbers, sales rep phone, at delivery).
+- **Fast mirror, every 60s** (`PHONE_WATCH_INTERVAL_MS`, first 60s after boot; `PHONE_WATCH=off` stops it): PostHog
+  persons whose events SET a phone property in the last 10 min (`$set`/`$set_once` keys `phone|phone_number|phoneNumber`)
+  and auth-provider users changed in the last 10 min (Clerk `order_by=-updated_at`) are mirrored now (bronze + silver,
+  no-churn upserts); every other connector is seen at its own sync. A new detection kicks the brand's people build.
+- **PostHog reads phones**: a person with a phone property is read like an identified one, its first `+` number lands in
+  `contacts.phone_e164` (people key `phone:`); one known by the phone ALONE (`raw_attributes.phoneOnly`) emits no `signup`.
+- Delivery: one org run per (org, brand), offer = the brand's only active offer (else `offer_unknown`, retried), body
+  `person {phone, email?, name?}` + `item {kind: "phone_given", phone, firstName, lastName, source, sourceContactId, crmContactId, givenAt}`
+  (first / last name as the source states them: PostHog `first_name`/`last_name`/`name`, Clerk's own; a greeting says "Hi Marie").
+  Retries 1→60 min for 24h; 400/422 final. Read: `GET /orgs/phone-triggers?brandId=[&includeHistory=true]`; a pass now:
+  `POST /internal/phone-triggers/watch`.
 
 ## Reply trigger — a person writing to the brand on a mirrored channel is reported at once (`src/lib/reply-trigger/`)
 

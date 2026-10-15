@@ -3169,6 +3169,65 @@ registry.registerPath({
   },
 });
 
+export const PhoneTriggerReportSchema = z.object({
+  id: z.string().uuid(),
+  phone: z.string().describe("E.164. Reported at most once per (brand, number)."),
+  source: z.string().describe("The connector that stated the number first: `posthog`, `clerk`, `gohighlevel`, `stripe`, `csv`, `matrix`..."),
+  person: z.object({
+    fullName: z.string().nullable(),
+    firstName: z.string().nullable(),
+    lastName: z.string().nullable(),
+    email: z.string().nullable(),
+    contactId: z.string().uuid().nullable(),
+    sourceContactId: z.string().nullable(),
+  }),
+  status: z.string().describe("`pending` | `reported` | `skipped` | `failed`."),
+  reason: z
+    .string()
+    .nullable()
+    .describe(
+      "Skipped: `before_watch` (known before the watch first looked at its source, history) | `conversation_channel` (learned " +
+        "from a chat the person opened) | `staff` | `own_team`. Failed: `offer_unknown` | `campaign_unreachable` | `campaign_refused`.",
+    ),
+  lastError: z.string().nullable(),
+  attempts: z.number().int(),
+  offerId: z.string().uuid().nullable(),
+  detectedAt: z.string(),
+  reportedAt: z.string().nullable(),
+  campaignEventId: z.string().nullable(),
+  campaignRecordedAt: z.string().nullable(),
+  campaignOutcome: z.unknown(),
+}).openapi("PhoneTriggerReport");
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/phone-triggers",
+  summary: "Every phone number the brand learned and its `whatsapp_number_given` report to campaign-service",
+  description:
+    "WA-GIVEN-TRIGGER-1015. A watch looks every 60s at what the brand's connectors state (PostHog person properties and " +
+    "auth-provider profiles are read live, every other connector at its own sync). A number a person of the brand holds " +
+    "for the first time is reported ONCE to campaign-service (`POST /internal/trigger-events`, trigger `whatsapp_number_given`) " +
+    "naming the person by the number (and email when held). Numbers known before the watch first looked at their source are " +
+    "history (`before_watch`), listed only with `includeHistory=true`. Newest first.",
+  request: {
+    query: z.object({
+      brandId: z.string().uuid(),
+      limit: z.coerce.number().int().min(1).max(200).optional(),
+      includeHistory: z.enum(["true", "false"]).optional(),
+    }),
+  },
+  responses: {
+    200: { description: "Reports", content: { "application/json": { schema: z.object({ reports: z.array(PhoneTriggerReportSchema) }) } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/phone-triggers/watch",
+  summary: "Run one phone-watch pass now (the loop runs every 60s)",
+  responses: { 200: { description: "What the pass mirrored, baselined, detected and reported" }, 502: { description: "The pass failed" } },
+});
+
 export const ReplyTriggerReportSchema = z.object({
   id: z.string().uuid(),
   source: z.string().describe("`matrix` (WhatsApp, LinkedIn) | `gmail` (the org's connected mailbox)."),

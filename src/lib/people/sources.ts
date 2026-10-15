@@ -558,7 +558,7 @@ export async function readPosthog(orgId: string, brandId: string): Promise<Sourc
   if (health.status === "not_connected") return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
   if (health.status === "failed") return { ...base, status: "failed", presences: [], sourceCount: null, error: health.error };
   const rows = (await db.execute(sql`
-    SELECT c.id, c.external_id, c.full_name, c.primary_email, c.source_created_at,
+    SELECT c.id, c.external_id, c.full_name, c.primary_email, c.phone_e164, c.source_created_at,
            c.raw_attributes->'distinctIds' AS distinct_ids,
            min(a.occurred_at) AS first_at, max(coalesce(a.ended_at, a.occurred_at)) AS last_at,
            count(a.id) FILTER (WHERE a.kind = 'visit')::int AS visits,
@@ -573,6 +573,7 @@ export async function readPosthog(orgId: string, brandId: string): Promise<Sourc
     external_id: string;
     full_name: string | null;
     primary_email: string | null;
+    phone_e164: string | null;
     source_created_at: string | Date | null;
     distinct_ids: string[] | null;
     first_at: string | Date | null;
@@ -586,7 +587,8 @@ export async function readPosthog(orgId: string, brandId: string): Promise<Sourc
     displayName: r.full_name,
     company: null,
     emails: r.primary_email ? [r.primary_email] : [],
-    phones: [],
+    // A phone the person's PostHog properties carry (WA-GIVEN-TRIGGER-1015): a visitor known by it alone is a person.
+    phones: r.phone_e164 ? [r.phone_e164] : [],
     userIds: Array.isArray(r.distinct_ids) ? r.distinct_ids : [],
     firstActivityAt: minIso([iso(r.first_at), iso(r.source_created_at)]),
     lastActivityAt: maxIso([iso(r.last_at), iso(r.source_created_at)]),
