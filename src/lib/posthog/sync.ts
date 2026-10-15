@@ -35,6 +35,8 @@ import { canonicalHash } from "../gohighlevel/records.js";
 import {
   listIdentifiedPersons,
   listKeyEvents,
+  listPersonIdsGivenPhoneSince,
+  listPersonsByIds,
   listPersonsByDistinctIds,
   listVisits,
   POSTHOG_MAX_PAGES,
@@ -43,6 +45,7 @@ import {
   type PosthogTarget,
 } from "./client.js";
 import { authUserIds } from "../auth/sync.js";
+import { normalizePhone } from "../people/identity.js";
 import {
   deriveKeyEvent,
   derivePosthogContact,
@@ -139,10 +142,12 @@ async function deriveContacts(conn: PosthogConnection, externalIds?: string[]): 
     if (!c) continue;
     const fields = {
       primaryEmail: c.primaryEmail,
+      // A number typed with no country (no `+`) is no international phone: kept in raw_attributes only.
+      phoneE164: c.phones.map((p) => normalizePhone(p)).find((p) => !!p) ?? null,
       fullName: c.fullName,
       firstName: c.firstName,
       lastName: c.lastName,
-      rawAttributes: { distinctIds: c.distinctIds },
+      rawAttributes: { distinctIds: c.distinctIds, phones: c.phones, phoneOnly: c.phoneOnly },
       sourceCreatedAt: c.sourceCreatedAt,
       sourceConnectionId: conn.id,
       lastRebuiltAt: now,
@@ -377,4 +382,49 @@ export async function rebuildPosthogFromBronze(conn: PosthogConnection) {
   const activitiesDerived = (await deriveActivities(conn, "visit")) + (await deriveActivities(conn, "event"));
   const activitiesLinked = await linkActivities(conn);
   return { contactsDerived, activitiesDerived, activitiesLinked };
+}
+
+/**
+ * The phone watch's fast path (WA-GIVEN-TRIGGER-1015, lib/phone-trigger/): mirror NOW
+ * the persons who were given a phone since `since`, bronze + silver, without
+ * waiting for the 15-min pass. A person mirrored here for the first time also gets
+ * their whole activity history read (the full pass would otherwise treat them as
+ * already known and never backfill it). Returns the person ids whose bronze moved.
+ */
+export async function mirrorPersonsGivenPhone(conn: PosthogConnection, since: Date): Promise<string[]> {
+  const apiKey = await resolveBrandCredential(POSTHOG_PROVIDER, "PostHog", conn.brandId, {
+    orgId: conn.orgId,
+    userId: conn.createdByUserId,
+  });
+  const target = targetOf(conn, apiKey);
+  const ids = await listPersonIdsGivenPhoneSince(target, since);
+  if (ids.length === 0) return [];
+  const known = new Set(
+    (
+      await db
+        .select({ externalId: posthogRawRecords.externalId })
+        .from(posthogRawRecords)
+        .where(and(eq(posthogRawRecords.connectionId, conn.id), eq(posthogRawRecords.kind, "person"), inArray(posthogRawRecords.externalId, ids)))
+    ).map((r) => r.externalId),
+  );
+  const changed: string[] = [];
+  for (const part of chunks(ids)) {
+    changed.push(...(await mirrorBatch(conn, "person", await listPersonsByIds(target, part), (r) => String(r.id))));
+  }
+  const fresh = ids.filter((id) => !known.has(id));
+  const visits: string[] = [];
+  const events: string[] = [];
+  for (const part of chunks(fresh)) {
+    for await (const page of listVisits(target, FIRST_PASS_SINCE, { kind: "ids", ids: part })) {
+      visits.push(...(await mirrorBatch(conn, "visit", page, visitId)));
+    }
+    for await (const page of listKeyEvents(target, FIRST_PASS_SINCE, { kind: "ids", ids: part })) {
+      events.push(...(await mirrorBatch(conn, "event", page, (r) => String(r.id))));
+    }
+  }
+  await deriveContacts(conn, changed);
+  await deriveActivities(conn, "visit", visits);
+  await deriveActivities(conn, "event", events);
+  await linkActivities(conn);
+  return changed;
 }

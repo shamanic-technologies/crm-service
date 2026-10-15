@@ -1278,6 +1278,71 @@ export const formTriggerReports = pgTable(
 );
 
 /**
+ * WA-GIVEN-TRIGGER-1015: one row per (org, brand, phone) the brand ever learned, the
+ * LEDGER of the "WhatsApp number given" trigger (lib/phone-trigger/). A number
+ * holds ONE row forever, so it is reported at most once per brand whichever
+ * connector states it first or again (a PostHog visitor who later signs up on
+ * Clerk with the same number is one occurrence). Numbers known before the watch
+ * first looked at their source are recorded `skipped / before_watch`.
+ */
+export const phoneGivenReports = pgTable(
+  "phone_given_reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    // E.164 (`+` + digits), the occurrence's identity.
+    phone: text("phone").notNull(),
+    // The contact that stated it first: its source (`posthog`, `clerk`, `gohighlevel`...), OUR contacts.id, the vendor id.
+    source: text("source").notNull(),
+    contactId: uuid("contact_id"),
+    sourceContactId: text("source_contact_id"),
+    // The source artifact (CSV upload or connection) the contact came from.
+    artifactId: uuid("artifact_id"),
+    fullName: text("full_name"),
+    email: text("email"),
+    detectedAt: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
+    status: text("status").notNull(),
+    // Why skipped / failed: 'before_watch' | 'conversation_channel' | 'staff' | 'own_team' | 'offer_unknown' | ...
+    reason: text("reason"),
+    lastError: text("last_error"),
+    attempts: integer("attempts").notNull().default(0),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    offerId: uuid("offer_id"),
+    runId: text("run_id"),
+    reportedAt: timestamp("reported_at", { withTimezone: true }),
+    campaignEventId: text("campaign_event_id"),
+    campaignRecordedAt: timestamp("campaign_recorded_at", { withTimezone: true }),
+    campaignOutcome: jsonb("campaign_outcome"),
+  },
+  (table) => [
+    uniqueIndex("phone_given_reports_phone_uq").on(table.orgId, table.brandId, table.phone),
+    index("phone_given_reports_status_idx").on(table.status),
+  ],
+);
+
+/**
+ * The source artifacts (a CSV upload, a connection) the phone watch has looked at:
+ * the first look records every number the artifact held as history (never
+ * reported), so connecting a CRM or importing a file never fires on its backlog.
+ */
+export const phoneWatchArtifacts = pgTable(
+  "phone_watch_artifacts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    artifactId: uuid("artifact_id").notNull(),
+    source: text("source").notNull(),
+    baselineAt: timestamp("baseline_at", { withTimezone: true }).notNull().defaultNow(),
+    phonesAtBaseline: integer("phones_at_baseline").notNull().default(0),
+  },
+  (table) => [uniqueIndex("phone_watch_artifacts_artifact_uq").on(table.orgId, table.brandId, table.artifactId)],
+);
+
+export type PhoneGivenReport = typeof phoneGivenReports.$inferSelect;
+
+/**
  * Which offer a brand's form submissions are about, when the brand sells
  * several. `form_id = '*'` = every form of the brand. A brand with ONE active
  * offer needs no row (lib/form-trigger/offer.ts).

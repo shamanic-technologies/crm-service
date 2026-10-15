@@ -14,6 +14,10 @@
  * never sets `is_identified`). Anonymous visitors are out of scope and are
  * filtered inside PostHog's own query, so they never reach this service.
  *
+ * A person carrying a PHONE property counts too (WA-GIVEN-TRIGGER-1015): a
+ * visitor who typed their WhatsApp number before any account exists is known by
+ * that number alone (distribute.you's /get-started sets `phone` on the person).
+ *
  * Why not "has an email" alone (the rule until 2026-10-11): measured on
  * distribute.you's own project, 151 persons, 136 carrying a Clerk user id, only
  * 56 with an email property — 80 signed-up users were never mirrored.
@@ -111,7 +115,11 @@ export const ts = (d: Date) => `toDateTime64(${lit(d.toISOString().replace("T", 
 // `NOT (is_identified OR notEmpty(...))` silently drops every such person:
 // both halves are made strictly boolean.
 const HAS_EMAIL = (alias: string) => `ifNull(toString(${alias}properties.email), '') != ''`;
-const IS_IDENTIFIED = (alias: string) => `(ifNull(${alias}is_identified, 0) = 1 OR ${HAS_EMAIL(alias)})`;
+/** The person properties a product names a phone by (the same keys the Clerk adapter reads in metadata). */
+export const PHONE_PROPERTY_KEYS = ["phone", "phone_number", "phoneNumber"] as const;
+const HAS_PHONE = (alias: string) =>
+  `(${PHONE_PROPERTY_KEYS.map((k) => `ifNull(toString(${alias}properties.${k}), '') != ''`).join(" OR ")})`;
+const IS_IDENTIFIED = (alias: string) => `(ifNull(${alias}is_identified, 0) = 1 OR ${HAS_EMAIL(alias)} OR ${HAS_PHONE(alias)})`;
 export const IDENTIFIED = IS_IDENTIFIED("");
 
 /** Which persons an activity read covers: the identified ones, or an explicit id list. */
@@ -150,6 +158,7 @@ const PERSON_COLUMNS = `
   toString(p.id) AS id, toString(p.properties.email) AS email,
   toString(p.properties.name) AS name, toString(p.properties.first_name) AS first_name,
   toString(p.properties.last_name) AS last_name, p.created_at AS created_at,
+  ${PHONE_PROPERTY_KEYS.map((k) => `toString(p.properties.${k}) AS prop_${k}`).join(", ")},
   p.is_identified AS is_identified, d.ids AS distinct_ids`;
 
 /** Up to 50 distinct ids per person: the ids another tool of the brand may name them by. */
@@ -237,6 +246,43 @@ export function listKeyEvents(target: PosthogTarget, since: Date, scope: PersonS
       WHERE event NOT LIKE '$%' AND ${personScopeSql(scope)} AND timestamp >= ${ts(since)}
         ${after ? `AND (timestamp, toString(uuid)) > (${ts(new Date(String(after.timestamp)))}, ${lit(String(after.id))})` : ""}
       ORDER BY timestamp, id
+      LIMIT ${POSTHOG_PAGE_SIZE}`,
+  );
+}
+
+/**
+ * The persons who were given a phone property since `since` (WA-GIVEN-TRIGGER-1015):
+ * any event that SET one (`$set` / `$set_once`: `identify`, `setPersonProperties`, a
+ * capture carrying `$set`). A cheap read on the events table, asked every minute
+ * by the phone watch so a number typed on a form reaches us within a minute,
+ * whatever the person's other properties. Returns PostHog person ids.
+ */
+export async function listPersonIdsGivenPhoneSince(target: PosthogTarget, since: Date): Promise<string[]> {
+  const setsPhone = PHONE_PROPERTY_KEYS.flatMap((k) =>
+    ["$set", "$set_once"].map((op) => `ifNull(toString(properties.${op}.${k}), '') != ''`),
+  ).join(" OR ");
+  const rows = await hogql(
+    target,
+    `
+      SELECT DISTINCT toString(person_id) AS id
+      FROM events
+      WHERE timestamp >= ${ts(since)} AND (${setsPhone})
+      LIMIT ${POSTHOG_PAGE_SIZE}`,
+  );
+  return rows.map((r) => String(r.id)).filter((id) => !!id);
+}
+
+/** These persons (PostHog ids), with the same columns as every person read. */
+export async function listPersonsByIds(target: PosthogTarget, ids: string[]) {
+  if (ids.length === 0) return [];
+  const match = `toString(id) IN (${ids.map(lit).join(", ")})`;
+  return hogql(
+    target,
+    `
+      SELECT ${PERSON_COLUMNS}
+      FROM persons AS p ${distinctIdsOf(match)}
+      WHERE toString(p.id) IN (${ids.map(lit).join(", ")})
+      ORDER BY id
       LIMIT ${POSTHOG_PAGE_SIZE}`,
   );
 }

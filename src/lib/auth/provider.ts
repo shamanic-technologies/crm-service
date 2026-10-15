@@ -94,6 +94,13 @@ export interface AuthProviderAdapter {
   countUsers(secretKey: string): Promise<number>;
   /** Every user, page by page, verbatim minus the provider's server-only secrets. */
   listUsers(secretKey: string): AsyncGenerator<Record<string, unknown>[]>;
+  /**
+   * The users the provider changed since `since` (ms), newest change first, verbatim minus
+   * server-only secrets: the phone watch's fast path (WA-GIVEN-TRIGGER-1015) mirrors them
+   * every minute so a number added to a profile is seen within a minute. Absent = only
+   * the 15-min full pass sees changes.
+   */
+  listUpdatedSince?(secretKey: string, since: number): Promise<Record<string, unknown>[]>;
   /** The record's id in the provider. */
   idOf(record: Record<string, unknown>): string;
   derive(record: Record<string, unknown>): DerivedAuthUser | null;

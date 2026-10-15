@@ -364,3 +364,24 @@ export async function authUserIds(orgId: string, brandId: string): Promise<strin
     );
   return rows.map((r) => r.externalId).filter((id): id is string => !!id);
 }
+
+/**
+ * The phone watch's fast path (WA-GIVEN-TRIGGER-1015, lib/phone-trigger/): mirror NOW
+ * the users the provider changed since `since` (ms), bronze + silver, with the same
+ * no-churn upsert and derivation as the full pass (which still runs every 15 min and
+ * owns removals and memberships). A provider with no recent-changes read does nothing.
+ * Returns the user ids whose bronze moved.
+ */
+export async function mirrorRecentlyUpdatedUsers(conn: AuthConnection, since: number): Promise<string[]> {
+  const adapter = adapterOf(conn);
+  if (!adapter.listUpdatedSince) return [];
+  const key = await resolveBrandCredential(adapter.name, adapter.label, conn.brandId, {
+    orgId: conn.orgId,
+    userId: conn.createdByUserId,
+  });
+  const users = await adapter.listUpdatedSince(key, since);
+  if (users.length === 0) return [];
+  const changed = await mirrorBatch(conn, users, adapter.idOf);
+  if (changed.length > 0) await deriveContacts(conn, changed);
+  return changed;
+}

@@ -66,6 +66,8 @@ import {
   replyTriggerReports,
   humanLinkStatements,
   humanFactStatements,
+  phoneGivenReports,
+  phoneWatchArtifacts,
 } from "../db/schema.js";
 
 export const TRANSFER_TABLES: PgTable[] = [
@@ -124,6 +126,9 @@ export const TRANSFER_TABLES: PgTable[] = [
   // marks). A link stated for the old org is stated again for the new one.
   humanLinkStatements,
   humanFactStatements,
+  // Phone numbers the brand learned ("WhatsApp number given") and the sources the watch looked at.
+  phoneGivenReports,
+  phoneWatchArtifacts,
 ];
 
 export interface TransferBrandInput {

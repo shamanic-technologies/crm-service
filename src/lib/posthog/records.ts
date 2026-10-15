@@ -31,6 +31,13 @@ export const visitId = (row: Record<string, unknown>) => `${row.session_id}:${ro
 export interface DerivedPosthogContact {
   externalId: string;
   primaryEmail: string | null;
+  /** The phone(s) the person's properties carry (`phone`, `phone_number`, `phoneNumber`), verbatim, deduped. */
+  phones: string[];
+  /**
+   * Known to the brand by a phone property ALONE (not identified, no email): a visitor
+   * who typed a number on a form, NOT a signup (facts.ts emits no PostHog `signup` for them).
+   */
+  phoneOnly: boolean;
   /** PostHog's distinct ids of the person, verbatim (the brand's own user ids among them). */
   distinctIds: string[];
   fullName: string | null;
@@ -45,9 +52,13 @@ export function derivePosthogContact(payload: Record<string, unknown>): DerivedP
   if (!externalId) return null;
   const firstName = str(payload.first_name);
   const lastName = str(payload.last_name);
+  const phones = [...new Set(["prop_phone", "prop_phone_number", "prop_phoneNumber"].map((k) => str(payload[k])).filter((v): v is string => !!v))];
+  const identified = payload.is_identified === true || payload.is_identified === 1 || payload.is_identified === "true";
   return {
     externalId,
     primaryEmail: email,
+    phoneOnly: !identified && !email && phones.length > 0,
+    phones,
     distinctIds: Array.isArray(payload.distinct_ids)
       ? [...new Set(payload.distinct_ids.map((d) => str(d)).filter((d): d is string => !!d))].sort()
       : [],

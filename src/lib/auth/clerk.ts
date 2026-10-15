@@ -30,6 +30,10 @@ export const CLERK_PAGE_SIZE = 500;
 /** Hard ceiling on pages per pass (100k users) — the cron re-runs. */
 export const CLERK_MAX_PAGES = Number(process.env.CLERK_MAX_PAGES) || 200;
 
+/** The phone watch's recent-changes read: pages of 100, at most 5 (500 changed users a minute). */
+const CLERK_UPDATED_PAGE_SIZE = 100;
+const CLERK_UPDATED_MAX_PAGES = 5;
+
 /** Server-only fields never mirrored: the brand stores its own secrets there. */
 const NEVER_STORED = ["private_metadata"] as const;
 
@@ -216,6 +220,27 @@ export const clerk: AuthProviderAdapter = {
       if (users.length > 0) yield users;
       if (users.length < CLERK_PAGE_SIZE) return;
     }
+  },
+  async listUpdatedSince(key, since) {
+    const out: Record<string, unknown>[] = [];
+    // Newest change first: stop at the first page reaching past `since` (a few users a minute).
+    for (let page = 0; page < CLERK_UPDATED_MAX_PAGES; page++) {
+      const body = await clerkGet(key, "/users", {
+        limit: String(CLERK_UPDATED_PAGE_SIZE),
+        offset: String(page * CLERK_UPDATED_PAGE_SIZE),
+        order_by: "-updated_at",
+      });
+      if (!Array.isArray(body)) throw new Error(`[crm-service][clerk] /users answered a non-array`);
+      const users = body as Record<string, unknown>[];
+      for (const u of users) {
+        if (typeof u.updated_at !== "number" || u.updated_at < since) return out;
+        const copy = { ...u };
+        for (const f of NEVER_STORED) delete copy[f];
+        out.push(copy);
+      }
+      if (users.length < CLERK_UPDATED_PAGE_SIZE) return out;
+    }
+    return out;
   },
   idOf: (record) => String(record.id),
   derive: deriveClerkUser,

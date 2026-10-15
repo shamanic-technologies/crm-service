@@ -605,6 +605,8 @@ async function posthogCandidates(orgId: string, brandId: string): Promise<Candid
   const persons = await rows<{ id: string; external_id: string; full_name: string | null; source_created_at: string | Date | null }>(sql`
     SELECT id, external_id, full_name, source_created_at FROM contacts
     WHERE org_id = ${orgId} AND brand_id = ${brandId} AND source = ${POSTHOG_SOURCE} AND external_id IS NOT NULL
+      -- A visitor known only by the phone they typed (WA-GIVEN-TRIGGER-1015) gave a number, they did not sign up.
+      AND coalesce(raw_attributes->>'phoneOnly', 'false') <> 'true'
   `);
   for (const p of persons) {
     out.push({
