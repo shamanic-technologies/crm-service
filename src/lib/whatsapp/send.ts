@@ -22,11 +22,11 @@
 import { createHash } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { people, whatsappSends } from "../../db/schema.js";
+import { matrixLinks, people, whatsappSends } from "../../db/schema.js";
 import { createDm, resolveIdentifier } from "../matrix/bridge.js";
 import { bridgeSaysNoSuchNumber } from "./number-validity.js";
 import { alertRefusal } from "./staff-alert.js";
-import { connectedOnly, linkedWhatsappAccounts, type WhatsappAccount } from "./accounts.js";
+import { connectedOnly, linkedWhatsappAccounts, personaOf, type SenderPersona, type WhatsappAccount } from "./accounts.js";
 import { recordGhostPhone } from "./phone-resolution.js";
 import { joinRoom, readRoomBridgeInfo, sendText } from "../matrix/client.js";
 import { expectedChannelIds, roomDeliversTo } from "./room-check.js";
@@ -40,6 +40,13 @@ export const SEND_REFUSAL_CODES = [
   "whatsapp_not_connected",
   /** No phone given and none known for this person in the brand's CRM. */
   "no_phone_known",
+  /**
+   * The brand has linked WhatsApp accounts, but none may send automated
+   * messages (`automationAllowed` off on every one, or on the one `fromAccount`
+   * names). Nothing is sent: an automated message never falls back to an
+   * account the brand kept for its own hand (SOPHIE-WA-1016).
+   */
+  "automation_not_allowed",
   /** WhatsApp says the number has no WhatsApp account (or the number cannot exist: number-validity.ts). */
   "not_on_whatsapp",
   /** `skipIfReplied` and the person has written to the brand on some channel. */
@@ -89,6 +96,8 @@ export interface SendResult {
   to: string;
   phoneSource: string;
   fromAccount: string;
+  /** The persona the brand gave the account that sent (null when none stated). */
+  persona: SenderPersona | null;
   roomId: string;
   eventId: string;
   sentAt: string;
@@ -108,7 +117,7 @@ export function txnIdFor(orgId: string, brandId: string, key: string): string {
 
 type SendRow = typeof whatsappSends.$inferSelect;
 
-function resultOf(row: SendRow, duplicate: boolean, previousSends: number): SendResult {
+function resultOf(row: SendRow, duplicate: boolean, previousSends: number, persona: SenderPersona | null): SendResult {
   return {
     sendId: row.id,
     status: "sent",
@@ -116,6 +125,7 @@ function resultOf(row: SendRow, duplicate: boolean, previousSends: number): Send
     to: row.phone!,
     phoneSource: row.phoneSource!,
     fromAccount: row.fromAccount!,
+    persona,
     roomId: row.roomId!,
     eventId: row.eventId!,
     sentAt: row.sentAt!.toISOString(),
@@ -221,7 +231,18 @@ async function sendableAccounts(req: ReachRequest): Promise<WhatsappAccount[]> {
         : "The brand has no linked WhatsApp account. Link one from the dashboard first.",
     );
   }
-  const connected = await connectedOnly(linked);
+  // Every send through this path is automated (a workflow): an account the brand
+  // keeps for its own hand is never picked, even where the person already talks to it.
+  const allowed = linked.filter((a) => a.automationAllowed);
+  if (allowed.length === 0) {
+    throw new SendRefusal(
+      "automation_not_allowed",
+      wanted
+        ? `The brand's WhatsApp account +${wanted} is not allowed to send automated messages.`
+        : "None of the brand's linked WhatsApp accounts is allowed to send automated messages. Allow one (or link a dedicated number) from the dashboard.",
+    );
+  }
+  const connected = await connectedOnly(allowed);
   if (connected.length === 0) {
     throw new SendRefusal(
       "whatsapp_not_connected",
@@ -238,6 +259,9 @@ async function sendableAccounts(req: ReachRequest): Promise<WhatsappAccount[]> {
  *     (the latest one), so a thread is never restarted from another number;
  *  2. else the account the brand marked as its outreach default;
  *  3. else the oldest linked account.
+ * Only accounts the brand allows automated sends from reach here (SOPHIE-WA-1016):
+ * a conversation on a disallowed account is not followed, the message starts a
+ * new thread from an allowed one.
  * A DM room with no message (WhatsApp opens some on its own) is not a conversation.
  */
 export async function chooseAccount(accounts: WhatsappAccount[], ghostMxid: string): Promise<WhatsappAccount> {
@@ -405,6 +429,8 @@ export interface ReachResult {
   phoneSource: string;
   /** The linked account a send would write from right now. */
   fromAccount: string;
+  /** That account's sender persona, as the brand stated it (null when none). */
+  persona: SenderPersona | null;
 }
 
 /**
@@ -418,14 +444,14 @@ export interface ReachResult {
 export async function reachWhatsApp(req: ReachRequest): Promise<ReachResult> {
   const { phone, phoneSource, accounts, who } = await resolveReach(req);
   const account = await chooseAccount(accounts, who.mxid);
-  return { reachable: true, to: phone, phoneSource, fromAccount: `+${digitsOf(account.loginId)}` };
+  return { reachable: true, to: phone, phoneSource, fromAccount: `+${digitsOf(account.loginId)}`, persona: account.persona };
 }
 
 export async function sendWhatsApp(req: SendRequest): Promise<SendResult> {
   const claimed = await claim(req);
   if ("earlier" in claimed) {
     const e = claimed.earlier;
-    if (e.status === "sent") return resultOf(e, true, await countPreviousSends(req, e.phone!, e.id));
+    if (e.status === "sent") return resultOf(e, true, await countPreviousSends(req, e.phone!, e.id), await personaOfConnection(e.connectionId));
     if (e.status === "refused") throw new SendRefusal(e.errorCode as SendRefusalCode, e.error ?? e.errorCode!);
     throw new SendRefusal("send_in_progress", "A send with this idempotency key is in progress.", 409);
   }
@@ -463,7 +489,7 @@ export async function sendWhatsApp(req: SendRequest): Promise<SendResult> {
       eventId,
       sentAt: new Date(),
     });
-    return resultOf(sent, false, await countPreviousSends(req, phone, sent.id));
+    return resultOf(sent, false, await countPreviousSends(req, phone, sent.id), account.persona);
   } catch (err) {
     if (err instanceof SendRefusal) {
       await finish(row.id, { status: "refused", errorCode: err.code, error: err.message });
@@ -483,6 +509,17 @@ export async function sendWhatsApp(req: SendRequest): Promise<SendResult> {
     }
     throw err;
   }
+}
+
+/** The persona of the account a recorded send went out on (its link, now). */
+async function personaOfConnection(connectionId: string | null): Promise<SenderPersona | null> {
+  if (!connectionId) return null;
+  const [link] = await db
+    .select({ personaName: matrixLinks.personaName, personaRole: matrixLinks.personaRole, personaInstructions: matrixLinks.personaInstructions })
+    .from(matrixLinks)
+    .where(eq(matrixLinks.connectionId, connectionId))
+    .limit(1);
+  return link ? personaOf(link) : null;
 }
 
 /** The connection a send went out on (to pull the sent message into the mirror at once). */

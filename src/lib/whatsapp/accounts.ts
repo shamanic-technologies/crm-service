@@ -8,6 +8,9 @@ import { and, asc, eq } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { matrixConnections, matrixLinks } from "../../db/schema.js";
 import { bridgeLogins } from "../matrix/bridge.js";
+import { personaOf, type SenderPersona } from "../matrix/persona.js";
+
+export { personaOf, type SenderPersona };
 
 export interface WhatsappAccount {
   linkId: string;
@@ -18,7 +21,12 @@ export interface WhatsappAccount {
   loginId: string;
   /** The brand marked this account as the one first messages go out from. */
   outreachDefault: boolean;
+  /** An automated send may write from this account (SOPHIE-WA-1016, `matrix_links.automation_allowed`). */
+  automationAllowed: boolean;
+  /** Who writes from this account, as the brand states it. */
+  persona: SenderPersona | null;
 }
+
 
 /** Every linked WhatsApp account of the brand with a token and a login, oldest link first. */
 export async function linkedWhatsappAccounts(orgId: string, brandId: string): Promise<WhatsappAccount[]> {
@@ -31,6 +39,10 @@ export async function linkedWhatsappAccounts(orgId: string, brandId: string): Pr
       connStatus: matrixConnections.status,
       loginId: matrixLinks.remoteLoginId,
       outreachDefault: matrixLinks.outreachDefault,
+      automationAllowed: matrixLinks.automationAllowed,
+      personaName: matrixLinks.personaName,
+      personaRole: matrixLinks.personaRole,
+      personaInstructions: matrixLinks.personaInstructions,
     })
     .from(matrixLinks)
     .innerJoin(matrixConnections, eq(matrixConnections.id, matrixLinks.connectionId))
@@ -52,6 +64,8 @@ export async function linkedWhatsappAccounts(orgId: string, brandId: string): Pr
       accessToken: r.accessToken!,
       loginId: r.loginId!,
       outreachDefault: r.outreachDefault,
+      automationAllowed: r.automationAllowed,
+      persona: personaOf(r),
     }));
 }
 

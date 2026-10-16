@@ -23,7 +23,11 @@ import { sendOwnerTelegram } from "../owner-telegram.js";
 import type { SendRefusalCode } from "./send.js";
 
 /** The refusals only the customer can lift. Every other code is about the person, not the brand. */
-export const CUSTOMER_ACTION_CODES: ReadonlySet<SendRefusalCode> = new Set(["whatsapp_not_linked", "whatsapp_not_connected"]);
+export const CUSTOMER_ACTION_CODES: ReadonlySet<SendRefusalCode> = new Set([
+  "whatsapp_not_linked",
+  "whatsapp_not_connected",
+  "automation_not_allowed",
+]);
 
 export interface RefusalAlertInput {
   code: SendRefusalCode;
@@ -51,8 +55,15 @@ export function composeRefusalAlert(p: { code: SendRefusalCode; brandName: strin
   const why =
     p.code === "whatsapp_not_linked"
       ? "the brand has no WhatsApp account linked"
-      : "the brand's WhatsApp is linked but logged out";
-  const todo = p.code === "whatsapp_not_linked" ? "link their WhatsApp" : "relink their WhatsApp (scan the QR again)";
+      : p.code === "automation_not_allowed"
+        ? "none of the brand's linked WhatsApp numbers is allowed to send automated messages"
+        : "the brand's WhatsApp is linked but logged out";
+  const todo =
+    p.code === "whatsapp_not_linked"
+      ? "link their WhatsApp"
+      : p.code === "automation_not_allowed"
+        ? "allow automated messages on one WhatsApp number (or link a dedicated one)"
+        : "relink their WhatsApp (scan the QR again)";
   const lines = [
     `WhatsApp message not sent: ${who}`,
     `A campaign wanted to write to a prospect on WhatsApp, but ${why}. Nothing was sent on WhatsApp.`,

@@ -41,6 +41,7 @@ import {
   conversationVerdicts,
   conversations,
   matrixConnections,
+  matrixLinks,
   matrixRawEvents,
   people,
   peopleScopes,
@@ -134,6 +135,12 @@ export const REPLY_REASONS = {
   /** Every message of the burst was mirrored before the watch started. */
   BEFORE_WATCH: "before_watch",
   /**
+   * The thread is on a linked account the brand keeps out of automation
+   * (`matrix_links.automation_allowed` off, SOPHIE-WA-1016): a human-only
+   * conversation, mirrored for the Unibox, never answered automatically.
+   */
+  AUTOMATION_NOT_ALLOWED: "automation_not_allowed",
+  /**
    * The person holds no email AND no international phone: the door cannot name them
    * (REPLY-PHONE-ONLY-1015; a phone-only writer is reported by phone). Older rows say `no_email`.
    */
@@ -209,7 +216,21 @@ export const PASS_THROUGH_REASONS: readonly string[] = [
   REPLY_REASONS.AUTOMATED_REPLY,
   REPLY_REASONS.BEFORE_WATCH,
   REPLY_REASONS.NOT_POSITIVE,
+  // Allowed again later: a person's next message in the same burst is judged.
+  REPLY_REASONS.AUTOMATION_NOT_ALLOWED,
 ];
+
+/**
+ * May a message received on this connection fire an automated reply? Its link's
+ * `automation_allowed`; a connection with no link (registered by hand) is allowed.
+ */
+export async function automationAllowedOn(connectionId: string): Promise<boolean> {
+  const rows = await db
+    .select({ allowed: matrixLinks.automationAllowed })
+    .from(matrixLinks)
+    .where(eq(matrixLinks.connectionId, connectionId));
+  return rows.length === 0 || rows.some((r) => r.allowed);
+}
 
 /**
  * PURE: what a judged burst becomes. Jev down = reported (never silence a person
@@ -346,6 +367,8 @@ export async function detectReplies(
     )
     .limit(1);
 
+  const automationAllowed = await automationAllowedOn(conn.id);
+
   for (const { roomId, campaign } of threads) {
     const since = (campaign ? conn.replyWatchSince : conn.openReplyWatchSince).getTime();
     const roomSends: RoomSend[] = sends.filter((s) => s.roomId === roomId);
@@ -406,7 +429,7 @@ export async function detectReplies(
       conversation?.contactPhone,
       ...rows.filter((r) => r.sender !== conn.matrixUserId).map((r) => phoneFromMxid(r.sender, conn.counterpartPrefix)),
     ];
-    const own = fresh.length > 0 ? ownTeamMatch(otherSide, await team()) : null;
+    const own = fresh.length > 0 && automationAllowed ? ownTeamMatch(otherSide, await team()) : null;
 
     let status: string = REPLY_STATUS.PENDING;
     let reason: string | null = null;
@@ -414,6 +437,9 @@ export async function detectReplies(
     if (fresh.length === 0) {
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.BEFORE_WATCH;
+    } else if (!automationAllowed) {
+      status = REPLY_STATUS.SKIPPED;
+      reason = REPLY_REASONS.AUTOMATION_NOT_ALLOWED;
     } else if (own) {
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.OWN_TEAM;
