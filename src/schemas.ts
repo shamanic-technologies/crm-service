@@ -3056,6 +3056,54 @@ registry.registerPath({
   },
 });
 
+export const WhatsappReachRequestSchema = registry.register(
+  "WhatsappReachRequest",
+  z
+    .object({
+      brandId: z.string().uuid().optional().openapi({ description: "The brand whose linked WhatsApp would send. Or the x-brand-id header." }),
+      email: z.string().optional().openapi({ description: "The person, by email, exactly as the send names them. Their phone is read from the brand's CRM people when `phone` is absent." }),
+      phone: z.string().optional().openapi({ description: "The number the send would write to, international form (+<country><number>). Wins over the CRM's." }),
+      fromAccount: z.string().optional().openapi({ description: "As on the send: only this linked account (its own number) may write." }),
+      skipIfReplied: z.boolean().optional().openapi({ description: "As on the send: answer `person_replied` when the person has written to the brand on any channel." }),
+    })
+    .openapi("WhatsappReachRequest"),
+);
+
+export const WhatsappReachResponseSchema = registry.register(
+  "WhatsappReachResponse",
+  z
+    .union([
+      z.object({
+        reachable: z.literal(true),
+        to: z.string().openapi({ description: "The number the send would write to (E.164)." }),
+        phoneSource: z.string().openapi({ description: "`request`, or `crm:<source>` (the person's record holding the phone)." }),
+        fromAccount: z.string().openapi({ description: "The linked account the send would write from right now (its own number)." }),
+      }),
+      z.object({
+        reachable: z.literal(false),
+        code: z.enum(["whatsapp_not_linked", "whatsapp_not_connected", "no_phone_known", "not_on_whatsapp", "person_replied"]).openapi({
+          description: "The refusal code POST /orgs/whatsapp/messages would answer for this person now.",
+        }),
+        error: z.string(),
+      }),
+    ])
+    .openapi("WhatsappReachResponse"),
+);
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/whatsapp/reach",
+  summary: "Can the brand's WhatsApp reach this person right now? (checks only, sends nothing)",
+  description:
+    "Runs the reachability checks of POST /orgs/whatsapp/messages in the same order, WITHOUT sending: the person's phone (`no_phone_known`), `skipIfReplied` (`person_replied`), the brand's linked and connected accounts (`whatsapp_not_linked`, `whatsapp_not_connected`), then one WhatsApp bridge lookup of the number (`not_on_whatsapp`, a number that cannot exist included). Ask it before paying a model to write the message: `reachable: true` means the send will not refuse for any of these reasons (a later transient bridge failure, or a `wrong_room` repair, can still happen). No message, no send row, no room opened, no cost. Requires x-api-key, x-org-id; brand from body or x-brand-id.",
+  request: { body: { content: { "application/json": { schema: WhatsappReachRequestSchema } }, required: true } },
+  responses: {
+    200: { description: "The answer: reachable, or not with the send's refusal code", content: { "application/json": { schema: WhatsappReachResponseSchema } } },
+    400: { description: "Bad request (`code: invalid_request`)", content: { "application/json": { schema: ErrorResponseSchema } } },
+    502: { description: "The WhatsApp bridge failed on a valid number, or run tracking failed (`code: bridge_error`)", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
 export const WhatsappSendsQueryRequestSchema = registry.register(
   "WhatsappSendsQueryRequest",
   z

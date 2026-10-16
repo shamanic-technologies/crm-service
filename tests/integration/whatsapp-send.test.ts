@@ -654,3 +654,86 @@ describe.skipIf(!RUN)("people-pool serve (DB)", () => {
     expect(res.status).toBe(400);
   });
 });
+
+/**
+ * The reach check (LLM-SPEND-NO-SEND-1016): the send's checks, answered without
+ * sending. Every answer here is the code the send gives for the same person.
+ */
+describe.skipIf(!RUN)("WhatsApp reach check (DB)", () => {
+  beforeEach(async () => {
+    await wipe();
+    installFetchStub();
+  });
+  afterAll(wipe);
+
+  const reach = (body: Record<string, unknown>) => request(app()).post("/orgs/whatsapp/reach").set(headers).send({ brandId: BRAND, ...body });
+  const sendRows = () => db.select().from(whatsappSends).where(eq(whatsappSends.orgId, ORG));
+
+  it("reachable: the phone the CRM knows, on WhatsApp, from the linked account; nothing sent, no row, no room", async () => {
+    await linkAccount();
+    await seedPeople([{ key: "email:ann@x.com", phones: ["+33600000002"], presences: [clerk(["+33600000002"])], at: "2026-09-01T00:00:00Z" }]);
+    const res = await reach({ email: "Ann@x.com" });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ reachable: true, to: "+33600000002", phoneSource: "crm:clerk", fromAccount: "+33611111111" });
+    expect(lookups).toEqual(["+33600000002"]);
+    expect(sends).toEqual([]);
+    expect(createdDms).toEqual([]);
+    expect(await sendRows()).toEqual([]);
+  });
+
+  it("no_phone_known: a person with no phone anywhere", async () => {
+    await linkAccount();
+    await seedPeople([{ key: "email:nophone@x.com", presences: [clerk()], at: "2026-09-01T00:00:00Z" }]);
+    const res = await reach({ email: "nophone@x.com" });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ reachable: false, code: "no_phone_known" });
+    const unknown = await reach({ email: "nobody@x.com" });
+    expect(unknown.body).toMatchObject({ reachable: false, code: "no_phone_known" });
+    expect(lookups).toEqual([]);
+    expect(await sendRows()).toEqual([]);
+  });
+
+  it("not_on_whatsapp: WhatsApp has no account, and a number that cannot exist (bridge 500) is never a 502", async () => {
+    await linkAccount();
+    const none = await reach({ phone: "+33699999999" });
+    expect(none.status).toBe(200);
+    expect(none.body).toMatchObject({ reachable: false, code: "not_on_whatsapp" });
+    const impossible = await reach({ phone: "+2541110229905" });
+    expect(impossible.status).toBe(200);
+    expect(impossible.body).toMatchObject({ reachable: false, code: "not_on_whatsapp" });
+    expect(sends).toEqual([]);
+    expect(await sendRows()).toEqual([]);
+  });
+
+  it("bridge_error stays 502 on a VALID number the bridge fails on", async () => {
+    await linkAccount();
+    const res = await reach({ phone: "+33600000009" });
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe("bridge_error");
+  });
+
+  it("whatsapp_not_linked / whatsapp_not_connected: before any lookup", async () => {
+    const unlinked = await request(app()).post("/orgs/whatsapp/reach").set(headers).send({ brandId: BRAND_UNLINKED, phone: "+33600000001" });
+    expect(unlinked.body).toMatchObject({ reachable: false, code: "whatsapp_not_linked" });
+    await linkAccount();
+    loginState = "BAD_CREDENTIALS";
+    const offline = await reach({ phone: "+33600000001" });
+    expect(offline.body).toMatchObject({ reachable: false, code: "whatsapp_not_connected" });
+    expect(lookups).toEqual([]);
+  });
+
+  it("person_replied only with skipIfReplied, as the send", async () => {
+    await linkAccount();
+    await seedPeople([
+      { key: "email:rep@x.com", phones: ["+33600000001"], presences: [{ source: "gmail", inboundCount: 2 }, clerk(["+33600000001"])], at: "2026-09-01T00:00:00Z" },
+    ]);
+    expect((await reach({ email: "rep@x.com", skipIfReplied: true })).body).toMatchObject({ reachable: false, code: "person_replied" });
+    expect((await reach({ email: "rep@x.com" })).body).toMatchObject({ reachable: true, to: "+33600000001" });
+  });
+
+  it("a person named by neither email nor phone is a 400", async () => {
+    const res = await reach({ phone: "0612345678" });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe("invalid_request");
+  });
+});
