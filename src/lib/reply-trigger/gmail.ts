@@ -31,6 +31,8 @@
  *    nobody: `own_team`.
  *  - AN AUTOMATED SENDER (sender_verdicts, Jev, >= 0.75) or an automatic reply
  *    (Jev on the burst, like WhatsApp) is no answer: `automated_reply`.
+ *  - ONLY A POSITIVE ANSWER IS REPORTED (Jev on the burst, like WhatsApp:
+ *    interested / asks for info / asks for a meeting); any other is `not_positive`.
  *  - GMAIL IS PER ORG, PEOPLE PER BRAND: a mail is reported under the brand(s)
  *    whose people know the person OUTSIDE the shared mailbox (a lead, a CRM
  *    contact, a signup...); when none does, under the ONE brand Jev judged the
@@ -61,9 +63,11 @@ import {
 import { readEmailThreadForReply, type EmailBurstMessage, type StoredEmail } from "./email-thread.js";
 import {
   AUTOMATED_MIN_CONFIDENCE,
+  burstVerdict,
   dueReports,
   judgeBurst,
   MAX_REPORT_MESSAGES,
+  PASS_THROUGH_REASONS,
   POSITIVE_REPLY_TRIGGER,
   rebuildBrandPeople,
   REPLY_LOOKBACK_MS,
@@ -207,8 +211,7 @@ export async function detectGmailReplies(
           inArray(replyTriggerReports.anchorEventId, reading.burst.map((m) => m.messageId)),
         ),
       );
-    const passThrough: string[] = [REPLY_REASONS.AUTOMATED_REPLY, REPLY_REASONS.BEFORE_WATCH];
-    if (existing.some((r) => !passThrough.includes(r.reason ?? ""))) continue;
+    if (existing.some((r) => !PASS_THROUGH_REASONS.includes(r.reason ?? ""))) continue;
     const coveredThrough = Math.max(0, ...existing.map((r) => r.lastMessageAt.getTime()));
     const uncovered = reading.burst.filter((m) => Date.parse(m.at) > coveredThrough);
     if (uncovered.length === 0) continue;
@@ -248,11 +251,14 @@ export async function detectGmailReplies(
           judgment = await judgeBurst(
             { orgId: scope.orgId, userId: scope.createdByUserId, brandId: scope.brandId, channel: CHANNEL, where: `gmail scope ${scope.id}` },
             runId,
-            burst.map((m) => ({ eventId: m.messageId, at: m.at, text: m.subject ? `${m.subject}\n${m.text}` : m.text })),
+            reading.burst
+              .filter((m) => Date.parse(m.at) >= since)
+              .map((m) => ({ eventId: m.messageId, at: m.at, text: m.subject ? `${m.subject}\n${m.text}` : m.text })),
           );
-          if (judgment.choice === "automated" && (judgment.confidence ?? 0) >= AUTOMATED_MIN_CONFIDENCE) {
+          const verdict = burstVerdict(judgment);
+          if (!verdict.report) {
             status = REPLY_STATUS.SKIPPED;
-            reason = REPLY_REASONS.AUTOMATED_REPLY;
+            reason = verdict.reason;
           }
         }
       }
