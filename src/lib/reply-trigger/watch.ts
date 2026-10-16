@@ -10,8 +10,9 @@
  * CAS PARTICULIERS »): whoever opened the thread (one of our campaigns, the
  * owner by hand, the person themselves). Who is answered is the answering
  * pipe's strategy at campaign-service (leads only), never filtered here. What
- * stays here is FACT, not targeting: a human wrote it (Jev: an away message is
- * no answer), one report per unanswered burst, history before the watch never
+ * stays here is FACT, not targeting: a human wrote a POSITIVE answer (Jev:
+ * interested, asks for info, asks for a meeting; an away message or a "no
+ * thanks" is no positive reply, `not_positive`, owner 2026-10-16), one report per unanswered burst, history before the watch never
  * reported, the brand's own team is not a person writing to the brand.
  *
  * WHERE IT RUNS: inside the Matrix sync (the live watch every ~10s on the rooms
@@ -80,6 +81,44 @@ const IN_FLIGHT_MS = 2 * 60_000;
 /** Below this, an `automated` verdict does not silence a person (coin flips stay human). */
 export const AUTOMATED_MIN_CONFIDENCE = 0.75;
 
+/**
+ * What a burst says, judged by Jev (one `choice` call per burst). The trigger is
+ * `positive_reply_received`, so only a POSITIVE answer rings it: the SAME three
+ * kinds the email path calls positive (instantly-service `REPLY_KIND_CLASSIFICATION`:
+ * interested, info requested, meeting requested). A "no thanks", a stop, a wrong
+ * person, a plain "ok" is no positive reply (owner 2026-10-16, it was reported
+ * as one since REPLY-ANY-LEAD-1015).
+ */
+export const REPLY_KINDS = [
+  "interested",
+  "info_requested",
+  "meeting_requested",
+  "not_interested",
+  "opt_out",
+  "wrong_person",
+  "neutral",
+  "automated",
+] as const;
+export type ReplyKind = (typeof REPLY_KINDS)[number];
+export const POSITIVE_REPLY_KINDS: readonly ReplyKind[] = ["interested", "info_requested", "meeting_requested"];
+/** A burst rings the trigger when Jev's probability that it is positive (the three kinds summed) reaches this. */
+export const POSITIVE_MIN_PROBABILITY = 0.5;
+
+const REPLY_KIND_CRITERIA: Record<ReplyKind, string> = {
+  interested: "The person shows interest in what the business offers: yes, sounds good, let's talk, tell me more, I want it.",
+  info_requested: "The person asks a question about the offer, the price, how it works, or asks for details or documents.",
+  meeting_requested:
+    "The person asks for, accepts or proposes a call, a meeting or a time slot, or gives a number to be called on.",
+  not_interested: "The person declines: not interested, no thanks, not now, already have a solution, too expensive.",
+  opt_out: "The person asks to stop: stop writing, unsubscribe, remove me, do not contact me.",
+  wrong_person: "The person says they are not the right contact, changed job, or the message reached the wrong person.",
+  neutral:
+    "A person wrote, but with no interest, no question and no refusal: ok, thanks, who is this?, a greeting, small talk, an unrelated topic.",
+  automated:
+    "No person wrote any of them: automatic replies the account sends on its own (an away message, a greeting " +
+    "message, 'thanks for contacting us, we will get back to you', an out-of-office), or a system notice.",
+};
+
 /** At most this many messages of one burst are carried to campaign-service (the latest ones). */
 export const MAX_REPORT_MESSAGES = 10;
 
@@ -89,6 +128,8 @@ export const REPLY_REASONS = {
   OWN_TEAM: "own_team",
   /** Jev: no person wrote it (away message, greeting, auto-reply). */
   AUTOMATED_REPLY: "automated_reply",
+  /** Jev: a person wrote, but no positive answer (declined, stop, wrong person, a plain "ok"). */
+  NOT_POSITIVE: "not_positive",
   /** Every message of the burst was mirrored before the watch started. */
   BEFORE_WATCH: "before_watch",
   /**
@@ -156,6 +197,30 @@ export interface Judgment {
   confidence: number | null;
   model: string | null;
   error: string | null;
+  /** Jev's distribution over `REPLY_KINDS` (absent on rows judged before 2026-10-16). */
+  probabilities?: Record<string, number>;
+  /** P(interested) + P(info_requested) + P(meeting_requested). */
+  positive?: number;
+}
+
+/** A recorded reason that does not END a burst: a person may still write in it, and the burst is judged again. */
+export const PASS_THROUGH_REASONS: readonly string[] = [
+  REPLY_REASONS.AUTOMATED_REPLY,
+  REPLY_REASONS.BEFORE_WATCH,
+  REPLY_REASONS.NOT_POSITIVE,
+];
+
+/**
+ * PURE: what a judged burst becomes. Jev down = reported (never silence a person
+ * because a judge was unavailable); automated >= 0.75 = `automated_reply`; a
+ * positive probability >= 0.5 = reported; anything else = `not_positive`.
+ */
+export function burstVerdict(judgment: Judgment): { report: true } | { report: false; reason: string } {
+  if (judgment.status === "failed") return { report: true };
+  const p = judgment.probabilities ?? {};
+  if ((p.automated ?? 0) >= AUTOMATED_MIN_CONFIDENCE) return { report: false, reason: REPLY_REASONS.AUTOMATED_REPLY };
+  if ((judgment.positive ?? 0) >= POSITIVE_MIN_PROBABILITY) return { report: true };
+  return { report: false, reason: REPLY_REASONS.NOT_POSITIVE };
 }
 
 /** Who a burst's Jev call is billed to and which channel it was written on. */
@@ -168,39 +233,49 @@ export interface BurstJudgeIdentity {
   where: string;
 }
 
-/** Jev: did a PERSON write this burst, or is it an automatic reply? One call per burst. */
+/**
+ * Jev: what does this burst say (`REPLY_KINDS`)? One call per burst. The burst
+ * judged is every message the person wrote since our last word (and since the
+ * watch started), so a later "actually, tell me more" after a "no" is read in
+ * its context; the latest words decide.
+ */
 export async function judgeBurst(who: BurstJudgeIdentity, runId: () => Promise<string>, burst: BurstMessage[]): Promise<Judgment> {
   try {
     const result = await judgeChoices(
       {
         context:
           `A business talks with someone on ${who.channel}. These are the messages that came from that ` +
-          "person's account since the business last wrote (or since the start), in order.",
+          "person's account since the business last wrote (or since the start), in order. The latest ones say " +
+          "where the person stands now.",
         messages: burst.map((m) => ({ at: m.at, text: m.text })),
       },
       {
-        sender: {
+        reply: {
           type: "choice",
-          instructions: "Who wrote these messages: a person, or the account's automatic replies?",
-          criteria: {
-            person:
-              "A person typed at least one of them: any words a human wrote, even very short or negative " +
-              "(ok, yes, who is this?, not interested, stop, a question, a price).",
-            automated:
-              "No person wrote any of them: automatic replies the account sends on its own (an away message, a " +
-              "greeting message, 'thanks for contacting us, we will get back to you', an out-of-office), or a system notice.",
-          },
+          instructions: "What do these messages say to the business, as of the latest one?",
+          criteria: REPLY_KIND_CRITERIA,
         },
       },
       { orgId: who.orgId, userId: who.userId, runId: await runId(), brandIds: [who.brandId] },
     );
-    const a = result.answers?.sender;
-    if (!a || (a.choice !== "person" && a.choice !== "automated")) throw new Error(`unexpected answer ${JSON.stringify(a)}`);
-    return { status: "ok", choice: a.choice, confidence: a.confidence, model: result.model, error: null };
+    const a = result.answers?.reply;
+    if (!a || !(REPLY_KINDS as readonly string[]).includes(a.choice) || !a.probabilities) {
+      throw new Error(`unexpected answer ${JSON.stringify(a)}`);
+    }
+    const positive = POSITIVE_REPLY_KINDS.reduce((sum, k) => sum + (a.probabilities[k] ?? 0), 0);
+    return {
+      status: "ok",
+      choice: a.choice,
+      confidence: a.confidence,
+      model: result.model,
+      error: null,
+      probabilities: a.probabilities,
+      positive,
+    };
   } catch (err) {
-    // Jev down = a person (never silence someone because a judge was unavailable).
+    // Jev down = reported (never silence someone because a judge was unavailable).
     const error = (err as Error).message.slice(0, 500);
-    console.error(`[crm-service][reply-trigger] Jev on a burst failed (${who.where}), treated as a person: ${error}`);
+    console.error(`[crm-service][reply-trigger] Jev on a burst failed (${who.where}), reported as a reply: ${error}`);
     return { status: "failed", choice: null, confidence: null, model: null, error };
   }
 }
@@ -309,8 +384,7 @@ export async function detectReplies(
           inArray(replyTriggerReports.anchorEventId, reading.burst.map((m) => m.eventId)),
         ),
       );
-    const passThrough: string[] = [REPLY_REASONS.AUTOMATED_REPLY, REPLY_REASONS.BEFORE_WATCH];
-    if (existing.some((r) => !passThrough.includes(r.reason ?? ""))) continue;
+    if (existing.some((r) => !PASS_THROUGH_REASONS.includes(r.reason ?? ""))) continue;
     const coveredThrough = Math.max(0, ...existing.map((r) => r.lastMessageAt.getTime()));
     const uncovered = reading.burst.filter((m) => Date.parse(m.at) > coveredThrough);
     if (uncovered.length === 0) continue;
@@ -346,11 +420,12 @@ export async function detectReplies(
       judgment = await judgeBurst(
         { orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId, channel: conn.channel, where: `connection ${conn.id}` },
         runId,
-        burst,
+        reading.burst.filter((m) => (ingested.get(m.eventId) ?? 0) >= since),
       );
-      if (judgment.choice === "automated" && (judgment.confidence ?? 0) >= AUTOMATED_MIN_CONFIDENCE) {
+      const verdict = burstVerdict(judgment);
+      if (!verdict.report) {
         status = REPLY_STATUS.SKIPPED;
-        reason = REPLY_REASONS.AUTOMATED_REPLY;
+        reason = verdict.reason;
       }
     }
     const inserted = await db

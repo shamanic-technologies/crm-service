@@ -17,6 +17,7 @@ import {
 import { rebuildFromBronze, runSyncPass } from "../../src/lib/gohighlevel/sync.js";
 import { readPipelineView } from "../../src/lib/gohighlevel/view.js";
 import { readFunnelEvents } from "../../src/lib/gohighlevel/funnel-events.js";
+import { STAGE_MEANING_CRITERIA_VERSION } from "../../src/lib/gohighlevel/stage-meanings.js";
 import { serveNext } from "../../src/lib/serve.js";
 import gohighlevelRoutes from "../../src/routes/gohighlevel.js";
 
@@ -1072,6 +1073,32 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
     } finally {
       PIPELINES[0].stages[2].name = "Won";
     }
+  });
+
+  it("re-decides every stage decided under an older wording of the options, replacing it in place", async () => {
+    const connectionId = await seedConnection();
+    await runSyncPass(connectionId);
+    expect(chatCalls).toBe(1);
+    const before = await db.select().from(ghlStageMeanings);
+    expect(before.map((r) => r.criteriaVersion)).toEqual([STAGE_MEANING_CRITERIA_VERSION, STAGE_MEANING_CRITERIA_VERSION, STAGE_MEANING_CRITERIA_VERSION]);
+
+    // Decided under the previous wording: still served, asked again on the next pass.
+    await db.update(ghlStageMeanings).set({ criteriaVersion: STAGE_MEANING_CRITERIA_VERSION - 1, meaning: "deal_lost" });
+    const again = await runSyncPass(connectionId);
+    expect(again.results[0].stageMeaningsDecided).toBe(3);
+    expect(chatCalls).toBe(2);
+    const after = await db.select().from(ghlStageMeanings);
+    expect(after).toHaveLength(3);
+    expect(after.map((r) => r.id).sort()).toEqual(before.map((r) => r.id).sort());
+    expect(Object.fromEntries(after.map((r) => [r.stageName, `${r.meaning}@v${r.criteriaVersion}`]))).toEqual({
+      "New lead": `none@v${STAGE_MEANING_CRITERIA_VERSION}`,
+      "Quote sent": `meeting_booked@v${STAGE_MEANING_CRITERIA_VERSION}`,
+      Won: `sale@v${STAGE_MEANING_CRITERIA_VERSION}`,
+    });
+
+    // Current again: nothing re-asked.
+    expect((await runSyncPass(connectionId)).results[0].stageMeaningsDecided).toBe(0);
+    expect(chatCalls).toBe(2);
   });
 
   it("serves each contact's dated funnel events, with where each came from", async () => {

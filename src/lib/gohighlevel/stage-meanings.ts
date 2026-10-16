@@ -15,7 +15,7 @@
  * served as evidence (see STAGE_MEANING_MIN_CONFIDENCE).
  */
 
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, gte, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import {
   ghlOpportunityHistory,
@@ -61,16 +61,36 @@ const STAGES_PER_CALL = 40;
  */
 export const STAGE_MEANING_MIN_CONFIDENCE = 0.5;
 
+/**
+ * The wording of the options below. Bump it when the wording changes: every
+ * stage decided under an older one is re-decided on the connection's next sync
+ * (its old meaning keeps serving until then, so the funnel never goes blank).
+ * v2 (owner 2026-10-16): v1 had no home for a CLIENT's own stages, so Jev filed
+ * Doc Dinners' "Ads launched" / "Onboarding Call" as meetings booked, "Past Event
+ * Held" as a meeting attended, "INACTIVE CLIENT" as a lost deal and "Potential/ In
+ * conversation" as a meeting attended.
+ */
+export const STAGE_MEANING_CRITERIA_VERSION = 2;
+
 /** The options every stage is judged against. */
 const MEANING_CRITERIA: Record<StageMeaning, string> = {
-  meeting_booked: "a meeting, call or appointment with the person has been scheduled",
-  meeting_attended: "the person showed up to the meeting",
+  meeting_booked:
+    "a SALES meeting, call or appointment with a prospect (someone who has not bought yet) has been scheduled. " +
+    "A call or event held for an existing client (onboarding, kick-off, launch, client event) is not this",
+  meeting_attended:
+    "the prospect showed up to that sales meeting (showed, held, met), whether they bought after it or not. " +
+    "Being in conversation or interested without a meeting held is not this; a client's onboarding or event is not this",
   meeting_not_held:
-    "a scheduled meeting did not take place: no-show, cancelled, or needs rescheduling",
-  sale: "the person became a paying customer: deal won, signed, closed, active client",
-  deal_lost: "the deal is over without a sale: lost, disqualified, not interested",
+    "a scheduled sales meeting did not take place: no-show, cancelled, or needs rescheduling",
+  sale:
+    "the person is or was a paying customer: deal won, signed, paid, closed client, and every stage a person " +
+    "only reaches AFTER buying (onboarding, launched, active, client event, off-boarding, inactive or former client)",
+  deal_lost:
+    "a prospect who did not buy and the deal is over: lost, not interested. Never a former or inactive client " +
+    "(that is sale), never a disqualified or unqualified person (that is none)",
   none:
-    "none of these: a lead not yet contacted, a form fill, nurturing, onboarding steps, anything else",
+    "none of these: a new lead, a form fill, in conversation, interested, nurturing, a free trial, " +
+    "unqualified, anything else",
 };
 
 export interface StageDecision {
@@ -90,13 +110,19 @@ export async function findUndecidedStages(conn: GhlConnection): Promise<StageToD
   for (const stage of await findConnectionStages(conn)) candidates.set(keyOf(stage.stageExternalId, stage.stageName), stage);
   if (candidates.size === 0) return [];
 
+  // Decided = under the CURRENT wording; an older one is asked again.
   const decided = await db
     .select({
       stageExternalId: ghlStageMeanings.stageExternalId,
       stageName: ghlStageMeanings.stageName,
     })
     .from(ghlStageMeanings)
-    .where(eq(ghlStageMeanings.connectionId, conn.id));
+    .where(
+      and(
+        eq(ghlStageMeanings.connectionId, conn.id),
+        gte(ghlStageMeanings.criteriaVersion, STAGE_MEANING_CRITERIA_VERSION),
+      ),
+    );
   for (const row of decided) candidates.delete(keyOf(row.stageExternalId, row.stageName));
 
   return [...candidates.values()];
@@ -258,16 +284,29 @@ export async function decideStageMeanings(
           probabilities: decisions[index].probabilities,
           model,
           runId,
+          criteriaVersion: STAGE_MEANING_CRITERIA_VERSION,
         })),
       )
-      // Recorded once: a concurrent pass that decided first wins, and nothing is
-      // ever re-decided over an existing record.
-      .onConflictDoNothing({
+      // Recorded once per wording: a concurrent pass that decided first wins;
+      // a record decided under an OLDER wording is replaced.
+      .onConflictDoUpdate({
         target: [
           ghlStageMeanings.connectionId,
           ghlStageMeanings.stageExternalId,
           ghlStageMeanings.stageName,
         ],
+        set: {
+          pipelineExternalId: sql`excluded.pipeline_external_id`,
+          pipelineName: sql`excluded.pipeline_name`,
+          meaning: sql`excluded.meaning`,
+          confidence: sql`excluded.confidence`,
+          probabilities: sql`excluded.probabilities`,
+          model: sql`excluded.model`,
+          runId: sql`excluded.run_id`,
+          decidedAt: sql`now()`,
+          criteriaVersion: sql`excluded.criteria_version`,
+        },
+        setWhere: sql`${ghlStageMeanings.criteriaVersion} < excluded.criteria_version`,
       })
       .returning({ id: ghlStageMeanings.id });
     recorded += rows.length;

@@ -717,7 +717,14 @@ customer's vocabulary.
   "Free Trail client" at 0.33-0.42.
   **No stage name is ever mapped in code** — no string matching, no keyword
   list; the recorded decision is the only source. Re-decided only when a NEW
-  name appears (a rename is a new statement by the customer). An answer that
+  name appears (a rename is a new statement by the customer) or the option
+  wording changes (`STAGE_MEANING_CRITERIA_VERSION`, column `criteria_version`:
+  an older row is re-decided in place on the next sync and serves until then).
+  v2 (2026-10-16): a meeting = a SALES meeting with someone who has not bought;
+  every stage reached only after buying (onboarding, launched, client event,
+  inactive / former client) = `sale`; a former client is never `deal_lost`
+  (v1 read Doc Dinners' "Ads launched" / "Onboarding Call" as meetings booked and
+  "INACTIVE CLIENT" as lost). An answer that
   skips a stage, invents a meaning or omits its confidence fails the sync loud.
 - **Form submissions** — bronze `kind='form'` + `kind='form_submission'`,
   silver `ghl_form_submissions` (form NAME resolved from the mirrored forms). Read
@@ -1144,6 +1151,12 @@ the owner wrote by hand, or the person wrote first) is reported to campaign-serv
 `positive_reply_received`. WHO is answered is the answering pipe's strategy there (lead-service refuses a non-lead:
 skip `person_not_admitted`), never filtered here. Same door as the form trigger (`lib/trigger-door.ts`).
 
+- **Only a POSITIVE answer is reported** (owner 2026-10-16): one Jev `choice` per burst over `REPLY_KINDS`
+  (`interested | info_requested | meeting_requested | not_interested | opt_out | wrong_person | neutral |
+  automated`), judged on every word since our last one; P(the first three) >= 0.5 = reported (the email
+  path's positive kinds, instantly-service `REPLY_KIND_CLASSIFICATION`), automated >= 0.75 =
+  `automated_reply`, else `not_positive` (a "no thanks", a stop, a plain "ok"). `not_positive` does not end
+  the burst: a later "actually, how much?" is judged again. Jev down = reported. WhatsApp and Gmail alike.
 - **Live** (`matrix/sync.ts` `startMatrixLiveWatch`, every `MATRIX_LIVE_INTERVAL_MS` 10s, first 60s after boot): per
   connection one `/sync`, bronze, silver of the rooms that moved, `detectReplies` on THOSE rooms, delivery if any. No
   lead reading (the 5-min pass reads every conversation whose lead is behind), no run unless Jev / brand-service is

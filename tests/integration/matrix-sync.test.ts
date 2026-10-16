@@ -124,10 +124,10 @@ function installFetchStub() {
           : { brand: { name: "Acme", domain: "acme.test", url: "https://acme.test" } };
       return new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
     }
-    if (url.includes("/orgs/judgments") && String(init?.body ?? "").includes('"sender"')) {
-      // The reply watch asking whether a person wrote a burst (every thread is read since REPLY-ANY-LEAD-1015).
+    if (url.includes("/orgs/judgments") && String(init?.body ?? "").includes('"reply":{')) {
+      // The reply watch asking what a burst says (every thread is read since REPLY-ANY-LEAD-1015).
       return new Response(
-        JSON.stringify({ model: "jev-test", answers: { sender: { type: "choice", choice: "person", confidence: 0.9, probabilities: {} } } }),
+        JSON.stringify({ model: "jev-test", answers: { reply: { type: "choice", choice: "interested", confidence: 0.9, probabilities: { interested: 0.9 } } } }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }

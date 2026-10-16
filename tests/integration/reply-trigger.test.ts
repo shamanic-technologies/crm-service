@@ -47,7 +47,7 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 let campaignCalls: { headers: Headers; body: Record<string, unknown> }[] = [];
-let jevChoice = "person";
+let jevChoice = "interested";
 let jevCalls = 0;
 /** What brand-service states as the brand's sales rep phone; a number = brand-service answers that status. */
 let repPhone: string | null | number = null;
@@ -69,7 +69,7 @@ function installFetchStub() {
     }
     if (url.pathname === "/orgs/judgments") {
       jevCalls += 1;
-      return json({ model: "jev", answers: { sender: { type: "choice", choice: jevChoice, confidence: 0.93, probabilities: {} } } });
+      return json({ model: "jev", answers: { reply: { type: "choice", choice: jevChoice, confidence: 0.93, probabilities: { [jevChoice]: 0.93 } } } });
     }
     if (url.host === "campaign.test" && url.pathname === `/campaigns/${CAMPAIGN}`) {
       return json({ campaign: { id: CAMPAIGN, offerId: OFFER } });
@@ -145,7 +145,7 @@ describe.skipIf(!RUN)("reply trigger", () => {
       })
       .returning();
     conversationId = conversation.id;
-    jevChoice = "person";
+    jevChoice = "interested";
     repPhone = null;
     installFetchStub();
   });
@@ -285,6 +285,24 @@ describe.skipIf(!RUN)("reply trigger", () => {
     expect(await detectReplies(conn, run1)).toMatchObject({ detected: 0, threadsRead: 0 });
   });
 
+  it("a negative answer is no positive reply; a positive one later in the same burst is (owner 2026-10-16)", async () => {
+    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
+    conn = await fresh();
+    await buildPerson();
+    await send("$n0", min(0), CAMPAIGN);
+    await event("$n0", OWN, min(0), "Hi");
+    await event("$no", GHOST, min(1), "No thanks, not interested");
+    jevChoice = "not_interested";
+    expect((await detectReplies(conn, run1)).skipped).toEqual([{ reason: "not_positive", roomId: ROOM }]);
+    expect(campaignCalls).toHaveLength(0);
+    jevChoice = "info_requested";
+    await event("$yes", GHOST, min(9), "Actually, how much is it?");
+    expect((await detectReplies(conn, run1)).detected).toBe(1);
+    const [row] = await db.select().from(replyTriggerReports).where(eq(replyTriggerReports.anchorEventId, "$yes"));
+    expect(row.status).toBe("pending");
+    expect((row.judgment as { positive?: number }).positive).toBeCloseTo(0.93);
+  });
+
   it("an auto-reply is not an answer; a person writing after it in the same burst is", async () => {
     await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
     conn = await fresh();
@@ -294,7 +312,7 @@ describe.skipIf(!RUN)("reply trigger", () => {
     await event("$auto", GHOST, min(1), "Thanks for contacting us! We will get back to you soon.");
     jevChoice = "automated";
     expect((await detectReplies(conn, run1)).skipped).toEqual([{ reason: "automated_reply", roomId: ROOM }]);
-    jevChoice = "person";
+    jevChoice = "interested";
     await event("$real", GHOST, min(9), "Hi, Kevin here, tell me more");
     expect((await detectReplies(conn, run1)).detected).toBe(1);
     await deliverDueReplies();

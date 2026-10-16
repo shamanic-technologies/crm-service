@@ -34,7 +34,7 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 let campaignCalls: { headers: Headers; body: Record<string, unknown> }[] = [];
-let jevChoice = "person";
+let jevChoice = "interested";
 let jevCalls = 0;
 
 function installFetchStub() {
@@ -56,7 +56,7 @@ function installFetchStub() {
     }
     if (url.pathname === "/orgs/judgments") {
       jevCalls += 1;
-      return json({ model: "jev", answers: { sender: { type: "choice", choice: jevChoice, confidence: 0.93, probabilities: {} } } });
+      return json({ model: "jev", answers: { reply: { type: "choice", choice: jevChoice, confidence: 0.93, probabilities: { [jevChoice]: 0.93 } } } });
     }
     if (url.host === "campaign.test" && url.pathname === "/internal/trigger-events") {
       campaignCalls.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) });
@@ -114,7 +114,7 @@ async function cleanup() {
 describe.skipIf(!RUN)("Gmail reply trigger", () => {
   beforeEach(async () => {
     await cleanup();
-    jevChoice = "person";
+    jevChoice = "interested";
     installFetchStub();
     scope = await newScope(BRAND, ["gmail", "instantly"]);
   });

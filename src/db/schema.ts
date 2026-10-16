@@ -973,6 +973,10 @@ export const ghlStageMeanings = pgTable(
     model: text("model").notNull(),
     runId: text("run_id").notNull(),
     decidedAt: timestamp("decided_at", { withTimezone: true }).notNull().defaultNow(),
+    // Which wording of the options decided it (STAGE_MEANING_CRITERIA_VERSION).
+    // A row decided under an older wording is re-decided on the next sync and
+    // keeps serving until then.
+    criteriaVersion: integer("criteria_version").notNull().default(1),
   },
   (table) => [
     uniqueIndex("ghl_stage_meanings_conn_stage_name_uq").on(
