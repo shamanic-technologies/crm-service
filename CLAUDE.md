@@ -828,11 +828,15 @@ owner had written to. A recorded fact, never an address-shape guess.
   `personal | other_business | this_brand`, where `this_brand` = the
   counterpart is a SALES LEAD of the brand (prospect, client, user, referral
   partner) and `other_business` = any other work: suppliers / tools / vendors
-  pitching the owner, accountant, lawyer, bank, admin, mentors, investors,
-  press, candidates, another company (state = brand name + website +
-  `companyOverview` extracted field, its ACTIVE offers, the org's other brands,
-  from brand-service; the overview is NOT in the context hash). This REPLACES
-  v0.29.x's rule that kept suppliers, the accountant and mentors visible.
+  pitching the owner (even in the brand's own field), the owner's OTHER
+  activities (anything sold / rented / taught that is not a brand offer:
+  visa help, co-living, coaching), accountant, bank, mentors, investors, press
+  (state = brand name + website + `companyOverview`, each ACTIVE offer with its
+  brand profile = `runtime-context?offerId=` fields as `whatItSells`, the org's
+  other brands; overview + profiles NOT in the context hash). Jev reads the
+  thread's first 10 + last 20 messages (`threadWindow`). WA-LEAD-RELEVANCE-1016
+  (v7): Jev knew only "Distribute.you" + an offer named "Product-led", so a Brazil
+  visa deal (0.81), co-living rooms and a vendor pitch (0.87) read as leads.
   Plus one `noul` per active offer. Text is clipped on code points (Jev refuses
   a lone surrogate). Recorded in `conversation_verdicts` keyed (org, brand,
   `gmail:<addr>` | `matrix:<conv id>`): Gmail is per ORG, so each brand judges

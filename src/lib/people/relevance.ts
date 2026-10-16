@@ -34,6 +34,14 @@
  * conversation is about the brand, so it is recorded `content = 'none'`
  * without a Jev call and never keeps a personal-channel-only person visible.
  *
+ * WA-LEAD-RELEVANCE-1016 (2026-10-16): an owner runs SEVERAL activities from one
+ * personal WhatsApp (residency help, co-living rooms, teaching, coaching) and
+ * vendors pitch them there. Asked only "a lead of this brand?", Jev read every
+ * deal the owner discussed as the brand's (Brazil visa 0.81, co-living 0.50,
+ * a no2bounce vendor pitch 0.87). The question now makes Jev name what is
+ * traded and who sells to whom, and the criteria name suppliers selling to the
+ * owner and the owner's other activities as other work.
+ *
  * WHO is hidden is decided in people/build.ts: only a person known from
  * personal channels ALONE. A person also known from a business source (our
  * cold email, a lead, the CRM, Stripe) is never hidden by this.
@@ -63,7 +71,14 @@ export const BRAND_MIN_PROBABILITY = 0.5;
 export const OFFER_MIN_PROBABILITY = 0.5;
 
 const CONCURRENCY = 4;
-const MAX_MESSAGES = 10;
+/**
+ * What Jev reads of a long thread: its FIRST messages (where a deal's subject is
+ * usually stated: a visa named 20 messages before "Fast track") and its LATEST
+ * ones (where the relationship stands now). The latest 10 alone read Faysal's
+ * Brazil residency as a lead (WA-LEAD-RELEVANCE-1016).
+ */
+const FIRST_MESSAGES = 10;
+const LAST_MESSAGES = 20;
 const MESSAGE_CHARS = 400;
 
 /**
@@ -79,20 +94,29 @@ const TOPIC_CRITERIA: Record<Topic, string> = {
     "the owner's PRIVATE life: family, partner, friends, dating, health, housing, personal shopping and " +
     "admin, personal travel, social plans, small talk, community or hobby groups.",
   other_business:
-    "work, but the counterpart is NOT a sales lead of the brand: a supplier, software tool or vendor the owner " +
-    "buys from, asks for support, or that pitches its own services to the owner; the accountant, lawyer, bank " +
-    "and the company's own admin; mentors, advisors, investors, journalists and press, candidates, networking " +
-    "contacts; and any work for another company the owner runs or serves.",
+    "work that is NOT a sale of this brand's offers. (1) The counterpart is the SELLER and the owner the " +
+    "buyer: a supplier, software tool, agency or vendor pitching or selling ITS OWN product or service to " +
+    "the owner, even a product in the brand's own field (an email tool, a lead list, a marketing agency " +
+    "pitching the owner is a supplier, not a lead). (2) The owner's OTHER activities: anything the owner " +
+    "sells, rents, teaches, organises or recruits for that is not one of this brand's offers (for example " +
+    "residency or visa help, housing, rooms or co-living, courses, coaching or training, a job or community " +
+    "they recruit for), even when money, a deal or a contract is discussed. (3) The accountant, lawyer, " +
+    "bank and the company's own admin; mentors, advisors, investors, journalists and press, candidates, " +
+    "networking contacts; and work inside another company the owner runs or is employed by.",
   this_brand:
-    "the counterpart is a SALES LEAD of the brand: someone the owner sells the brand's offers to, or who buys, " +
-    "uses, asks about, tries or negotiates them: a prospect, a client, a user, or a partner who refers or " +
-    "resells clients to the brand. It must show in the words: a thread with nothing about buying or using " +
-    "the brand (greetings, emojis, \"ok\") is not a sales lead.",
+    "the counterpart is a SALES LEAD of the brand: someone the owner sells THIS brand's offers to, or who " +
+    "buys, uses, asks about, tries or negotiates THEM: a prospect, a client, a user, or a partner who refers " +
+    "or resells clients to the brand. A CLIENT or user stays a sales lead while the owner delivers the " +
+    "brand's offers to them: their account, campaigns, credits, billing, results, feature requests, advice " +
+    "on their own sales, a pause or a churn. The test is what is traded: it must be what this brand sells " +
+    "(its description and offers), shown in the words. A deal about something else the owner does is not a " +
+    "lead of this brand, and a thread with nothing about buying or using the brand (greetings, emojis, " +
+    "\"ok\") is not a sales lead.",
 };
 
 export interface BrandContext {
   brand: { name: string; website: string | null; description: string | null };
-  offers: { offerId: string; name: string; description: string | null }[];
+  offers: { offerId: string; name: string; description: string | null; profile?: Record<string, string> | null }[];
   otherBrandsOfTheSameOwner: { name: string; website: string | null }[];
   hash: string;
 }
@@ -111,6 +135,8 @@ export async function readBrandContext(identity: SiblingIdentity): Promise<Brand
     siblingGetOk<{ fields: { key: string; value: unknown }[] }>("brand", `/internal/brands/${id}/extracted-fields`, identity),
   ]);
   const overview = fields.fields.find((f) => f.key === "companyOverview")?.value;
+  const active = offers.offers.filter((o) => o.status === "active");
+  const profiles = await Promise.all(active.map((o) => readOfferProfile(identity, o.offerId)));
   const ctx = {
     brand: { name: brand.brand.name, website: brand.brand.domain ?? brand.brand.url },
     offers: offers.offers
@@ -124,12 +150,42 @@ export async function readBrandContext(identity: SiblingIdentity): Promise<Brand
   };
   // The description is re-extracted every few days in different words: it is shown to
   // Jev but kept OUT of the hash, so a re-extraction never re-judges every conversation.
+  // The offers' profiles too: what each offer IS, worded like the description (re-extracted, out of the hash).
+  const profileOf = new Map(active.map((o, k) => [o.offerId, profiles[k]]));
   return {
     ...ctx,
     brand: { ...ctx.brand, description: typeof overview === "string" && overview.trim() ? overview.trim() : null },
-    // v6 (2026-10-10): sales leads only: every conversation re-judged once.
-    hash: createHash("sha256").update(JSON.stringify(["v6", ctx])).digest("hex").slice(0, 32),
+    offers: ctx.offers.map((o) => ({ ...o, profile: profileOf.get(o.offerId) ?? null })),
+    // v6 (2026-10-10): sales leads only. v7 (WA-LEAD-RELEVANCE-1016): the owner's other
+    // activities and suppliers selling to the owner are other work. Each bump re-judges once.
+    hash: createHash("sha256").update(JSON.stringify(["v7", ctx])).digest("hex").slice(0, 32),
   };
+}
+
+const PROFILE_FIELD_CHARS = 600;
+
+/**
+ * What ONE offer sells, in the brand's own words: brand-service's brand profile
+ * for that offer (the confirmed fields over the extracted ones). Without it Jev
+ * judged "a lead of Distribute.you" knowing only the brand name and an offer
+ * called "Product-led", so any deal the owner discussed read as the brand's
+ * (WA-LEAD-RELEVANCE-1016). Null = brand-service holds no profile. Fails loud.
+ */
+async function readOfferProfile(identity: SiblingIdentity, offerId: string): Promise<Record<string, string> | null> {
+  const body = await siblingGetOk<{ brandProfile: { fields: Record<string, string | string[]> } | null }>(
+    "brand",
+    `/internal/brands/${encodeURIComponent(identity.brandId)}/runtime-context?offerId=${encodeURIComponent(offerId)}`,
+    identity,
+  );
+  const fields = body.brandProfile?.fields;
+  if (!fields) return null;
+  const out: Record<string, string> = {};
+  for (const key of Object.keys(fields).sort()) {
+    const v = fields[key];
+    const text = (Array.isArray(v) ? v.join("; ") : String(v ?? "")).trim();
+    if (text) out[key] = clipTo(text, PROFILE_FIELD_CHARS);
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 export interface ConversationMessage {
@@ -146,8 +202,14 @@ export interface ConversationInput {
   judgedThrough: string;
   channel: string;
   counterpart: { names: string[]; email: string | null; phone: string | null };
-  /** Oldest first, the latest MAX_MESSAGES holding words a person wrote. Empty = nothing to judge. */
+  /** Oldest first, `threadWindow` of the messages holding words a person wrote. Empty = nothing to judge. */
   messages: ConversationMessage[];
+}
+
+/** PURE: the first FIRST_MESSAGES and the last LAST_MESSAGES of a thread, oldest first, none twice. */
+export function threadWindow<T>(messages: T[]): T[] {
+  if (messages.length <= FIRST_MESSAGES + LAST_MESSAGES) return messages;
+  return [...messages.slice(0, FIRST_MESSAGES), ...messages.slice(-LAST_MESSAGES)];
 }
 
 export interface Verdict {
@@ -187,8 +249,11 @@ export function hidesConversation(v: { content?: Content; brandProbability: numb
  */
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 export function clip(s: string): string {
+  return clipTo(s, MESSAGE_CHARS);
+}
+function clipTo(s: string, max: number): string {
   const chars = Array.from(s.replace(LONE_SURROGATE, "\uFFFD"));
-  return chars.length > MESSAGE_CHARS ? `${chars.slice(0, MESSAGE_CHARS).join("")}…` : chars.join("");
+  return chars.length > max ? `${chars.slice(0, max).join("")}…` : chars.join("");
 }
 
 /** One Jev call: the topic choice plus one yes/no per active offer. Fails loud on a malformed answer. */
@@ -199,11 +264,12 @@ export async function judgeConversation(
 ): Promise<Verdict & { model: string }> {
   const state = {
     task:
-      "A business owner connected their own inbox. It mixes their private life, their other work, and " +
+      "A business owner connected their own inbox. It mixes their private life, the suppliers who sell to " +
+      "them, their OTHER activities (the owner often runs several: services, rentals, teaching, jobs), and " +
       "conversations with the sales leads of the brand below. Judge whether the counterpart in this one " +
-      "conversation is a sales lead of the brand.",
+      "conversation is a sales lead of THIS brand: someone who could buy, or buys, what this brand sells.",
     brand: context.brand,
-    offers: context.offers.map((o, k) => ({ key: `o${k}`, name: o.name, description: o.description })),
+    offers: context.offers.map((o, k) => ({ key: `o${k}`, name: o.name, description: o.description, whatItSells: o.profile ?? null })),
     otherBrandsOfTheSameOwner: context.otherBrandsOfTheSameOwner,
     conversation: {
       channel: input.channel,
@@ -215,10 +281,14 @@ export async function judgeConversation(
     topic: {
       type: "choice",
       instructions:
-        "Read the conversation between the owner (outbound) and the counterpart (inbound). Is the counterpart " +
-        `a sales lead of ${context.brand.name} (a prospect, client, user or referral partner of its offers), ` +
-        "other work (supplier, accountant, mentor, investor, press, another company), or the owner's private " +
-        "life? Judge the whole conversation, not one polite or logistical message.",
+        "Read the conversation between the owner (outbound) and the counterpart (inbound): who pays whom, " +
+        `for what? A counterpart who buys, uses, tries or is offered what ${context.brand.name} sells (its ` +
+        "description and offers in the state) is its sales lead, and a client stays one while the owner runs " +
+        "their account, campaigns, credits or billing, whatever else they chat about (tools, ideas, small " +
+        "talk). A counterpart selling to the owner, or a deal about something this brand does not sell (another " +
+        "activity of the owner), is other work, even when the owner writes first or money is discussed; " +
+        "accountant, mentor, investor and press are other work too; the owner's private life is personal. " +
+        "Judge the whole conversation, not one polite or logistical message.",
       criteria: TOPIC_CRITERIA,
     },
   };
@@ -308,15 +378,14 @@ export async function gmailConversationInput(identity: SiblingIdentity, plan: Gm
       subject: m.subject,
       text: ((m.bodyStatus === "ok" && m.bodyText ? m.bodyText : m.snippet) ?? "").trim(),
     }))
-    .filter((m) => m.text || m.subject?.trim())
-    .slice(-MAX_MESSAGES);
+    .filter((m) => m.text || m.subject?.trim());
   return {
     key: `gmail:${plan.email}`,
     source: "gmail",
     judgedThrough: plan.judgedThrough,
     channel: "email",
     counterpart: { names: plan.names, email: plan.email, phone: null },
-    messages,
+    messages: threadWindow(messages),
   };
 }
 
@@ -351,10 +420,12 @@ export async function matrixConversationInput(conversationId: string): Promise<C
     .from(matrixRawEvents)
     .where(and(eq(matrixRawEvents.connectionId, row.conversation.connectionId), eq(matrixRawEvents.roomId, row.conversation.roomId)))
     .orderBy(asc(matrixRawEvents.originServerTs), asc(matrixRawEvents.eventId));
-  const lines = renderThread(
-    events.map((e) => e.payload as unknown as MatrixEvent),
-    row.ownMxid,
-    MAX_MESSAGES,
+  const lines = threadWindow(
+    renderThread(
+      events.map((e) => e.payload as unknown as MatrixEvent),
+      row.ownMxid,
+      Number.POSITIVE_INFINITY,
+    ),
   );
   return {
     key: `matrix:${conversationId}`,
