@@ -1030,7 +1030,7 @@ body `brandId`; `x-campaign-id` recorded), body `{ email?, phone?, text, idempot
 fromAccount?, skipIfReplied? }`. 200 `{ sendId, status: "sent", duplicate, to, phoneSource,
 fromAccount, roomId, eventId, sentAt, previousSends }`. Refusals 422 `{ type: "refused",
 code, error }`: `whatsapp_not_linked` | `whatsapp_not_connected` | `no_phone_known` |
-`not_on_whatsapp` | `person_replied` (only with `skipIfReplied`) | `wrong_room` | `automation_not_allowed`; 409 `send_in_progress`;
+`not_on_whatsapp` | `person_replied` (only with `skipIfReplied`) | `wrong_room` | `automation_not_allowed` | `human_in_conversation`; 409 `send_in_progress`;
 400 `invalid_request`; 502 `bridge_error`. `GET /orgs/whatsapp/messages?brandId=&email=|phone=`
 lists the person's sends. No cost.
 `POST /orgs/whatsapp/sends/query {brandId, campaignId, emails[1..500]}` answers ONE campaign's
@@ -1074,6 +1074,15 @@ newest first, a person with none absent; a send with no campaign never matches. 
   row with email + phone is merge evidence `whatsapp_send`. After a send the connection is
   synced and the people scope rebuilt (unawaited), so the Unibox shows it within a minute.
 
+- **Human takeover = forever** (`lib/matrix/human-takeover.ts`, HUMAN-IN-THREAD-1016, owner 2026-10-16: « je ne veux plus
+  que ça lui autoréponde à ma place, mais pour un nouveau lead et un premier message de bienvenue oui »): a message the brand's
+  account TYPED (sender = the account, human words, not an edit, not one of our sends by event id or by text) in ANY of the
+  brand's threads on the channel with the person's ghost(s) = the human's conversation. Send + reach refuse
+  `human_in_conversation` (after `not_on_whatsapp`, no staff alert); the reply trigger skips `human_in_conversation` (before
+  Jev, not pass-through). No timer: chatbot handover convention (respond.io, Chatfuel, Intercom) keeps the bot silent until
+  handed back, timed pauses (Jelou 15 min-4 h) cannot cover a multi-day talk; we have no hand-back. A new lead (no thread,
+  or only our automated messages) still gets the welcome. Gmail not covered (crm sends no email; a responder mail and a
+  typed one look the same in the store). Reverses REPLY-ANY-LEAD-1015's "a hand-typed message is just one of ours" (10-15).
 - **Which account writes** (owner 2026-10-12: the pro number, not the personal one,
   unless a conversation already exists there): the account whose conversation with the
   ghost HAS MESSAGES (latest), else the link marked `outreach_default` (`PATCH
@@ -1169,8 +1178,8 @@ kind `reported`, reportedBy crm-service, fromStep `lead_found`), within ~1 min. 
 ## Reply trigger — a person writing to the brand on a mirrored channel is reported at once (`src/lib/reply-trigger/`)
 
 REPLY-ANY-LEAD-1015 (owner 2026-10-15, « NE CRÉE PLUS JAMAIS DES CAS PARTICULIERS »; replaces WA-RESPONDER-1012's
-campaign-thread gate and "hand-typed = taken over"): every human burst in ANY one-to-one thread (a campaign opened it,
-the owner wrote by hand, or the person wrote first) is reported to campaign-service's trigger door as
+campaign-thread gate): every human burst in ANY one-to-one thread (a campaign opened it, or the person wrote first; one
+a human of the brand typed in is theirs, skipped `human_in_conversation`, HUMAN-IN-THREAD-1016) is reported to campaign-service's trigger door as
 `positive_reply_received`. WHO is answered is the answering pipe's strategy there (lead-service refuses a non-lead:
 skip `person_not_admitted`), never filtered here. Same door as the form trigger (`lib/trigger-door.ts`).
 
@@ -1188,7 +1197,7 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
 - **Rules = `thread.ts`, pure**: threads = `conversations` rows (a group is no conversation, never read); the person's
   human words since our last outbound = ONE burst = ONE row (`reply_trigger_reports`, UNIQUE on its first message,
   `idempotencyKey crm:matrix:reply:<event>`); ANY outbound ends it: one of our sends OR a message typed by hand on the
-  account (just one of ours, never a takeover); bridge notices / uncaptioned media / edits are no answer; any brand
+  account (it ends the burst; the person's later bursts are then skipped `human_in_conversation`: a human took it, see "Human takeover"); bridge notices / uncaptioned media / edits are no answer; any brand
   send `sending` < 2 min holds the pass. Jev (`person|automated`, >= 0.75 silences; down = person) drops auto-replies.
 - **Own team = the org's members too** (`lib/org-members.ts`, OWN-TEAM-GMAIL-1016, owner 2026-10-16: his own pitch
   from his personal gmail, brand mailbox in copy, rang an AI Instant Call): client-service `GET /internal/users?orgId=

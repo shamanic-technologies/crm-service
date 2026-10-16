@@ -245,7 +245,6 @@ describe.skipIf(!RUN)("reply trigger", () => {
     await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
     conn = await fresh();
     await buildPerson();
-    await event("$h", OWN, min(0), "Hey Noah, typed by hand");
     await event("$q", GHOST, min(1), "Who are your customers?");
     expect((await detectReplies(conn, run1)).detected).toBe(1);
     await deliverDueReplies();
@@ -253,22 +252,29 @@ describe.skipIf(!RUN)("reply trigger", () => {
     expect((await reports())[0]).toMatchObject({ offerBasis: "only_offer" });
   });
 
-  it("a hand-typed message is just one of ours: it ends the burst, and the person's next message is reported", async () => {
+  it("a human of the brand typing by hand takes the conversation: no automated reply fires there again, named skip (HUMAN-IN-THREAD-1016)", async () => {
     await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
     conn = await fresh();
     await buildPerson();
     await send("$c", min(0), CAMPAIGN);
     await event("$c", OWN, min(0), "Hi");
     await event("$a", GHOST, min(1), "who is this?");
+    // Only automated messages of ours so far: the answer is reported.
     expect((await detectReplies(conn, run1)).detected).toBe(1);
-    await event("$h", OWN, min(2), "typed on my phone");
+    await event("$h", OWN, min(2), "Hey Noah, it's Kevin, typed on my phone");
     expect((await detectReplies(conn, run1)).detected).toBe(0); // answered by hand: nobody waiting
     await event("$x", GHOST, min(3), "ok, send me references");
+    const jevBefore = jevCalls;
     const d = await detectReplies(conn, run1);
-    expect(d).toMatchObject({ detected: 1, skipped: [] });
+    expect(d).toMatchObject({ detected: 0, skipped: [{ reason: "human_in_conversation", roomId: ROOM }] });
+    expect(jevCalls).toBe(jevBefore);
+    // Later on, still the human's conversation.
+    await event("$y", OWN, min(4), "sure, here they are");
+    await event("$z", GHOST, min(5), "great, can we book a call?");
+    expect((await detectReplies(conn, run1)).skipped).toEqual([{ reason: "human_in_conversation", roomId: ROOM }]);
     await deliverDueReplies();
-    expect(campaignCalls.map((c) => c.body.idempotencyKey)).toEqual(["crm:matrix:reply:$a", "crm:matrix:reply:$x"]);
-    expect(campaignCalls[1].body).toMatchObject({ offerId: OFFER, item: { campaignId: CAMPAIGN, openedBy: "campaign" } });
+    expect(campaignCalls.map((c) => c.body.idempotencyKey)).toEqual(["crm:matrix:reply:$a"]);
+    expect((await reports()).find((r) => r.anchorEventId === "$x")).toMatchObject({ status: "skipped", reason: "human_in_conversation" });
   });
 
   it("history of a thread no campaign opened (mirrored before the open watch started) is never reported; a later message is", async () => {

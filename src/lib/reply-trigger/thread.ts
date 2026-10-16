@@ -13,8 +13,9 @@
  *  - the person's words since the last outbound message are ONE burst: three
  *    messages in a row are one answer to give, not three;
  *  - ANY outbound message ends the burst: one of our sends, or a message the
- *    account typed by hand on the phone. A hand-typed message is just one of
- *    our messages: the person's next words are a new burst;
+ *    account typed by hand on the phone (the person's next words are a new
+ *    burst; that burst is then skipped `human_in_conversation` by the watch:
+ *    a human of the brand took the conversation, HUMAN-IN-THREAD-1016);
  *  - only words a human wrote count (`humanText`): a bridge notice, an
  *    uncaptioned photo, an edit of an earlier message are not an answer. A
  *    reaction is not a message at all.
