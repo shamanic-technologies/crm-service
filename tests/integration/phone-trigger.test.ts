@@ -32,6 +32,8 @@ process.env.CAMPAIGN_SERVICE_URL = "http://campaign.test";
 process.env.CAMPAIGN_SERVICE_API_KEY = "campaign-key";
 process.env.BRAND_SERVICE_URL = "http://brand.test";
 process.env.BRAND_SERVICE_API_KEY = "brand-key";
+process.env.CLIENT_SERVICE_URL = "http://client.test";
+process.env.CLIENT_SERVICE_API_KEY = "client-key";
 process.env.PHONE_TRIGGER_REFRESH = "off";
 
 const json = (body: unknown, status = 200) =>
@@ -65,6 +67,7 @@ function installFetchStub() {
       return json({ offers: [{ offerId: OFFER, name: "A", description: null, status: "active" }] });
     }
     if (url.host === "brand.test" && url.pathname.endsWith("/sales-rep")) return json({ salesRepPhone: SALES_REP });
+    if (url.host === "client.test" && url.pathname === "/internal/users") return json({ users: [], total: 0 });
     if (url.host === "campaign.test" && url.pathname === "/internal/trigger-events") {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       campaignCalls.push(body);
@@ -126,7 +129,7 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
       .returning();
     // History: a Clerk user who gave a number before the watch existed.
     await db.insert(contacts).values({
-      orgId: ORG, brandId: BRAND, source: "clerk", externalId: "user_old", phoneE164: "+447700900001",
+      orgId: ORG, brandId: BRAND, source: "clerk", externalId: "user_old", phoneE164: "+447911123001",
       primaryEmail: "old@example.com", rawAttributes: {}, sourceConnectionId: clerkConn,
     });
     installFetchStub();
@@ -142,14 +145,14 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     expect(pass.baselined.find((b) => b.artifactId === clerkConn)).toMatchObject({ phones: 1 });
     const rows = await reports();
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ phone: "+447700900001", status: "skipped", reason: "before_watch" });
+    expect(rows[0]).toMatchObject({ phone: "+447911123001", status: "skipped", reason: "before_watch" });
     await runPhoneWatchPass(min(1));
     expect(campaignCalls).toHaveLength(0);
   });
 
   it("a Clerk user gaining public_metadata.phone is reported once, within the pass, and never again", async () => {
     await runPhoneWatchPass(T0);
-    clerkUsers = [clerkUser("user_new", "+44 7700 900002", min(1)), clerkUser("user_stale", "+447700900009", T0 - 3_600_000)];
+    clerkUsers = [clerkUser("user_new", "+44 7911 123002", min(1)), clerkUser("user_stale", "+447911123009", T0 - 3_600_000)];
     const pass = await runPhoneWatchPass(min(2));
     expect(pass.mirrored.find((m) => m.connectionId === clerkConn)).toMatchObject({ changed: 1 });
     expect(campaignCalls).toHaveLength(1);
@@ -157,11 +160,11 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
       triggerId: PHONE_GIVEN_TRIGGER,
       brandId: BRAND,
       offerId: OFFER,
-      idempotencyKey: `crm:phone_given:${BRAND}:+447700900002`,
-      person: { phone: "+447700900002", email: "user_new@example.com", name: "Test user_new" },
-      item: { kind: "phone_given", phone: "+447700900002", firstName: "Test", lastName: "user_new", source: "clerk", sourceContactId: "user_new" },
+      idempotencyKey: `crm:phone_given:${BRAND}:+447911123002`,
+      person: { phone: "+447911123002", email: "user_new@example.com", name: "Test user_new" },
+      item: { kind: "phone_given", phone: "+447911123002", firstName: "Test", lastName: "user_new", source: "clerk", sourceContactId: "user_new" },
     });
-    const [row] = (await reports()).filter((r) => r.phone === "+447700900002");
+    const [row] = (await reports()).filter((r) => r.phone === "+447911123002");
     expect(row).toMatchObject({ status: "reported", campaignEventId: "ev-1" });
     // Further passes (same user listed again, a full re-sync) report nothing.
     await runPhoneWatchPass(min(3));
@@ -173,35 +176,35 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     await runPhoneWatchPass(T0);
     posthogPersons = [{
       id: "ph-anon-1", email: null, name: "Marie Curie", first_name: "Marie", last_name: "Curie", created_at: new Date(T0).toISOString(),
-      prop_phone: "+447700900003", prop_phone_number: null, prop_phoneNumber: null, is_identified: false, distinct_ids: ["anon-abc"],
+      prop_phone: "+447911123003", prop_phone_number: null, prop_phoneNumber: null, is_identified: false, distinct_ids: ["anon-abc"],
     }];
     await runPhoneWatchPass(min(1));
     const [c] = await db.select().from(contacts).where(and(eq(contacts.brandId, BRAND), eq(contacts.source, "posthog")));
-    expect(c).toMatchObject({ phoneE164: "+447700900003", primaryEmail: null });
+    expect(c).toMatchObject({ phoneE164: "+447911123003", primaryEmail: null });
     expect((c.rawAttributes as Record<string, unknown>).phoneOnly).toBe(true);
     expect(campaignCalls).toHaveLength(1);
-    expect(campaignCalls[0]).toMatchObject({ person: { phone: "+447700900003", name: "Marie Curie" }, item: { source: "posthog", firstName: "Marie", lastName: "Curie" } });
+    expect(campaignCalls[0]).toMatchObject({ person: { phone: "+447911123003", name: "Marie Curie" }, item: { source: "posthog", firstName: "Marie", lastName: "Curie" } });
     expect((campaignCalls[0].person as Record<string, unknown>).email).toBeUndefined();
 
-    clerkUsers = [clerkUser("user_signup", "+447700900003", min(5))];
+    clerkUsers = [clerkUser("user_signup", "+447911123003", min(5))];
     await runPhoneWatchPass(min(6));
     expect(campaignCalls).toHaveLength(1);
-    expect((await reports()).filter((r) => r.phone === "+447700900003")).toHaveLength(1);
+    expect((await reports()).filter((r) => r.phone === "+447911123003")).toHaveLength(1);
   });
 
   it("staff, the brand's own numbers and a number learned from a chat are never reported", async () => {
     await runPhoneWatchPass(T0);
     await db.insert(contacts).values([
-      { orgId: ORG, brandId: BRAND, source: "clerk", externalId: "user_staff", phoneE164: "+447700900004", primaryEmail: "kevin@distribute.you", rawAttributes: {}, sourceConnectionId: clerkConn },
+      { orgId: ORG, brandId: BRAND, source: "clerk", externalId: "user_staff", phoneE164: "+447911123004", primaryEmail: "kevin@distribute.you", rawAttributes: {}, sourceConnectionId: clerkConn },
       { orgId: ORG, brandId: BRAND, source: "clerk", externalId: "user_rep", phoneE164: SALES_REP, primaryEmail: "rep@example.com", rawAttributes: {}, sourceConnectionId: clerkConn },
-      { orgId: ORG, brandId: BRAND, source: "matrix", channel: "whatsapp", channelHandle: "@whatsapp_447700900005:hs", phoneE164: "+447700900005", rawAttributes: {}, sourceConnectionId: "fefefefe-1111-4111-8111-0000000000c1" },
+      { orgId: ORG, brandId: BRAND, source: "matrix", channel: "whatsapp", channelHandle: "@whatsapp_447911123005:hs", phoneE164: "+447911123005", rawAttributes: {}, sourceConnectionId: "fefefefe-1111-4111-8111-0000000000c1" },
     ]);
     await runPhoneWatchPass(min(1));
     expect(campaignCalls).toHaveLength(0);
     const byPhone = new Map((await reports()).map((r) => [r.phone, r]));
-    expect(byPhone.get("+447700900004")).toMatchObject({ status: "skipped", reason: "staff" });
+    expect(byPhone.get("+447911123004")).toMatchObject({ status: "skipped", reason: "staff" });
     expect(byPhone.get(SALES_REP)).toMatchObject({ status: "skipped", reason: "own_team" });
-    expect(byPhone.get("+447700900005")).toMatchObject({ status: "skipped", reason: "conversation_channel" });
+    expect(byPhone.get("+447911123005")).toMatchObject({ status: "skipped", reason: "conversation_channel" });
   });
 
   it("an imported file is history, and a source still on its first sync waits", async () => {
@@ -210,34 +213,34 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
       .insert(contactUploads)
       .values({ orgId: ORG, brandId: BRAND, filename: "f.csv", contentHash: "h-phone", columnHeaders: [], runId: "r", status: "promoted" })
       .returning();
-    await db.insert(contacts).values({ orgId: ORG, brandId: BRAND, source: "csv", primaryEmail: "a@example.com", phoneE164: "+447700900006", rawAttributes: {}, sourceUploadId: upload.id });
+    await db.insert(contacts).values({ orgId: ORG, brandId: BRAND, source: "csv", primaryEmail: "a@example.com", phoneE164: "+447911123006", rawAttributes: {}, sourceUploadId: upload.id });
     // A CRM connected now, its first sync still running.
     const [crm] = await db.insert(ghlConnections).values({ orgId: ORG, brandId: BRAND, locationId: "loc-phone", createdByUserId: USER, status: "active" }).returning();
-    await db.insert(contacts).values({ orgId: ORG, brandId: BRAND, source: "gohighlevel", externalId: "ghl-first-sync", phoneE164: "+447700900007", rawAttributes: {}, sourceConnectionId: crm.id });
+    await db.insert(contacts).values({ orgId: ORG, brandId: BRAND, source: "gohighlevel", externalId: "ghl-first-sync", phoneE164: "+447911123007", rawAttributes: {}, sourceConnectionId: crm.id });
     await runPhoneWatchPass(min(1));
     expect(campaignCalls).toHaveLength(0);
     const byPhone = new Map((await reports()).map((r) => [r.phone, r]));
-    expect(byPhone.get("+447700900006")).toMatchObject({ status: "skipped", reason: "before_watch" });
-    expect(byPhone.has("+447700900007")).toBe(false);
+    expect(byPhone.get("+447911123006")).toMatchObject({ status: "skipped", reason: "before_watch" });
+    expect(byPhone.has("+447911123007")).toBe(false);
     // Its first sync done: what it held then is history too.
     await db.update(ghlConnections).set({ lastSyncedAt: new Date(min(2)) }).where(eq(ghlConnections.id, crm.id));
     await runPhoneWatchPass(min(3));
-    expect((await reports()).find((r) => r.phone === "+447700900007")).toMatchObject({ reason: "before_watch" });
+    expect((await reports()).find((r) => r.phone === "+447911123007")).toMatchObject({ reason: "before_watch" });
     expect(campaignCalls).toHaveLength(0);
   });
 
   it("campaign-service unreachable is retried with backoff; a 422 is final", async () => {
     await runPhoneWatchPass(T0);
     campaignStatus = 503;
-    clerkUsers = [clerkUser("user_retry", "+447700900008", min(1))];
+    clerkUsers = [clerkUser("user_retry", "+447911123008", min(1))];
     await runPhoneWatchPass(min(2));
-    let [row] = (await reports()).filter((r) => r.phone === "+447700900008");
+    let [row] = (await reports()).filter((r) => r.phone === "+447911123008");
     expect(row).toMatchObject({ status: "failed", reason: "campaign_unreachable", attempts: 1 });
     await runPhoneWatchPass(min(2) + 30_000); // inside the 1-min backoff: not retried
     expect(campaignCalls).toHaveLength(1);
     campaignStatus = 201;
     await runPhoneWatchPass(min(4));
-    [row] = (await reports()).filter((r) => r.phone === "+447700900008");
+    [row] = (await reports()).filter((r) => r.phone === "+447911123008");
     expect(row).toMatchObject({ status: "reported", attempts: 2 });
     expect(campaignCalls).toHaveLength(2);
     expect(campaignCalls[1].idempotencyKey).toBe(campaignCalls[0].idempotencyKey);

@@ -47,7 +47,7 @@ function submission(id: string, createdAt: string, formId = META_FORM, extra: Re
     formId,
     contactId: `contact-${id}`,
     createdAt,
-    others: { phone: "+15550100199", fieldsOriSequance: ["MfQa5Fl4DCvkUHR3wZrE", "button"], MfQa5Fl4DCvkUHR3wZrE: "Chiropractor", ...extra },
+    others: { phone: "+12126647665", fieldsOriSequance: ["MfQa5Fl4DCvkUHR3wZrE", "button"], MfQa5Fl4DCvkUHR3wZrE: "Chiropractor", ...extra },
   };
 }
 
@@ -150,7 +150,7 @@ describe.skipIf(!RUN)("form trigger watch", () => {
       offerId: OFFER_A,
       idempotencyKey: "crm:gohighlevel:form_submission:new-1",
     });
-    expect(call.body.person).toEqual({ email: "new-1@example.com", name: "Person new-1", phone: "+15550100199", crmContact: { provider: "gohighlevel", contactId: "contact-new-1" } });
+    expect(call.body.person).toEqual({ email: "new-1@example.com", name: "Person new-1", phone: "+12126647665", crmContact: { provider: "gohighlevel", contactId: "contact-new-1" } });
     expect(JSON.stringify(call.body)).toContain("Which profession best describes you?");
     expect(JSON.stringify(call.body)).toContain("Meta Ads");
 
@@ -249,9 +249,9 @@ describe.skipIf(!RUN)("form trigger watch", () => {
     const pass = await runFormWatchPass(min(2));
     expect(pass.connections.find((c) => c.connectionId === connId)).toMatchObject({ detected: 1, skippedNoEmail: 1 });
     expect(campaignCalls).toHaveLength(1);
-    expect(campaignCalls[0].body.person).toEqual({ name: "Person phone-only", phone: "+15550100199", crmContact: { provider: "gohighlevel", contactId: "contact-phone-only" } });
+    expect(campaignCalls[0].body.person).toEqual({ name: "Person phone-only", phone: "+12126647665", crmContact: { provider: "gohighlevel", contactId: "contact-phone-only" } });
     const rows = await reports();
-    expect(rows.find((r) => r.submissionId === "phone-only")).toMatchObject({ status: "reported", email: null, phone: "+15550100199" });
+    expect(rows.find((r) => r.submissionId === "phone-only")).toMatchObject({ status: "reported", email: null, phone: "+12126647665" });
     expect(rows.find((r) => r.submissionId === "nobody")).toMatchObject({ status: "skipped", reason: "no_email_or_phone" });
   });
 

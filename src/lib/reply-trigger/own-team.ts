@@ -11,7 +11,9 @@
  *  - one of the brand's linked WhatsApp accounts (`matrix_links.remote_login_id`,
  *    the bridge names a WhatsApp login by its phone digits), or
  *  - the brand's stated sales rep phone, READ from brand-service (its owner),
- *    never copied here.
+ *    never copied here, or
+ *  - the phone of any MEMBER of the org (client-service, `org-members.ts`,
+ *    OWN-TEAM-GMAIL-1016).
  *
  * Numbers are compared on their digits (`+33 7 70…`, `0033770…` and
  * `33770…` are one number).
@@ -20,6 +22,7 @@ import { and, eq, isNotNull } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { matrixLinks } from "../../db/schema.js";
 import { siblingGet, SiblingError, type SiblingIdentity } from "../people/siblings.js";
+import { readOrgMembers } from "../org-members.js";
 
 /** PURE: a phone as its bare digits (international form), or null when it holds none worth comparing. */
 export function phoneDigits(phone: string | null | undefined): string | null {
@@ -42,7 +45,7 @@ export function ownTeamMatch(phones: (string | null | undefined)[], team: OwnTea
 
 /**
  * The brand's own numbers. Throws when brand-service cannot say who the sales
- * rep is: the caller then reports nothing this pass rather than risk answering
+ * rep is, or client-service who the org's members are: the caller then reports nothing this pass rather than risk answering
  * one of our own people (the next pass re-reads the thread).
  */
 export async function readOwnTeam(identity: SiblingIdentity): Promise<OwnTeam> {
@@ -70,5 +73,9 @@ export async function readOwnTeam(identity: SiblingIdentity): Promise<OwnTeam> {
   }
   const rep = phoneDigits((r.body as { salesRepPhone?: string | null } | null)?.salesRepPhone ?? null);
   if (rep) team.set(rep, "the brand's sales rep phone");
+  for (const p of (await readOrgMembers(identity)).phones) {
+    const d = phoneDigits(p);
+    if (d && !team.has(d)) team.set(d, "a member of the org");
+  }
   return team;
 }

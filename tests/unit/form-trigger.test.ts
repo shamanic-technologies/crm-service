@@ -14,7 +14,7 @@ const META_ADS = {
   createdAt: "2026-10-07T14:34:21.802Z",
   others: {
     formId: "rfJqRLuLSDXDxfbEcA1T",
-    phone: "+1 (555) 010-0199",
+    phone: "+1 (212) 664-7665",
     full_name: "Jane Doe",
     eventData: { medium: "form", parentName: "Meta Ads" },
     sessionId: "98e8ce2c",
@@ -43,7 +43,7 @@ describe("submission", () => {
     expect(submissionPerson(META_ADS)).toEqual({
       fullName: "Jane Doe",
       email: "jane.doe@example.com",
-      phone: "+15550100199",
+      phone: "+12126647665",
       sourceContactId: "gI9vezTMfelEsjhOymtt",
     });
   });
@@ -95,7 +95,7 @@ describe("occurrenceBody", () => {
     const body = occurrenceBody({
       orgId: "o", userId: "u", runId: "r", brandId: "b", offerId: "of",
       source: "gohighlevel", submissionId: "s1", submittedAt: new Date("2026-10-07T14:34:21.802Z"),
-      person: { fullName: "Jane Doe", email: "jane@x.com", phone: "+15550100199", sourceContactId: "c1", crmContactId: null },
+      person: { fullName: "Jane Doe", email: "jane@x.com", phone: "+12126647665", sourceContactId: "c1", crmContactId: null },
       form: { formId: "f1", formName: "Meta Ads", answers: [{ key: "k", label: "L", value: "v" }] },
     });
     expect(body).toMatchObject({
@@ -105,7 +105,7 @@ describe("occurrenceBody", () => {
       idempotencyKey: "crm:gohighlevel:form_submission:s1",
       occurredAt: "2026-10-07T14:34:21.802Z",
     });
-    expect(body.person).toEqual({ email: "jane@x.com", name: "Jane Doe", phone: "+15550100199", crmContact: { provider: "gohighlevel", contactId: "c1" } });
+    expect(body.person).toEqual({ email: "jane@x.com", name: "Jane Doe", phone: "+12126647665", crmContact: { provider: "gohighlevel", contactId: "c1" } });
     expect(body.item).toMatchObject({ formName: "Meta Ads", submissionId: "s1", crmContactId: null, answers: [{ key: "k", label: "L", value: "v" }] });
   });
 
@@ -115,8 +115,8 @@ describe("occurrenceBody", () => {
       source: "gohighlevel", submissionId: "s2", submittedAt: new Date("2026-10-07T14:34:21.802Z"),
       form: { formId: "f1", formName: "Meta Ads", answers: [] },
     };
-    const body = occurrenceBody({ ...base, person: { fullName: "Jane Doe", email: null, phone: "+1 (555) 010-0199", sourceContactId: null, crmContactId: null } });
-    expect(body.person).toEqual({ name: "Jane Doe", phone: "+15550100199" });
+    const body = occurrenceBody({ ...base, person: { fullName: "Jane Doe", email: null, phone: "+1 (212) 664-7665", sourceContactId: null, crmContactId: null } });
+    expect(body.person).toEqual({ name: "Jane Doe", phone: "+12126647665" });
   });
 });
 

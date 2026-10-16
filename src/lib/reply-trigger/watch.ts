@@ -57,6 +57,7 @@ import { createRun, updateRun } from "../runs-client.js";
 import {
   CampaignRefusal,
   campaignServiceConfigured,
+  dialablePhone,
   doorPersonKey,
   FINAL_REFUSAL_STATUSES,
   NO_EMAIL_OR_PHONE,
@@ -651,7 +652,9 @@ export async function deliverReply(
     .where(and(eq(whatsappSends.connectionId, r.connectionId), eq(whatsappSends.roomId, r.roomId), eq(whatsappSends.status, "sent")));
   const held = new Set(person.emails.map((e) => normalizeEmail(e)).filter((e): e is string => !!e));
   const email = sentTo.map((s) => normalizeEmail(s.email)).find((e): e is string => !!e && held.has(e)) ?? [...held][0] ?? null;
-  const phone = person.presences.find((p) => p.source === "matrix" && p.detail.conversationId === r.conversationId)?.phones[0] ?? person.phones[0] ?? null;
+  // The thread's own number first, else the person's: the first DIALABLE one (never an id read as a phone).
+  const threadPhones = person.presences.find((p) => p.source === "matrix" && p.detail.conversationId === r.conversationId)?.phones ?? [];
+  const phone = dialablePhone([...threadPhones, ...person.phones]);
   // Named by email when held, else by their E.164 phone (a WhatsApp writer usually has only that).
   const key = doorPersonKey(email, phone);
   const who = { personId: person.personId, fullName: person.displayName, email, phone: key?.phone ?? phone, conversationId: r.conversationId };

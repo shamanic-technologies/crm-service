@@ -6,6 +6,7 @@
  * many times needs no model.
  */
 
+import { isValidPhoneNumber } from "libphonenumber-js/max";
 import type { MatrixEvent } from "./client.js";
 
 export const MATRIX_CHANNELS = ["whatsapp", "telegram", "discord", "linkedin"] as const;
@@ -260,11 +261,18 @@ export function unescapeLocalpart(local: string): string {
  * mautrix-whatsapp encodes the counterpart's phone number in the ghost MXID
  * localpart (`@whatsapp_33612345678:hs` → `+33612345678`). Other bridges use
  * opaque ids, so this returns null for them — deterministically, never a guess.
+ * ⚠️ A Telegram ghost is ALSO all digits (`@telegram_1501657753`, the Telegram
+ * USER id): read as a phone it rang "+1501657753" on an AI Instant Call
+ * (OWN-TEAM-GMAIL-1016). Only a WhatsApp ghost names a phone, and only a number
+ * valid under its country's plan is one.
  */
+export const WHATSAPP_GHOST_PREFIX = "@whatsapp_";
+
 export function phoneFromMxid(mxid: string, counterpartPrefix: string): string | null {
-  if (!mxid.startsWith(counterpartPrefix)) return null;
+  if (counterpartPrefix !== WHATSAPP_GHOST_PREFIX || !mxid.startsWith(counterpartPrefix)) return null;
   const localpart = mxid.slice(counterpartPrefix.length).split(":")[0] ?? "";
-  return /^\d{6,20}$/.test(localpart) ? `+${localpart}` : null;
+  if (!/^\d{6,20}$/.test(localpart)) return null;
+  return isValidPhoneNumber(`+${localpart}`) ? `+${localpart}` : null;
 }
 
 /** Split a display name into first / last, same light rule the CSV path uses. */

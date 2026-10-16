@@ -12,6 +12,7 @@
  * campaign-service's FIRST event (`replayed: true`) and nothing fires twice.
  */
 
+import { isValidPhoneNumber } from "libphonenumber-js/max";
 import { normalizePhone } from "./people/identity.js";
 
 const TIMEOUT_MS = Number(process.env.CAMPAIGN_SERVICE_TIMEOUT_MS) || 30_000;
@@ -24,16 +25,32 @@ const TIMEOUT_MS = Number(process.env.CAMPAIGN_SERVICE_TIMEOUT_MS) || 30_000;
 export const NO_EMAIL_OR_PHONE = "no_email_or_phone";
 
 /**
+ * The first of these numbers a person can be CALLED back on: E.164 and valid
+ * under its country's numbering plan (libphonenumber, full metadata). Every
+ * other one is logged loud and never offered (OWN-TEAM-GMAIL-1016: an AI
+ * Instant Call offered "+1501657753", a Telegram user id read as a phone).
+ */
+export function dialablePhone(phones: (string | null | undefined)[]): string | null {
+  for (const raw of phones) {
+    if (!raw) continue;
+    const e164 = normalizePhone(raw);
+    if (e164 && isValidPhoneNumber(e164)) return e164;
+    console.warn(`[crm-service][trigger-door] phone ${JSON.stringify(raw)} is not a dialable number: never offered to campaign-service`);
+  }
+  return null;
+}
+
+/**
  * How the door names a person (campaign-service v0.75.81, any trigger): by
- * email when one is held (byte-identical to before), else by an E.164 phone
- * (`+` + country code). Null = neither: nobody campaign-service can file.
- * A national number carries no country and is no phone the door accepts.
- * Never an email made up from a phone.
+ * email when one is held, else by an E.164 phone (`+` + country code). The
+ * phone travels only when it is DIALABLE (`dialablePhone`): a national number
+ * carries no country, an impossible one reaches nobody. Null = neither: nobody
+ * campaign-service can file. Never an email made up from a phone.
  */
 export function doorPersonKey(email: string | null | undefined, phone: string | null | undefined): { email: string | null; phone: string | null } | null {
-  if (email) return { email, phone: phone ?? null };
-  const e164 = normalizePhone(phone);
-  return e164 ? { email: null, phone: e164 } : null;
+  const dial = dialablePhone([phone]);
+  if (email) return { email, phone: dial };
+  return dial ? { email: null, phone: dial } : null;
 }
 
 export interface DoorIdentity {

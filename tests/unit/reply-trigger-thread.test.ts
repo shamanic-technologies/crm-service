@@ -114,10 +114,10 @@ describe("replyOccurrenceBody", () => {
       brandId: "b",
       offerId: "of",
       report: { anchorEventId: "$p", channel: "whatsapp", campaignId: null, conversationId: "c1", roomId: "!r", source: "matrix" },
-      person: { email: null, name: "Velveteen (WA)", phone: "+447700900123", personId: "p1" },
+      person: { email: null, name: "Velveteen (WA)", phone: "+447911123123", personId: "p1" },
       messages: [{ eventId: "$p", at: "2026-10-15T15:37:59.000Z", text: "Hi" }],
     });
-    expect(body.person).toEqual({ name: "Velveteen (WA)", phone: "+447700900123" });
+    expect(body.person).toEqual({ name: "Velveteen (WA)", phone: "+447911123123" });
     expect(body.triggerId).toBe("positive_reply_received");
   });
 
