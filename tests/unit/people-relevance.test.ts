@@ -8,6 +8,8 @@ import {
   judgeConversation,
   needsJudgment,
   personRelevance,
+  readBrandContext,
+  threadWindow,
   type BrandContext,
   type ConversationInput,
   type RecordedVerdict,
@@ -214,5 +216,126 @@ describe("clip", () => {
     expect(out).toBe("a".repeat(399) + "😀…");
     expect(clip("broken \uD83D end")).toBe("broken \uFFFD end");
     expect(clip("short")).toBe("short");
+  });
+});
+
+describe("WA-LEAD-RELEVANCE-1016: a supplier or another activity of the owner is not a lead of the brand", () => {
+  const context: BrandContext = {
+    brand: { name: "Distribute.you", website: "distribute.you", description: null },
+    offers: [
+      {
+        offerId: "offer-a",
+        name: "Product-led",
+        description: null,
+        profile: { dreamOutcome: "Meetings on your calendar with buyers who asked for them.", services: "Autonomous multi-channel acquisition" },
+      },
+    ],
+    otherBrandsOfTheSameOwner: [],
+    hash: "h",
+  };
+  const tracking = { orgId: "o", userId: "u", runId: "r", brandIds: ["b"] };
+  const thread = (texts: [string, string][]): ConversationInput => ({
+    key: "matrix:c1",
+    source: "matrix",
+    judgedThrough: "e1",
+    channel: "whatsapp",
+    counterpart: { names: [], email: null, phone: null },
+    messages: texts.map(([direction, text]) => ({ at: null, direction, text })),
+  });
+  // Prod 2026-10-16 (live Jev, before -> after): Vino Shan's no2bounce pitch 0.87 -> 0.00,
+  // Faysal's Brazil residency 0.81 -> 0.13, a Da Nang co-living room 0.50 -> 0.00.
+  const SUPPLIER = thread([
+    ["inbound", "Hi Kevin, I'm Vino from no2bounce. Our email validation SaaS beats ZeroBounce on price, want a free trial?"],
+    ["outbound", "Thanks, not now"],
+  ]);
+  const OTHER_ACTIVITY = thread([
+    ["inbound", "What are the fees for the Brazil residency? Is the fast track visa possible from Dubai?"],
+    ["outbound", "Fast track is $15,000 fees, I'll send the invoice"],
+  ]);
+  let body: { state: { offers: { whatItSells: Record<string, string> | null }[] }; questions: { topic: { instructions: string; criteria: Record<string, string> } } } | null =
+    null;
+  function stubJev(probabilities: Record<string, number>) {
+    process.env.CHAT_SERVICE_URL = "http://chat.test";
+    process.env.CHAT_SERVICE_API_KEY = "k";
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      body = JSON.parse(String(init.body));
+      return new Response(
+        JSON.stringify({
+          model: "jev-test",
+          answers: { topic: { type: "choice", choice: "other_business", confidence: 0.9, probabilities }, o0: { type: "noul", noul: 0.6 } },
+        }),
+        { status: 200 },
+      );
+    });
+  }
+  afterEach(() => vi.unstubAllGlobals());
+
+  for (const [name, input] of [["a vendor pitching its own product", SUPPLIER], ["the owner's other activity (residency help)", OTHER_ACTIVITY]] as const) {
+    it(`${name}: Jev is shown what the brand sells and told such a thread is other work, and its answer hides it`, async () => {
+      stubJev({ personal: 0.02, other_business: 0.9, this_brand: 0.08 });
+      const v = await judgeConversation(input, context, tracking);
+      expect(body!.state.offers[0].whatItSells).toEqual(context.offers[0].profile);
+      const topic = body!.questions.topic;
+      expect(topic.criteria.other_business).toMatch(/SELLER and the owner the buyer/);
+      expect(topic.criteria.other_business).toMatch(/OTHER activities/);
+      expect(topic.criteria.other_business).toMatch(/residency or visa help/);
+      expect(topic.criteria.other_business).toMatch(/co-living/);
+      expect(topic.instructions).toMatch(/who pays whom/);
+      expect(hidesConversation(v)).toBe(true);
+      expect(v.offerIds).toEqual([]);
+    });
+  }
+
+  it("a client whose account the owner runs stays this brand's lead (Senthil, Olive)", async () => {
+    stubJev({ personal: 0, other_business: 0.02, this_brand: 0.98 });
+    await judgeConversation(thread([["outbound", "Your credit ran out, add $100 in Billing and we match it"]]), context, tracking);
+    expect(body!.questions.topic.criteria.this_brand).toMatch(/A CLIENT or user stays a sales lead/);
+    // A client of the brand's service is not "work for another company".
+    expect(body!.questions.topic.criteria.other_business).not.toMatch(/runs or serves/);
+  });
+});
+
+describe("threadWindow", () => {
+  it("keeps the first 10 (where the deal is named) and the last 20 (where it stands), oldest first", () => {
+    const all = Array.from({ length: 50 }, (_, i) => i);
+    expect(threadWindow(all)).toEqual([...all.slice(0, 10), ...all.slice(30)]);
+    expect(threadWindow(all.slice(0, 30))).toEqual(all.slice(0, 30));
+  });
+});
+
+describe("readBrandContext", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("reads each ACTIVE offer's brand profile (what it sells), kept out of the hash", async () => {
+    process.env.BRAND_SERVICE_URL = "http://brand.test";
+    process.env.BRAND_SERVICE_API_KEY = "k";
+    const asked: string[] = [];
+    let dream = "Meetings on your calendar.";
+    vi.stubGlobal("fetch", async (url: string) => {
+      const u = new URL(url);
+      asked.push(u.pathname + u.search);
+      const json = (b: unknown) => new Response(JSON.stringify(b), { status: 200, headers: { "content-type": "application/json" } });
+      if (u.pathname.endsWith("/offers")) {
+        return json({
+          offers: [
+            { offerId: "o-active", name: "Product-led", description: null, status: "active" },
+            { offerId: "o-archived", name: "Angel round", description: null, status: "archived" },
+          ],
+        });
+      }
+      if (u.pathname.endsWith("/runtime-context")) {
+        return json({ brand: {}, brandProfile: { fields: { dreamOutcome: dream, services: ["Acquisition", "Cold email"], empty: " " } } });
+      }
+      if (u.pathname === "/orgs/brands") return json({ brands: [] });
+      if (u.pathname.endsWith("/extracted-fields")) return json({ fields: [] });
+      return json({ brand: { name: "Distribute.you", domain: "distribute.you", url: null } });
+    });
+    const identity = { orgId: "o", brandId: "b", userId: "u", runId: "r" };
+    const ctx = await readBrandContext(identity);
+    expect(asked.filter((a) => a.includes("runtime-context"))).toEqual(["/internal/brands/b/runtime-context?offerId=o-active"]);
+    expect(ctx.offers).toEqual([
+      { offerId: "o-active", name: "Product-led", description: null, profile: { dreamOutcome: dream, services: "Acquisition; Cold email" } },
+    ]);
+    dream = "Meetings, worded differently after a re-extraction.";
+    expect((await readBrandContext(identity)).hash).toBe(ctx.hash);
   });
 });
