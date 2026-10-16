@@ -28,6 +28,7 @@ import { bridgeSaysNoSuchNumber } from "./number-validity.js";
 import { alertRefusal } from "./staff-alert.js";
 import { connectedOnly, linkedWhatsappAccounts, personaOf, type SenderPersona, type WhatsappAccount } from "./accounts.js";
 import { recordGhostPhone } from "./phone-resolution.js";
+import { humanTypedTo } from "../matrix/human-takeover.js";
 import { joinRoom, readRoomBridgeInfo, sendText } from "../matrix/client.js";
 import { expectedChannelIds, roomDeliversTo } from "./room-check.js";
 import { emailKey, normalizeEmail, normalizePhone, phoneKey, type Presence } from "../people/identity.js";
@@ -51,6 +52,13 @@ export const SEND_REFUSAL_CODES = [
   "not_on_whatsapp",
   /** `skipIfReplied` and the person has written to the brand on some channel. */
   "person_replied",
+  /**
+   * A human of the brand typed a message by hand to this person on WhatsApp
+   * (any linked account): the conversation is theirs, automation never writes
+   * into it (HUMAN-IN-THREAD-1016, lib/matrix/human-takeover.ts). Brand-side:
+   * nothing is wrong with the number. Nothing is sent.
+   */
+  "human_in_conversation",
   /** Another call with the same idempotency key is sending right now. */
   "send_in_progress",
   /**
@@ -373,7 +381,8 @@ interface Reach {
  * phone (`no_phone_known`), `skipIfReplied` (`person_replied`), the brand's
  * linked + connected accounts (`whatsapp_not_linked` / `whatsapp_not_connected`),
  * then ONE bridge `resolve_identifier` (`not_on_whatsapp`, a number that cannot
- * exist included). Throws the SendRefusal the send answers; a bridge failure on
+ * exist included), then a human of the brand already typing to them by hand
+ * (`human_in_conversation`). Throws the SendRefusal the send answers; a bridge failure on
  * a valid number propagates as BridgeError. `onPhone` lets the send record the
  * phone on its row the moment it is known. Sends nothing.
  */
@@ -420,6 +429,23 @@ async function resolveReach(req: ReachRequest, onPhone?: (phone: string, source:
   // 4. The bridge said this ghost IS this number: recorded, so the mirrored
   //    thread carries the phone and merges with the person.
   await recordGhostPhone(who.mxid, phone, req.orgId, req.brandId);
+
+  // 5. A human of the brand talks to this person by hand: their conversation, never automation's.
+  const ghosts = (await db.execute(sql`
+    SELECT ghost_mxid FROM matrix_ghost_phones WHERE phone = ${phone}
+  `)) as unknown as { ghost_mxid: string }[];
+  const human = await humanTypedTo({
+    orgId: req.orgId,
+    brandId: req.brandId,
+    channel: "whatsapp",
+    ghosts: [who.mxid, ...ghosts.map((g) => g.ghost_mxid)],
+  });
+  if (human) {
+    throw new SendRefusal(
+      "human_in_conversation",
+      `Someone of the brand wrote to ${phone} by hand on WhatsApp (last on ${human.at}): the conversation is theirs, no automated message is sent.`,
+    );
+  }
   return { phone, phoneSource, accounts, who };
 }
 

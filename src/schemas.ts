@@ -3077,9 +3077,13 @@ const WhatsappRefusalSchema = z.object({
     "no_phone_known",
     "not_on_whatsapp",
     "person_replied",
+    "human_in_conversation",
     "send_in_progress",
     "wrong_room",
-  ]),
+  ]).openapi({
+    description:
+      "`human_in_conversation`: someone of the brand typed a message by hand to this person on WhatsApp (any linked account); the conversation is theirs and automation never writes into it. Brand-side, not the number's fault.",
+  }),
   error: z.string(),
 });
 
@@ -3125,7 +3129,7 @@ export const WhatsappReachResponseSchema = registry.register(
       }),
       z.object({
         reachable: z.literal(false),
-        code: z.enum(["whatsapp_not_linked", "whatsapp_not_connected", "automation_not_allowed", "no_phone_known", "not_on_whatsapp", "person_replied"]).openapi({
+        code: z.enum(["whatsapp_not_linked", "whatsapp_not_connected", "automation_not_allowed", "no_phone_known", "not_on_whatsapp", "person_replied", "human_in_conversation"]).openapi({
           description: "The refusal code POST /orgs/whatsapp/messages would answer for this person now.",
         }),
         error: z.string(),

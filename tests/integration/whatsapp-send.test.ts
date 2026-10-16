@@ -11,6 +11,7 @@ import {
   matrixConnections,
   matrixGhostPhones,
   matrixLinks,
+  matrixRawEvents,
   people,
   peopleScopes,
   staffAlerts,
@@ -161,6 +162,7 @@ async function wipe() {
   await db.delete(conversations).where(eq(conversations.orgId, ORG));
   await db.delete(whatsappPhoneLookups).where(inArray(whatsappPhoneLookups.phone, ["+33600000001", "+33600000002", "+33699999999", "+2541110229905"]));
   await db.delete(staffAlerts).where(like(staffAlerts.alertKey, "%babababa-1111-4111-8111-%"));
+  await db.delete(matrixRawEvents).where(eq(matrixRawEvents.orgId, ORG));
   await db.delete(matrixLinks).where(eq(matrixLinks.orgId, ORG));
   await db.delete(matrixConnections).where(eq(matrixConnections.orgId, ORG));
   await db.delete(contactServes).where(eq(contactServes.orgId, ORG));
@@ -235,6 +237,15 @@ async function mirroredThread(connectionId: string, ghost: string, messages: num
     lastEventId: "$x",
   });
   return c.id;
+}
+
+/** One message sent AS the brand's account into the mirrored thread of `connectionId` (typed on the phone, or one of our sends mirrored back). */
+async function ownMessage(connectionId: string, matrixUserId: string, eventId: string, body: string) {
+  await db.insert(matrixRawEvents).values({
+    orgId: ORG, brandId: BRAND, connectionId, eventId, roomId: `!room-${connectionId}`, sender: matrixUserId, eventType: "m.room.message",
+    originServerTs: new Date("2026-09-02T00:00:00Z"),
+    payload: { event_id: eventId, type: "m.room.message", sender: matrixUserId, origin_server_ts: Date.parse("2026-09-02T00:00:00Z"), content: { msgtype: "m.text", body } },
+  });
 }
 
 type P = { source: string; phones?: string[]; inboundCount?: number | null; outboundCount?: number | null; detail?: Record<string, unknown> };
@@ -422,6 +433,53 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
     expect(cleared.body.link.persona).toBeNull();
     const empty = await request(app()).patch(`/orgs/matrix/links/${assistant.linkId}`).set(headers).send({ brandId: BRAND });
     expect(empty.status).toBe(400);
+  });
+
+  it("refuses human_in_conversation, nothing sent, when someone of the brand typed to the person by hand on any linked account (HUMAN-IN-THREAD-1016)", async () => {
+    const personal = await linkAccount(ACCOUNT, { linkedAt: new Date("2026-10-01T00:00:00Z") });
+    await linkAccount(ACCOUNT_PRO, { linkedAt: new Date("2026-10-02T00:00:00Z") });
+    await mirroredThread(personal.connectionId, "@whatsapp_lid-1:matrix.test", 3);
+
+    // Only our own automated messages in the thread (one mirrored back by event id, one by its text before
+    // its event id was recorded): the person still gets the follow-up.
+    await db.insert(whatsappSends).values({
+      orgId: ORG, brandId: BRAND, idempotencyKey: "k-earlier", phone: "+33600000001", text: "Welcome to Acme!", status: "sent",
+      connectionId: personal.connectionId, roomId: `!room-${personal.connectionId}`, eventId: "$ours-1", sentAt: new Date("2026-09-02T00:00:00Z"),
+    });
+    await ownMessage(personal.connectionId, ACCOUNT, "$ours-1", "Welcome to Acme!");
+    await ownMessage(personal.connectionId, ACCOUNT, "$ours-2-mirrored-before-recorded", "Welcome to Acme!");
+    const automatedOnly = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000001", text: "Following up", idempotencyKey: "k-follow" });
+    expect(automatedOnly.status).toBe(200);
+    expect(sends).toHaveLength(1);
+
+    // The owner typed to them by hand (on his personal account): his conversation now, on every account.
+    await ownMessage(personal.connectionId, ACCOUNT, "$hand-1", "Hey Noah, Kevin here, let's talk tomorrow");
+    const res = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000001", text: "Following up again", idempotencyKey: "k-follow-2" });
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({ type: "refused", code: "human_in_conversation" });
+    expect(sends).toHaveLength(1);
+    const [row] = await db.select().from(whatsappSends).where(eq(whatsappSends.idempotencyKey, "k-follow-2"));
+    expect(row).toMatchObject({ status: "refused", errorCode: "human_in_conversation" });
+    // A brand-side refusal the brand chose: no staff alert.
+    expect(telegrams).toEqual([]);
+
+    // The reach check answers the same, before any model writes a message.
+    const reach = await request(app()).post("/orgs/whatsapp/reach").set(headers).send({ brandId: BRAND, phone: "+33600000001" });
+    expect(reach.body).toMatchObject({ reachable: false, code: "human_in_conversation" });
+
+    // A brand-new lead (no thread at all) still gets the welcome.
+    const newcomer = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000002", text: "Welcome!", idempotencyKey: "k-new" });
+    expect(newcomer.status).toBe(200);
+    expect(sends).toHaveLength(2);
   });
 
   it("refuses automation_not_allowed, nothing sent, when no linked account allows automated sends (SOPHIE-WA-1016)", async () => {

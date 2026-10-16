@@ -70,6 +70,7 @@ import { phoneFromMxid } from "../matrix/events.js";
 import { readBrandOffers } from "../form-trigger/offer.js";
 import { ownTeamMatch, readOwnTeam, type OwnTeam } from "./own-team.js";
 import { readThreadForReply, type BurstMessage, type RoomSend } from "./thread.js";
+import { humanTypedTo } from "../matrix/human-takeover.js";
 
 const SERVICE_NAME = "crm-service";
 const SOURCE = "matrix";
@@ -140,6 +141,12 @@ export const REPLY_REASONS = {
    * conversation, mirrored for the Unibox, never answered automatically.
    */
   AUTOMATION_NOT_ALLOWED: "automation_not_allowed",
+  /**
+   * A human of the brand typed a message by hand to this person on the channel
+   * (any linked account, HUMAN-IN-THREAD-1016, lib/matrix/human-takeover.ts):
+   * the conversation is theirs, never answered automatically.
+   */
+  HUMAN_IN_CONVERSATION: "human_in_conversation",
   /**
    * The person holds no email AND no international phone: the door cannot name them
    * (REPLY-PHONE-ONLY-1015; a phone-only writer is reported by phone). Older rows say `no_email`.
@@ -418,7 +425,7 @@ export async function detectReplies(
     const fresh = uncovered.filter((m) => (ingested.get(m.eventId) ?? 0) >= since);
     const burst = fresh.length > 0 ? fresh : uncovered;
     const [conversation] = await db
-      .select({ id: conversations.id, contactPhone: contacts.phoneE164 })
+      .select({ id: conversations.id, contactPhone: contacts.phoneE164, ghost: contacts.channelHandle })
       .from(conversations)
       .leftJoin(contacts, eq(contacts.id, conversations.contactId))
       .where(and(eq(conversations.connectionId, conn.id), eq(conversations.roomId, roomId)));
@@ -443,6 +450,16 @@ export async function detectReplies(
     } else if (own) {
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.OWN_TEAM;
+    } else if (
+      await humanTypedTo({
+        orgId: conn.orgId,
+        brandId: conn.brandId,
+        channel: conn.channel,
+        ghosts: [conversation?.ghost ?? "", ...rows.map((r) => r.sender).filter((x) => x !== conn.matrixUserId)],
+      })
+    ) {
+      status = REPLY_STATUS.SKIPPED;
+      reason = REPLY_REASONS.HUMAN_IN_CONVERSATION;
     } else {
       judgment = await judgeBurst(
         { orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId, channel: conn.channel, where: `connection ${conn.id}` },
