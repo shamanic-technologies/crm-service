@@ -210,7 +210,7 @@ function phoneSourceOf(person: PersonView, phone: string): string {
  * The brand's linked WhatsApp accounts allowed for this send (`fromAccount`
  * narrows to one), CONNECTED right now. Refuses with a named code otherwise.
  */
-async function sendableAccounts(req: SendRequest): Promise<WhatsappAccount[]> {
+async function sendableAccounts(req: ReachRequest): Promise<WhatsappAccount[]> {
   const wanted = req.fromAccount ? digitsOf(req.fromAccount) : null;
   const linked = (await linkedWhatsappAccounts(req.orgId, req.brandId)).filter((a) => !wanted || digitsOf(a.loginId) === wanted);
   if (linked.length === 0) {
@@ -257,7 +257,7 @@ export async function chooseAccount(accounts: WhatsappAccount[], ghostMxid: stri
 }
 
 /** Has the person written to the brand: any channel (people), or on WhatsApp since the last mirror read. */
-async function hasReplied(req: SendRequest, person: PersonView | null, phone: string): Promise<boolean> {
+async function hasReplied(req: ReachRequest, person: PersonView | null, phone: string): Promise<boolean> {
   if (person && personReplied(person.presences)) return true;
   // The people index is rebuilt every 15 min; the WhatsApp mirror every 5. Read
   // the mirror directly for an answer to a message we sent.
@@ -328,6 +328,99 @@ async function verifiedRoom(
   throw new SendRefusal("wrong_room", message);
 }
 
+export interface ReachRequest {
+  orgId: string;
+  brandId: string;
+  email: string | null;
+  phone: string | null;
+  fromAccount: string | null;
+  skipIfReplied: boolean;
+}
+
+interface Reach {
+  phone: string;
+  phoneSource: string;
+  accounts: WhatsappAccount[];
+  who: Awaited<ReturnType<typeof resolveIdentifier>>;
+}
+
+/**
+ * Every reachability check of a send, in the send's order: the person's
+ * phone (`no_phone_known`), `skipIfReplied` (`person_replied`), the brand's
+ * linked + connected accounts (`whatsapp_not_linked` / `whatsapp_not_connected`),
+ * then ONE bridge `resolve_identifier` (`not_on_whatsapp`, a number that cannot
+ * exist included). Throws the SendRefusal the send answers; a bridge failure on
+ * a valid number propagates as BridgeError. `onPhone` lets the send record the
+ * phone on its row the moment it is known. Sends nothing.
+ */
+async function resolveReach(req: ReachRequest, onPhone?: (phone: string, source: string) => Promise<unknown>): Promise<Reach> {
+  // 1. Who, at which number.
+  const email = normalizeEmail(req.email);
+  const askedPhone = normalizePhone(req.phone);
+  const person = await findPersonByKeys(req.orgId, req.brandId, [
+    ...(email ? [emailKey(email)] : []),
+    ...(askedPhone ? [phoneKey(askedPhone)] : []),
+  ]);
+  let phone = askedPhone;
+  let phoneSource = "request";
+  if (!phone && person) {
+    phone = person.phones.map((p) => normalizePhone(p)).find((p): p is string => !!p) ?? null;
+    if (phone) phoneSource = phoneSourceOf(person, phone);
+  }
+  if (!phone) {
+    throw new SendRefusal(
+      "no_phone_known",
+      email ? `No phone number is known for ${email}.` : "No phone number given and no person named.",
+    );
+  }
+  if (onPhone) await onPhone(phone, phoneSource);
+
+  // 2. Stop when they already answered (follow-ups).
+  if (req.skipIfReplied && (await hasReplied(req, person, phone))) {
+    throw new SendRefusal("person_replied", "This person has already written to the brand; no follow-up is sent.");
+  }
+
+  // 3. Who the number is on WhatsApp (the same answer from every account).
+  const accounts = await sendableAccounts(req);
+  let who;
+  try {
+    who = await resolveIdentifier("whatsapp", accounts[0].matrixUserId, accounts[0].loginId, phone);
+  } catch (err) {
+    const none = bridgeSaysNoSuchNumber(err, phone);
+    if (none === "not_on_whatsapp") throw new SendRefusal("not_on_whatsapp", `${phone} is not on WhatsApp.`);
+    if (none === "invalid_number") {
+      throw new SendRefusal("not_on_whatsapp", `${phone} is not a valid phone number: WhatsApp has no account for it.`);
+    }
+    throw err;
+  }
+  // 4. The bridge said this ghost IS this number: recorded, so the mirrored
+  //    thread carries the phone and merges with the person.
+  await recordGhostPhone(who.mxid, phone, req.orgId, req.brandId);
+  return { phone, phoneSource, accounts, who };
+}
+
+export interface ReachResult {
+  reachable: true;
+  to: string;
+  phoneSource: string;
+  /** The linked account a send would write from right now. */
+  fromAccount: string;
+}
+
+/**
+ * CAN THIS BRAND'S WHATSAPP REACH THIS PERSON, NOW? (LLM-SPEND-NO-SEND-1016)
+ * The send's own checks (resolveReach), without sending: a workflow asks
+ * before it pays a model to write the message. Writes no send row, posts
+ * nothing, opens no room. Throws the SendRefusal the send would answer.
+ * Not covered: `wrong_room` (needs joining / opening the room) and a later
+ * transient bridge failure.
+ */
+export async function reachWhatsApp(req: ReachRequest): Promise<ReachResult> {
+  const { phone, phoneSource, accounts, who } = await resolveReach(req);
+  const account = await chooseAccount(accounts, who.mxid);
+  return { reachable: true, to: phone, phoneSource, fromAccount: `+${digitsOf(account.loginId)}` };
+}
+
 export async function sendWhatsApp(req: SendRequest): Promise<SendResult> {
   const claimed = await claim(req);
   if ("earlier" in claimed) {
@@ -339,49 +432,9 @@ export async function sendWhatsApp(req: SendRequest): Promise<SendResult> {
   const row = claimed.row;
 
   try {
-    // 1. Who, at which number.
-    const email = normalizeEmail(req.email);
-    const askedPhone = normalizePhone(req.phone);
-    const person = await findPersonByKeys(req.orgId, req.brandId, [
-      ...(email ? [emailKey(email)] : []),
-      ...(askedPhone ? [phoneKey(askedPhone)] : []),
-    ]);
-    let phone = askedPhone;
-    let phoneSource = "request";
-    if (!phone && person) {
-      phone = person.phones.map((p) => normalizePhone(p)).find((p): p is string => !!p) ?? null;
-      if (phone) phoneSource = phoneSourceOf(person, phone);
-    }
-    if (!phone) {
-      throw new SendRefusal(
-        "no_phone_known",
-        email ? `No phone number is known for ${email}.` : "No phone number given and no person named.",
-      );
-    }
-    await finish(row.id, { phone, phoneSource });
-
-    // 2. Stop when they already answered (follow-ups).
-    if (req.skipIfReplied && (await hasReplied(req, person, phone))) {
-      throw new SendRefusal("person_replied", "This person has already written to the brand; no follow-up is sent.");
-    }
-
-    // 3. Who the number is on WhatsApp (the same answer from every account),
-    //    then which account writes, into which room.
-    const accounts = await sendableAccounts(req);
-    let who;
-    try {
-      who = await resolveIdentifier("whatsapp", accounts[0].matrixUserId, accounts[0].loginId, phone);
-    } catch (err) {
-      const none = bridgeSaysNoSuchNumber(err, phone);
-      if (none === "not_on_whatsapp") throw new SendRefusal("not_on_whatsapp", `${phone} is not on WhatsApp.`);
-      if (none === "invalid_number") {
-        throw new SendRefusal("not_on_whatsapp", `${phone} is not a valid phone number: WhatsApp has no account for it.`);
-      }
-      throw err;
-    }
-    // 4. The bridge said this ghost IS this number: recorded, so the mirrored
-    //    thread carries the phone and merges with the person.
-    await recordGhostPhone(who.mxid, phone, req.orgId, req.brandId);
+    // 1-4. Who, at which number, and who that number is on WhatsApp: the
+    //      SAME checks the reach check answers (reachWhatsApp).
+    const { phone, phoneSource, accounts, who } = await resolveReach(req, (p, src) => finish(row.id, { phone: p, phoneSource: src }));
 
     const account = await chooseAccount(accounts, who.mxid);
     const onAccount =

@@ -1031,6 +1031,13 @@ lists the person's sends. No cost.
 sends to a LIST of people in one call and one run (lead-service's pool check, WA-SENDS-BATCH-1014):
 `{sends: [{email, sendId, status, code, campaignId, sentAt, createdAt}], invalidEmails}`, every status,
 newest first, a person with none absent; a send with no campaign never matches. Keep the GET as is.
+- **Reach check, nothing sent** (LLM-SPEND-NO-SEND-1016: a workflow paid Opus ~$0.70 per draft for 28 people the
+  send then refused): `POST /orgs/whatsapp/reach` (same auth + body as the send minus `text` / `idempotencyKey`) runs
+  the send's OWN checks (`resolveReach` in send.ts, the one function both call), same order: phone (`no_phone_known`),
+  `skipIfReplied` (`person_replied`), accounts (`whatsapp_not_linked` | `whatsapp_not_connected`), ONE bridge
+  `resolve_identifier` (`not_on_whatsapp`, impossible number included). 200 `{reachable: true, to, phoneSource,
+  fromAccount}` | 200 `{reachable: false, code, error}`; 502 `bridge_error` only on a valid number. No send row, no
+  message, no room (records the ghost phone like the send). Not covered: `wrong_room`, transient bridge failures.
 - Phone = `phone` if given, else the person's first phone from `people` (looked up by email).
 - Account = the brand's `matrix_links` whatsapp `linked` rows whose bridge login is
   `CONNECTED` (`/whoami`), oldest first; one already in a DM with the number wins.

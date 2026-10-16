@@ -3,11 +3,11 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { peopleScopes, whatsappSends } from "../db/schema.js";
 import { apiKeyAuth, requireOrg, AuthenticatedRequest } from "../middleware/auth.js";
-import { WhatsappSendRequestSchema, WhatsappSendsQueryRequestSchema } from "../schemas.js";
+import { WhatsappReachRequestSchema, WhatsappSendRequestSchema, WhatsappSendsQueryRequestSchema } from "../schemas.js";
 import { BridgeError } from "../lib/matrix/bridge.js";
 import { runSyncPass } from "../lib/matrix/sync.js";
 import { runScopeBuild } from "../lib/people/build.js";
-import { SendRefusal, sendConnection, sendWhatsApp } from "../lib/whatsapp/send.js";
+import { reachWhatsApp, SendRefusal, sendConnection, sendWhatsApp } from "../lib/whatsapp/send.js";
 import { normalizeEmail, normalizePhone } from "../lib/people/identity.js";
 
 const router = Router();
@@ -74,6 +74,50 @@ router.post("/orgs/whatsapp/messages", apiKeyAuth, requireOrg("whatsapp.send"), 
     if (err instanceof SendRefusal) {
       return res.status(err.httpStatus).json({ type: "refused", code: err.code, error: err.message });
     }
+    if (err instanceof BridgeError) {
+      return res.status(502).json({ type: "upstream", code: "bridge_error", error: `WhatsApp bridge: ${err.code} ${err.bridgeMessage}` });
+    }
+    throw err;
+  }
+});
+
+/**
+ * POST /orgs/whatsapp/reach — can the brand's WhatsApp reach this person right
+ * now? The send's own checks, in its order, WITHOUT sending (LLM-SPEND-NO-SEND-1016):
+ * a workflow asks before paying a model to write the message. 200 either way:
+ * `{reachable: true, …}` or `{reachable: false, code, error}` with the code the
+ * send would have refused with. A bridge failure on a valid number = 502.
+ */
+router.post("/orgs/whatsapp/reach", apiKeyAuth, requireOrg("whatsapp.reach"), async (req: AuthenticatedRequest, res) => {
+  const parsed = WhatsappReachRequestSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ type: "validation", code: "invalid_request", error: parsed.error.message });
+  }
+  const body = parsed.data;
+  const brandId = body.brandId ?? req.brandIds?.[0];
+  if (!brandId) {
+    return res.status(400).json({ type: "validation", code: "invalid_request", error: "brandId (body) or x-brand-id header is required" });
+  }
+  if (!normalizeEmail(body.email) && !normalizePhone(body.phone)) {
+    return res.status(400).json({
+      type: "validation",
+      code: "invalid_request",
+      error: "name the person: email, or phone in international form (+<country><number>)",
+    });
+  }
+  try {
+    return res.json(
+      await reachWhatsApp({
+        orgId: req.orgId!,
+        brandId,
+        email: body.email ?? null,
+        phone: body.phone ?? null,
+        fromAccount: body.fromAccount ?? null,
+        skipIfReplied: body.skipIfReplied ?? false,
+      }),
+    );
+  } catch (err) {
+    if (err instanceof SendRefusal) return res.json({ reachable: false, code: err.code, error: err.message });
     if (err instanceof BridgeError) {
       return res.status(502).json({ type: "upstream", code: "bridge_error", error: `WhatsApp bridge: ${err.code} ${err.bridgeMessage}` });
     }
