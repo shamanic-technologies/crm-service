@@ -27,8 +27,10 @@ export const PHONE_REASONS = {
   CONVERSATION_CHANNEL: "conversation_channel",
   /** One of our staff (`isStaffEmail`), never a prospect. */
   STAFF: "staff",
-  /** One of the brand's own numbers (a linked WhatsApp account, the sales rep phone). */
+  /** One of the brand's own numbers (a linked WhatsApp account, the sales rep phone, a member of the org). */
   OWN_TEAM: "own_team",
+  /** A number nobody can be reached on (impossible under its country's plan): never offered. */
+  INVALID_NUMBER: "invalid_number",
   OFFER_UNKNOWN: "offer_unknown",
   CAMPAIGN_REFUSED: "campaign_refused",
   CAMPAIGN_UNREACHABLE: "campaign_unreachable",

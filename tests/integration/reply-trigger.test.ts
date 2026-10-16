@@ -42,6 +42,8 @@ process.env.CAMPAIGN_SERVICE_URL = "http://campaign.test";
 process.env.CAMPAIGN_SERVICE_API_KEY = "campaign-key";
 process.env.BRAND_SERVICE_URL = "http://brand.test";
 process.env.BRAND_SERVICE_API_KEY = "brand-key";
+process.env.CLIENT_SERVICE_URL = "http://client.test";
+process.env.CLIENT_SERVICE_API_KEY = "client-key";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -51,6 +53,7 @@ let jevChoice = "interested";
 let jevCalls = 0;
 /** What brand-service states as the brand's sales rep phone; a number = brand-service answers that status. */
 let repPhone: string | null | number = null;
+let memberPhones: string[] = [];
 
 function installFetchStub() {
   campaignCalls = [];
@@ -63,6 +66,10 @@ function installFetchStub() {
     if (url.host === "brand.test" && url.pathname === `/orgs/brands/${BRAND}/sales-rep`) {
       if (typeof repPhone === "number") return json({ error: "down" }, repPhone);
       return json({ salesRepEmail: null, salesRepPhone: repPhone, salesRepFirstName: null, salesRepRole: null });
+    }
+    if (url.host === "client.test" && url.pathname === "/internal/users") {
+      expect(url.searchParams.get("allMembers")).toBe("true");
+      return json({ users: memberPhones.map((phone) => ({ email: null, phone })), total: memberPhones.length });
     }
     if (url.host === "brand.test" && url.pathname === `/internal/brands/${BRAND}/offers`) {
       return json({ offers: [{ offerId: ONLY_OFFER, name: "Only", status: "active" }, { offerId: OFFER, name: "Old", status: "archived" }] });
@@ -147,6 +154,7 @@ describe.skipIf(!RUN)("reply trigger", () => {
     conversationId = conversation.id;
     jevChoice = "interested";
     repPhone = null;
+    memberPhones = [];
     installFetchStub();
   });
 
@@ -392,6 +400,15 @@ describe.skipIf(!RUN)("reply trigger", () => {
 
     it("a burst from the brand's sales rep phone (read from brand-service, any spelling) is skipped as own_team", async () => {
       repPhone = "+33 7 70 65 75 85";
+      await campaignThreadAnswered();
+      const d = await detectReplies(conn, run1);
+      expect(d.skipped).toEqual([{ reason: "own_team", roomId: ROOM }]);
+      await deliverDueReplies();
+      expect(campaignCalls).toHaveLength(0);
+    });
+
+    it("a burst from the phone of any member of the org (client-service) is skipped as own_team (OWN-TEAM-GMAIL-1016)", async () => {
+      memberPhones = ["+33 7 70 65 75 85"];
       await campaignThreadAnswered();
       const d = await detectReplies(conn, run1);
       expect(d.skipped).toEqual([{ reason: "own_team", roomId: ROOM }]);

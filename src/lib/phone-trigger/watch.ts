@@ -44,6 +44,7 @@ import { readOwnTeam, ownTeamMatch } from "../reply-trigger/own-team.js";
 import {
   CampaignRefusal,
   campaignServiceConfigured,
+  dialablePhone,
   FINAL_REFUSAL_STATUSES,
   recordTriggerEvent,
 } from "../trigger-door.js";
@@ -327,6 +328,10 @@ async function deliverOne(
   if (ownTeamMatch([r.phone], ownTeam)) {
     await settle(r, now, { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.OWN_TEAM, runId: identity.runId });
     return { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.OWN_TEAM };
+  }
+  if (!dialablePhone([r.phone])) {
+    await settle(r, now, { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.INVALID_NUMBER, runId: identity.runId });
+    return { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.INVALID_NUMBER };
   }
   if (offer.offerId === null) {
     const detail = offer.detail.replace(/: state it with .*$/, "");

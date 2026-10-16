@@ -142,6 +142,14 @@ describe("phoneFromMxid", () => {
   it("returns null for opaque bridge ids", () => {
     expect(phoneFromMxid("@discord_abc123:hs.example", "@discord_")).toBeNull();
   });
+
+  it("never reads a Telegram user id as a phone (OWN-TEAM-GMAIL-1016)", () => {
+    expect(phoneFromMxid("@telegram_1501657753:hs.example", "@telegram_")).toBeNull();
+  });
+
+  it("returns null for a WhatsApp ghost whose digits are no valid number", () => {
+    expect(phoneFromMxid("@whatsapp_1501657753:hs.example", PREFIX)).toBeNull();
+  });
 });
 
 describe("splitName", () => {

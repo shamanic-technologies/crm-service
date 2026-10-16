@@ -27,8 +27,10 @@
  *    instantly-service detects it in that mailbox and fires the trigger itself,
  *    so it is recorded `cold_email_path` and never reported here. The mailbox the
  *    person wrote TO decides the owner: the brand's own Gmail = here.
- *  - THE BRAND'S OWN ADDRESSES (a sending mailbox, the brand's domain) are
- *    nobody: `own_team`.
+ *  - THE BRAND'S OWN ADDRESSES (a sending mailbox, the brand's domain) and
+ *    EVERY MEMBER OF THE ORG, whatever address they write from (org-members.ts,
+ *    OWN-TEAM-GMAIL-1016: the owner's pitch from his personal gmail rang a
+ *    call), are nobody: `own_team`.
  *  - AN AUTOMATED SENDER (sender_verdicts, Jev, >= 0.75) or an automatic reply
  *    (Jev on the burst, like WhatsApp) is no answer: `automated_reply`.
  *  - ONLY A POSITIVE ANSWER IS REPORTED (Jev on the burst, like WhatsApp:
@@ -53,9 +55,11 @@ import {
 import { createRun, updateRun } from "../runs-client.js";
 import { normalizeEmail, type Presence } from "../people/identity.js";
 import { isOwnAddress, readOwnAddresses, type OwnAddresses } from "../people/sources.js";
+import { readOrgMembers, type OrgMembers } from "../org-members.js";
 import {
   CampaignRefusal,
   campaignServiceConfigured,
+  dialablePhone,
   FINAL_REFUSAL_STATUSES,
   recordTriggerEvent,
   type DoorIdentity,
@@ -186,13 +190,14 @@ export async function detectGmailReplies(
     );
   if (moved.length === 0) return out;
 
-  let own: OwnAddresses | null = null;
+  let own: { addresses: OwnAddresses; members: OrgMembers } | null = null;
   const ownAddresses = async () => {
     if (own) return own;
-    const read = await readOwnAddresses({ orgId: scope.orgId, userId: scope.createdByUserId, runId: await runId(), brandId: scope.brandId });
+    const identity = { orgId: scope.orgId, userId: scope.createdByUserId, runId: await runId(), brandId: scope.brandId };
+    const [read, members] = await Promise.all([readOwnAddresses(identity), readOrgMembers(identity)]);
     // Unreadable = nothing recorded this pass (a cold-email reply must never be reported by mistake).
     if (read.status !== "ok") throw new Error(`own addresses unreadable: ${read.error}`);
-    return (own = read);
+    return (own = { addresses: read, members });
   };
 
   for (const { address } of moved) {
@@ -227,10 +232,11 @@ export async function detectGmailReplies(
     } else {
       const ours = await ownAddresses();
       const recipients = burst.flatMap((m) => m.to).map((t) => normalizeEmail(t)).filter((t): t is string => !!t);
-      if (isOwnAddress(address, ours)) {
+      // A member of the org (any address: a teammate's personal gmail) writing is the brand itself, never a prospect.
+      if (isOwnAddress(address, ours.addresses) || ours.members.emails.has(address)) {
         status = REPLY_STATUS.SKIPPED;
         reason = REPLY_REASONS.OWN_TEAM;
-      } else if (recipients.some((t) => ours.addresses.has(t))) {
+      } else if (recipients.some((t) => ours.addresses.addresses.has(t))) {
         status = REPLY_STATUS.SKIPPED;
         reason = GMAIL_REPLY_REASONS.COLD_EMAIL_PATH;
       } else {
@@ -360,7 +366,7 @@ export async function deliverGmailReply(r: ReplyTriggerReport, identity: DoorIde
     });
     return { status: REPLY_STATUS.FAILED, reason: REPLY_REASONS.PERSON_NOT_BUILT };
   }
-  const phone = (person.phones as string[])[0] ?? null;
+  const phone = dialablePhone(person.phones as string[]);
   const who = { personId: person.personId, fullName: person.displayName, email: address, phone };
 
   let offerId = r.offerId;

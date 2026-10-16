@@ -375,8 +375,10 @@ Deterministic, **zero per-row LLM** — knowing who wrote to you needs no model.
   yields one sync stream carrying every bridge's rooms, which is why each
   connection keeps its OWN cursor and filters by prefix.
 - A WhatsApp ghost MXID encodes the phone (`@whatsapp_33612345678:hs` →
-  `+33612345678`); other bridges use opaque ids and get `null` — deterministically,
-  never a guess.
+  `+33612345678`, kept only when libphonenumber calls it valid); other bridges use
+  opaque ids and get `null` — deterministically, never a guess. ⚠️ A Telegram ghost
+  is all digits too (the Telegram USER id): read as a phone it rang "+1501657753"
+  on an AI Instant Call (OWN-TEAM-GMAIL-1016), so only the `@whatsapp_` prefix parses.
 - `conversations` — one row per (contact, channel), a pure aggregation over the
   raw events: first/last message timestamp, message / inbound / outbound counts,
   and `last_event_id`, which doubles as the freshness watermark.
@@ -1178,6 +1180,12 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   `idempotencyKey crm:matrix:reply:<event>`); ANY outbound ends it: one of our sends OR a message typed by hand on the
   account (just one of ours, never a takeover); bridge notices / uncaptioned media / edits are no answer; any brand
   send `sending` < 2 min holds the pass. Jev (`person|automated`, >= 0.75 silences; down = person) drops auto-replies.
+- **Own team = the org's members too** (`lib/org-members.ts`, OWN-TEAM-GMAIL-1016, owner 2026-10-16: his own pitch
+  from his personal gmail, brand mailbox in copy, rang an AI Instant Call): client-service `GET /internal/users?orgId=
+  &allMembers=true` (Clerk members, staff who set the org up included), emails (Gmail) + phones (WhatsApp, phone
+  trigger). Unreadable = the pass records nothing. **A phone is offered to campaign-service only when DIALABLE**
+  (`trigger-door.ts` `dialablePhone`: E.164 + libphonenumber valid; else logged, dropped; phone trigger skips it
+  `invalid_number`).
 - **Never history**: `reply_watch_since` (campaign threads, since 2026-10-12) / `open_reply_watch_since` (every other
   thread, since REPLY-ANY-LEAD-1015), set at first look; only messages mirrored after them are reported, the rest is
   `before_watch` (does not block a later message of the same burst). The brand's own team (`own-team.ts`: linked
@@ -1201,7 +1209,7 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   `crm:gmail:reply:<brandId>:<gmail message id>`. **A cold-email reply is the EMAIL PATH's**: a mail addressed to one
   of our sending mailboxes (instantly-service `/internal/accounts`) is recorded `cold_email_path`, never reported
   here (instantly-service fires it from that mailbox): the mailbox the person wrote TO decides the owner. Own
-  addresses (sending mailboxes, brand domain) = `own_team`; `sender_verdicts` automated >= 0.75 or Jev on the burst =
+  addresses (sending mailboxes, brand domain) AND every org MEMBER, any address = `own_team`; `sender_verdicts` automated >= 0.75 or Jev on the burst =
   `automated_reply`. **Gmail is per ORG**: reported under every brand whose people know the person OUTSIDE the mailbox
   (any non-gmail presence), else the ONE brand with the highest `conversation_verdicts` brand probability, else the
   oldest scope; other brands record nothing. Offer: conversation tag > only active offer. Delivery: one org run per

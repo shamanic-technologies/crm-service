@@ -29,10 +29,14 @@ process.env.BRAND_SERVICE_URL = "http://brand.test";
 process.env.BRAND_SERVICE_API_KEY = "brand-key";
 process.env.INSTANTLY_SERVICE_URL = "http://instantly.test";
 process.env.INSTANTLY_SERVICE_API_KEY = "instantly-key";
+process.env.CLIENT_SERVICE_URL = "http://client.test";
+process.env.CLIENT_SERVICE_API_KEY = "client-key";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
+// A member of the org writing from a PERSONAL address (not the brand's domain): the owner's gmail on 2026-10-16.
+let members: { email: string | null; phone: string | null }[] = [];
 let campaignCalls: { headers: Headers; body: Record<string, unknown> }[] = [];
 let jevChoice = "interested";
 let jevCalls = 0;
@@ -53,6 +57,11 @@ function installFetchStub() {
     }
     if (url.host === "brand.test" && /^\/internal\/brands\/[^/]+\/offers$/.test(url.pathname)) {
       return json({ offers: [{ offerId: ONLY_OFFER, name: "Only", status: "active" }] });
+    }
+    if (url.host === "client.test" && url.pathname === "/internal/users") {
+      expect(url.searchParams.get("orgId")).toBe(ORG);
+      expect(url.searchParams.get("allMembers")).toBe("true");
+      return json({ users: members, total: members.length });
     }
     if (url.pathname === "/orgs/judgments") {
       jevCalls += 1;
@@ -115,6 +124,7 @@ describe.skipIf(!RUN)("Gmail reply trigger", () => {
   beforeEach(async () => {
     await cleanup();
     jevChoice = "interested";
+    members = [{ email: "Owner.Personal@gmail-like.example", phone: null }];
     installFetchStub();
     scope = await newScope(BRAND, ["gmail", "instantly"]);
   });
@@ -178,6 +188,55 @@ describe.skipIf(!RUN)("Gmail reply trigger", () => {
     expect(campaignCalls.map((c) => c.body.idempotencyKey)).toEqual([`crm:gmail:reply:${BRAND}:m1`, `crm:gmail:reply:${BRAND}:m2`]);
     const second = (campaignCalls[1].body.item as { messages: { messageId: string }[] }).messages.map((m) => m.messageId);
     expect(second).toEqual(["m2"]);
+  });
+
+  it("a member of the org writing from a personal address is the brand itself: never reported (OWN-TEAM-GMAIL-1016)", async () => {
+    const MEMBER = "owner.personal@gmail-like.example";
+    await db.insert(people).values({
+      scopeId: scope.id, orgId: ORG, brandId: BRAND, personKey: `email:${MEMBER}`, identityKeys: [`email:${MEMBER}`],
+      displayName: "Owner", emails: [MEMBER], phones: ["+1501657753"], sources: ["gmail"], mergeEvidence: [],
+      presences: [{ source: "gmail", sourceRef: MEMBER, displayName: "Owner", company: null, emails: [MEMBER], phones: [],
+        firstActivityAt: null, lastActivityAt: null, messageCount: 1, inboundCount: 1, outboundCount: 0, detail: {} }],
+      state: "in_conversation", stateSource: "gmail",
+    });
+    scope = await startWatch(scope);
+    // The owner's own pitch to a prospect, the brand's mailbox in copy: stored as a mail FROM the member.
+    await mail(scope.id, "k1", min(1), "Hi RUPI team, We could run that for you. Interested?", ["prospect@rupi.example", OWNER_MAILBOX], MEMBER);
+    const d = await detectGmailReplies(scope, run1);
+    expect(d.detected).toBe(0);
+    expect(d.skipped).toEqual([{ reason: "own_team", address: MEMBER }]);
+    expect(jevCalls).toBe(0);
+    await deliverDueGmailReplies();
+    expect(campaignCalls).toHaveLength(0);
+
+    // A real outsider's positive mail to the same mailbox still rings.
+    await mail(scope.id, "m1", min(2), "Hi, how much is it?");
+    expect((await detectGmailReplies(scope, run1)).detected).toBe(1);
+    await deliverDueGmailReplies();
+    expect(campaignCalls).toHaveLength(1);
+    expect(campaignCalls[0].body.person).toEqual({ email: PERSON, name: "QA Gmail" });
+  });
+
+  it("an impossible number on the person is never offered as their phone", async () => {
+    await db.update(people).set({ phones: ["+1501657753", "+33680478702"] }).where(eq(people.scopeId, scope.id));
+    scope = await startWatch(scope);
+    await mail(scope.id, "m1", min(1), "Hi, how much is it?");
+    expect((await detectGmailReplies(scope, run1)).detected).toBe(1);
+    await deliverDueGmailReplies();
+    expect(campaignCalls[0].body.person).toEqual({ email: PERSON, name: "QA Gmail", phone: "+33680478702" });
+  });
+
+  it("client-service unable to say who the org's members are: nothing recorded this pass", async () => {
+    scope = await startWatch(scope);
+    await mail(scope.id, "m1", min(1), "Hi, how much is it?");
+    const base = globalThis.fetch;
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) =>
+      new URL(String(input)).host === "client.test" ? json({ error: "identity provider down" }, 502) : base(input, init),
+    );
+    await expect(detectGmailReplies(scope, run1)).rejects.toThrow(/client-service GET \/internal\/users.* returned 502/);
+    expect(await reports()).toHaveLength(0);
+    installFetchStub();
+    expect((await detectGmailReplies(scope, run1)).detected).toBe(1);
   });
 
   it("a cold-email reply (addressed to one of our sending mailboxes) is the email path's: never reported here", async () => {
