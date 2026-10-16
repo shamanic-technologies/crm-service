@@ -286,6 +286,31 @@ describe.skipIf(!RUN)("reply trigger", () => {
     expect((campaignCalls[0].body.item as { messages: { text: string }[] }).messages.map((m) => m.text)).toEqual(["hello again"]);
   });
 
+  it("a message received on an account the brand keeps out of automation fires no automated reply; allowed again, the next one does (SOPHIE-WA-1016)", async () => {
+    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
+    conn = await fresh();
+    await buildPerson();
+    const [link] = await db
+      .insert(matrixLinks)
+      .values({
+        orgId: ORG, brandId: BRAND, channel: "whatsapp", createdByUserId: USER, matrixUserId: OWN, status: "linked", method: "qr",
+        remoteLoginId: "33680478702", connectionId: conn.id, linkedAt: new Date(), automationAllowed: false,
+      })
+      .returning();
+    await event("$p", GHOST, min(1), "Hey, how much is it?");
+    expect(await detectReplies(conn, run1)).toMatchObject({ detected: 0, skipped: [{ reason: "automation_not_allowed", roomId: ROOM }] });
+    expect(jevCalls).toBe(0);
+    await deliverDueReplies();
+    expect(campaignCalls).toHaveLength(0);
+    expect((await reports())[0]).toMatchObject({ status: "skipped", reason: "automation_not_allowed" });
+
+    await db.update(matrixLinks).set({ automationAllowed: true }).where(eq(matrixLinks.id, link.id));
+    await event("$p2", GHOST, min(2), "Still interested, can we talk?");
+    expect((await detectReplies(conn, run1)).detected).toBe(1);
+    await deliverDueReplies();
+    expect(campaignCalls).toHaveLength(1);
+  });
+
   it("only one-to-one threads are read: a room with no conversation (a group) is not", async () => {
     await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
     conn = await fresh();

@@ -406,6 +406,16 @@ export const matrixLinks = pgTable(
     // with the person (lib/whatsapp/send.ts). One per (org, brand, channel), set
     // by the brand (owner 2026-10-12: write from the pro number, not the personal one).
     outreachDefault: boolean("outreach_default").notNull().default(false),
+    // SOPHIE-WA-1016: may an AUTOMATED send (a workflow: welcome, follow-up,
+    // auto-reply) write from this account, and may a message received on it
+    // fire an automated reply? Off = the account is mirrored for the Unibox
+    // only. True for every link unless the brand turns it off.
+    automationAllowed: boolean("automation_allowed").notNull().default(true),
+    // Who writes from this account, as the brand states it (a workflow renders
+    // "You are <name>, <role>"). Empty by default; never derived.
+    personaName: text("persona_name"),
+    personaRole: text("persona_role"),
+    personaInstructions: text("persona_instructions"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     linkedAt: timestamp("linked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

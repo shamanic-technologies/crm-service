@@ -11,6 +11,7 @@ import {
   SERVICE_NAME,
 } from "../middleware/auth.js";
 import { MATRIX_CHANNELS } from "../lib/matrix/events.js";
+import { MatrixLinkUpdateRequestSchema } from "../schemas.js";
 import { LEAD_STATUSES } from "../lib/matrix/leads.js";
 import { BRAND_MIN_PROBABILITY } from "../lib/people/relevance.js";
 import { rebuildFromBronze, runSyncPass } from "../lib/matrix/sync.js";
@@ -413,37 +414,61 @@ router.get(
 );
 
 /**
- * Mark ONE linked account as the brand's outreach default for its channel: a
- * first message to someone no account already talks with goes out from it
- * (lib/whatsapp/send.ts). Exactly one per (brand, channel): the others lose it.
+ * Update ONE linked account (each field optional, at least one):
+ *  - `outreachDefault: true`: a first message to someone no allowed account
+ *    already talks with goes out from it (lib/whatsapp/send.ts). Exactly one per
+ *    (brand, channel): the others lose it.
+ *  - `automationAllowed` (SOPHIE-WA-1016): false = automated sends never write
+ *    from it and a message received on it fires no automated reply; the account
+ *    stays mirrored for the Unibox.
+ *  - `persona {name, role, instructions}`: who writes from it, served on the
+ *    link views and on the WhatsApp reach / send. Omitted fields keep their
+ *    value; null or "" clears one; `persona: null` clears all.
  */
 router.patch(
   "/orgs/matrix/links/:linkId",
   apiKeyAuth,
-  requireOrg("matrix.links.outreach-default"),
+  requireOrg("matrix.links.update"),
   async (req: AuthenticatedRequest, res) => {
-    const parsed = z
-      .object({ brandId: z.string().uuid(), outreachDefault: z.literal(true) })
-      .safeParse(req.body ?? {});
+    const parsed = MatrixLinkUpdateRequestSchema.safeParse(req.body ?? {});
     const linkParse = z.string().uuid().safeParse(req.params.linkId);
     if (!parsed.success || !linkParse.success) {
-      return res.status(400).json({ type: "validation", error: "linkId (uuid) path, body {brandId (uuid), outreachDefault: true}" });
+      return res.status(400).json({
+        type: "validation",
+        error:
+          "linkId (uuid) path, body {brandId (uuid), and at least one of outreachDefault: true, automationAllowed: boolean, persona: {name?, role?, instructions?} | null}" +
+          (parsed.success ? "" : `: ${parsed.error.issues.map((i) => i.message).join("; ")}`),
+      });
     }
-    const { brandId } = parsed.data;
+    const { brandId, outreachDefault, automationAllowed, persona } = parsed.data;
     const [link] = await db
       .select()
       .from(matrixLinks)
       .where(and(eq(matrixLinks.id, linkParse.data), eq(matrixLinks.orgId, req.orgId!), eq(matrixLinks.brandId, brandId)));
     if (!link) return res.status(404).json({ type: "not_found", error: "no such link for this brand" });
-    if (link.status !== "linked") {
+    if (outreachDefault && link.status !== "linked") {
       return res.status(409).json({ type: "conflict", error: `the account is ${link.status}, not linked` });
     }
+    const set: Partial<typeof matrixLinks.$inferInsert> = {};
+    if (automationAllowed !== undefined) set.automationAllowed = automationAllowed;
+    if (persona === null) Object.assign(set, { personaName: null, personaRole: null, personaInstructions: null });
+    else if (persona) {
+      const clean = (v: string | null | undefined) => (v == null ? null : v.trim() || null);
+      if (persona.name !== undefined) set.personaName = clean(persona.name);
+      if (persona.role !== undefined) set.personaRole = clean(persona.role);
+      if (persona.instructions !== undefined) set.personaInstructions = clean(persona.instructions);
+    }
     await db.transaction(async (tx) => {
-      await tx
-        .update(matrixLinks)
-        .set({ outreachDefault: false, updatedAt: new Date() })
-        .where(and(eq(matrixLinks.orgId, req.orgId!), eq(matrixLinks.brandId, brandId), eq(matrixLinks.channel, link.channel)));
-      await tx.update(matrixLinks).set({ outreachDefault: true, updatedAt: new Date() }).where(eq(matrixLinks.id, link.id));
+      if (outreachDefault) {
+        await tx
+          .update(matrixLinks)
+          .set({ outreachDefault: false, updatedAt: new Date() })
+          .where(and(eq(matrixLinks.orgId, req.orgId!), eq(matrixLinks.brandId, brandId), eq(matrixLinks.channel, link.channel)));
+        set.outreachDefault = true;
+      }
+      if (Object.keys(set).length > 0) {
+        await tx.update(matrixLinks).set({ ...set, updatedAt: new Date() }).where(eq(matrixLinks.id, link.id));
+      }
     });
     res.json({ link: await getLinkViewById(req.orgId!, brandId, link.id) });
   },

@@ -364,6 +364,93 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
     expect(known.body.fromAccount).toBe("+33611111111");
   });
 
+  it("an automated send never writes from an account the brand keeps out of automation, even where the person talks to it (SOPHIE-WA-1016)", async () => {
+    const personal = await linkAccount(ACCOUNT, { linkedAt: new Date("2026-10-01T00:00:00Z") });
+    const assistant = await linkAccount(ACCOUNT_PRO, { linkedAt: new Date("2026-10-02T00:00:00Z") });
+    // New links allow automation by default.
+    const before = await request(app()).get(`/orgs/matrix/links?brandId=${BRAND}`).set(headers);
+    expect(before.body.accounts.map((a: { automationAllowed: boolean; persona: unknown }) => [a.automationAllowed, a.persona])).toEqual([
+      [true, null],
+      [true, null],
+    ]);
+
+    const off = await request(app())
+      .patch(`/orgs/matrix/links/${personal.linkId}`)
+      .set(headers)
+      .send({ brandId: BRAND, automationAllowed: false });
+    expect(off.status).toBe(200);
+    expect(off.body.link).toMatchObject({ automationAllowed: false, outreachDefault: false });
+    const named = await request(app())
+      .patch(`/orgs/matrix/links/${assistant.linkId}`)
+      .set(headers)
+      .send({ brandId: BRAND, persona: { name: " Sophie ", role: "AI assistant", instructions: "Warm, short." } });
+    expect(named.status).toBe(200);
+    expect(named.body.link.persona).toEqual({ name: "Sophie", role: "AI assistant", instructions: "Warm, short." });
+
+    // The only conversation with +33600000001 is on the personal account: the message starts from the assistant.
+    await mirroredThread(personal.connectionId, "@whatsapp_lid-1:matrix.test", 12);
+    const persona = { name: "Sophie", role: "AI assistant", instructions: "Warm, short." };
+    const r = await request(app()).post("/orgs/whatsapp/reach").set(headers).send({ brandId: BRAND, phone: "+33600000001" });
+    expect(r.body).toMatchObject({ reachable: true, fromAccount: "+33622222222", persona });
+    const sent = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000001", text: "Hi, Sophie here", idempotencyKey: "k-sophie" });
+    expect(sent.status).toBe(200);
+    expect(sent.body).toMatchObject({ fromAccount: "+33622222222", persona });
+    expect(sends).toHaveLength(1);
+    expect(sends[0].auth).toBe("Bearer tok-33622222222");
+    const again = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000001", text: "Hi, Sophie here", idempotencyKey: "k-sophie" });
+    expect(again.body).toMatchObject({ duplicate: true, persona });
+
+    // The list shows both settings; a partial persona update keeps the other fields; null clears.
+    const list = await request(app()).get(`/orgs/matrix/links?brandId=${BRAND}`).set(headers);
+    const wa = list.body.links.find((l: { channel: string }) => l.channel === "whatsapp");
+    expect(wa.channelAccounts.map((a: { phone: string; automationAllowed: boolean; persona: unknown }) => [a.phone, a.automationAllowed, a.persona])).toEqual([
+      ["+33611111111", false, null],
+      ["+33622222222", true, persona],
+    ]);
+    const role = await request(app())
+      .patch(`/orgs/matrix/links/${assistant.linkId}`)
+      .set(headers)
+      .send({ brandId: BRAND, persona: { role: "" } });
+    expect(role.body.link.persona).toEqual({ name: "Sophie", role: null, instructions: "Warm, short." });
+    const cleared = await request(app()).patch(`/orgs/matrix/links/${assistant.linkId}`).set(headers).send({ brandId: BRAND, persona: null });
+    expect(cleared.body.link.persona).toBeNull();
+    const empty = await request(app()).patch(`/orgs/matrix/links/${assistant.linkId}`).set(headers).send({ brandId: BRAND });
+    expect(empty.status).toBe(400);
+  });
+
+  it("refuses automation_not_allowed, nothing sent, when no linked account allows automated sends (SOPHIE-WA-1016)", async () => {
+    const personal = await linkAccount(ACCOUNT);
+    const pro = await linkAccount(ACCOUNT_PRO);
+    for (const l of [personal, pro]) {
+      await request(app()).patch(`/orgs/matrix/links/${l.linkId}`).set(headers).send({ brandId: BRAND, automationAllowed: false }).expect(200);
+    }
+    const res = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set({ ...headers, "x-campaign-id": "babababa-1111-4111-8111-0000000000c1" })
+      .send({ brandId: BRAND, phone: "+33600000001", text: "Hi", idempotencyKey: "k-none-allowed" });
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({ type: "refused", code: "automation_not_allowed" });
+    expect(sends).toEqual([]);
+    expect(createdDms).toEqual([]);
+    const [row] = await db.select().from(whatsappSends).where(eq(whatsappSends.idempotencyKey, "k-none-allowed"));
+    expect(row).toMatchObject({ status: "refused", errorCode: "automation_not_allowed" });
+    const reach = await request(app()).post("/orgs/whatsapp/reach").set(headers).send({ brandId: BRAND, phone: "+33600000001" });
+    expect(reach.body).toMatchObject({ reachable: false, code: "automation_not_allowed" });
+    // Naming a disallowed account explicitly is refused the same way.
+    await request(app()).patch(`/orgs/matrix/links/${pro.linkId}`).set(headers).send({ brandId: BRAND, automationAllowed: true }).expect(200);
+    const named = await request(app())
+      .post("/orgs/whatsapp/reach")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000001", fromAccount: "+33611111111" });
+    expect(named.body).toMatchObject({ reachable: false, code: "automation_not_allowed" });
+  });
+
   it("never posts into a DM room the bridge maps to someone else (JACKSON-WA-WRONG-ROOM)", async () => {
     await linkAccount();
     // The bridge answers KNOWN_ROOM for +33600000001, but the room's m.bridge is another person.
@@ -674,7 +761,7 @@ describe.skipIf(!RUN)("WhatsApp reach check (DB)", () => {
     await seedPeople([{ key: "email:ann@x.com", phones: ["+33600000002"], presences: [clerk(["+33600000002"])], at: "2026-09-01T00:00:00Z" }]);
     const res = await reach({ email: "Ann@x.com" });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ reachable: true, to: "+33600000002", phoneSource: "crm:clerk", fromAccount: "+33611111111" });
+    expect(res.body).toEqual({ reachable: true, to: "+33600000002", phoneSource: "crm:clerk", fromAccount: "+33611111111", persona: null });
     expect(lookups).toEqual(["+33600000002"]);
     expect(sends).toEqual([]);
     expect(createdDms).toEqual([]);

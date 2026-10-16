@@ -1030,7 +1030,7 @@ body `brandId`; `x-campaign-id` recorded), body `{ email?, phone?, text, idempot
 fromAccount?, skipIfReplied? }`. 200 `{ sendId, status: "sent", duplicate, to, phoneSource,
 fromAccount, roomId, eventId, sentAt, previousSends }`. Refusals 422 `{ type: "refused",
 code, error }`: `whatsapp_not_linked` | `whatsapp_not_connected` | `no_phone_known` |
-`not_on_whatsapp` | `person_replied` (only with `skipIfReplied`) | `wrong_room`; 409 `send_in_progress`;
+`not_on_whatsapp` | `person_replied` (only with `skipIfReplied`) | `wrong_room` | `automation_not_allowed`; 409 `send_in_progress`;
 400 `invalid_request`; 502 `bridge_error`. `GET /orgs/whatsapp/messages?brandId=&email=|phone=`
 lists the person's sends. No cost.
 `POST /orgs/whatsapp/sends/query {brandId, campaignId, emails[1..500]}` answers ONE campaign's
@@ -1079,6 +1079,16 @@ newest first, a person with none absent; a send with no campaign never matches. 
   ghost HAS MESSAGES (latest), else the link marked `outreach_default` (`PATCH
   /orgs/matrix/links/{linkId} {brandId, outreachDefault: true}`, one per brand+channel),
   else the oldest linked. An empty DM room is not a conversation.
+- **Automation allowed + sender persona, per link** (SOPHIE-WA-1016, owner 2026-10-16: a dedicated assistant number
+  is the ONLY automated sender, his personal / pro numbers stay mirrored): `matrix_links.automation_allowed` (default
+  true) + `persona_name` / `persona_role` / `persona_instructions` (null). Every send / reach through this route is
+  AUTOMATED: an account with it off is never a candidate, even where the person's only conversation is on it (the
+  message starts a new thread from an allowed one); none allowed (or `fromAccount` names a disallowed one) = refused
+  `automation_not_allowed` (staff-alerted like `whatsapp_not_linked`). Reach + send answer the chosen account's
+  `persona {name, role, instructions}` (null when none). A burst received on a disallowed account is skipped
+  `automation_not_allowed` by the reply trigger (pass-through: allowed again, the next message is judged). Set with
+  `PATCH /orgs/matrix/links/{linkId} {brandId, outreachDefault?: true, automationAllowed?, persona?}`; served on
+  every link view and `channelAccounts`. Generic on every channel.
 - **WhatsApp threads merge into their person** (`lib/whatsapp/phone-resolution.ts`):
   WhatsApp names counterparts by LID ghosts (514/514 mirrored contacts had no phone, so 6
   of the first 13 people a campaign wrote to looked "never answered" while they had

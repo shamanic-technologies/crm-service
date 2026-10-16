@@ -26,6 +26,7 @@
  * Read-only by design: nothing here (or in the modules it calls) sends a message.
  */
 
+import { personaOf, type SenderPersona } from "./persona.js";
 import { and, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import QRCode from "qrcode";
 import { db } from "../../db/index.js";
@@ -593,6 +594,8 @@ export interface ChannelAccount {
   /** WhatsApp only: the account's own number in E.164 (its login id is the number). */
   phone: string | null;
   outreachDefault: boolean;
+  automationAllowed: boolean;
+  persona: SenderPersona | null;
   needsRelink: boolean;
 }
 
@@ -622,6 +625,10 @@ export interface LinkView {
   channelAccounts: ChannelAccount[];
   /** First messages go out from this account when no account already talks with the person. */
   outreachDefault: boolean;
+  /** Automated sends may write from this account; a message received on it may fire an automated reply (SOPHIE-WA-1016). */
+  automationAllowed: boolean;
+  /** Who writes from this account, as the brand stated it. */
+  persona: SenderPersona | null;
   connection: {
     id: string;
     status: string;
@@ -713,6 +720,8 @@ function toChannelAccount(v: LinkView): ChannelAccount {
     account: v.account,
     phone: v.channel === "whatsapp" && v.account && /^\d{6,15}$/.test(v.account.id) ? `+${v.account.id}` : null,
     outreachDefault: v.outreachDefault,
+    automationAllowed: v.automationAllowed,
+    persona: v.persona,
     needsRelink: v.needsRelink,
   };
 }
@@ -848,6 +857,8 @@ export async function toView(
     linkedAccounts,
     channelAccounts: [],
     outreachDefault: link?.outreachDefault ?? false,
+    automationAllowed: link?.automationAllowed ?? true,
+    persona: link ? personaOf(link) : null,
     connection: conn
       ? {
           id: conn.id,

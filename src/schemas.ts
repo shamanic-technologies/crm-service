@@ -1058,6 +1058,18 @@ export const MatrixLinkStartRequestSchema = registry.register(
     .openapi("MatrixLinkStartRequest"),
 );
 
+const SenderPersonaSchema = z
+  .object({
+    name: z.string().nullable().openapi({ description: "Display first name of whoever writes from this account (e.g. the assistant's name)." }),
+    role: z.string().nullable().openapi({ description: "Their role / title." }),
+    instructions: z.string().nullable().openapi({ description: "Free-text persona / style instructions for the writer." }),
+  })
+  .nullable()
+  .openapi("SenderPersona", {
+    description:
+      "The sender persona the brand gave this linked account (null when none stated). A workflow renders \"You are <name>, <role>\" from the account that will send.",
+  });
+
 export const MatrixLinkSchema = registry.register(
   "MatrixLink",
   z
@@ -1108,6 +1120,8 @@ export const MatrixLinkSchema = registry.register(
             account: z.object({ id: z.string(), name: z.string().nullable() }).nullable(),
             phone: z.string().nullable().openapi({ description: "WhatsApp only: the account's own number, E.164." }),
             outreachDefault: z.boolean(),
+            automationAllowed: z.boolean(),
+            persona: SenderPersonaSchema,
             needsRelink: z.boolean(),
           }),
         )
@@ -1118,6 +1132,11 @@ export const MatrixLinkSchema = registry.register(
       outreachDefault: z.boolean().openapi({
         description: "First messages go out from this account when no linked account already has a conversation with the person. Set with PATCH /orgs/matrix/links/{linkId}.",
       }),
+      automationAllowed: z.boolean().openapi({
+        description:
+          "Automated sends (workflows: welcome, follow-ups, auto-replies) may write from this account, and a message received on it may fire an automated reply. Off = mirrored for the Unibox only, never picked by an automated send, even for a person whose conversation is on it. True unless the brand turns it off. Set with PATCH /orgs/matrix/links/{linkId}.",
+      }),
+      persona: SenderPersonaSchema,
       connection: z
         .object({
           id: z.string().uuid(),
@@ -1186,15 +1205,37 @@ registry.registerPath({
   },
 });
 
+export const MatrixLinkUpdateRequestSchema = z
+  .object({
+    brandId: z.string().uuid(),
+    outreachDefault: z.literal(true).optional().openapi({ description: "Make this account the brand's outreach default for its channel." }),
+    automationAllowed: z.boolean().optional().openapi({
+      description: "false = automated sends never write from this account and a message received on it fires no automated reply (it stays mirrored in the Unibox).",
+    }),
+    persona: z
+      .object({
+        name: z.string().max(80).nullable().optional(),
+        role: z.string().max(120).nullable().optional(),
+        instructions: z.string().max(4000).nullable().optional(),
+      })
+      .nullable()
+      .optional()
+      .openapi({ description: "Who writes from this account. Omitted fields keep their value; null or \"\" clears one; persona: null clears all." }),
+  })
+  .refine((b) => b.outreachDefault !== undefined || b.automationAllowed !== undefined || b.persona !== undefined, {
+    message: "set at least one of outreachDefault, automationAllowed, persona",
+  })
+  .openapi("MatrixLinkUpdateRequest");
+
 registry.registerPath({
   method: "patch",
   path: "/orgs/matrix/links/{linkId}",
-  summary: "Mark a linked account as the brand's outreach default for its channel",
+  summary: "Update a linked account: outreach default, automated sends allowed, sender persona",
   description:
-    "A first WhatsApp message to a person no linked account already talks with goes out from this account (an existing conversation always keeps its account). One per brand and channel: the others lose it. Requires x-api-key, x-org-id.",
+    "Every field but brandId is optional; at least one is required. `outreachDefault: true`: a first message to a person no allowed account already talks with goes out from this account (one per brand and channel: the others lose it). `automationAllowed`: may automated sends write from this account and may a message received on it fire an automated reply (false = Unibox mirror only). `persona`: who writes from it (`null` clears it; a field set to null or \"\" clears that field). Requires x-api-key, x-org-id.",
   request: {
     params: z.object({ linkId: z.string().uuid() }),
-    body: { content: { "application/json": { schema: z.object({ brandId: z.string().uuid(), outreachDefault: z.literal(true) }) } }, required: true },
+    body: { content: { "application/json": { schema: MatrixLinkUpdateRequestSchema } }, required: true },
   },
   responses: {
     200: { description: "The account's view", content: { "application/json": { schema: z.object({ link: MatrixLinkSchema }) } } },
@@ -3018,6 +3059,7 @@ export const WhatsappSendResponseSchema = registry.register(
       to: z.string(),
       phoneSource: z.string().openapi({ description: "`request`, or `crm:<source>` (the person's record holding the phone)." }),
       fromAccount: z.string(),
+      persona: SenderPersonaSchema,
       roomId: z.string(),
       eventId: z.string(),
       sentAt: z.string(),
@@ -3031,6 +3073,7 @@ const WhatsappRefusalSchema = z.object({
   code: z.enum([
     "whatsapp_not_linked",
     "whatsapp_not_connected",
+    "automation_not_allowed",
     "no_phone_known",
     "not_on_whatsapp",
     "person_replied",
@@ -3077,11 +3120,12 @@ export const WhatsappReachResponseSchema = registry.register(
         reachable: z.literal(true),
         to: z.string().openapi({ description: "The number the send would write to (E.164)." }),
         phoneSource: z.string().openapi({ description: "`request`, or `crm:<source>` (the person's record holding the phone)." }),
-        fromAccount: z.string().openapi({ description: "The linked account the send would write from right now (its own number)." }),
+        fromAccount: z.string().openapi({ description: "The linked account the send would write from right now (its own number). Only accounts allowing automated sends are considered." }),
+        persona: SenderPersonaSchema,
       }),
       z.object({
         reachable: z.literal(false),
-        code: z.enum(["whatsapp_not_linked", "whatsapp_not_connected", "no_phone_known", "not_on_whatsapp", "person_replied"]).openapi({
+        code: z.enum(["whatsapp_not_linked", "whatsapp_not_connected", "automation_not_allowed", "no_phone_known", "not_on_whatsapp", "person_replied"]).openapi({
           description: "The refusal code POST /orgs/whatsapp/messages would answer for this person now.",
         }),
         error: z.string(),
