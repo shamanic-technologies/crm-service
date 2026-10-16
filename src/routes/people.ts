@@ -368,7 +368,7 @@ router.get(
       const familyCounts = Object.fromEntries(LEAD_FAMILIES.map((f) => [f, 0])) as Record<LeadFamily, number>;
       if (fam.ok) {
         for (const m of members) {
-          const v = familyOf(m.emails as string[], fam.f.byEmail);
+          const v = familyOf(m.emails as string[], m.humanId, fam.f);
           if (!v) continue;
           verdicts.set(m.personKey, v);
           familyCounts[v.family] += 1;

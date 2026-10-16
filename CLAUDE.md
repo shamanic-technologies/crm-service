@@ -1239,7 +1239,9 @@ and the OLD code then wrote onto the NEW schema (0020, 2026-10-10).
 - **Family filters (Unibox Won / Hot / Lost / Cold, `families.ts`)**: `GET /orgs/people?family=won|hot|lost|cold`
   (combines with `q`, `source`, paging). Each person carries `family` + `familyLostReason`
   = features-service's verdict (`GET /brands/{brandId}/lead-families`, read verbatim, matched on
-  email; several lead addresses → strongest, features' own union rule). Null = not our lead.
+  email AND `humanId`; several matches → strongest, features' own union rule). Hot also holds every
+  person lead-service tags lead + wants business, any channel, campaign lead or not
+  (HOT-INBOUND-UNANSWERED-1016): a WhatsApp writer often has no email, only the human matches them. Null = not our lead.
   `families.counts` = per family over the list's population with `family` NOT applied (the
   buttons), sum = `withFamily`; `producerCounts` = features' own over ALL leads. One read
   (~4 MB, ~1s warm / ~25s cold) shared 60s per (org, brand), failures not cached. Every sibling GET
