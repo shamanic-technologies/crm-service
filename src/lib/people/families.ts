@@ -13,7 +13,11 @@ import { SwrCache } from "./swr.js";
  * Someone who is not one of our leads has no family (null): listed under All only.
  *
  * Matched on the email address (features serves it trimmed and lower-cased,
- * the same form as a person's `emails`). A person holding several addresses
+ * the same form as a person's `emails`), AND on the fleet-wide `humanId` when
+ * features serves one (HOT-INBOUND-UNANSWERED-1016: Hot also holds everyone
+ * lead-service tags lead + wants business, any channel, and a WhatsApp writer
+ * often has no email: matched on the email alone they never showed under Hot).
+ * A person holding several addresses
  * that are each a lead takes the STRONGEST family (won > hot > lost > cold),
  * the very rule features-service applies to one lead across several offers.
  *
@@ -30,12 +34,18 @@ const RANK: Record<LeadFamily, number> = { won: 0, hot: 1, lost: 2, cold: 3 };
 export interface FamilyVerdict {
   family: LeadFamily;
   lostReason: LostReason | null;
-  leadId: string;
+  /** Null for a person Hot by lead-service's tags who is no campaign lead. */
+  leadId: string | null;
 }
 
-export interface BrandFamilies {
+export interface FamilyIndex {
   /** email (lower-cased) → its lead's family. */
   byEmail: Map<string, FamilyVerdict>;
+  /** humanId → the strongest family features served for that human. */
+  byHuman: Map<string, FamilyVerdict>;
+}
+
+export interface BrandFamilies extends FamilyIndex {
   /** features-service's own counts over ALL the brand's leads (not only the Unibox people). */
   producerCounts: Record<LeadFamily, number>;
   readAt: string;
@@ -43,34 +53,37 @@ export interface BrandFamilies {
 
 interface LeadFamiliesBody {
   counts: Record<LeadFamily, number>;
-  people: { leadId: string; email: string | null; family: LeadFamily; lostReason: LostReason | null }[];
+  people: { leadId: string | null; email: string | null; humanId?: string | null; family: LeadFamily; lostReason: LostReason | null }[];
 }
 
-/** PURE: the response body → the email index. An unknown family fails loud. */
-export function indexFamilies(body: LeadFamiliesBody): Map<string, FamilyVerdict> {
+function keepStrongest(map: Map<string, FamilyVerdict>, key: string, v: FamilyVerdict): void {
+  const current = map.get(key);
+  if (!current || RANK[v.family] < RANK[current.family]) map.set(key, v);
+}
+
+/** PURE: the response body → the email + human indexes. An unknown family fails loud. */
+export function indexFamilies(body: LeadFamiliesBody): FamilyIndex {
   if (!body || !Array.isArray(body.people)) {
     throw new Error("features-service lead-families answered without a people list");
   }
   const byEmail = new Map<string, FamilyVerdict>();
+  const byHuman = new Map<string, FamilyVerdict>();
   for (const p of body.people) {
     if (!(LEAD_FAMILIES as readonly string[]).includes(p.family)) {
       throw new Error(`features-service lead-families served an unknown family "${p.family}"`);
     }
-    if (!p.email) continue;
-    const email = p.email.trim().toLowerCase();
-    const current = byEmail.get(email);
-    if (!current || RANK[p.family] < RANK[current.family]) {
-      byEmail.set(email, { family: p.family, lostReason: p.lostReason ?? null, leadId: p.leadId });
-    }
+    const verdict: FamilyVerdict = { family: p.family, lostReason: p.lostReason ?? null, leadId: p.leadId ?? null };
+    if (p.email) keepStrongest(byEmail, p.email.trim().toLowerCase(), verdict);
+    if (p.humanId) keepStrongest(byHuman, p.humanId, verdict);
   }
-  return byEmail;
+  return { byEmail, byHuman };
 }
 
-/** PURE: a person's family = the strongest family among their addresses, else null. */
-export function familyOf(emails: readonly string[], byEmail: Map<string, FamilyVerdict>): FamilyVerdict | null {
+/** PURE: a person's family = the strongest family among their addresses and their human, else null. */
+export function familyOf(emails: readonly string[], humanId: string | null, index: FamilyIndex): FamilyVerdict | null {
+  const candidates = [...emails.map((e) => index.byEmail.get(e.toLowerCase())), humanId ? index.byHuman.get(humanId) : undefined];
   let best: FamilyVerdict | null = null;
-  for (const e of emails) {
-    const v = byEmail.get(e.toLowerCase());
+  for (const v of candidates) {
     if (v && (!best || RANK[v.family] < RANK[best.family])) best = v;
   }
   return best;
@@ -97,7 +110,7 @@ export function readBrandFamilies(identity: SiblingIdentity): Promise<BrandFamil
   const path = `/brands/${encodeURIComponent(identity.brandId)}/lead-families`;
   return cache.get(`${identity.orgId}:${identity.brandId}`, () =>
     siblingGetOk<LeadFamiliesBody>("features", path, identity).then((body) => ({
-      byEmail: indexFamilies(body),
+      ...indexFamilies(body),
       producerCounts: body.counts,
       readAt: new Date().toISOString(),
     })),
