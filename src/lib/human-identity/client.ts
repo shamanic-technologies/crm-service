@@ -83,6 +83,8 @@ export function resolveHuman(args: {
   phones: string[];
   /** Weak keys (RELATIONSHIP-TAGS-1014): resolve / create, never auto-merge; an org judgment link merges them. */
   messagingHandles?: { network: string; id: string }[];
+  /** Weak keys too (HUMAN-RECORD-KEYS-1017): a record in one of the brand's own tools, for a person with no email / phone. */
+  crmRecords?: { provider: string; accountId: string; id: string }[];
   create: boolean;
 }): Promise<ResolveAnswer> {
   return call<ResolveAnswer>("POST", "/internal/human-identities/resolve", {
@@ -90,6 +92,7 @@ export function resolveHuman(args: {
     ...(args.emails.length ? { emails: args.emails } : {}),
     ...(args.phones.length ? { phones: args.phones } : {}),
     ...(args.messagingHandles?.length ? { messagingHandles: args.messagingHandles } : {}),
+    ...(args.crmRecords?.length ? { crmRecords: args.crmRecords } : {}),
     source: HUMAN_SOURCE,
     create: args.create,
   });

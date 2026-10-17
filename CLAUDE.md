@@ -820,7 +820,11 @@ CSV contacts are NOT people (nobody talked to them yet); a CSV row holding an
 email and a phone is still merge evidence. Every CSV row with an email or a phone
 IS stated to human-service (stated last, HUMAN-ID-COVERAGE-1017), so its
 standalone `added_to_crm` fact carries its humanId (`PersonIndex.setHumans`
-reads `human_keys`; a fact emitted before is re-stated `human_identified`).
+reads `human_keys`; a fact emitted before is re-stated `human_identified`). A record of the brand's
+own tool with NO email, phone or handle (GoHighLevel / Stripe / PostHog / Clerk known by a name)
+is stated by its record id (human-service `crmRecords`, key `crm_record:<provider>:<account>:<id>`,
+account = GHL location / Stripe account / PostHog project, else the connection id; resolve-only,
+never merges; `build.ts crmRecordsOf`, HUMAN-RECORD-KEYS-1017).
 
 **The brand's own addresses are nobody.** Every mailbox we send from
 (instantly-service `/internal/accounts`) and every address on the brand's

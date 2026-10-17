@@ -53,6 +53,28 @@ export interface IdentityRecord {
   phones: string[];
   /** Messaging handle keys (`msg:<network>:<id>`, identity.ts): a bridged contact with no email / phone. */
   handles?: string[];
+  /** HUMAN-RECORD-KEYS-1017: a record of the brand's own tool, stated only for a record with no email / phone. */
+  crmRecords?: CrmRecord[];
+}
+
+/** One record in a client's tool (human-service `crmRecords`): provider + the client account + the vendor's record id. */
+export interface CrmRecord {
+  provider: "gohighlevel" | "stripe" | "posthog" | "clerk";
+  accountId: string;
+  id: string;
+}
+
+const CRM_RECORD_PREFIX = "crm_record:";
+/** PURE: the identity key of a CRM record, as human-service stores it (`crm_record:<provider>:<accountId>:<id>`). */
+export const crmRecordKey = (r: CrmRecord) => `${CRM_RECORD_PREFIX}${r.provider}:${r.accountId}:${r.id}`;
+/** PURE: a `crm_record:` key back to its parts (the id may itself hold ':'); null = not one. */
+export function parseCrmRecordKey(k: string): CrmRecord | null {
+  if (!k.startsWith(CRM_RECORD_PREFIX)) return null;
+  const rest = k.slice(CRM_RECORD_PREFIX.length);
+  const a = rest.indexOf(":");
+  const b = a < 0 ? -1 : rest.indexOf(":", a + 1);
+  if (a <= 0 || b <= a + 1 || b === rest.length - 1) return null;
+  return { provider: rest.slice(0, a) as CrmRecord["provider"], accountId: rest.slice(a + 1, b), id: rest.slice(b + 1) };
 }
 
 /** A judgment that two records are one human. */
@@ -86,10 +108,11 @@ export const resolveBudgetMs = () => Number(process.env.HUMAN_RESOLVE_BUDGET_MS)
 
 // ─── pure ────────────────────────────────────────────────────────────────────
 
-/** PURE: the email / phone / messaging-handle identity keys a record states (sorted, unique). Other keys never reach human-service. */
+/** PURE: the email / phone / messaging-handle / CRM-record identity keys a record states (sorted, unique). Other keys never reach human-service. */
 export function recordKeys(r: IdentityRecord): string[] {
   const keys = new Set<string>();
   for (const h of r.handles ?? []) if (parseHandleKey(h)) keys.add(h);
+  for (const c of r.crmRecords ?? []) if (c.accountId && !c.accountId.includes(":") && c.id) keys.add(crmRecordKey(c));
   for (const e of r.emails) {
     const n = normalizeEmail(e);
     if (n) keys.add(emailKey(n));
@@ -107,6 +130,7 @@ const splitKeys = (keys: string[]) => ({
   emails: keys.filter((k) => k.startsWith("email:")).map((k) => k.slice(6)),
   phones: keys.filter((k) => k.startsWith("phone:")).map((k) => k.slice(6)),
   messagingHandles: keys.map(parseHandleKey).filter((h): h is { network: string; id: string } => !!h),
+  crmRecords: keys.map(parseCrmRecordKey).filter((c): c is CrmRecord => !!c),
 });
 
 /**

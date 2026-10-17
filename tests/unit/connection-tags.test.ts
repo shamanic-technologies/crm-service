@@ -151,3 +151,21 @@ describe("groupLines", () => {
     ]);
   });
 });
+
+import { crmRecordKey, parseCrmRecordKey, recordKeys } from "../../src/lib/people/humans.js";
+
+describe("CRM record keys (HUMAN-RECORD-KEYS-1017)", () => {
+  it("round-trips a record key, an id holding ':' included", () => {
+    const r = { provider: "stripe" as const, accountId: "acct_1", id: "cus:9" };
+    expect(crmRecordKey(r)).toBe("crm_record:stripe:acct_1:cus:9");
+    expect(parseCrmRecordKey(crmRecordKey(r))).toEqual(r);
+    expect(parseCrmRecordKey("gohighlevel:abc")).toBeNull();
+    expect(parseCrmRecordKey("crm_record:stripe::x")).toBeNull();
+  });
+  it("a record's keys include its CRM record; an account id holding ':' is never stated", () => {
+    expect(recordKeys({ emails: [], phones: [], crmRecords: [{ provider: "gohighlevel", accountId: "loc", id: "c1" }] })).toEqual([
+      "crm_record:gohighlevel:loc:c1",
+    ]);
+    expect(recordKeys({ emails: [], phones: [], crmRecords: [{ provider: "gohighlevel", accountId: "a:b", id: "c1" }] })).toEqual([]);
+  });
+});
