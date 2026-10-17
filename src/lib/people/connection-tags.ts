@@ -106,24 +106,11 @@ export interface TagLookups {
   posters: Map<string, TaggedItem>;
 }
 
-/** PURE: every tag the person earns, with what earned it. Empty = nothing judged yet. */
-export function personConnectionTags(person: PersonLikeForTags, x: TagLookups): PersonConnectionTag[] {
-  const out = new Map<ConnectionTag, PersonConnectionTag>();
-  const add = (tag: ConnectionTag, userIds: string[], basis: TagBasis) => {
-    const personal = PERSONAL.has(tag);
-    const t = out.get(tag) ?? { tag, userIds: [], brandId: personal ? null : x.brandId, basis: [] };
-    if (personal) for (const u of userIds) if (!t.userIds.includes(u)) t.userIds.push(u);
-    if (!t.basis.some((b) => b.kind === basis.kind && b.ref === basis.ref)) t.basis.push(basis);
-    out.set(tag, t);
-  };
-  const addItem = (item: TaggedItem, kind: string, ref: string, only?: (t: ConnectionTag) => ConnectionTag) => {
-    for (const tag of item.tags) {
-      const final = only ? only(tag) : tag;
-      add(final, item.userIds, { kind, ref, probability: item.scores ? item.scores[tag] : null });
-    }
-  };
+type PresenceLike = PersonLikeForTags["presences"][number];
 
-  for (const p of person.presences) {
+/** PURE: the tags ONE presence earns (its threads, its groups, the brand tool holding it). */
+export function presenceConnectionTags(p: PresenceLike, x: TagLookups): PersonConnectionTag[] {
+  return collect((add, addItem) => {
     if (BRAND_TOOL_SOURCES.has(p.source)) {
       add("professional_to_brand", [], { kind: "source", ref: p.source, probability: null });
     }
@@ -149,13 +136,43 @@ export function personConnectionTags(person: PersonLikeForTags, x: TagLookups): 
         if (group) addItem(group, "group", g.roomId, (t) => (t === "personal_to_user" ? "personal_not_to_user" : t));
       }
     }
-  }
-  for (const e of person.evidence ?? []) {
-    if (BRAND_TOOL_EVIDENCE.has(e.kind)) add("professional_to_brand", [], { kind: "evidence", ref: e.kind, probability: null });
-  }
-  if (x.automated) add("professional_not_to_brand", [], { kind: "automated_sender", ref: "sender_verdicts", probability: null });
+  }, x.brandId);
+}
+
+/** PURE: every tag the person earns, with what earned it. Empty = nothing judged yet. */
+export function personConnectionTags(person: PersonLikeForTags, x: TagLookups): PersonConnectionTag[] {
+  const parts = person.presences.map((p) => presenceConnectionTags(p, x));
+  return collect((add) => {
+    for (const part of parts) for (const t of part) for (const b of t.basis) add(t.tag, t.userIds, b);
+    for (const e of person.evidence ?? []) {
+      if (BRAND_TOOL_EVIDENCE.has(e.kind)) add("professional_to_brand", [], { kind: "evidence", ref: e.kind, probability: null });
+    }
+    if (x.automated) add("professional_not_to_brand", [], { kind: "automated_sender", ref: "sender_verdicts", probability: null });
+  }, x.brandId);
+}
+
+type Add = (tag: ConnectionTag, userIds: string[], basis: TagBasis) => void;
+type AddItem = (item: TaggedItem, kind: string, ref: string, only?: (t: ConnectionTag) => ConnectionTag) => void;
+
+/** PURE: the tags `fill` adds, merged per tag (users and bases unioned), in CONNECTION_TAGS order. */
+function collect(fill: (add: Add, addItem: AddItem) => void, brandId: string): PersonConnectionTag[] {
+  const out = new Map<ConnectionTag, PersonConnectionTag>();
+  const add: Add = (tag, userIds, basis) => {
+    const personal = PERSONAL.has(tag);
+    const t = out.get(tag) ?? { tag, userIds: [], brandId: personal ? null : brandId, basis: [] };
+    if (personal) for (const u of userIds) if (!t.userIds.includes(u)) t.userIds.push(u);
+    if (!t.basis.some((b) => b.kind === basis.kind && b.ref === basis.ref)) t.basis.push(basis);
+    out.set(tag, t);
+  };
+  const addItem: AddItem = (item, kind, ref, only) => {
+    for (const tag of item.tags) add(only ? only(tag) : tag, item.userIds, { kind, ref, probability: item.scores ? item.scores[tag] : null });
+  };
+  fill(add, addItem);
   return CONNECTION_TAGS.filter((t) => out.has(t)).map((t) => out.get(t)!);
 }
+
+/** PURE: only the professional tags (the ones an organization can carry). */
+export const professionalTags = (tags: PersonConnectionTag[]) => tags.filter((t) => !PERSONAL.has(t.tag));
 
 /** What the four yes/no questions ask, the same for a conversation, a group or a member's posts. */
 export function tagQuestionText(tag: ConnectionTag, brandName: string): string {

@@ -68,6 +68,7 @@ import { visitorLabel } from "../posthog/records.js";
 import { readAccountUsers } from "./account-users.js";
 import { CONNECTION_TAGS, personConnectionTags, type ConnectionTag, type TagLookups } from "./connection-tags.js";
 import { resolveGroupTags, type GroupTags, type GroupTagsSummary } from "./group-tags.js";
+import { contactWebsites, personOrganizations, resolveOrganizationLookups, type OrganizationsSummary } from "./organizations.js";
 import {
   crmRecordKey,
   humanEvidence,
@@ -147,6 +148,8 @@ export interface BuildSummary {
     peopleUntagged: number;
     byTag: Record<ConnectionTag, number>;
   };
+  /** PERSON-ORGANIZATIONS-1017: domains judged, companies resolved, human x organization links made. */
+  organizations?: OrganizationsSummary;
 }
 
 const NUMBER_IN_NAME = /\d[\d\s().-]{5,}\d/;
@@ -518,6 +521,18 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     if (!conversationTags.has(key)) conversationTags.set(key, { noWords: true, userIds: key.startsWith("gmail:") ? gmailUserIds : [] });
   }
 
+  // PERSON-ORGANIZATIONS-1017: the companies people speak for (work email domains, CRM websites).
+  const websites = await contactWebsites([
+    ...new Set(clusters.flatMap((c) => c.presences.filter((p) => p.source === "gohighlevel" && typeof p.detail.contactId === "string").map((p) => p.detail.contactId as string))),
+  ]);
+  const websiteOf = (p: { source: string; detail: Record<string, unknown> }) =>
+    p.source === "gohighlevel" && typeof p.detail.contactId === "string" ? (websites.get(p.detail.contactId) ?? null) : null;
+  const orgLookups = await resolveOrganizationLookups(identity, clusters, websiteOf).catch((err) => {
+    const error = (err as Error).message.slice(0, 1000);
+    console.error(`[crm-service] organizations failed scope=${scope.id}: ${error}`);
+    return null;
+  });
+
   // A lead-service read that failed may be hiding a lead: never hide on it.
   const isOurLead = (c: PersonCluster) =>
     c.emails.some((e) => {
@@ -525,6 +540,13 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       return found === true || found === "error";
     });
 
+  const tagLookupsOf = (c: PersonCluster): TagLookups => ({
+    brandId: scope.brandId,
+    automated: automated.get(c.personKey)!,
+    conversations: conversationTags,
+    groups: groupTags.groups,
+    posters: groupTags.posters,
+  });
   const rows = clusters.map((c) => {
     const ghlDeals: GhlDeal[] = c.presences
       .filter((p) => p.source === "gohighlevel")
@@ -597,13 +619,8 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
         ? { notBusiness: false, offerIds: [] as string[], relevance: null }
         : personRelevance(c, relevance.verdicts, isOurLead(c))),
       groupOnly: isGroupOnly(c.presences),
-      connectionTags: personConnectionTags(c, {
-        brandId: scope.brandId,
-        automated: automated.get(c.personKey)!,
-        conversations: conversationTags,
-        groups: groupTags.groups,
-        posters: groupTags.posters,
-      }),
+      connectionTags: personConnectionTags(c, tagLookupsOf(c)),
+      organizations: orgLookups ? personOrganizations(c, tagLookupsOf(c), orgLookups.kinds, orgLookups.companyOf, websiteOf) : [],
       possibleLeads: c.presences
         .filter((p) => p.source === "gohighlevel")
         .flatMap((p) => possibleLeadsByCrmContact.get(p.sourceRef) ?? [])
@@ -643,6 +660,16 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       peopleUntagged: rows.filter((r) => r.connectionTags.length === 0).length,
       byTag: Object.fromEntries(CONNECTION_TAGS.map((t) => [t, rows.filter((r) => r.connectionTags.some((x) => x.tag === t)).length])) as Record<ConnectionTag, number>,
     },
+    organizations: orgLookups
+      ? {
+          status: orgLookups.domainKinds.status === "ok" && orgLookups.companies?.status !== "failed" ? "ok" : "failed",
+          domainKinds: orgLookups.domainKinds,
+          companies: orgLookups.companies,
+          organizations: new Set(rows.flatMap((r) => r.organizations.map((o) => o.companyId))).size,
+          links: rows.reduce((n, r) => n + r.organizations.length, 0),
+          peopleWithOrganization: rows.filter((r) => r.organizations.length > 0).length,
+        }
+      : { status: "failed", domainKinds: { status: "failed", domains: 0, reused: 0, judged: 0, pending: 0, error: "lookup failed" }, companies: null, organizations: 0, links: 0, peopleWithOrganization: 0 },
   };
 
   await db.transaction(async (tx) => {

@@ -1144,6 +1144,9 @@ export const people = pgTable(
     // CONNECTION-TAGS-1017: personal_to_user | personal_not_to_user | professional_to_brand |
     // professional_not_to_brand, each with its users / brand and what earned it (people/connection-tags.ts).
     connectionTags: jsonb("connection_tags").notNull().default([]),
+    // PERSON-ORGANIZATIONS-1017: the companies (brand-service ids) the person speaks for, with the
+    // evidence and the professional tags of that link (people/organizations.ts).
+    organizations: jsonb("organizations").notNull().default([]),
     relevance: jsonb("relevance"),
     offerIds: jsonb("offer_ids").notNull().default([]),
 
@@ -2351,4 +2354,32 @@ export const humanEventCursor = pgTable("human_event_cursor", {
   id: text("id").primaryKey(),
   after: bigint("after", { mode: "number" }).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * PERSON-ORGANIZATIONS-1017: is an email domain a public mailbox provider or one organization's own?
+ * Jev, judged ONCE per domain, fleet-wide (a fact about the domain, nobody's data). people/organizations.ts.
+ */
+export const domainVerdicts = pgTable("domain_verdicts", {
+  domain: text("domain").primaryKey(),
+  // mailbox_provider | organization
+  kind: text("kind").notNull(),
+  confidence: doublePrecision("confidence").notNull(),
+  probabilities: jsonb("probabilities"),
+  model: text("model"),
+  runId: text("run_id").notNull(),
+  judgedAt: timestamp("judged_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * PERSON-ORGANIZATIONS-1017: brand-service's answer for an organization domain (its company id, a brand
+ * row), cached fleet-wide: brand-service resolves a domain to the same id forever. Null id = unresolved.
+ */
+export const companyKeys = pgTable("company_keys", {
+  domain: text("domain").primaryKey(),
+  companyId: uuid("company_id"),
+  companyDomain: text("company_domain"),
+  matchedBy: text("matched_by"),
+  unresolvedReason: text("unresolved_reason"),
+  resolvedAt: timestamp("resolved_at", { withTimezone: true }).notNull().defaultNow(),
 });

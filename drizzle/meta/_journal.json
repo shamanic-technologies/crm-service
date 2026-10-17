@@ -330,6 +330,13 @@
       "when": 1792260000000,
       "tag": "0046_connection_tags",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1792270000000,
+      "tag": "0047_person_organizations",
+      "breakpoints": true
     }
   ]
 }
