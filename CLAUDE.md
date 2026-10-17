@@ -1371,6 +1371,14 @@ lead-service serves the overall tag, then go.
   CSV `added_to_crm` (once per email, dated `uploaded_at`); crm
   `person_merged | person_split | withdrawn`. GoHighLevel `sale.amountMinor` =
   deal value × 100 (GoHighLevel states no currency; `amountVerbatim` beside it).
+- **The registry's own statements** (FEED-CONNECTION-TAGS-1017, owner 2026-10-17: lead-service serves the
+  Unibox list, scoped to `professional_to_brand`, and stops re-deriving tags / companies / humans): source
+  `crm`, `connection_tag` (one per tag a person holds: payload `{tag, userIds, brandId, basis [{kind, ref}]}`)
+  and `organization_link` (one per company: `{companyId, domain, tags, evidence}`), natural key
+  `crm|<type>|<personId>|<tag|companyId>`, `humanId` like every fact, `occurredAt` null (the feed order is
+  the time). Snapshot: withdrawn when the BUILT person no longer holds it or their id was retired by a
+  merge; a person missing from one build (a source read failed) keeps theirs. Jev's probabilities are
+  not in the payload (a re-judgment keeping the tag is no change).
 - OUT: our own outreach (Instantly, self-send) — lead-service reads it directly.
 - **`withdrawn` only when the vendor record changed or vanished**, and a
   vanished record is withdrawn only in a SNAPSHOT family (GoHighLevel contacts
