@@ -20,6 +20,7 @@ import whatsappRoutes from "./routes/whatsapp.js";
 import apiCallsRoutes from "./routes/api-calls.js";
 import formTriggerRoutes from "./routes/form-triggers.js";
 import phoneTriggerRoutes from "./routes/phone-triggers.js";
+import teamMembershipRoutes from "./routes/team-membership.js";
 import { startFreshnessWatch } from "./lib/people/freshness.js";
 import { startFormWatch } from "./lib/form-trigger/watch.js";
 import { startPhoneWatch } from "./lib/phone-trigger/watch.js";
@@ -76,6 +77,7 @@ app.use(copilotRoutes);
 app.use(whatsappRoutes);
 app.use(formTriggerRoutes);
 app.use(phoneTriggerRoutes);
+app.use(teamMembershipRoutes);
 
 app.use((_req, res) => {
   res.status(404).json({ type: "not_found", error: "Not found" });

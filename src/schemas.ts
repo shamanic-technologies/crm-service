@@ -3289,6 +3289,50 @@ registry.registerPath({
   },
 });
 
+export const TeamMembershipRequestSchema = registry.register(
+  "TeamMembershipRequest",
+  z
+    .object({
+      brandId: z.string().uuid().optional().openapi({ description: "The brand whose own team is asked about. Else the x-brand-id header." }),
+      email: z.string().optional().openapi({ description: "The person's email." }),
+      phone: z.string().optional().openapi({ description: "The person's phone, international form (+<country><number>)." }),
+    })
+    .openapi("TeamMembershipRequest"),
+);
+
+export const TeamMembershipResponseSchema = registry.register(
+  "TeamMembershipResponse",
+  z
+    .object({
+      staff: z.boolean().openapi({ description: "One of distribute.you's staff (by email)." }),
+      ownTeam: z.boolean().openapi({ description: "One of the brand's own team: a linked WhatsApp account, the sales rep phone, or a member of the org (by phone or email)." }),
+      matches: z
+        .array(
+          z.object({
+            kind: z.enum(["staff", "linked_whatsapp_account", "sales_rep_phone", "org_member"]),
+            via: z.string().openapi({ description: "The address or number (E.164) that matched." }),
+            description: z.string().openapi({ description: "The kind in plain words, for a log." }),
+          }),
+        )
+        .openapi({ description: "Every way the person matched; empty = neither." }),
+    })
+    .openapi("TeamMembershipResponse"),
+);
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/people/team-membership",
+  summary: "Is this person our staff, or one of the brand's own team? (a fact, no refusal)",
+  description:
+    "A read for a pipe's strategy (WA-GIVEN-PURE-FACT-1017): the triggers report every person; who to skip is the pipe's call. Staff = a distribute.you staff address. Own team = one of the brand's linked WhatsApp numbers, its sales rep phone (brand-service), or any member of the org, by phone or address (client-service). No side effect, no cost. 502 `team_unreadable` when the sales rep or the org's members cannot be read: never answered as \"not own team\". Requires x-api-key, x-org-id, x-user-id; brand from body or x-brand-id.",
+  request: { body: { content: { "application/json": { schema: TeamMembershipRequestSchema } }, required: true } },
+  responses: {
+    200: { description: "The facts", content: { "application/json": { schema: TeamMembershipResponseSchema } } },
+    400: { description: "Bad request (`code: invalid_request`)", content: { "application/json": { schema: ErrorResponseSchema } } },
+    502: { description: "Sales rep or org members unreadable (`code: team_unreadable`), or run tracking failed", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
 export const WhatsappSendsQueryRequestSchema = registry.register(
   "WhatsappSendsQueryRequest",
   z

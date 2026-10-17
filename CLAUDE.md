@@ -1233,6 +1233,10 @@ kind `reported`, reportedBy crm-service, fromStep `lead_found`), within ~1 min. 
   (first / last name as the source states them: PostHog `first_name`/`last_name`/`name`, Clerk's own; a greeting says "Hi Marie").
   Retries 1→60 min for 24h; 400/422 final. Read: `GET /orgs/phone-triggers?brandId=[&includeHistory=true]`; a pass now:
   `POST /internal/phone-triggers/watch`.
+- **Team membership read** (`lib/people/team-membership.ts`, WA-GIVEN-PURE-FACT-1017): `POST /orgs/people/team-membership
+  {brandId?, email?, phone?}` → `{staff, ownTeam, matches [{kind, via, description}]}` (staff = `isStaffEmail`; own team =
+  linked WhatsApp numbers, sales rep phone, org members by phone or address). A fact for the PIPE's strategy (who to skip
+  is never the trigger's call); unreadable sales rep / members = 502 `team_unreadable`, never "not own team".
 
 ## Reply trigger — a person writing to the brand on a mirrored channel is reported at once (`src/lib/reply-trigger/`)
 
