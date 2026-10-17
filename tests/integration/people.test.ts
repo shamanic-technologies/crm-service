@@ -44,6 +44,17 @@ process.env.BRAND_SERVICE_URL = "http://brand.test";
 process.env.BRAND_SERVICE_API_KEY = "b";
 process.env.FEATURES_SERVICE_URL = "http://features.test";
 process.env.FEATURES_SERVICE_API_KEY = "f";
+process.env.CLIENT_SERVICE_URL = "http://client.test";
+process.env.CLIENT_SERVICE_API_KEY = "c";
+
+/** The four connection-tag answers (CONNECTION-TAGS-1017), yes on the given ones. */
+const tagAnswers = (...yes: string[]) =>
+  Object.fromEntries(
+    ["personal_to_user", "personal_not_to_user", "professional_to_brand", "professional_not_to_brand"].map((t) => [
+      `t_${t}`,
+      { type: "noul", noul: yes.includes(t) ? 0.9 : 0.05 },
+    ]),
+  );
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -154,9 +165,11 @@ function installFetchStub() {
           answers: {
             topic: { type: "choice", choice: personal ? "personal" : "this_brand", confidence: 0.9, probabilities: p },
             o0: { type: "noul", noul: personal ? 0.1 : 0.85 },
+            ...tagAnswers(personal ? "personal_to_user" : "professional_to_brand"),
           },
         });
       }
+      if (body.state.group) return json({ model: "jev-test", answers: tagAnswers("personal_not_to_user") });
       jevRequests.push({ headers: init!.headers as Record<string, string>, body });
       const answers: Record<string, unknown> = {};
       for (const [key, sender] of Object.entries(body.state.senders as Record<string, { email: string }>)) {
@@ -171,7 +184,11 @@ function installFetchStub() {
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
       return json({ id: "run-" + Math.random().toString(16).slice(2) });
     }
+    if (url.host === "client.test" && url.pathname === "/internal/users") {
+      return json({ users: [{ id: "user-owner", email: "me@brand.com", phone: "+33600000001", firstName: "Owner", lastName: "Brand" }], total: 1 });
+    }
     if (url.host === "google.test") {
+      if (url.pathname === "/orgs/google/accounts") return json({ accounts: gmailConnected ? [{ email: "me@brand.com" }] : [] });
       if (url.pathname === "/orgs/google/correspondents") {
         if (!gmailConnected) return json({ error: "none", reason: "no_google_account_connected" }, 404);
         return json({
@@ -1465,6 +1482,19 @@ describe.skipIf(!RUN)("person layer", () => {
       const alice = list.body.people.find((p: { personKey: string }) => p.personKey === "email:alice@x.com");
       expect(alice).toMatchObject({ notBusiness: false, offerIds: [OFFER] });
       expect(alice.relevance[0]).toMatchObject({ conversation: "gmail:alice@x.com", topic: "this_brand" });
+
+      // CONNECTION-TAGS-1017: Mom is personal to the mailbox's owner; Alice (a cold-email lead
+      // whose thread is about the brand) is professional to the brand, from both.
+      const mom = list.body.people.find((p: { personKey: string }) => p.personKey === "email:mom@family.com");
+      expect(mom.connectionTags).toEqual([
+        { tag: "personal_to_user", userIds: ["user-owner"], brandId: null, basis: [{ kind: "conversation", ref: "gmail:mom@family.com", probability: 0.9 }] },
+      ]);
+      expect(alice.connectionTags.map((t: { tag: string }) => t.tag)).toEqual(["professional_to_brand"]);
+      expect(alice.connectionTags[0].brandId).toBe(BRAND);
+      expect(alice.connectionTags[0].basis.map((b: { kind: string }) => b.kind)).toEqual(expect.arrayContaining(["source", "conversation"]));
+      const shown = relevanceRequests[0].body.state as unknown as { user: { users: { name: string; emails: string[] }[] } };
+      expect(shown.user.users[0]).toMatchObject({ name: "Owner Brand", emails: ["me@brand.com"] });
+      expect(summary.connectionTags).toMatchObject({ peopleUntagged: 0 });
 
       // An offer-scoped read: only the people Jev tied to that offer.
       expect(keysOf(await listPeople(`&offerId=${OFFER}`))).toEqual(["email:alice@x.com"]);

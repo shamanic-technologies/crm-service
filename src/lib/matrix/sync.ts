@@ -47,11 +47,14 @@ import {
   splitName,
 } from "./events.js";
 import { readThread, THREAD_WINDOW } from "./leads.js";
+import { readAccountUsers } from "../people/account-users.js";
 import { deliverDueReplies, detectReplies, type ReplyDetection } from "../reply-trigger/watch.js";
 import {
   hidesConversation,
   judgeAndRecord,
-  matrixConversationInput,
+  matrixLoader,
+  matrixPlans,
+  personViewsOfConversations,
   matrixMarkers,
   readBrandContext,
   type JudgePassSummary,
@@ -123,18 +126,19 @@ async function gateLeadReading(
   if (ids.length === 0) return { cleared: [], notBusiness: 0, deferred: 0, relevance: empty };
   const identity = { orgId: conn.orgId, userId: conn.createdByUserId, runId, brandId: conn.brandId };
   let context;
+  let users;
   try {
-    context = await readBrandContext(identity);
+    // Gmail is not read here: only the Matrix accounts' users (people/account-users.ts).
+    [context, users] = await Promise.all([readBrandContext(identity), readAccountUsers(identity, false)]);
   } catch (err) {
-    const error = `brand context: ${(err as Error).message}`.slice(0, 1000);
+    const error = `brand / user context: ${(err as Error).message}`.slice(0, 1000);
     console.error(`[crm-service][matrix] relevance gate skipped connection=${conn.id}: ${error}`);
     return { cleared: [], notBusiness: 0, deferred: ids.length, relevance: { ...empty, status: "failed", pending: ids.length, error } };
   }
   const markers = await matrixMarkers(ids);
-  const plans = ids
-    .filter((id) => markers.has(id))
-    .map((id) => ({ key: `matrix:${id}`, judgedThrough: markers.get(id)!, plan: id }));
-  const { verdicts, summary } = await judgeAndRecord(identity, context, plans, matrixConversationInput);
+  const plans = matrixPlans(ids, markers, context, users);
+  const views = await personViewsOfConversations(conn.orgId, conn.brandId, plans.map((p) => p.plan));
+  const { verdicts, summary } = await judgeAndRecord(identity, context, plans, matrixLoader(users, views));
   if (summary.error) console.error(`[crm-service][matrix] relevance judgments connection=${conn.id}: ${summary.error}`);
   const cleared: string[] = [];
   let notBusiness = 0;

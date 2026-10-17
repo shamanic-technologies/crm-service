@@ -114,6 +114,12 @@ function installFetchStub() {
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
+    if (url.startsWith("http://client.test/internal/users")) {
+      return new Response(JSON.stringify({ users: [{ id: "user-1", email: "owner@acme.test", phone: null, firstName: "Owner", lastName: null }], total: 1 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
     if (url.startsWith("http://brand.test/")) {
       const body = url.endsWith("/offers")
         ? { offers: [{ offerId: "offer-1", name: "Weddings", description: null, status: "active" }] }
@@ -137,7 +143,14 @@ function installFetchStub() {
       return new Response(
         JSON.stringify({
           model: "jev-test",
-          answers: { topic: { type: "choice", choice: judgedTopic, confidence: 0.9, probabilities: p }, o0: { type: "noul", noul: 0.8 } },
+          answers: {
+            topic: { type: "choice", choice: judgedTopic, confidence: 0.9, probabilities: p },
+            o0: { type: "noul", noul: 0.8 },
+            t_personal_to_user: { type: "noul", noul: judgedTopic === "personal" ? 0.9 : 0.05 },
+            t_personal_not_to_user: { type: "noul", noul: 0.05 },
+            t_professional_to_brand: { type: "noul", noul: judgedTopic === "this_brand" ? 0.9 : 0.05 },
+            t_professional_not_to_brand: { type: "noul", noul: judgedTopic === "other_business" ? 0.9 : 0.05 },
+          },
           usage: { inputTokens: 10, outputTokens: 0 },
         }),
         { status: 200, headers: { "content-type": "application/json" } },
@@ -218,6 +231,8 @@ describe.skipIf(!RUN)("matrix ingestion", () => {
     process.env.MATRIX_INGESTION_FLOOR = FLOOR;
     process.env.CRM_LEAD_READING_CHAT_CONFIG = "google/flash";
     process.env.BRAND_SERVICE_URL = "http://brand.test";
+    process.env.CLIENT_SERVICE_URL = "http://client.test";
+    process.env.CLIENT_SERVICE_API_KEY = "c";
     process.env.BRAND_SERVICE_API_KEY = "test-brand-key";
     installFetchStub();
   });

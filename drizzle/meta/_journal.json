@@ -323,6 +323,13 @@
       "when": 1792173661461,
       "tag": "0045_link_automation_persona",
       "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "7",
+      "when": 1792260000000,
+      "tag": "0046_connection_tags",
+      "breakpoints": true
     }
   ]
 }
