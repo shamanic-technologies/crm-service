@@ -68,7 +68,8 @@ import { visitorLabel } from "../posthog/records.js";
 import { readAccountUsers } from "./account-users.js";
 import { CONNECTION_TAGS, personConnectionTags, type ConnectionTag, type TagLookups } from "./connection-tags.js";
 import { resolveGroupTags, type GroupTags, type GroupTagsSummary } from "./group-tags.js";
-import { contactWebsites, personOrganizations, resolveOrganizationLookups, type OrganizationsSummary } from "./organizations.js";
+import { contactWebsites, overrideDomains, personOrganizations, resolveOrganizationLookups, type OrganizationsSummary } from "./organizations.js";
+import { activeCorrections, applyCorrections, correctionsOf, domainOverrides } from "./corrections.js";
 import {
   crmRecordKey,
   humanEvidence,
@@ -533,6 +534,10 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     return null;
   });
 
+  // PEOPLE-CORRECTIONS-1017: what the brand's users stated wins over every automatic answer.
+  const corrections = await activeCorrections(scope.orgId, scope.brandId);
+  if (orgLookups) overrideDomains(orgLookups.kinds, orgLookups.companyOf, domainOverrides(corrections));
+
   // A lead-service read that failed may be hiding a lead: never hide on it.
   const isOurLead = (c: PersonCluster) =>
     c.emails.some((e) => {
@@ -619,8 +624,14 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
         ? { notBusiness: false, offerIds: [] as string[], relevance: null }
         : personRelevance(c, relevance.verdicts, isOurLead(c))),
       groupOnly: isGroupOnly(c.presences),
-      connectionTags: personConnectionTags(c, tagLookupsOf(c)),
-      organizations: orgLookups ? personOrganizations(c, tagLookupsOf(c), orgLookups.kinds, orgLookups.companyOf, websiteOf) : [],
+      ...applyCorrections(
+        {
+          connectionTags: personConnectionTags(c, tagLookupsOf(c)),
+          organizations: orgLookups ? personOrganizations(c, tagLookupsOf(c), orgLookups.kinds, orgLookups.companyOf, websiteOf) : [],
+        },
+        correctionsOf(c.identityKeys, corrections),
+        scope.brandId,
+      ),
       possibleLeads: c.presences
         .filter((p) => p.source === "gohighlevel")
         .flatMap((p) => possibleLeadsByCrmContact.get(p.sourceRef) ?? [])

@@ -2383,3 +2383,32 @@ export const companyKeys = pgTable("company_keys", {
   unresolvedReason: text("unresolved_reason"),
   resolvedAt: timestamp("resolved_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/**
+ * PEOPLE-CORRECTIONS-1017: a user's statement correcting what the registry worked out (a tag, a
+ * person's company, a domain verdict). Never deleted: undo sets `undone_at`. Every people build
+ * applies the active ones on top of the automatic answer (people/corrections.ts).
+ */
+export const peopleCorrections = pgTable(
+  "people_corrections",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    // tag_add | tag_remove | organization_add | organization_remove | domain_kind
+    kind: text("kind").notNull(),
+    personId: uuid("person_id"),
+    // Every identity key the person held when stated: the statement follows them through rebuilds.
+    personKeys: jsonb("person_keys").notNull(),
+    target: jsonb("target").notNull(),
+    targetKey: text("target_key").notNull(),
+    reason: text("reason"),
+    statedByUserId: text("stated_by_user_id").notNull(),
+    runId: text("run_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    undoneAt: timestamp("undone_at", { withTimezone: true }),
+    undoneByUserId: text("undone_by_user_id"),
+  },
+  (table) => [index("people_corrections_org_brand_idx").on(table.orgId, table.brandId)],
+);
+export type PeopleCorrection = typeof peopleCorrections.$inferSelect;

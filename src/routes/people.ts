@@ -1,4 +1,6 @@
-import type { PersonConnectionTag } from "../lib/people/connection-tags.js";
+import { CONNECTION_TAGS, type PersonConnectionTag } from "../lib/people/connection-tags.js";
+import { CORRECTION_KINDS, correctionView, listCorrections, stateCorrection, undoCorrection } from "../lib/people/corrections.js";
+import { DOMAIN_KINDS } from "../lib/people/organizations.js";
 import type { PersonOrganization } from "../lib/people/organizations.js";
 import { Router, type Response } from "express";
 import { and, asc, eq, sql } from "drizzle-orm";
@@ -762,8 +764,9 @@ router.post(
 /** Rebuild the brand's people in the background so a statement shows on the next read. */
 async function kickRebuild(req: AuthenticatedRequest, brandId: string) {
   const { scope } = await ensureScope(req.orgId!, brandId, req.userId!);
+  // A statement made while a build runs must not wait for the next cron: one more build follows it.
   setImmediate(() => {
-    runScopeBuild(scope).catch((e) => console.error("[crm-service] people build crashed:", e));
+    runScopeBuild(scope, { followUp: true }).catch((e) => console.error("[crm-service] people build crashed:", e));
   });
 }
 
@@ -859,6 +862,93 @@ router.post(
       }
       if (!outcome.duplicate) await kickRebuild(req, body.data.brandId);
       res.json({ merge: mergeView(outcome.merge), duplicate: outcome.duplicate, rebuild: outcome.duplicate ? "not_needed" : "started" });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ─── corrections (PEOPLE-CORRECTIONS-1017) ───────────────────────────────────
+
+const correctionBodySchema = z.object({
+  brandId: brandIdSchema,
+  kind: z.enum(CORRECTION_KINDS),
+  personId: z.string().uuid().optional(),
+  tag: z.enum(CONNECTION_TAGS).optional(),
+  domain: z.string().min(1).max(500).optional(),
+  companyId: z.string().uuid().optional(),
+  domainKind: z.enum(DOMAIN_KINDS).optional(),
+  tags: z.array(z.enum(CONNECTION_TAGS)).max(4).optional(),
+  reason: z.string().max(2000).optional(),
+});
+
+/**
+ * A user corrects what the registry worked out (a tag, a person's company, a domain verdict). Recorded at
+ * once, honoured by every rebuild until undone (a human statement wins over Jev); a rebuild starts now.
+ */
+router.post(
+  "/orgs/people/corrections",
+  apiKeyAuth,
+  requireOrgAndUser("people.correct"),
+  async (req: AuthenticatedRequest, res, next) => {
+    const parsed = correctionBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ type: "validation", error: `invalid body: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` });
+    }
+    const { brandId, ...rest } = parsed.data;
+    try {
+      const outcome = await stateCorrection({ orgId: req.orgId!, brandId, userId: req.userId!, runId: req.runId ?? null, ...rest });
+      if (!outcome.ok) {
+        const { status, ...body } = outcome.refusal;
+        return res.status(status).json({ type: "refused", ...body });
+      }
+      if (!outcome.duplicate) await kickRebuild(req, brandId);
+      res.status(outcome.duplicate ? 200 : 201).json({
+        correction: correctionView(outcome.correction),
+        duplicate: outcome.duplicate,
+        rebuild: outcome.duplicate ? "not_needed" : "started",
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+/** Every correction of the brand, newest first, undone ones included. */
+router.get(
+  "/orgs/people/corrections",
+  apiKeyAuth,
+  requireOrgAndUser("people.corrections.list"),
+  async (req: AuthenticatedRequest, res, next) => {
+    const parsed = z.object({ brandId: brandIdSchema }).safeParse(req.query);
+    if (!parsed.success) return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
+    try {
+      res.json({ brandId: parsed.data.brandId, corrections: (await listCorrections(req.orgId!, parsed.data.brandId)).map(correctionView) });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+/** Take a correction back: the automatic answer applies again from the rebuild that starts now. */
+router.post(
+  "/orgs/people/corrections/:correctionId/undo",
+  apiKeyAuth,
+  requireOrgAndUser("people.correct.undo"),
+  async (req: AuthenticatedRequest, res, next) => {
+    const id = z.string().uuid().safeParse(req.params.correctionId);
+    const body = z.object({ brandId: brandIdSchema }).safeParse(req.body ?? {});
+    if (!id.success || !body.success) {
+      return res.status(400).json({ type: "validation", error: "correctionId (uuid) path param and brandId (uuid) body are required" });
+    }
+    try {
+      const outcome = await undoCorrection({ orgId: req.orgId!, brandId: body.data.brandId, correctionId: id.data, userId: req.userId! });
+      if (!outcome.ok) {
+        const { status, ...rest } = outcome.refusal;
+        return res.status(status).json({ type: "refused", ...rest });
+      }
+      if (!outcome.duplicate) await kickRebuild(req, body.data.brandId);
+      res.json({ correction: correctionView(outcome.correction), duplicate: outcome.duplicate, rebuild: outcome.duplicate ? "not_needed" : "started" });
     } catch (err) {
       next(err);
     }

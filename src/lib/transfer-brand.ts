@@ -68,6 +68,7 @@ import {
   humanFactStatements,
   phoneGivenReports,
   phoneWatchArtifacts,
+  peopleCorrections,
 } from "../db/schema.js";
 
 export const TRANSFER_TABLES: PgTable[] = [
@@ -117,6 +118,8 @@ export const TRANSFER_TABLES: PgTable[] = [
   apiCalls,
   // Stated merges (two people said to be one) follow the people they tie.
   personMerges,
+  // Users' corrections (tags, companies, domains) follow the people they correct.
+  peopleCorrections,
   // CRM form submissions reported as `form_submitted`, and the offer each form is about.
   formTriggerReports,
   formOfferMappings,

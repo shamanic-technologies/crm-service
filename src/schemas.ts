@@ -2086,8 +2086,8 @@ const PersonSchema = registry.register(
             companyId: z.string().openapi({ description: "brand-service's company id (a brand row; same domain = same id, fleet-wide)." }),
             domain: z.string(),
             evidence: z
-              .array(z.object({ kind: z.enum(["email", "website"]), value: z.string(), source: z.string() }))
-              .openapi({ description: "What names the company: a work address of the person (its domain), or the website their CRM record states." }),
+              .array(z.object({ kind: z.enum(["email", "website", "user"]), value: z.string(), source: z.string() }))
+              .openapi({ description: "What names the company: a work address of the person (its domain), the website their CRM record states, or a user's correction (kind user)." }),
             tags: z
               .array(
                 z.object({
@@ -2556,6 +2556,85 @@ export const OutcomePeopleResponseSchema = registry.register(
     ).openapi({ description: "Earliest reachedAt first (undated last), then personKey: a total order, safe to page." }),
   }),
 );
+
+const CorrectionSchema = z
+  .object({
+    correctionId: z.string().uuid(),
+    kind: z.enum(["tag_add", "tag_remove", "organization_add", "organization_remove", "domain_kind"]),
+    personId: z.string().nullable(),
+    target: z.record(z.string(), z.unknown()).openapi({ description: "What it states: {tag} | {domain, companyId, tags} | {companyId} | {domain, domainKind, companyId?}." }),
+    reason: z.string().nullable(),
+    statedByUserId: z.string(),
+    createdAt: z.string(),
+    undoneAt: z.string().nullable(),
+    undoneByUserId: z.string().nullable(),
+  })
+  .openapi("PeopleCorrection");
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/people/corrections",
+  summary: "Correct what the registry worked out about people: a tag, a person's company, a domain",
+  description:
+    "PEOPLE-CORRECTIONS-1017. A user's statement, recorded with who / when / why, honoured by every people build until undone: a human " +
+    "statement always wins over Jev and the sources. Kinds: `tag_add` / `tag_remove` {personId, tag} (one of the four connection tags); " +
+    "`organization_add` {personId, domain (or website), tags? (professional tags; default = the person's)} / `organization_remove` {personId, companyId}; " +
+    "`domain_kind` {domain, domainKind: mailbox_provider | organization} (overrides the domain verdict for this brand's people). A newer statement " +
+    "on the same thing replaces the older; an add takes back an active remove of the same thing (and the other way). Same statement twice = 200 duplicate. " +
+    "A rebuild starts at once (~1 min). 404 person_not_found, 422 company_unresolved (brand-service names no company for the domain) | tags_required.",
+  request: {
+    headers: IDENTITY_HEADERS,
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            brandId: z.string().uuid(),
+            kind: z.enum(["tag_add", "tag_remove", "organization_add", "organization_remove", "domain_kind"]),
+            personId: z.string().uuid().optional(),
+            tag: z.enum(CONNECTION_TAGS).optional(),
+            domain: z.string().optional(),
+            companyId: z.string().uuid().optional(),
+            domainKind: z.enum(["mailbox_provider", "organization"]).optional(),
+            tags: z.array(z.enum(CONNECTION_TAGS)).optional(),
+            reason: z.string().optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    201: { description: "Recorded", content: { "application/json": { schema: z.object({ correction: CorrectionSchema, duplicate: z.boolean(), rebuild: z.string() }) } } },
+    200: { description: "Already stated", content: { "application/json": { schema: z.object({ correction: CorrectionSchema, duplicate: z.boolean(), rebuild: z.string() }) } } },
+    400: { description: "Invalid body", content: { "application/json": { schema: ErrorResponseSchema } } },
+    404: { description: "person_not_found", content: { "application/json": { schema: ErrorResponseSchema } } },
+    422: { description: "company_unresolved | tags_required", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/people/corrections",
+  summary: "Every correction of the brand, newest first (undone ones included)",
+  request: { headers: IDENTITY_HEADERS, query: z.object({ brandId: z.string().uuid() }) },
+  responses: {
+    200: { description: "Corrections", content: { "application/json": { schema: z.object({ brandId: z.string(), corrections: z.array(CorrectionSchema) }) } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/people/corrections/{correctionId}/undo",
+  summary: "Take a correction back: the automatic answer applies again from the rebuild that starts now",
+  request: {
+    headers: IDENTITY_HEADERS,
+    params: z.object({ correctionId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: z.object({ brandId: z.string().uuid() }) } } },
+  },
+  responses: {
+    200: { description: "Undone", content: { "application/json": { schema: z.object({ correction: CorrectionSchema, duplicate: z.boolean(), rebuild: z.string() }) } } },
+    404: { description: "correction_not_found", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
 
 registry.registerPath({
   method: "get",

@@ -208,8 +208,8 @@ export async function resolveCompanyIds(domains: string[]): Promise<{ companyOf:
 // ─── the person's organizations ──────────────────────────────────────────────
 
 export interface OrganizationEvidence {
-  /** email = a work address of the person; website = the website their CRM record states. */
-  kind: "email" | "website";
+  /** email = a work address of the person; website = the website their CRM record states; user = a user said so (corrections.ts). */
+  kind: "email" | "website" | "user";
   value: string;
   source: string;
 }
@@ -234,6 +234,19 @@ export function presenceDomains(p: PresenceLike, websiteOf: (p: PresenceLike) =>
 }
 
 const evidenceDomain = (e: OrganizationEvidence) => (e.kind === "email" ? domainOfEmail(e.value) : domainOfWebsite(e.value));
+
+/** Apply the brand's users' domain statements over Jev's verdicts (they win), in place. */
+export function overrideDomains(
+  kinds: Map<string, { kind: DomainKind; confidence: number }>,
+  companyOf: Map<string, string>,
+  overrides: Map<string, { kind: DomainKind; companyId: string | null }>,
+): void {
+  for (const [domain, o] of overrides) {
+    kinds.set(domain, { kind: o.kind, confidence: 1 });
+    if (o.kind === "organization" && o.companyId) companyOf.set(domain, o.companyId);
+    if (o.kind === "mailbox_provider") companyOf.delete(domain);
+  }
+}
 
 /**
  * PURE: the organizations the person speaks for. A domain counts only when Jev called it an

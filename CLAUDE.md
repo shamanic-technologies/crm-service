@@ -54,6 +54,19 @@ judged once fleet-wide (`domain_verdicts`, 100 per call), organization >= 0.5 on
 only where the presence giving it carries a PROFESSIONAL tag (`presenceConnectionTags`): a friend
 writing from a work address gets none. Facts do not carry the company yet.
 
+## User corrections (`src/lib/people/corrections.ts`, PEOPLE-CORRECTIONS-1017)
+
+A user corrects what the registry worked out: `POST /orgs/people/corrections {brandId, kind, ...}`
+(`tag_add` / `tag_remove` {personId, tag}, `organization_add` {personId, domain, tags?} /
+`organization_remove` {personId, companyId}, `domain_kind` {domain, domainKind}), `GET` lists,
+`POST /orgs/people/corrections/:id/undo`. Table `people_corrections` = statements (who, when, why,
+the person's identity keys at the time, never deleted: undo sets `undone_at`). Every build applies
+the active ones AFTER the automatic answers (`applyCorrections`, basis `user_correction`): a human
+statement always wins over Jev. An add takes back an active remove of the same thing (and back).
+Same person = stated merges (`/orgs/people/merges`); not the same person (split) is not built yet.
+A route that states something kicks a rebuild with `followUp` (a running build is followed by one
+more; before, the kick was silently skipped until the next cron).
+
 ## Route tiers (service-architecture)
 
 - `/health`, `/openapi.json` — public, no auth.
