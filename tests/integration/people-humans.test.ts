@@ -81,8 +81,21 @@ class FakeHumans {
     const h = this.holder.get(`email:${email}`);
     return h ? this.canonical(h, ORG) : null;
   }
-  resolve(b: { orgId?: string; emails?: string[]; phones?: string[]; create: boolean }) {
-    const keys = [...(b.emails ?? []).map((e) => `email:${e.toLowerCase()}`), ...(b.phones ?? []).map((p) => `phone:${p}`)];
+  /** Every resolve body received (HUMAN-RECORD-KEYS-1017 checks what crm-service states). */
+  resolves: Record<string, unknown>[] = [];
+  resolve(b: {
+    orgId?: string;
+    emails?: string[];
+    phones?: string[];
+    crmRecords?: { provider: string; accountId: string; id: string }[];
+    create: boolean;
+  }) {
+    this.resolves.push(b as Record<string, unknown>);
+    const keys = [
+      ...(b.emails ?? []).map((e) => `email:${e.toLowerCase()}`),
+      ...(b.phones ?? []).map((p) => `phone:${p}`),
+      ...(b.crmRecords ?? []).map((c) => `crm_record:${c.provider}:${c.accountId}:${c.id}`),
+    ];
     const held = keys.map((k) => this.holder.get(k)).filter((x): x is string => !!x);
     const orgId = b.orgId ?? null;
     if (!b.create) {
@@ -384,6 +397,35 @@ describe.skipIf(!RUN)("people x human-service: same human is human-service's cal
       .where(and(eq(peopleFacts.brandId, BRAND), eq(peopleFacts.live, true), eq(peopleFacts.type, "added_to_crm"), eq(peopleFacts.source, "csv")));
     expect(live).toHaveLength(1);
     expect(live[0].humanId).toBe(humans.humanOfEmail("late@csv.com"));
+  });
+
+  it("HUMAN-RECORD-KEYS-1017: a CRM contact known by a name only is stated by its record id and gets its human", async () => {
+    const [conn] = await db.select().from(ghlConnections).where(eq(ghlConnections.brandId, BRAND));
+    await db.insert(contacts).values({
+      orgId: ORG,
+      brandId: BRAND,
+      source: "gohighlevel",
+      externalId: "ghl-name-only",
+      fullName: "Nora NameOnly",
+      rawAttributes: {},
+      unsubscribed: false,
+      sourceConnectionId: conn.id,
+    });
+    await build();
+    const stated = humans.resolves.find((r) => Array.isArray(r.crmRecords));
+    expect(stated).toMatchObject({ crmRecords: [{ provider: "gohighlevel", accountId: "loc", id: "ghl-name-only" }], create: true });
+    expect(stated!.emails).toBeUndefined();
+    const nora = (await db.select().from(people).where(eq(people.brandId, BRAND))).find((p) => p.displayName === "Nora NameOnly")!;
+    expect(nora.humanId).toBeTruthy();
+    expect(nora.humanId).toBe(humans.canonical(humans.holder.get("crm_record:gohighlevel:loc:ghl-name-only")!, ORG));
+    const facts = await db
+      .select()
+      .from(peopleFacts)
+      .where(and(eq(peopleFacts.brandId, BRAND), eq(peopleFacts.live, true), eq(peopleFacts.sourceContactId, "ghl-name-only")));
+    expect(facts.length).toBeGreaterThan(0);
+    expect(facts.every((f) => f.humanId === nora.humanId)).toBe(true);
+    // A contact holding an email is never stated by its record id.
+    expect(humans.resolves.filter((r) => Array.isArray(r.crmRecords))).toHaveLength(1);
   });
 
   it("human-service down: the build still runs, a pairing merges locally as before", async () => {

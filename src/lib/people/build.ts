@@ -22,6 +22,8 @@ import {
   type Evidence,
   type PersonCluster,
   type PeopleSource,
+  type Presence,
+  presenceFallbackKey,
 } from "./identity.js";
 import { mapLimit, type SiblingIdentity } from "./siblings.js";
 import {
@@ -67,8 +69,10 @@ import { readAccountUsers } from "./account-users.js";
 import { CONNECTION_TAGS, personConnectionTags, type ConnectionTag, type TagLookups } from "./connection-tags.js";
 import { resolveGroupTags, type GroupTags, type GroupTagsSummary } from "./group-tags.js";
 import {
+  crmRecordKey,
   humanEvidence,
   judgmentId,
+  type CrmRecord,
   personHumanId,
   resolveScopeHumans,
   type HumanIdentitySummary,
@@ -277,6 +281,46 @@ export function personDisplayName(c: PersonCluster): string | null {
   return firstNonNull(c, "displayName") ?? c.presences.map((p) => visitorLabel(presenceWebsite(p))).find((v) => !!v) ?? null;
 }
 
+const CRM_RECORD_SOURCES = new Set<string>(["gohighlevel", "stripe", "posthog", "clerk"]);
+
+/**
+ * The CRM record each name-only presence IS (no email, no phone, no handle): provider, the
+ * client account (GoHighLevel location, Stripe account, PostHog project, else the connection
+ * the record was read through) and the vendor's own record id.
+ */
+export async function crmRecordsOf(presences: Presence[]): Promise<Map<string, CrmRecord>> {
+  const nameOnly = presences.filter(
+    (p) =>
+      CRM_RECORD_SOURCES.has(p.source) &&
+      p.emails.length === 0 &&
+      p.phones.length === 0 &&
+      !(p.keys ?? []).some((k: string) => k.startsWith("msg:")) &&
+      typeof p.detail.contactId === "string",
+  );
+  const out = new Map<string, CrmRecord>();
+  if (nameOnly.length === 0) return out;
+  const ids = [...new Set(nameOnly.map((p) => p.detail.contactId as string))];
+  const account = new Map<string, { externalId: string | null; accountId: string | null }>();
+  for (let i = 0; i < ids.length; i += 1000) {
+    const rows = (await db.execute(sql`
+      SELECT c.id, c.external_id,
+             COALESCE(g.location_id, s.account_id, ph.project_id, c.source_connection_id::text) AS account_id
+      FROM contacts c
+      LEFT JOIN ghl_connections g ON c.source = 'gohighlevel' AND g.id = c.source_connection_id
+      LEFT JOIN stripe_connections s ON c.source = 'stripe' AND s.id = c.source_connection_id
+      LEFT JOIN posthog_connections ph ON c.source = 'posthog' AND ph.id = c.source_connection_id
+      WHERE c.id IN (${sql.join(ids.slice(i, i + 1000).map((id) => sql`${id}::uuid`), sql`, `)})
+    `)) as unknown as { id: string; external_id: string | null; account_id: string | null }[];
+    for (const r of rows) account.set(r.id, { externalId: r.external_id, accountId: r.account_id });
+  }
+  for (const p of nameOnly) {
+    const a = account.get(p.detail.contactId as string);
+    if (!a?.externalId?.trim() || !a.accountId?.trim() || a.accountId.includes(":")) continue;
+    out.set(presenceFallbackKey(p), { provider: p.source as CrmRecord["provider"], accountId: a.accountId.trim(), id: a.externalId.trim() });
+  }
+  return out;
+}
+
 /** Every CSV contact of the brand holding an email or a phone, as the keys its row states together. */
 export async function readCsvIdentityRecords(orgId: string, brandId: string): Promise<IdentityRecord[]> {
   const rows = await db
@@ -389,12 +433,14 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
   // stated LAST: the long tail of the brand's groups never holds back the rest.
   const handlesOf = (p: (typeof presences)[number]) => (p.keys ?? []).filter((k) => k.startsWith("msg:"));
   const lurker = (p: (typeof presences)[number]) => isGroupOnly([p]) && p.phones.length === 0;
+  // HUMAN-RECORD-KEYS-1017: a record of the brand's own tool with no email, phone or handle
+  // (a GoHighLevel contact known by a name) is stated by its record id.
+  const recordOf = await crmRecordsOf(presences);
   const records: IdentityRecord[] = [
-    ...[...presences.filter((p) => !lurker(p)), ...presences.filter(lurker)].map((p) => ({
-      emails: p.emails,
-      phones: p.phones,
-      handles: handlesOf(p),
-    })),
+    ...[...presences.filter((p) => !lurker(p)), ...presences.filter(lurker)].map((p) => {
+      const crm = recordOf.get(presenceFallbackKey(p));
+      return { emails: p.emails, phones: p.phones, handles: handlesOf(p), ...(crm ? { crmRecords: [crm] } : {}) };
+    }),
     ...allEvidence.filter((e) => !isJudgment(e)).map((e) => ({ emails: e.emails, phones: e.phones })),
     // HUMAN-ID-COVERAGE-1017: every CSV row too (an imported contact nobody talked to yet is
     // no person of the Unibox, but its facts name a human). Stated last: never holds back the rest.
@@ -509,7 +555,12 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       orgId: scope.orgId,
       brandId: scope.brandId,
       personKey: c.personKey,
-      humanId: personHumanId(c.identityKeys, humans.humanOf),
+      humanId:
+        personHumanId(c.identityKeys, humans.humanOf) ??
+        personHumanId(
+          c.presences.map((p) => recordOf.get(presenceFallbackKey(p))).filter((r): r is CrmRecord => !!r).map(crmRecordKey),
+          humans.humanOf,
+        ),
       identityKeys: c.identityKeys,
       displayName: personDisplayName(c),
       company: firstNonNull(c, "company"),
