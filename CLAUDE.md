@@ -269,13 +269,12 @@ human-service from the pipe's strategy), both pools. Candidates are walked in po
 adds `relationships {policy, checked, skipped{reason}}`; `exhausted` = nothing allowed left AND
 nobody waiting on a first judgment.
 
-### Unibox relationship block
+### Unibox list: lead-service's (UNIBOX-FROM-LEAD-1017)
 
-`GET /orgs/people`: each row carries lead-service's `relationship` block verbatim (by `humanId`,
-read 60s-cached per human, `lib/people/relationships.ts`), `relationships {status, counts per YES
-tag, untagged, unjudged}` over the population, filter `relationship=<tag>|untagged|unjudged` (502
-when lead-service is unreadable). One row per human: human-service's merges (incl. org judgment
-links) come back as `human_identity` evidence, so two people one human holds collapse at build.
+lead-service serves the Unibox LIST and lead card (`/orgs/leads/unibox*`, scoped to `professional_to_brand`,
+read off our fact feed); `GET /orgs/people` no longer reads lead-service relationships (no `relationship`
+filter, block or counts). crm → lead, one way. The serve's `relationships: business_only` (above) still asks
+lead-service: that policy also excludes team, investors, suppliers, press (lead-service's Type).
 
 ### Reachability (`reachableBy`) — a serve FOR a pipe never burns whom it cannot reach
 
