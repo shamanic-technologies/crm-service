@@ -1378,7 +1378,9 @@ lead-service serves the overall tag, then go.
   `crm|<type>|<personId>|<tag|companyId>`, `humanId` like every fact, `occurredAt` null (the feed order is
   the time). Snapshot: withdrawn when the BUILT person no longer holds it or their id was retired by a
   merge; a person missing from one build (a source read failed) keeps theirs. Jev's probabilities are
-  not in the payload (a re-judgment keeping the tag is no change).
+  not in the payload (a re-judgment keeping the tag is no change). A CSV row no built person holds (no person of the
+  Unibox, a human of the brand's own CRM) gets `connection_tag professional_to_brand` keyed on its person key
+  (`standaloneRegistryCandidates`), withdrawn once a built person holds that key or the row leaves the CSV.
 - OUT: our own outreach (Instantly, self-send) — lead-service reads it directly.
 - **`withdrawn` only when the vendor record changed or vanished**, and a
   vanished record is withdrawn only in a SNAPSHOT family (GoHighLevel contacts

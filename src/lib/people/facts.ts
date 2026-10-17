@@ -247,6 +247,33 @@ async function humansOfKeys(tx: Pick<typeof db, "select">, orgId: string, keys: 
   return out;
 }
 
+/**
+ * PURE: a `connection_tag` professional_to_brand for every CSV row no built person holds (a contact of the
+ * brand's own CRM nobody talked to yet: not a person of the Unibox, a human of the registry all the same).
+ * Keyed on the row's person key (`email:<addr>`), standalone subject, so its humanId comes from `human_keys`.
+ */
+export function standaloneRegistryCandidates(csv: CandidateFact[], builtKeys: Set<string>, brandId: string): CandidateFact[] {
+  const out = new Map<string, CandidateFact>();
+  for (const c of csv) {
+    if (!c.subject.standalone || c.subject.keys.length === 0 || c.subject.keys.some((k) => builtKeys.has(k))) continue;
+    const personKey = pickPersonKey(c.subject.keys);
+    out.set(personKey, {
+      naturalKey: `crm|connection_tag|${personKey}|professional_to_brand`,
+      family: "crm_connection_tag",
+      type: "connection_tag",
+      source: "crm",
+      sourceRef: personKey,
+      sourceContactId: null,
+      crmContactId: null,
+      occurredAt: null,
+      dateBasis: "none",
+      payload: { tag: "professional_to_brand", userIds: [], brandId, basis: [{ kind: "evidence", ref: "csv_contact" }] },
+      subject: c.subject,
+    });
+  }
+  return [...out.values()];
+}
+
 // ─── candidates, per source ─────────────────────────────────────────────────
 
 /**
@@ -1110,7 +1137,10 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
           .where(and(eq(personIdAliases.orgId, orgId), eq(personIdAliases.brandId, brandId)))
       ).map((r) => r.id),
     );
-    const registry = registryCandidates(personRows);
+    // A CSV row no built person holds is a human of the brand's own CRM all the same: professional_to_brand.
+    const builtKeys = new Set(personRows.flatMap((r) => r.identityKeys as string[]));
+    const registry = [...registryCandidates(personRows), ...standaloneRegistryCandidates(csv, builtKeys, brandId)];
+    const csvKeys = new Set(csv.map((c) => pickPersonKey(c.subject.keys)));
     const all = [...ghl, ...matrix, ...matrixGroups, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv, ...registry].filter(
       (c) => !(authStatesSignups && c.family === "posthog_person"),
     );
@@ -1275,7 +1305,10 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       if (!family?.snapshot || !connected.has(family.source)) continue;
       // A registry statement goes only when its person is still built and no longer holds it, or was
       // merged into another (retired id). A person missing from ONE build (a source read failed) keeps it.
-      if (family.source === "crm" && !builtIds.has(live.sourceRef ?? "") && !retiredIds.has(live.sourceRef ?? "")) continue;
+      // A standalone CSV row's tag (sourceRef = its person key) goes once a built person holds that key
+      // (the person's own tags take over) or the row is gone from the CSV.
+      const standaloneGone = (live.sourceRef ?? "").includes(":") && (builtKeys.has(live.sourceRef!) || !csvKeys.has(live.sourceRef!));
+      if (family.source === "crm" && !builtIds.has(live.sourceRef ?? "") && !retiredIds.has(live.sourceRef ?? "") && !standaloneGone) continue;
       if (family.source === "stripe" && !stillMirrored.has(live.sourceRef ?? "")) continue;
       withdrawals.push({ fact: live, reason: "vendor_record_gone" });
       withdrawnGone++;
