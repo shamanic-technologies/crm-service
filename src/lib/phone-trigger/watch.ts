@@ -15,11 +15,12 @@
  *     does not. History is never reported: the first time the watch looks at a source
  *     ARTIFACT (a CSV upload, a connection) once it has finished its first sync, every
  *     number it holds is recorded `skipped / before_watch` (`phone_watch_artifacts`),
- *     so connecting a CRM or importing a file never fires on its backlog. A number
- *     learned from a chat the person opened is `conversation_channel`; a staff address
- *     is `staff`.
+ *     so connecting a CRM or importing a file never fires on its backlog. A chat
+ *     contact (Matrix) counts once the person WROTE in a one-to-one thread (a silent
+ *     group member gave nothing). No WHO filter (staff, own team, already wrote): the
+ *     answering pipe's strategy decides (WA-GIVEN-PURE-FACT-1017).
  *  3. DELIVER every pending / failed-and-due report: one ORG run per (org, brand),
- *     the brand's own numbers (`own_team`) dropped, the offer = the brand's only active
+ *     an impossible number dropped (`invalid_number`), the offer = the brand's only active
  *     offer, idempotency key `crm:phone_given:<brand>:<number>` (a retry returns
  *     campaign-service's first event). Retries 1 → 60 min for 24h; 400 / 422 final.
  *  A detection kicks the brand's people build (unawaited) so the person is known to
@@ -40,7 +41,6 @@ import { mirrorRecentlyUpdatedUsers } from "../auth/sync.js";
 import { runScopeBuild } from "../people/build.js";
 import { createRun, updateRun } from "../runs-client.js";
 import { readBrandOffers, pickOffer } from "../form-trigger/offer.js";
-import { readOwnTeam, ownTeamMatch } from "../reply-trigger/own-team.js";
 import {
   CampaignRefusal,
   campaignServiceConfigured,
@@ -52,8 +52,6 @@ import {
   PHONE_REASONS,
   PHONE_STATUS,
   phoneOccurrenceBody,
-  phoneSkipReason,
-  type PhoneCandidate,
 } from "./rules.js";
 
 const SERVICE_NAME = "crm-service";
@@ -170,10 +168,11 @@ async function baselineNewArtifacts(now: number): Promise<PhoneWatchResult["base
 export async function detectNewPhones(now: number = Date.now()): Promise<Pick<PhoneWatchResult, "baselined" | "detected" | "skipped"> & { brands: Set<string> }> {
   const baselined = await baselineNewArtifacts(now);
   const out = { baselined, detected: 0, skipped: {} as Record<string, number>, brands: new Set<string>() };
-  // Only contacts of a WATCHED artifact (one still on its first load waits: its numbers are not news yet),
-  // or learned from a chat (skipped whatever its connection's state).
+  // Only contacts of a WATCHED artifact (one still on its first load waits: its numbers are not news yet).
+  // A chat contact (Matrix) only once the person wrote in a one-to-one thread: a group member who
+  // never did gave the brand nothing (WA-GIVEN-PURE-FACT-1017: a chat-learned number is given too).
   const found = await rows<Row>(sql`
-    SELECT c.id, c.org_id, c.brand_id, c.source, c.channel, c.phone_e164, c.primary_email, c.full_name,
+    SELECT c.id, c.org_id, c.brand_id, c.source, c.phone_e164, c.primary_email, c.full_name,
            c.first_name, c.last_name, c.external_id,
            coalesce(c.source_upload_id, c.source_connection_id) AS artifact_id
     FROM contacts c
@@ -182,56 +181,43 @@ export async function detectNewPhones(now: number = Date.now()): Promise<Pick<Ph
         SELECT 1 FROM phone_given_reports r
         WHERE r.org_id = c.org_id AND r.brand_id = c.brand_id AND r.phone = c.phone_e164
       )
-      AND (c.channel IS NOT NULL OR EXISTS (
+      AND EXISTS (
         SELECT 1 FROM phone_watch_artifacts w
         WHERE w.org_id = c.org_id AND w.brand_id = c.brand_id
           AND w.artifact_id = coalesce(c.source_upload_id, c.source_connection_id)
+      )
+      AND (c.channel IS NULL OR EXISTS (
+        SELECT 1 FROM conversations cv WHERE cv.contact_id = c.id AND cv.inbound_count > 0
       ))
     ORDER BY c.last_rebuilt_at DESC, c.id
     LIMIT ${DETECT_BATCH}
   `);
   const detectedAt = new Date(now);
   for (const r of found) {
-    const c: PhoneCandidate = {
+    const c = {
       contactId: String(r.id),
       orgId: String(r.org_id),
       brandId: String(r.brand_id),
       source: String(r.source),
-      channel: (r.channel as string | null) ?? null,
       phone: String(r.phone_e164),
-      email: (r.primary_email as string | null) ?? null,
-      fullName: (r.full_name as string | null) ?? null,
-      firstName: (r.first_name as string | null) ?? null,
-      lastName: (r.last_name as string | null) ?? null,
-      sourceContactId: (r.external_id as string | null) ?? null,
-      artifactId: (r.artifact_id as string | null) ?? null,
     };
-    const skip = phoneSkipReason(c, null);
     const inserted = await db
       .insert(phoneGivenReports)
       .values({
-        orgId: c.orgId,
-        brandId: c.brandId,
-        phone: c.phone,
-        source: c.source,
-        contactId: c.contactId,
-        sourceContactId: c.sourceContactId,
-        artifactId: c.artifactId,
-        fullName: c.fullName,
-        firstName: c.firstName,
-        lastName: c.lastName,
-        email: c.email,
+        ...c,
+        sourceContactId: (r.external_id as string | null) ?? null,
+        artifactId: (r.artifact_id as string | null) ?? null,
+        fullName: (r.full_name as string | null) ?? null,
+        firstName: (r.first_name as string | null) ?? null,
+        lastName: (r.last_name as string | null) ?? null,
+        email: (r.primary_email as string | null) ?? null,
         detectedAt,
-        status: skip ? PHONE_STATUS.SKIPPED : PHONE_STATUS.PENDING,
-        reason: skip,
+        status: PHONE_STATUS.PENDING,
+        reason: null,
       })
       .onConflictDoNothing()
       .returning({ id: phoneGivenReports.id });
     if (inserted.length === 0) continue;
-    if (skip) {
-      out.skipped[skip] = (out.skipped[skip] ?? 0) + 1;
-      continue;
-    }
     out.detected += 1;
     out.brands.add(`${c.orgId}|${c.brandId}`);
     console.log(
@@ -302,16 +288,16 @@ export async function deliverDue(now: number = Date.now()): Promise<PhoneWatchRe
     let failed = false;
     try {
       // Read once per brand; a brand-service outage leaves every report for the next pass.
-      const [offers, ownTeam] = await Promise.all([readBrandOffers(identity), readOwnTeam(identity)]);
+      const offers = await readBrandOffers(identity);
       const offer = pickOffer(null, [], offers);
       for (const r of reports) {
-        const outcome = await deliverOne(r, identity, offer, ownTeam, now);
+        const outcome = await deliverOne(r, identity, offer, now);
         if (outcome.status === PHONE_STATUS.FAILED) failed = true;
         delivered.push({ reportId: r.id, ...outcome });
       }
     } catch (err) {
       failed = true;
-      console.warn(`[crm-service][phone-trigger] brand ${brandId}: offers / own team unreadable, retried next pass: ${(err as Error).message}`);
+      console.warn(`[crm-service][phone-trigger] brand ${brandId}: offers unreadable, retried next pass: ${(err as Error).message}`);
     }
     await updateRun(run.id, failed ? "failed" : "completed", { orgId, userId, runId: run.id, brandIds: [brandId] });
   }
@@ -322,13 +308,8 @@ async function deliverOne(
   r: PhoneGivenReport,
   identity: { orgId: string; userId: string; runId: string; brandId: string },
   offer: ReturnType<typeof pickOffer>,
-  ownTeam: Awaited<ReturnType<typeof readOwnTeam>>,
   now: number,
 ): Promise<{ status: string; reason: string | null }> {
-  if (ownTeamMatch([r.phone], ownTeam)) {
-    await settle(r, now, { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.OWN_TEAM, runId: identity.runId });
-    return { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.OWN_TEAM };
-  }
   if (!dialablePhone([r.phone])) {
     await settle(r, now, { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.INVALID_NUMBER, runId: identity.runId });
     return { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.INVALID_NUMBER };

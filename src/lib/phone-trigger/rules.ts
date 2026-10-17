@@ -8,10 +8,14 @@
  * The occurrence's identity is (brand, number): reported once, whichever connector
  * states it first or again (a PostHog visitor who later signs up on Clerk with the
  * same number is ONE occurrence).
+ *
+ * The trigger states the FACT only (WA-GIVEN-PURE-FACT-1017, owner 2026-10-17): who a
+ * pipe then writes to or skips (staff, the brand's own team, someone who already wrote)
+ * is the answering pipe's strategy, which reads the person's timeline. Nothing here
+ * filters on WHO the person is. A number learned because the person wrote to the brand
+ * on a chat (WhatsApp, LinkedIn) is given too. The only skips: history (`before_watch`)
+ * and a number nobody can be reached on (`invalid_number`).
  */
-import { isStaffEmail } from "../owner-telegram.js";
-import { ownTeamMatch, type OwnTeam } from "../reply-trigger/own-team.js";
-
 /** The trigger id declared in features-service's catalogue (kind `reported`, reportedBy crm-service). */
 export const PHONE_GIVEN_TRIGGER = "whatsapp_number_given";
 
@@ -21,13 +25,11 @@ export const PHONE_REASONS = {
   /** The number was already on a source when the watch first looked at it: history, never reported. */
   BEFORE_WATCH: "before_watch",
   /**
-   * Learned from a chat the person opened (a bridged WhatsApp / LinkedIn conversation):
-   * they WROTE to the brand, which the reply trigger reports; they gave no number.
+   * RETIRED reasons (WA-GIVEN-PURE-FACT-1017): rows recorded before it keep them; no new
+   * row gets them. Who to skip is the answering pipe's strategy.
    */
   CONVERSATION_CHANNEL: "conversation_channel",
-  /** One of our staff (`isStaffEmail`), never a prospect. */
   STAFF: "staff",
-  /** One of the brand's own numbers (a linked WhatsApp account, the sales rep phone, a member of the org). */
   OWN_TEAM: "own_team",
   /** A number nobody can be reached on (impossible under its country's plan): never offered. */
   INVALID_NUMBER: "invalid_number",
@@ -35,33 +37,6 @@ export const PHONE_REASONS = {
   CAMPAIGN_REFUSED: "campaign_refused",
   CAMPAIGN_UNREACHABLE: "campaign_unreachable",
 } as const;
-
-export interface PhoneCandidate {
-  contactId: string;
-  orgId: string;
-  brandId: string;
-  source: string;
-  /** Set only on a contact learned from a messaging channel (Matrix). */
-  channel: string | null;
-  phone: string;
-  email: string | null;
-  fullName: string | null;
-  firstName: string | null;
-  lastName: string | null;
-  sourceContactId: string | null;
-  artifactId: string | null;
-}
-
-/**
- * PURE: why a new number is NOT reported, or null when it is. Structural only: who
- * a campaign may write to beyond this is the answering pipe's strategy, never ours.
- */
-export function phoneSkipReason(c: PhoneCandidate, ownTeam: OwnTeam | null): string | null {
-  if (c.channel) return PHONE_REASONS.CONVERSATION_CHANNEL;
-  if (isStaffEmail(c.email)) return PHONE_REASONS.STAFF;
-  if (ownTeam && ownTeamMatch([c.phone], ownTeam)) return PHONE_REASONS.OWN_TEAM;
-  return null;
-}
 
 export function phoneIdempotencyKey(brandId: string, phone: string): string {
   return `crm:phone_given:${brandId}:${phone}`;

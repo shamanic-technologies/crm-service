@@ -1,23 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { PHONE_GIVEN_TRIGGER, phoneOccurrenceBody, phoneSkipReason, type PhoneCandidate } from "../../src/lib/phone-trigger/rules.js";
+import { PHONE_GIVEN_TRIGGER, phoneOccurrenceBody } from "../../src/lib/phone-trigger/rules.js";
 import { nextAttemptDue } from "../../src/lib/phone-trigger/watch.js";
 import { derivePosthogContact } from "../../src/lib/posthog/records.js";
 
-const base: PhoneCandidate = {
-  contactId: "c1", orgId: "o", brandId: "b", source: "clerk", channel: null, phone: "+447911123001",
-  email: "a@example.com", fullName: "A B", firstName: "A", lastName: "B", sourceContactId: "user_1", artifactId: "art",
-};
-
 describe("phone given rules (WA-GIVEN-TRIGGER-1015)", () => {
-  it("skips a chat counterpart, staff and the brand's own numbers; reports anyone else", () => {
-    expect(phoneSkipReason(base, null)).toBeNull();
-    expect(phoneSkipReason({ ...base, channel: "whatsapp" }, null)).toBe("conversation_channel");
-    expect(phoneSkipReason({ ...base, email: "kevin@distribute.you" }, null)).toBe("staff");
-    // A sending-mailbox +tag identity is no staff address: a test through it stays possible.
-    expect(phoneSkipReason({ ...base, email: "k.lourd+probe@trydistribute.com" }, null)).toBeNull();
-    expect(phoneSkipReason(base, new Map([["447911123001", "the brand's sales rep phone"]]))).toBe("own_team");
-  });
-
   it("names the person by the number, adds the email when held, omits absent values", () => {
     const at = new Date("2026-10-15T15:00:00Z");
     const body = phoneOccurrenceBody({ brandId: "b", offerId: "o1", phone: "+447911123001", source: "posthog", email: null, fullName: null, firstName: "Marie", lastName: null, contactId: "c1", sourceContactId: "ph-1", detectedAt: at });
