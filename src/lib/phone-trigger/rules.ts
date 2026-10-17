@@ -12,7 +12,9 @@
  * The trigger states the FACT only (WA-GIVEN-PURE-FACT-1017, owner 2026-10-17): who a
  * pipe then writes to or skips (staff, the brand's own team, someone who already wrote)
  * is the answering pipe's strategy, which reads the person's timeline. Nothing here
- * filters on WHO the person is; the only skips say the number was not GIVEN now.
+ * filters on WHO the person is. A number learned because the person wrote to the brand
+ * on a chat (WhatsApp, LinkedIn) is given too. The only skips: history (`before_watch`)
+ * and a number nobody can be reached on (`invalid_number`).
  */
 /** The trigger id declared in features-service's catalogue (kind `reported`, reportedBy crm-service). */
 export const PHONE_GIVEN_TRIGGER = "whatsapp_number_given";
@@ -23,14 +25,10 @@ export const PHONE_REASONS = {
   /** The number was already on a source when the watch first looked at it: history, never reported. */
   BEFORE_WATCH: "before_watch",
   /**
-   * Learned from a chat the person opened (a bridged WhatsApp / LinkedIn conversation):
-   * they WROTE to the brand, which the reply trigger reports; they gave no number.
-   */
-  CONVERSATION_CHANNEL: "conversation_channel",
-  /**
    * RETIRED reasons (WA-GIVEN-PURE-FACT-1017): rows recorded before it keep them; no new
    * row gets them. Who to skip is the answering pipe's strategy.
    */
+  CONVERSATION_CHANNEL: "conversation_channel",
   STAFF: "staff",
   OWN_TEAM: "own_team",
   /** A number nobody can be reached on (impossible under its country's plan): never offered. */
@@ -39,32 +37,6 @@ export const PHONE_REASONS = {
   CAMPAIGN_REFUSED: "campaign_refused",
   CAMPAIGN_UNREACHABLE: "campaign_unreachable",
 } as const;
-
-export interface PhoneCandidate {
-  contactId: string;
-  orgId: string;
-  brandId: string;
-  source: string;
-  /** Set only on a contact learned from a messaging channel (Matrix). */
-  channel: string | null;
-  phone: string;
-  email: string | null;
-  fullName: string | null;
-  firstName: string | null;
-  lastName: string | null;
-  sourceContactId: string | null;
-  artifactId: string | null;
-}
-
-/**
- * PURE: why a new number is NOT reported, or null when it is. Only the fact's own
- * definition: a number read off a chat channel (the bridge's identity of whoever is in
- * the thread) was not GIVEN. Never who the person is (staff, own team): the pipe's call.
- */
-export function phoneSkipReason(c: PhoneCandidate): string | null {
-  if (c.channel) return PHONE_REASONS.CONVERSATION_CHANNEL;
-  return null;
-}
 
 export function phoneIdempotencyKey(brandId: string, phone: string): string {
   return `crm:phone_given:${brandId}:${phone}`;

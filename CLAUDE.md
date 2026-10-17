@@ -1215,10 +1215,12 @@ kind `reported`, reportedBy crm-service, fromStep `lead_found`), within ~1 min. 
   Key `crm:phone_given:<brandId>:<phone>`. Detection = generic over silver `contacts` (any source), no per-source code.
 - **Never history**: every source ARTIFACT (promoted CSV upload, connection synced once) is baselined at the first pass
   that sees it loaded (`phone_watch_artifacts`): every number it holds then = `skipped / before_watch`. So connecting a CRM
-  or importing a file never fires on its backlog; an artifact still on its first sync waits. Skips = the fact's own
-  definition only: `conversation_channel` (a number read off a bridged chat was not GIVEN), `invalid_number`. NO who
-  filter (WA-GIVEN-PURE-FACT-1017, owner 2026-10-17): staff and the brand's own team ARE reported; the answering pipe's
-  strategy skips them off the person's timeline (`staff` / `own_team` = old rows only).
+  or importing a file never fires on its backlog; an artifact still on its first sync waits. Skips = history
+  (`before_watch`) and `invalid_number` only. NO who filter (WA-GIVEN-PURE-FACT-1017, owner 2026-10-17): staff, the
+  brand's own team AND a number learned because the person wrote on a bridged chat (WhatsApp / LinkedIn) ARE reported;
+  the answering pipe's strategy skips them (`POST /orgs/people/team-membership`, the person's timeline). A Matrix
+  contact counts once it holds a one-to-one conversation with an inbound message (a silent group member gave nothing).
+  `conversation_channel` / `staff` / `own_team` = old rows only.
 - **Fast mirror, every 60s** (`PHONE_WATCH_INTERVAL_MS`, first 60s after boot; `PHONE_WATCH=off` stops it): PostHog
   persons whose events SET a known property (phone, email, name, website) or fired a custom event in the last 10 min
   and auth-provider users changed in the last 10 min (Clerk `order_by=-updated_at`) are mirrored now (bronze + silver,

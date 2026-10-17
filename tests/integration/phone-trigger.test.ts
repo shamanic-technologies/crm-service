@@ -6,7 +6,9 @@ import {
   authRawRecords,
   contacts,
   contactUploads,
+  conversations,
   ghlConnections,
+  matrixConnections,
   phoneGivenReports,
   phoneWatchArtifacts,
   posthogConnections,
@@ -94,6 +96,7 @@ async function wipe() {
   await db.delete(posthogConnections).where(eq(posthogConnections.brandId, BRAND));
   await db.delete(ghlConnections).where(eq(ghlConnections.brandId, BRAND));
   await db.delete(contactUploads).where(eq(contactUploads.brandId, BRAND));
+  await db.delete(matrixConnections).where(eq(matrixConnections.brandId, BRAND));
 }
 
 function clerkUser(id: string, phone: string | null, updatedAt: number, email = `${id}@example.com`) {
@@ -192,19 +195,60 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     expect((await reports()).filter((r) => r.phone === "+447911123003")).toHaveLength(1);
   });
 
-  it("staff and the brand's own numbers are reported (the pipe decides who to skip); a number read off a chat is not", async () => {
+  it("staff, the brand's own numbers and a number learned from a chat the person wrote in are reported (the pipe decides who to skip)", async () => {
+    const [mx] = await db
+      .insert(matrixConnections)
+      .values({ orgId: ORG, brandId: BRAND, channel: "whatsapp", matrixUserId: "@crm_phone:hs", createdByUserId: USER, counterpartPrefix: "@whatsapp_", status: "active", lastSyncedAt: new Date(T0 - 3_600_000) })
+      .returning();
     await runPhoneWatchPass(T0);
-    await db.insert(contacts).values([
-      { orgId: ORG, brandId: BRAND, source: "clerk", externalId: "user_staff", phoneE164: "+447911123004", primaryEmail: "kevin@distribute.you", rawAttributes: {}, sourceConnectionId: clerkConn },
-      { orgId: ORG, brandId: BRAND, source: "clerk", externalId: "user_rep", phoneE164: SALES_REP, primaryEmail: "rep@example.com", rawAttributes: {}, sourceConnectionId: clerkConn },
-      { orgId: ORG, brandId: BRAND, source: "matrix", channel: "whatsapp", channelHandle: "@whatsapp_447911123005:hs", phoneE164: "+447911123005", rawAttributes: {}, sourceConnectionId: "fefefefe-1111-4111-8111-0000000000c1" },
-    ]);
+    const [wrote, silent] = await db
+      .insert(contacts)
+      .values([
+        { orgId: ORG, brandId: BRAND, source: "clerk", externalId: "user_staff", phoneE164: "+447911123004", primaryEmail: "kevin@distribute.you", rawAttributes: {}, sourceConnectionId: clerkConn },
+        { orgId: ORG, brandId: BRAND, source: "clerk", externalId: "user_rep", phoneE164: SALES_REP, primaryEmail: "rep@example.com", rawAttributes: {}, sourceConnectionId: clerkConn },
+        { orgId: ORG, brandId: BRAND, source: "matrix", channel: "whatsapp", channelHandle: "@whatsapp_447911123005:hs", phoneE164: "+447911123005", rawAttributes: {}, sourceConnectionId: mx.id },
+        // A group member who never wrote to the brand gave it nothing.
+        { orgId: ORG, brandId: BRAND, source: "matrix", channel: "whatsapp", channelHandle: "@whatsapp_447911123010:hs", phoneE164: "+447911123010", rawAttributes: {}, sourceConnectionId: mx.id },
+      ])
+      .returning()
+      .then((r) => [r[2], r[3]]);
+    await db.insert(conversations).values({
+      orgId: ORG, brandId: BRAND, connectionId: mx.id, contactId: wrote.id, channel: "whatsapp", roomId: "!r:hs",
+      firstMessageAt: new Date(T0), lastMessageAt: new Date(T0), messageCount: 1, inboundCount: 1, outboundCount: 0, lastEventId: "$e1",
+    });
     await runPhoneWatchPass(min(1));
-    expect(campaignCalls.map((c) => (c.person as Record<string, unknown>).phone).sort()).toEqual(["+447911123004", SALES_REP].sort());
+    expect(campaignCalls.map((c) => (c.person as Record<string, unknown>).phone).sort()).toEqual(["+447911123004", "+447911123005", SALES_REP].sort());
     const byPhone = new Map((await reports()).map((r) => [r.phone, r]));
     expect(byPhone.get("+447911123004")).toMatchObject({ status: "reported", reason: null });
     expect(byPhone.get(SALES_REP)).toMatchObject({ status: "reported", reason: null });
-    expect(byPhone.get("+447911123005")).toMatchObject({ status: "skipped", reason: "conversation_channel" });
+    expect(byPhone.get("+447911123005")).toMatchObject({ status: "reported", reason: null, source: "matrix" });
+    expect(byPhone.has(silent.phoneE164!)).toBe(false);
+    // Once that member writes in a one-to-one thread, the number is given.
+    await db.insert(conversations).values({
+      orgId: ORG, brandId: BRAND, connectionId: mx.id, contactId: silent.id, channel: "whatsapp", roomId: "!r2:hs",
+      firstMessageAt: new Date(min(2)), lastMessageAt: new Date(min(2)), messageCount: 1, inboundCount: 1, outboundCount: 0, lastEventId: "$e2",
+    });
+    await runPhoneWatchPass(min(3));
+    expect((await reports()).find((r) => r.phone === "+447911123010")).toMatchObject({ status: "reported" });
+  });
+
+  it("a chat connection's numbers before the watch are history", async () => {
+    const [mx] = await db
+      .insert(matrixConnections)
+      .values({ orgId: ORG, brandId: BRAND, channel: "whatsapp", matrixUserId: "@crm_phone_old:hs", createdByUserId: USER, counterpartPrefix: "@whatsapp_", status: "active", lastSyncedAt: new Date(T0 - 3_600_000) })
+      .returning();
+    const [old] = await db
+      .insert(contacts)
+      .values({ orgId: ORG, brandId: BRAND, source: "matrix", channel: "whatsapp", channelHandle: "@whatsapp_447911123011:hs", phoneE164: "+447911123011", rawAttributes: {}, sourceConnectionId: mx.id })
+      .returning();
+    await db.insert(conversations).values({
+      orgId: ORG, brandId: BRAND, connectionId: mx.id, contactId: old.id, channel: "whatsapp", roomId: "!r3:hs",
+      firstMessageAt: new Date(T0 - 86_400_000), lastMessageAt: new Date(T0 - 86_400_000), messageCount: 3, inboundCount: 2, outboundCount: 1, lastEventId: "$e3",
+    });
+    await runPhoneWatchPass(T0);
+    await runPhoneWatchPass(min(1));
+    expect(campaignCalls).toHaveLength(0);
+    expect((await reports()).find((r) => r.phone === "+447911123011")).toMatchObject({ status: "skipped", reason: "before_watch" });
   });
 
   it("an imported file is history, and a source still on its first sync waits", async () => {

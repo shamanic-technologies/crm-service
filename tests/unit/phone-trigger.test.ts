@@ -1,22 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { PHONE_GIVEN_TRIGGER, phoneOccurrenceBody, phoneSkipReason, type PhoneCandidate } from "../../src/lib/phone-trigger/rules.js";
+import { PHONE_GIVEN_TRIGGER, phoneOccurrenceBody } from "../../src/lib/phone-trigger/rules.js";
 import { nextAttemptDue } from "../../src/lib/phone-trigger/watch.js";
 import { derivePosthogContact } from "../../src/lib/posthog/records.js";
 
-const base: PhoneCandidate = {
-  contactId: "c1", orgId: "o", brandId: "b", source: "clerk", channel: null, phone: "+447911123001",
-  email: "a@example.com", fullName: "A B", firstName: "A", lastName: "B", sourceContactId: "user_1", artifactId: "art",
-};
-
 describe("phone given rules (WA-GIVEN-TRIGGER-1015)", () => {
-  it("reports staff and the brand's own numbers (the pipe decides who to skip); skips only a number read off a chat", () => {
-    expect(phoneSkipReason(base)).toBeNull();
-    expect(phoneSkipReason({ ...base, channel: "whatsapp" })).toBe("conversation_channel");
-    // WA-GIVEN-PURE-FACT-1017: a staff address and an own-team number are no longer filtered here.
-    expect(phoneSkipReason({ ...base, email: "kevin@distribute.you" })).toBeNull();
-    expect(phoneSkipReason({ ...base, email: "k.lourd+probe@trydistribute.com" })).toBeNull();
-  });
-
   it("names the person by the number, adds the email when held, omits absent values", () => {
     const at = new Date("2026-10-15T15:00:00Z");
     const body = phoneOccurrenceBody({ brandId: "b", offerId: "o1", phone: "+447911123001", source: "posthog", email: null, fullName: null, firstName: "Marie", lastName: null, contactId: "c1", sourceContactId: "ph-1", detectedAt: at });
