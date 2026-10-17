@@ -2080,6 +2080,30 @@ const PersonSchema = registry.register(
           description:
             "CONNECTION-TAGS-1017: in what capacity this human speaks, 0 to 4 tags at once (a friend who is also a client carries both). Empty = nothing judged yet (a Gmail thread whose mailbox was unreadable).",
         }),
+      organizations: z
+        .array(
+          z.object({
+            companyId: z.string().openapi({ description: "brand-service's company id (a brand row; same domain = same id, fleet-wide)." }),
+            domain: z.string(),
+            evidence: z
+              .array(z.object({ kind: z.enum(["email", "website"]), value: z.string(), source: z.string() }))
+              .openapi({ description: "What names the company: a work address of the person (its domain), or the website their CRM record states." }),
+            tags: z
+              .array(
+                z.object({
+                  tag: z.enum(CONNECTION_TAGS),
+                  userIds: z.array(z.string()),
+                  brandId: z.string().nullable(),
+                  basis: z.array(z.object({ kind: z.string(), ref: z.string(), probability: z.number().nullable() })),
+                }),
+              )
+              .openapi({ description: "How the person speaks for this company: the PROFESSIONAL tags of the presences giving the evidence (always at least one)." }),
+          }),
+        )
+        .openapi({
+          description:
+            "PERSON-ORGANIZATIONS-1017: the organizations the person speaks for in a work role. Only domains Jev judged an organization's own (a public mailbox like gmail.com is nobody's company) that brand-service names; a presence judged personal only gives no link. Empty = none known.",
+        }),
       offerIds: z.array(z.string()).openapi({
         description: "The brand's offers (brand-service offer ids) Jev tied this person's personal-channel conversations to (yes-probability >= 0.5, on a conversation about the brand). Empty when none or not judged.",
       }),
@@ -2532,6 +2556,48 @@ export const OutcomePeopleResponseSchema = registry.register(
     ).openapi({ description: "Earliest reachedAt first (undated last), then personKey: a total order, safe to page." }),
   }),
 );
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/people/organizations",
+  summary: "The organizations the brand's people speak for, each with its people and tags",
+  description:
+    "PERSON-ORGANIZATIONS-1017: one row per company (brand-service id) at least one person of the brand speaks for in a work role, " +
+    "most people first. `tags` = the professional connection tags its human x organization links carry, with how many people carry each " +
+    "(an organization's tags are the union of its links'). Read off the last people build.",
+  request: {
+    headers: IDENTITY_HEADERS,
+    query: z.object({
+      brandId: z.string().uuid(),
+      limit: z.coerce.number().int().min(1).max(1000).optional().openapi({ description: "Default 100." }),
+      offset: z.coerce.number().int().min(0).optional(),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Organizations",
+      content: {
+        "application/json": {
+          schema: z.object({
+            brandId: z.string(),
+            scope: z.object({ status: z.string(), lastBuiltAt: z.string().nullable(), lastError: z.string().nullable() }),
+            total: z.number().int(),
+            links: z.number().int().openapi({ description: "Human x organization links over the brand." }),
+            organizations: z.array(
+              z.object({
+                companyId: z.string(),
+                domains: z.array(z.string()),
+                people: z.number().int(),
+                tags: z.array(z.object({ tag: z.enum(CONNECTION_TAGS), people: z.number().int() })),
+              }),
+            ),
+          }),
+        },
+      },
+    },
+    400: { description: "Invalid query", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
 
 registry.registerPath({
   method: "get",

@@ -1,4 +1,5 @@
 import type { PersonConnectionTag } from "../lib/people/connection-tags.js";
+import type { PersonOrganization } from "../lib/people/organizations.js";
 import { Router, type Response } from "express";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
@@ -200,6 +201,8 @@ function personView(row: typeof people.$inferSelect) {
     groupOnly: row.groupOnly,
     // CONNECTION-TAGS-1017: in what capacity the human speaks (people/connection-tags.ts).
     connectionTags: (row.connectionTags as PersonConnectionTag[] | null) ?? [],
+    // PERSON-ORGANIZATIONS-1017: the companies the person speaks for, each with its professional tags.
+    organizations: (row.organizations as PersonOrganization[] | null) ?? [],
     offerIds: row.offerIds as string[],
     relevance: row.relevance as PersonRelevance["relevance"],
     possibleLeads: row.possibleLeads as PossibleLead[],
@@ -642,6 +645,62 @@ router.get(
     }
   },
 );
+
+// ─── GET /orgs/people/organizations?brandId= (PERSON-ORGANIZATIONS-1017) ─────
+
+router.get(
+  "/orgs/people/organizations",
+  apiKeyAuth,
+  requireOrgAndUser("people.organizations"),
+  async (req: AuthenticatedRequest, res, next) => {
+    const parsed = z
+      .object({
+        brandId: brandIdSchema,
+        limit: z.coerce.number().int().min(1).max(1000).optional(),
+        offset: z.coerce.number().int().min(0).optional(),
+      })
+      .safeParse(req.query);
+    if (!parsed.success) {
+      return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required; limit 1..1000, offset >= 0" });
+    }
+    try {
+      const { brandId } = parsed.data;
+      const limit = parsed.data.limit ?? 100;
+      const offset = parsed.data.offset ?? 0;
+      const scope = await openScope(req, brandId);
+      const links = (await db.execute(sql`
+        SELECT o->>'companyId' AS company_id, o->>'domain' AS domain,
+               COALESCE((SELECT jsonb_agg(t->>'tag') FROM jsonb_array_elements(o->'tags') t), '[]'::jsonb) AS tags
+        FROM people p, jsonb_array_elements(p.organizations) o
+        WHERE p.org_id = ${req.orgId!} AND p.brand_id = ${brandId}
+      `)) as unknown as { company_id: string; domain: string; tags: string[] }[];
+      res.json({ brandId, scope, ...organizationsView(links, limit, offset) });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+/** PURE: one row per organization, its people and the tags its links carry (an org's tags = the union of its links'). */
+export function organizationsView(links: { company_id: string; domain: string; tags: string[] }[], limit: number, offset: number) {
+  const byCompany = new Map<string, { companyId: string; domains: Set<string>; people: number; tags: Map<string, number> }>();
+  for (const l of links) {
+    const o = byCompany.get(l.company_id) ?? { companyId: l.company_id, domains: new Set<string>(), people: 0, tags: new Map<string, number>() };
+    o.domains.add(l.domain);
+    o.people++;
+    for (const t of new Set(l.tags)) o.tags.set(t, (o.tags.get(t) ?? 0) + 1);
+    byCompany.set(l.company_id, o);
+  }
+  const all = [...byCompany.values()]
+    .map((o) => ({
+      companyId: o.companyId,
+      domains: [...o.domains].sort(),
+      people: o.people,
+      tags: [...o.tags.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([tag, people]) => ({ tag, people })),
+    }))
+    .sort((a, b) => b.people - a.people || (a.companyId < b.companyId ? -1 : 1));
+  return { total: all.length, links: links.length, organizations: all.slice(offset, offset + limit) };
+}
 
 const outcomePeopleQuerySchema = z.object({
   brandId: brandIdSchema,

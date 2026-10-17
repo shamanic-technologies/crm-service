@@ -42,6 +42,18 @@ the brand's own tools (CRM, CSV, Stripe, Clerk, PostHog, Instantly, Copilot, API
 keeps every tag >= 0.5, else its most likely one. Build summary `connectionTags` counts
 `peopleTagged` / `peopleUntagged`.
 
+## Organizations (`src/lib/people/organizations.ts`, PERSON-ORGANIZATIONS-1017)
+
+The company a human speaks for in a work role: `people.organizations` (served on `GET /orgs/people`)
+= `[{companyId, domain, evidence, tags}]`; `GET /orgs/people/organizations?brandId=` = one row per
+company with its people and tags (union of its links'). Company id = brand-service's
+(`POST /internal/companies/resolve`, by domain, `lib/companies/client.ts`, cached fleet-wide in
+`company_keys`). Evidence = every address's domain + a GoHighLevel contact's `website`, never a
+name. A public mailbox domain is nobody's: Jev `choice mailbox_provider | organization` per DOMAIN,
+judged once fleet-wide (`domain_verdicts`, 100 per call), organization >= 0.5 only. A link exists
+only where the presence giving it carries a PROFESSIONAL tag (`presenceConnectionTags`): a friend
+writing from a work address gets none. Facts do not carry the company yet.
+
 ## Route tiers (service-architecture)
 
 - `/health`, `/openapi.json` — public, no auth.

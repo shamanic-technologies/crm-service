@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import express from "express";
 import request from "supertest";
@@ -60,6 +61,9 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 let gmailConnected = false;
+/** PERSON-ORGANIZATIONS-1017: domains Jev was asked about, domains brand-service resolved. */
+const domainQuestions: string[] = [];
+const companyResolves: string[] = [];
 /** features-service's lead families (won / hot / lost / cold) for the brand. */
 let leadFamilies: { leadId: string; email: string; family: string; lostReason: string | null }[] = [];
 let featuresDown = false;
@@ -170,6 +174,17 @@ function installFetchStub() {
         });
       }
       if (body.state.group) return json({ model: "jev-test", answers: tagAnswers("personal_not_to_user") });
+      if (Object.keys(body.questions).some((k) => /^d\d+$/.test(k))) {
+        // PERSON-ORGANIZATIONS-1017: is each email domain a public mailbox or one organization's?
+        const answers: Record<string, unknown> = {};
+        for (const [k, q] of Object.entries(body.questions as Record<string, { instructions: string }>)) {
+          const domain = /"([^"]+)"/.exec(q.instructions)![1];
+          const mailbox = domain === "gmail.com";
+          answers[k] = { type: "choice", choice: mailbox ? "mailbox_provider" : "organization", confidence: 0.95, probabilities: {} };
+          domainQuestions.push(domain);
+        }
+        return json({ model: "jev-test", answers });
+      }
       jevRequests.push({ headers: init!.headers as Record<string, string>, body });
       const answers: Record<string, unknown> = {};
       for (const [key, sender] of Object.entries(body.state.senders as Record<string, { email: string }>)) {
@@ -302,6 +317,21 @@ function installFetchStub() {
       for (const p of leadFamilies) counts[p.family] += 1;
       return json({ brandId: BRAND, counts, lostBreakdown: { wentCold: 0, ruledOut: 0 }, offers: [], people: leadFamilies.map((p) => ({ ...p, campaignLeadIds: [], offerId: "o1" })) });
     }
+    if (url.host === "brand.test" && url.pathname === "/internal/companies/resolve") {
+      const body = JSON.parse(String(init!.body)) as { companies: { ref: string; domain: string }[] };
+      companyResolves.push(...body.companies.map((c) => c.domain));
+      return json({
+        companies: body.companies.map((c, index) => ({
+          index,
+          ref: c.ref,
+          brandId: `cccccccc-2222-4222-8222-${createHash("sha256").update(c.domain).digest("hex").slice(0, 12)}`,
+          domain: c.domain,
+          matchedBy: "domain",
+          created: true,
+          unresolvedReason: null,
+        })),
+      });
+    }
     if (url.host === "brand.test") {
       if (url.pathname.endsWith("/offers")) {
         return json({ offers: [{ offerId: OFFER, brandId: BRAND, name: "Pro plan", description: null, status: "active" }] });
@@ -414,7 +444,7 @@ async function retryOnDeadlock(fn: () => Promise<unknown>): Promise<void> {
 }
 
 async function wipe() {
-  await retryOnDeadlock(() => db.execute(sql`TRUNCATE sender_verdicts, conversation_verdicts, people_scopes, people, person_ids, person_id_aliases, person_merges, contact_uploads, lead_standing_observations, matrix_raw_events, conversations, matrix_leads, matrix_connections, ghl_opportunities, ghl_connections, contacts CASCADE`));
+  await retryOnDeadlock(() => db.execute(sql`TRUNCATE sender_verdicts, conversation_verdicts, domain_verdicts, company_keys, people_scopes, people, person_ids, person_id_aliases, person_merges, contact_uploads, lead_standing_observations, matrix_raw_events, conversations, matrix_leads, matrix_connections, ghl_opportunities, ghl_connections, contacts CASCADE`));
 }
 
 /** Alice in GoHighLevel (email + phone, a won deal) and on WhatsApp (phone only). */
@@ -1495,6 +1525,29 @@ describe.skipIf(!RUN)("person layer", () => {
       const shown = relevanceRequests[0].body.state as unknown as { user: { users: { name: string; emails: string[] }[] } };
       expect(shown.user.users[0]).toMatchObject({ name: "Owner Brand", emails: ["me@brand.com"] });
       expect(summary.connectionTags).toMatchObject({ peopleUntagged: 0 });
+
+      // PERSON-ORGANIZATIONS-1017: Alice (x.com, a lead) speaks for x.com; Mom (family.com) is
+      // personal only: no link, though family.com is an organization's domain.
+      expect(alice.organizations).toHaveLength(1);
+      expect(alice.organizations[0]).toMatchObject({ domain: "x.com", evidence: expect.arrayContaining([{ kind: "email", value: "alice@x.com", source: "instantly" }]) });
+      expect(alice.organizations[0].tags.map((t: { tag: string }) => t.tag)).toEqual(["professional_to_brand"]);
+      expect(mom.organizations).toEqual([]);
+      expect(companyResolves).toContain("x.com");
+      expect(summary.organizations).toMatchObject({ status: "ok" });
+      const orgs = await request(app())
+        .get(`/orgs/people/organizations?brandId=${BRAND}`)
+        .set("x-api-key", API_KEY)
+        .set("x-org-id", ORG)
+        .set("x-user-id", USER);
+      expect(orgs.status).toBe(200);
+      const xcom = orgs.body.organizations.find((o: { domains: string[] }) => o.domains.includes("x.com"));
+      expect(xcom).toMatchObject({ people: 1, tags: [{ tag: "professional_to_brand", people: 1 }] });
+      // Domains are judged once: a rebuild asks Jev about none of them again.
+      domainQuestions.length = 0;
+      companyResolves.length = 0;
+      await buildNow();
+      expect(domainQuestions).toEqual([]);
+      expect(companyResolves).toEqual([]);
 
       // An offer-scoped read: only the people Jev tied to that offer.
       expect(keysOf(await listPeople(`&offerId=${OFFER}`))).toEqual(["email:alice@x.com"]);
