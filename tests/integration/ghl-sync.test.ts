@@ -18,6 +18,7 @@ import { rebuildFromBronze, runSyncPass } from "../../src/lib/gohighlevel/sync.j
 import { readPipelineView } from "../../src/lib/gohighlevel/view.js";
 import { readFunnelEvents } from "../../src/lib/gohighlevel/funnel-events.js";
 import { STAGE_MEANING_CRITERIA_VERSION } from "../../src/lib/gohighlevel/stage-meanings.js";
+import { LABEL_CRITERIA_VERSION, labelEventsQuery } from "../../src/lib/gohighlevel/label-verdicts.js";
 import { serveNext } from "../../src/lib/serve.js";
 import gohighlevelRoutes from "../../src/routes/gohighlevel.js";
 
@@ -1033,6 +1034,29 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
       "tag:vip": "none",
       "tag:wedding": "none",
     });
+  });
+
+  it("FORMER-CLIENT-1017: a label meaning 'was a client and stopped' states client AND former_client; older wording is re-decided", async () => {
+    LABEL_ANSWERS.vip = ["former_client", 0.9];
+    try {
+      const connectionId = await seedConnection();
+      expect((await runSyncPass(connectionId)).results[0].labelVerdictsDecided).toBe(5);
+      const events = (await db.execute(labelEventsQuery(ORG, BRAND))) as unknown as { tag: string | null; step: string }[];
+      const vip = events.filter((e) => e.tag === "vip").map((e) => e.step).sort();
+      expect(vip.length).toBeGreaterThan(0);
+      expect(new Set(vip)).toEqual(new Set(["client", "former_client"]));
+      expect(vip.filter((s) => s === "client").length).toBe(vip.filter((s) => s === "former_client").length);
+
+      // A verdict decided under the older wording is asked again, and only that one.
+      await db.execute(sql`UPDATE crm_label_verdicts SET criteria_version = 1 WHERE label = 'wedding'`);
+      labelQuestions = [];
+      expect((await runSyncPass(connectionId)).results[0].labelVerdictsDecided).toBe(1);
+      expect(labelQuestions).toEqual(["wedding"]);
+      const [row] = (await db.execute(sql`SELECT criteria_version FROM crm_label_verdicts WHERE label = 'wedding'`)) as unknown as { criteria_version: number }[];
+      expect(row.criteria_version).toBe(LABEL_CRITERIA_VERSION);
+    } finally {
+      delete LABEL_ANSWERS.vip;
+    }
   });
 
   it("decides each stage's meaning once, records the model, and never re-asks", async () => {

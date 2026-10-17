@@ -251,6 +251,11 @@ every tag of a GoHighLevel connection gets ONE Jev `choice` `client | disqualifi
 recorded once per label, decided each sync after stage meanings (0 calls once all decided). >= 0.5 confidence → facts
 `client` / `disqualified` (family `ghl_funnel`; stage entries dated, tags undated, withdrawn when the tag goes). The
 serve's `sale` step = sale | standing payment | `client` fact. Read: `GET /orgs/gohighlevel/label-verdicts?brandId=`.
+**Former client** (FORMER-CLIENT-1017, owner 2026-10-17: lead-service's Type "Former customer", only what a source
+STATES, never a time guess): the choice is `client | former_client | disqualified | none` (`LABEL_CRITERIA_VERSION` 2,
+column `criteria_version`: an older verdict is re-decided in place); a `former_client` label emits `client` AND
+`former_client` facts (every `client` reader unchanged). Stripe states it with `subscription_changed` status
+`canceled` (a new subscription = a new fact).
 Doc Dinners: tag `client.` = 41 clients with no sale fact; stage/tag "Unqualified" judged `none` by stage meanings.
 
 ### Relationships (`relationships: "business_only"`) — a business pipe never writes to a friend
