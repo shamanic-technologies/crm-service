@@ -1509,6 +1509,12 @@ export interface Fact {
   withdrawnOf?: string;
   /** The fleet-wide human (human-service) the person was at emission; null before it was known. */
   humanId: string | null;
+  /**
+   * PERSON-RELATIONS-1017: the CONTACT POINT the fact is about (`<source>:<id>`, byte-equal to a relation's
+   * `contactPoints[].id`), so a reader files it under its relation. Null for a CSV row, a registry fact or a
+   * bookkeeping fact (withdrawn / merged / split). Read from a column held since the feed began: old facts carry it too.
+   */
+  contactPoint: string | null;
 }
 
 export function toFact(r: PeopleFact): Fact {
@@ -1531,6 +1537,7 @@ export function toFact(r: PeopleFact): Fact {
     payload: r.payload as Record<string, unknown>,
     ...(r.withdrawnOf ? { withdrawnOf: r.withdrawnOf } : {}),
     humanId: r.humanId ?? null,
+    contactPoint: r.subjectPresence || null,
   };
 }
 
