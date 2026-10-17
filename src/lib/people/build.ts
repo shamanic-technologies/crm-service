@@ -72,6 +72,7 @@ import { contactWebsites, personOrganizations, resolveOrganizationLookups, type 
 import {
   crmRecordKey,
   humanEvidence,
+  recordKeys,
   judgmentId,
   type CrmRecord,
   personHumanId,
@@ -287,7 +288,7 @@ export function personDisplayName(c: PersonCluster): string | null {
 const CRM_RECORD_SOURCES = new Set<string>(["gohighlevel", "stripe", "posthog", "clerk"]);
 
 /**
- * The CRM record each name-only presence IS (no email, no phone, no handle): provider, the
+ * The CRM record each name-only presence IS (no usable email, phone or handle): provider, the
  * client account (GoHighLevel location, Stripe account, PostHog project, else the connection
  * the record was read through) and the vendor's own record id.
  */
@@ -295,9 +296,8 @@ export async function crmRecordsOf(presences: Presence[]): Promise<Map<string, C
   const nameOnly = presences.filter(
     (p) =>
       CRM_RECORD_SOURCES.has(p.source) &&
-      p.emails.length === 0 &&
-      p.phones.length === 0 &&
-      !(p.keys ?? []).some((k: string) => k.startsWith("msg:")) &&
+      // No key human-service can hold: an unusable phone (`+1262849`, too short) names nobody either.
+      recordKeys({ emails: p.emails, phones: p.phones, handles: (p.keys ?? []).filter((k: string) => k.startsWith("msg:")) }).length === 0 &&
       typeof p.detail.contactId === "string",
   );
   const out = new Map<string, CrmRecord>();

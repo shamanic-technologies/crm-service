@@ -428,6 +428,27 @@ describe.skipIf(!RUN)("people x human-service: same human is human-service's cal
     expect(humans.resolves.filter((r) => Array.isArray(r.crmRecords))).toHaveLength(1);
   });
 
+  it("HUMAN-RECORD-KEYS-1017: a CRM contact whose only phone is unusable (+1262849) is stated by its record id too", async () => {
+    const [conn] = await db.select().from(ghlConnections).where(eq(ghlConnections.brandId, BRAND));
+    await db.insert(contacts).values({
+      orgId: ORG,
+      brandId: BRAND,
+      source: "gohighlevel",
+      externalId: "ghl-short-phone",
+      fullName: "Sam ShortPhone",
+      phoneE164: "+1262849",
+      rawAttributes: {},
+      unsubscribed: false,
+      sourceConnectionId: conn.id,
+    });
+    await build();
+    expect(humans.resolves.find((r) => Array.isArray(r.crmRecords))).toMatchObject({
+      crmRecords: [{ provider: "gohighlevel", accountId: "loc", id: "ghl-short-phone" }],
+    });
+    const sam = (await db.select().from(people).where(eq(people.brandId, BRAND))).find((p) => p.displayName === "Sam ShortPhone")!;
+    expect(sam.humanId).toBeTruthy();
+  });
+
   it("human-service down: the build still runs, a pairing merges locally as before", async () => {
     humans.down = true;
     leadPairings = [pairing()];
