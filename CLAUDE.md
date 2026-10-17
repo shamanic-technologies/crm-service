@@ -817,7 +817,10 @@ never writes to them (no write path to any outside tool, by design).
 | `gohighlevel` | every mirrored GoHighLevel contact | own silver |
 
 CSV contacts are NOT people (nobody talked to them yet); a CSV row holding an
-email and a phone is still merge evidence.
+email and a phone is still merge evidence. Every CSV row with an email or a phone
+IS stated to human-service (stated last, HUMAN-ID-COVERAGE-1017), so its
+standalone `added_to_crm` fact carries its humanId (`PersonIndex.setHumans`
+reads `human_keys`; a fact emitted before is re-stated `human_identified`).
 
 **The brand's own addresses are nobody.** Every mailbox we send from
 (instantly-service `/internal/accounts`) and every address on the brand's
