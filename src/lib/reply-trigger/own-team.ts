@@ -31,6 +31,13 @@ export function phoneDigits(phone: string | null | undefined): string | null {
   return digits.length >= 6 ? digits : null;
 }
 
+/** What a number of the own team is to the brand: the map's value, and the log's words. */
+export const OWN_TEAM_ROLES = {
+  linked_whatsapp_account: "one of the brand's linked WhatsApp accounts",
+  sales_rep_phone: "the brand's sales rep phone",
+  org_member: "a member of the org",
+} as const;
+
 /** digits -> what that number is to the brand (for the log). */
 export type OwnTeam = Map<string, string>;
 
@@ -63,7 +70,7 @@ export async function readOwnTeam(identity: SiblingIdentity): Promise<OwnTeam> {
     );
   for (const l of links) {
     const d = /^\+?\d{6,20}$/.test(l.remoteLoginId ?? "") ? phoneDigits(l.remoteLoginId) : null;
-    if (d) team.set(d, "one of the brand's linked WhatsApp accounts");
+    if (d) team.set(d, OWN_TEAM_ROLES.linked_whatsapp_account);
   }
 
   const path = `/orgs/brands/${identity.brandId}/sales-rep`;
@@ -72,10 +79,10 @@ export async function readOwnTeam(identity: SiblingIdentity): Promise<OwnTeam> {
     throw new SiblingError("brand", path, r.status, `brand-service GET ${path} returned ${r.status}: ${JSON.stringify(r.body).slice(0, 300)}`);
   }
   const rep = phoneDigits((r.body as { salesRepPhone?: string | null } | null)?.salesRepPhone ?? null);
-  if (rep) team.set(rep, "the brand's sales rep phone");
+  if (rep) team.set(rep, OWN_TEAM_ROLES.sales_rep_phone);
   for (const p of (await readOrgMembers(identity)).phones) {
     const d = phoneDigits(p);
-    if (d && !team.has(d)) team.set(d, "a member of the org");
+    if (d && !team.has(d)) team.set(d, OWN_TEAM_ROLES.org_member);
   }
   return team;
 }
