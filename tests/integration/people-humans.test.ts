@@ -380,6 +380,13 @@ describe.skipIf(!RUN)("people x human-service: same human is human-service's cal
       .where(and(eq(peopleFacts.brandId, BRAND), eq(peopleFacts.live, true), eq(peopleFacts.source, "csv")));
     expect(fact).toMatchObject({ type: "added_to_crm", subjectStandalone: true });
     expect(fact.humanId).toBe(humans.humanOfEmail("imported@csv.com"));
+    // A CSV row nobody else holds is a human of the brand's own CRM: professional_to_brand, with its human.
+    const [tag] = await db
+      .select()
+      .from(peopleFacts)
+      .where(and(eq(peopleFacts.brandId, BRAND), eq(peopleFacts.live, true), eq(peopleFacts.type, "connection_tag"), eq(peopleFacts.sourceRef, "email:imported@csv.com")));
+    expect(tag.payload).toMatchObject({ tag: "professional_to_brand", brandId: BRAND, basis: [{ kind: "evidence", ref: "csv_contact" }] });
+    expect(tag.humanId).toBe(fact.humanId);
     const again = await build();
     expect(again.facts).toMatchObject({ emitted: 0, humanIdentified: 0 });
   });

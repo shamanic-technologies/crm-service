@@ -343,6 +343,8 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
     const types = facts.map((f) => `${f.source}:${f.type}`).sort();
     expect(types).toEqual(
       [
+        // The CSV row no built person holds: professional_to_brand (a contact of the brand's own CRM).
+        "crm:connection_tag",
         "csv:added_to_crm",
         "gmail:message_in",
         "gmail:message_out",
@@ -378,7 +380,7 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
     // Every fact backed by a contact row names it; lead-service pairs on that id.
     expect(facts.filter((f) => f.source === "gohighlevel").every((f) => f.crmContactId === s.aliceGhl)).toBe(true);
     expect(csvRow(facts).crmContactId).toMatch(/^[0-9a-f-]{36}$/);
-    const alice = facts.filter((f) => f.source !== "csv");
+    const alice = facts.filter((f) => f.source !== "csv" && f.source !== "crm");
     expect(new Set(alice.map((f) => f.personKey))).toEqual(new Set(["email:alice@x.com"]));
     expect(alice[0].emails).toEqual(["alice@x.com"]);
     expect(alice[0].phones).toEqual(["+33612345678"]);
