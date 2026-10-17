@@ -1149,6 +1149,9 @@ export const people = pgTable(
     // PERSON-ORGANIZATIONS-1017: the companies (brand-service ids) the person speaks for, with the
     // evidence and the professional tags of that link (people/organizations.ts).
     organizations: jsonb("organizations").notNull().default([]),
+    // PERSON-RELATIONS-1017: the person x capacity rows (personal / professional at a company / company
+    // unknown), each with ONLY its contact points' emails, phones and tags (people/relations.ts).
+    relations: jsonb("relations").notNull().default([]),
     relevance: jsonb("relevance"),
     offerIds: jsonb("offer_ids").notNull().default([]),
 
@@ -2414,3 +2417,30 @@ export const peopleCorrections = pgTable(
   (table) => [index("people_corrections_org_brand_idx").on(table.orgId, table.brandId)],
 );
 export type PeopleCorrection = typeof peopleCorrections.$inferSelect;
+
+/**
+ * PERSON-RELATIONS-1017: for a professional contact point with no company of its own, which of the person's
+ * known companies Jev read in its content (or `unknown`). Re-asked when the point moves or the options change.
+ */
+export const contactPointOrgVerdicts = pgTable(
+  "contact_point_org_verdicts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    // presenceStableKey: `<source>:<stable id>`
+    contactPoint: text("contact_point").notNull(),
+    // a companyId among the options, or `unknown`
+    choice: text("choice").notNull(),
+    confidence: doublePrecision("confidence").notNull(),
+    probabilities: jsonb("probabilities").notNull(),
+    optionsHash: text("options_hash").notNull(),
+    judgedThrough: text("judged_through").notNull(),
+    criteriaVersion: integer("criteria_version").notNull(),
+    input: jsonb("input").notNull(),
+    model: text("model").notNull(),
+    runId: text("run_id").notNull(),
+    judgedAt: timestamp("judged_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("contact_point_org_verdicts_uq").on(table.orgId, table.brandId, table.contactPoint)],
+);

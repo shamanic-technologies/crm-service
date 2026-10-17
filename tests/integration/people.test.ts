@@ -174,6 +174,8 @@ function installFetchStub() {
         });
       }
       if (body.state.group) return json({ model: "jev-test", answers: tagAnswers("personal_not_to_user") });
+      // PERSON-RELATIONS-1017: which known company a contact point without evidence speaks for.
+      if (body.questions.point) return json({ model: "jev-test", answers: { point: { type: "choice", choice: "unknown", confidence: 0.9, probabilities: {} } } });
       if (Object.keys(body.questions).some((k) => /^d\d+$/.test(k))) {
         // PERSON-ORGANIZATIONS-1017: is each email domain a public mailbox or one organization's?
         const answers: Record<string, unknown> = {};
@@ -1564,6 +1566,22 @@ describe.skipIf(!RUN)("person layer", () => {
         domain: "x.com",
         tags: ["professional_to_brand"],
       });
+
+      // PERSON-RELATIONS-1017: Mom is one personal relation; Alice one professional relation at x.com.
+      expect(mom.relations.map((r: { relationKey: string; capacity: string }) => [r.relationKey.split(":").slice(2).join(":"), r.capacity])).toEqual([["personal", "personal"]]);
+      const aliceRel = alice.relations.find((r: { companyId: string | null }) => r.companyId === alice.organizations[0].companyId);
+      expect(aliceRel).toMatchObject({ capacity: "professional", domain: "x.com", emails: ["alice@x.com"] });
+      const readRel = (relationKey: string) =>
+        request(app()).get(`/orgs/people/timeline?brandId=${BRAND}&relationKey=${encodeURIComponent(relationKey)}`).set("x-api-key", API_KEY).set("x-org-id", ORG).set("x-user-id", USER);
+      const relThread = await readRel(aliceRel.relationKey);
+      expect(relThread.status).toBe(200);
+      expect(relThread.body.items.every((i: { source: string }) => i.source !== "matrix")).toBe(true);
+      expect((await readRel(`rel:${alice.personId}:personal`)).body.reason).toBe("relation_not_found");
+      expect((await readRel("not-a-relation")).status).toBe(400);
+      const relFacts = (await db.execute(sql`
+        SELECT payload FROM people_facts WHERE brand_id = ${BRAND} AND type = 'relation' AND live
+      `)) as unknown as { payload: { relationKey: string } }[];
+      expect(relFacts.map((f) => f.payload.relationKey)).toContain(aliceRel.relationKey);
 
       // PEOPLE-CORRECTIONS-1017: the owner says Mom is a client at family.com, not a friend.
       const post = (body: Record<string, unknown>) =>
