@@ -48,7 +48,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { contacts, conversations, conversationVerdicts, matrixConnections, matrixRawEvents } from "../../db/schema.js";
 import type { ChatTrackingHeaders } from "../chat-client.js";
@@ -56,6 +56,8 @@ import { judgeQuestions, type ChoiceQuestion, type NoulQuestion } from "../judgm
 import type { MatrixEvent } from "../matrix/client.js";
 import { renderThread } from "../matrix/events.js";
 import { mapLimit, siblingGet, siblingGetOk, type SiblingIdentity } from "./siblings.js";
+import { accountUserView, readAccountUsers, userIdsOf, type AccountUserView, type AccountUsers } from "./account-users.js";
+import { CONNECTION_TAGS, tagQuestionText, tagsFromScores, type ConnectionTag, type TagScores } from "./connection-tags.js";
 
 export const TOPICS = ["personal", "other_business", "this_brand"] as const;
 export type Topic = (typeof TOPICS)[number];
@@ -158,7 +160,8 @@ export async function readBrandContext(identity: SiblingIdentity): Promise<Brand
     offers: ctx.offers.map((o) => ({ ...o, profile: profileOf.get(o.offerId) ?? null })),
     // v6 (2026-10-10): sales leads only. v7 (WA-LEAD-RELEVANCE-1016): the owner's other
     // activities and suppliers selling to the owner are other work. Each bump re-judges once.
-    hash: createHash("sha256").update(JSON.stringify(["v7", ctx])).digest("hex").slice(0, 32),
+    // v8 (CONNECTION-TAGS-1017): the four connection tags + who the user is.
+    hash: createHash("sha256").update(JSON.stringify(["v8", ctx])).digest("hex").slice(0, 32),
   };
 }
 
@@ -195,13 +198,28 @@ export interface ConversationMessage {
   text: string;
 }
 
+/** What the brand's own tools already know about the counterpart (no model). */
+export interface PersonView {
+  /** The brand's sources holding the person: gohighlevel, stripe, clerk, posthog, instantly... */
+  knownBy: string[];
+  company: string | null;
+  emailDomains: string[];
+}
+
 /** What Jev is shown about one conversation. */
 export interface ConversationInput {
   key: string;
   source: "gmail" | "matrix";
   judgedThrough: string;
   channel: string;
+  /** A one-to-one thread on the user's own account (groups are judged in people/group-tags.ts). */
+  kind?: "direct";
   counterpart: { names: string[]; email: string | null; phone: string | null };
+  /** The user who connected the account: who "personal to user" is about (CONNECTION-TAGS-1017). */
+  user?: AccountUserView | null;
+  /** The user ids behind `user`, recorded on the verdict (never shown to Jev). */
+  userIds?: string[];
+  person?: PersonView | null;
   /** Oldest first, `threadWindow` of the messages holding words a person wrote. Empty = nothing to judge. */
   messages: ConversationMessage[];
 }
@@ -219,6 +237,8 @@ export interface Verdict {
   brandProbability: number;
   offerScores: Record<string, number>;
   offerIds: string[];
+  tagScores: TagScores;
+  tags: ConnectionTag[];
 }
 
 export type Content = "readable" | "none";
@@ -230,6 +250,10 @@ export interface RecordedVerdict {
   confidence: number | null;
   brandProbability: number | null;
   offerIds: string[];
+  /** CONNECTION-TAGS-1017. Null on a verdict recorded before the tags (re-judged on the next pass). */
+  tags: ConnectionTag[] | null;
+  tagScores: TagScores | null;
+  userIds: string[];
 }
 
 /**
@@ -271,7 +295,10 @@ export async function judgeConversation(
     brand: context.brand,
     offers: context.offers.map((o, k) => ({ key: `o${k}`, name: o.name, description: o.description, whatItSells: o.profile ?? null })),
     otherBrandsOfTheSameOwner: context.otherBrandsOfTheSameOwner,
+    user: input.user ?? null,
+    counterpartKnownByTheBrand: input.person ?? null,
     conversation: {
+      kind: "direct, one to one, on the user's own account",
       channel: input.channel,
       counterpart: { ...input.counterpart, names: input.counterpart.names.map(clip) },
       messages: input.messages.map((m) => ({ ...m, subject: m.subject ? clip(m.subject) : m.subject, text: clip(m.text) })),
@@ -292,6 +319,9 @@ export async function judgeConversation(
       criteria: TOPIC_CRITERIA,
     },
   };
+  for (const tag of CONNECTION_TAGS) {
+    questions[`t_${tag}`] = { type: "noul", instructions: tagQuestionText(tag, context.brand.name) };
+  }
   context.offers.forEach((o, k) => {
     questions[`o${k}`] = {
       type: "noul",
@@ -319,6 +349,7 @@ export async function judgeConversation(
     }
     offerScores[o.offerId] = a.noul;
   });
+  const tagScores = readTagScores(result.answers, input.key);
   const verdict: Verdict = {
     topic: topic.choice as Topic,
     confidence: topic.confidence,
@@ -326,12 +357,27 @@ export async function judgeConversation(
     brandProbability,
     offerScores,
     offerIds: [],
+    tagScores,
+    tags: tagsFromScores(tagScores),
   };
   // An offer is only ever tagged on a conversation that is about the brand.
   verdict.offerIds = hidesConversation(verdict)
     ? []
     : context.offers.filter((o) => offerScores[o.offerId] >= OFFER_MIN_PROBABILITY).map((o) => o.offerId);
   return { ...verdict, model: result.model };
+}
+
+/** The four `t_<tag>` yes-probabilities of a judgment. Fails loud on a missing or malformed one. */
+export function readTagScores(answers: Record<string, unknown>, key: string): TagScores {
+  const out = {} as TagScores;
+  for (const tag of CONNECTION_TAGS) {
+    const a = answers[`t_${tag}`] as { type?: string; noul?: unknown } | undefined;
+    if (!a || a.type !== "noul" || typeof a.noul !== "number" || !Number.isFinite(a.noul)) {
+      throw new Error(`[crm-service][connection-tags] ${key}: no answer for tag ${tag}`);
+    }
+    out[tag] = a.noul;
+  }
+  return out;
 }
 
 // ─── loading what Jev reads ─────────────────────────────────────────────────
@@ -384,6 +430,7 @@ export async function gmailConversationInput(identity: SiblingIdentity, plan: Gm
     source: "gmail",
     judgedThrough: plan.judgedThrough,
     channel: "email",
+    kind: "direct",
     counterpart: { names: plan.names, email: plan.email, phone: null },
     messages: threadWindow(messages),
   };
@@ -403,7 +450,7 @@ export async function matrixMarkers(conversationIds: string[]): Promise<Map<stri
 }
 
 /** What Jev reads about one Matrix conversation, from our own bronze (no Matrix call). Null = vanished. */
-export async function matrixConversationInput(conversationId: string): Promise<ConversationInput | null> {
+export async function matrixConversationInput(conversationId: string): Promise<(ConversationInput & { connectionId: string }) | null> {
   const [row] = await db
     .select({
       conversation: conversations,
@@ -432,9 +479,58 @@ export async function matrixConversationInput(conversationId: string): Promise<C
     source: "matrix",
     judgedThrough: row.conversation.lastEventId,
     channel: row.conversation.channel,
+    kind: "direct",
+    connectionId: row.conversation.connectionId,
     counterpart: { names: row.contact.fullName ? [row.contact.fullName] : [], email: null, phone: row.contact.phone },
     messages: lines.map((l) => ({ at: l.at, direction: l.direction, text: l.body })),
   };
+}
+
+/**
+ * The Matrix conversations to judge, keyed and hashed the SAME way by every caller (the people
+ * build and the Matrix sync's lead-reading gate): two hashes would re-judge each thread on
+ * every pass, one caller undoing the other.
+ */
+export function matrixPlans(
+  ids: string[],
+  markers: Map<string, string>,
+  context: BrandContext,
+  users: AccountUsers,
+): { key: string; judgedThrough: string; plan: string; contextHash: string }[] {
+  return ids
+    .filter((id) => markers.has(id))
+    .map((id) => ({ key: `matrix:${id}`, judgedThrough: markers.get(id)!, plan: id, contextHash: `${context.hash}|${users.hash.matrix}` }));
+}
+
+/** What Jev reads about one Matrix conversation: the thread, the account's user, what the brand knows of the person. */
+export function matrixLoader(users: AccountUsers, views: Map<string, PersonView>) {
+  return async (conversationId: string): Promise<ConversationInput | null> => {
+    const input = await matrixConversationInput(conversationId);
+    if (!input) return null;
+    const { connectionId, ...rest } = input;
+    const acc = users.matrix.get(connectionId);
+    return {
+      ...rest,
+      user: acc ? accountUserView(acc.channel, acc.account, [acc.user]) : null,
+      userIds: acc ? userIdsOf([acc.user]) : [],
+      person: views.get(input.key) ?? null,
+    };
+  };
+}
+
+/** What the brand's tools know about the people holding these Matrix conversations, from the last people build. */
+export async function personViewsOfConversations(orgId: string, brandId: string, ids: string[]): Promise<Map<string, PersonView>> {
+  const out = new Map<string, PersonView>();
+  for (const id of ids) {
+    const rows = (await db.execute(sql`
+      SELECT presences, merge_evidence FROM people
+      WHERE org_id = ${orgId} AND brand_id = ${brandId}
+        AND presences @> ${JSON.stringify([{ detail: { conversationId: id } }])}::jsonb
+      LIMIT 1
+    `)) as unknown as { presences: PersonLike["presences"]; merge_evidence: { kind: string }[] | null }[];
+    if (rows[0]) out.set(`matrix:${id}`, personView({ presences: rows[0].presences, evidence: rows[0].merge_evidence ?? [] }));
+  }
+  return out;
 }
 
 // ─── the record ─────────────────────────────────────────────────────────────
@@ -464,6 +560,9 @@ export async function storedVerdicts(orgId: string, brandId: string, keys: strin
         confidence: r.confidence,
         brandProbability: r.brandProbability,
         offerIds: r.offerIds as string[],
+        tags: (r.tags as ConnectionTag[] | null) ?? null,
+        tagScores: (r.tagScores as TagScores | null) ?? null,
+        userIds: (r.accountUserIds as string[] | null) ?? [],
         judgedThrough: r.judgedThrough,
         contextHash: r.contextHash,
       });
@@ -505,14 +604,15 @@ export interface JudgePassSummary {
 export async function judgeAndRecord<P>(
   identity: SiblingIdentity,
   context: BrandContext,
-  plans: { key: string; judgedThrough: string; plan: P }[],
+  plans: { key: string; judgedThrough: string; plan: P; contextHash?: string }[],
   load: (plan: P) => Promise<ConversationInput | null>,
-): Promise<{ verdicts: Map<string, RecordedVerdict>; summary: JudgePassSummary }> {
+): Promise<{ verdicts: Map<string, RecordedVerdict>; summary: JudgePassSummary; nothingToRead: Set<string> }> {
   const stored = await storedVerdicts(identity.orgId, identity.brandId, plans.map((p) => p.key));
   const verdicts = new Map<string, RecordedVerdict>();
+  const hashOf = (p: { contextHash?: string }) => p.contextHash ?? context.hash;
   const todo = plans.filter(
     (p) =>
-      needsJudgment(stored.get(p.key), p.judgedThrough, context.hash) &&
+      needsJudgment(stored.get(p.key), p.judgedThrough, hashOf(p)) &&
       nothingToRead.get(`${identity.orgId}|${identity.brandId}|${p.key}`) !== p.judgedThrough,
   );
   for (const p of plans) {
@@ -552,7 +652,10 @@ export async function judgeAndRecord<P>(
           brandProbability: null,
           offerScores: null,
           offerIds: [],
-          contextHash: context.hash,
+          tagScores: null,
+          tags: null,
+          accountUserIds: input.userIds ?? [],
+          contextHash: hashOf(p),
           judgedThrough: p.judgedThrough,
           input,
           model: null,
@@ -567,7 +670,16 @@ export async function judgeAndRecord<P>(
             target: [conversationVerdicts.orgId, conversationVerdicts.brandId, conversationVerdicts.conversationKey],
             set,
           });
-        verdicts.set(p.key, { content: "none", topic: null, confidence: null, brandProbability: null, offerIds: [] });
+        verdicts.set(p.key, {
+          content: "none",
+          topic: null,
+          confidence: null,
+          brandProbability: null,
+          offerIds: [],
+          tags: null,
+          tagScores: null,
+          userIds: input.userIds ?? [],
+        });
         noContent++;
         return;
       }
@@ -585,7 +697,10 @@ export async function judgeAndRecord<P>(
         brandProbability: v.brandProbability,
         offerScores: v.offerScores,
         offerIds: v.offerIds,
-        contextHash: context.hash,
+        tagScores: v.tagScores,
+        tags: v.tags,
+        accountUserIds: input.userIds ?? [],
+        contextHash: hashOf(p),
         judgedThrough: p.judgedThrough,
         input,
         model: v.model,
@@ -606,6 +721,9 @@ export async function judgeAndRecord<P>(
         confidence: v.confidence,
         brandProbability: v.brandProbability,
         offerIds: v.offerIds,
+        tags: v.tags,
+        tagScores: v.tagScores,
+        userIds: input.userIds ?? [],
       });
       judged++;
     } catch (err) {
@@ -614,6 +732,10 @@ export async function judgeAndRecord<P>(
   });
   const pending = plans.filter((p) => !verdicts.has(p.key)).length;
   return {
+    // Unjudged because the sibling holds no message at this watermark (not a failure).
+    nothingToRead: new Set(
+      plans.filter((p) => !verdicts.has(p.key) && nothingToRead.get(`${identity.orgId}|${identity.brandId}|${p.key}`) === p.judgedThrough).map((p) => p.key),
+    ),
     verdicts,
     summary: {
       status: errors.length ? "failed" : "ok",
@@ -635,8 +757,30 @@ export const PERSONAL_CHANNEL_SOURCES = new Set(["gmail", "matrix"]);
 const BUSINESS_EVIDENCE = new Set(["gohighlevel_contact", "csv_contact", "lead_pairing", "stripe_customer"]);
 
 interface PersonLike {
-  presences: { source: string; emails: string[]; displayName: string | null; lastActivityAt: string | null; messageCount: number | null; detail: Record<string, unknown> }[];
+  presences: {
+    source: string;
+    emails: string[];
+    displayName: string | null;
+    company?: string | null;
+    lastActivityAt: string | null;
+    messageCount: number | null;
+    detail: Record<string, unknown>;
+  }[];
   evidence?: { kind: string }[];
+}
+
+/** PURE: what the brand's own tools know about a person, shown to Jev beside the conversation. */
+export function personView(person: PersonLike): PersonView {
+  const knownBy = new Set<string>();
+  for (const p of person.presences) if (!PERSONAL_CHANNEL_SOURCES.has(p.source)) knownBy.add(p.source);
+  for (const e of person.evidence ?? []) if (e.kind === "csv_contact") knownBy.add("csv");
+  const domains = new Set<string>();
+  for (const p of person.presences) for (const e of p.emails) domains.add(e.slice(e.indexOf("@") + 1));
+  return {
+    knownBy: [...knownBy].sort(),
+    company: person.presences.map((p) => p.company ?? null).find((c) => !!c?.trim()) ?? null,
+    emailDomains: [...domains].sort(),
+  };
 }
 
 /** PURE: the conversation keys a person's personal-channel presences carry. */
@@ -717,7 +861,15 @@ export async function resolvePeopleRelevance(
   identity: SiblingIdentity,
   persons: PersonLike[],
   gmailReadable: boolean,
-): Promise<{ verdicts: Map<string, RecordedVerdict>; summary: Omit<RelevanceSummary, "notBusinessPeople"> }> {
+): Promise<{
+  verdicts: Map<string, RecordedVerdict>;
+  summary: Omit<RelevanceSummary, "notBusinessPeople">;
+  /** What the pass judged against; null when it could not be read (nothing judged). */
+  context: BrandContext | null;
+  /** Conversations with no message to read (a Gmail correspondent google-service holds nothing for). */
+  nothingToRead: Set<string>;
+  users: AccountUsers | null;
+}> {
   const gmail = new Map<string, GmailPlan>();
   const matrixIds = new Set<string>();
   for (const person of persons) {
@@ -741,6 +893,9 @@ export async function resolvePeopleRelevance(
   const contentFreeOf = (verdicts: Map<string, RecordedVerdict>) => [...verdicts.values()].filter((v) => v.content === "none").length;
   if (keys.length === 0) {
     return {
+      context: null,
+      users: null,
+      nothingToRead: new Set(),
       verdicts: new Map(),
       summary: {
         status: "ok",
@@ -759,11 +914,15 @@ export async function resolvePeopleRelevance(
   }
 
   let context: BrandContext;
+  let users: AccountUsers;
   try {
-    context = await readBrandContext(identity);
+    [context, users] = await Promise.all([readBrandContext(identity), readAccountUsers(identity, gmailReadable)]);
   } catch (err) {
     const verdicts = new Map<string, RecordedVerdict>(await storedVerdicts(identity.orgId, identity.brandId, keys));
     return {
+      context: null,
+      users: null,
+      nothingToRead: new Set(),
       verdicts,
       summary: {
         status: "failed",
@@ -772,7 +931,7 @@ export async function resolvePeopleRelevance(
         noContent: 0,
         pending: keys.length - verdicts.size,
         model: null,
-        error: `brand context: ${(err as Error).message}`.slice(0, 1000),
+        error: `brand / user context: ${(err as Error).message}`.slice(0, 1000),
         conversations: keys.length,
         topics: topicsOf(verdicts),
         contentFree: contentFreeOf(verdicts),
@@ -782,23 +941,47 @@ export async function resolvePeopleRelevance(
   }
 
   const markers = await matrixMarkers([...matrixIds]);
+  // What the brand's own tools know about each conversation's counterpart.
+  const views = new Map<string, PersonView>();
+  for (const person of persons) {
+    const view = personView(person);
+    for (const k of conversationKeysOf(person)) views.set(k, view);
+  }
   type Plan = { kind: "gmail"; gmail: GmailPlan } | { kind: "matrix"; id: string };
   // An unreadable mailbox judges no Gmail thread: its recorded verdicts still apply.
-  const plans: { key: string; judgedThrough: string; plan: Plan }[] = [
-    ...[...gmail.values()].filter(() => gmailReadable).map((g) => ({ key: `gmail:${g.email}`, judgedThrough: g.judgedThrough, plan: { kind: "gmail" as const, gmail: g } })),
-    ...[...matrixIds]
-      .filter((id) => markers.has(id))
-      .map((id) => ({ key: `matrix:${id}`, judgedThrough: markers.get(id)!, plan: { kind: "matrix" as const, id } })),
+  const plans: { key: string; judgedThrough: string; plan: Plan; contextHash: string }[] = [
+    ...[...gmail.values()].filter(() => gmailReadable).map((g) => ({
+      key: `gmail:${g.email}`,
+      judgedThrough: g.judgedThrough,
+      plan: { kind: "gmail" as const, gmail: g },
+      contextHash: `${context.hash}|${users.hash.gmail}`,
+    })),
+    ...matrixPlans([...matrixIds], markers, context, users).map((p) => ({ ...p, plan: { kind: "matrix" as const, id: p.plan } })),
   ];
-  const { verdicts, summary } = await judgeAndRecord(identity, context, plans, (plan) =>
-    plan.kind === "gmail" ? gmailConversationInput(identity, plan.gmail) : matrixConversationInput(plan.id),
-  );
+  const gmailUsers = users.gmail.map((g) => g.user);
+  const { verdicts, summary, nothingToRead } = await judgeAndRecord(identity, context, plans, async (plan) => {
+    if (plan.kind === "gmail") {
+      const input = await gmailConversationInput(identity, plan.gmail);
+      if (!input) return null;
+      const account = users.gmail.length === 1 ? users.gmail[0].mailbox : null;
+      return {
+        ...input,
+        user: accountUserView("email", account, gmailUsers),
+        userIds: userIdsOf(gmailUsers),
+        person: views.get(input.key) ?? null,
+      };
+    }
+    return matrixLoader(users, views)(plan.id);
+  });
   if (!gmailReadable && gmail.size > 0) {
     const recorded = await storedVerdicts(identity.orgId, identity.brandId, [...gmail.keys()].map((e) => `gmail:${e}`));
     for (const [k, v] of recorded) verdicts.set(k, v);
     summary.pending = keys.filter((k) => !verdicts.has(k)).length;
   }
   return {
+    context,
+    users,
+    nothingToRead,
     verdicts,
     summary: {
       ...summary,

@@ -1,3 +1,4 @@
+import type { PersonConnectionTag } from "../lib/people/connection-tags.js";
 import { Router, type Response } from "express";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
@@ -197,6 +198,8 @@ function personView(row: typeof people.$inferSelect) {
     automatedVerdict: row.automatedVerdict as { email: string; verdict: string | null; confidence: number | null }[] | null,
     notBusiness: row.notBusiness,
     groupOnly: row.groupOnly,
+    // CONNECTION-TAGS-1017: in what capacity the human speaks (people/connection-tags.ts).
+    connectionTags: (row.connectionTags as PersonConnectionTag[] | null) ?? [],
     offerIds: row.offerIds as string[],
     relevance: row.relevance as PersonRelevance["relevance"],
     possibleLeads: row.possibleLeads as PossibleLead[],

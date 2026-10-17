@@ -1,3 +1,4 @@
+import { CONNECTION_TAGS } from "./lib/people/connection-tags.js";
 import { z } from "zod";
 import { extendZodWithOpenApi, OpenAPIRegistry } from "@asteasolutions/zod-to-openapi";
 import { COLUMN_FIELDS } from "./lib/column-typing.js";
@@ -2058,6 +2059,27 @@ const PersonSchema = registry.register(
       groupOnly: z.boolean().openapi({
         description: "True when the person is known ONLY as a member of the brand's messaging groups and never wrote a word anywhere: listed only with includeGroupMembers=true.",
       }),
+      connectionTags: z
+        .array(
+          z.object({
+            tag: z.enum(CONNECTION_TAGS).openapi({
+              description:
+                "personal_to_user = speaks personally to the user who connected the account (a friend); personal_not_to_user = personal, but not to that user (chatter in a group); professional_to_brand = in a work role about what this brand sells (prospect, client, user, referral partner); professional_not_to_brand = in a work role about something else (supplier, the owner's other activity, accountant, automated sender).",
+            }),
+            userIds: z.array(z.string()).openapi({ description: "Personal tags: the users (client-service ids) it is about, the owners of the accounts the exchange is on. Empty on professional tags." }),
+            brandId: z.string().nullable().openapi({ description: "Professional tags: the brand it is judged against (this scope's). Null on personal tags." }),
+            basis: z
+              .array(z.object({ kind: z.string(), ref: z.string(), probability: z.number().nullable() }))
+              .openapi({
+                description:
+                  "What earned the tag: conversation (Jev on a direct thread, ref = gmail:<address> | matrix:<conversation id>), group_posts (Jev on the person's own posts in a group, ref = room id), group (the group's own verdict, for a member who never wrote), direct_thread_no_words (a direct thread holding no word a person wrote), source / evidence (a record of the brand's own tools: CRM, CSV, Stripe, auth provider, PostHog, cold email, Copilot, API), automated_sender. probability = Jev's yes-probability, null when no model decided.",
+              }),
+          }),
+        )
+        .openapi({
+          description:
+            "CONNECTION-TAGS-1017: in what capacity this human speaks, 0 to 4 tags at once (a friend who is also a client carries both). Empty = nothing judged yet (a Gmail thread whose mailbox was unreadable).",
+        }),
       offerIds: z.array(z.string()).openapi({
         description: "The brand's offers (brand-service offer ids) Jev tied this person's personal-channel conversations to (yes-probability >= 0.5, on a conversation about the brand). Empty when none or not judged.",
       }),

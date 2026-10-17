@@ -33,7 +33,18 @@ const verdict = (topic: RecordedVerdict["topic"], brandProbability: number, offe
   confidence: 0.9,
   brandProbability,
   offerIds,
+  tags: null,
+  tagScores: null,
+  userIds: [],
 });
+
+/** The four connection-tag answers every conversation judgment now carries (CONNECTION-TAGS-1017). */
+const TAG_ANSWERS = {
+  t_personal_to_user: { type: "noul", noul: 0.1 },
+  t_personal_not_to_user: { type: "noul", noul: 0.05 },
+  t_professional_to_brand: { type: "noul", noul: 0.9 },
+  t_professional_not_to_brand: { type: "noul", noul: 0.1 },
+};
 
 describe("hidesConversation", () => {
   it("hides below the owner's 0.50 line (Alejandro's 0.47 photo-only thread hides, 0.5 stays)", () => {
@@ -157,7 +168,9 @@ describe("judgeConversation", () => {
     vi.stubGlobal("fetch", async (url: string, init: RequestInit) => {
       expect(String(url)).toBe("http://chat.test/orgs/judgments");
       body = JSON.parse(String(init.body));
-      return new Response(JSON.stringify({ model: "jev-test", answers, usage: { inputTokens: 1, outputTokens: 0 } }), { status: 200 });
+      return new Response(JSON.stringify({ model: "jev-test", answers: { ...TAG_ANSWERS, ...answers }, usage: { inputTokens: 1, outputTokens: 0 } }), {
+        status: 200,
+      });
     });
   }
   afterEach(() => vi.unstubAllGlobals());
@@ -169,7 +182,15 @@ describe("judgeConversation", () => {
       o1: { type: "noul", noul: 0.1 },
     });
     const v = await judgeConversation(input, context, tracking);
-    expect(Object.keys(body!.questions)).toEqual(["topic", "o0", "o1"]);
+    expect(Object.keys(body!.questions)).toEqual([
+      "topic",
+      "t_personal_to_user",
+      "t_personal_not_to_user",
+      "t_professional_to_brand",
+      "t_professional_not_to_brand",
+      "o0",
+      "o1",
+    ]);
     expect(body!.questions.o0.type).toBe("noul");
     expect(v).toMatchObject({ topic: "this_brand", brandProbability: 0.9, offerIds: ["offer-a"], model: "jev-test" });
     expect(v.offerScores).toEqual({ "offer-a": 0.93, "offer-b": 0.1 });
@@ -196,6 +217,33 @@ describe("judgeConversation", () => {
     });
     const v = await judgeConversation(input, context, tracking);
     expect(v.offerIds).toEqual([]);
+  });
+
+  it("CONNECTION-TAGS-1017: asks the four tags with the user and what the brand knows of the person, keeps every tag >= 0.5", async () => {
+    stub({
+      topic: { type: "choice", choice: "this_brand", confidence: 0.8, probabilities: { personal: 0.3, other_business: 0.05, this_brand: 0.65 } },
+      t_personal_to_user: { type: "noul", noul: 0.7 },
+      o0: { type: "noul", noul: 0.1 },
+      o1: { type: "noul", noul: 0.1 },
+    });
+    const user = { channel: "whatsapp", account: "Kevin", users: [{ name: "Kevin Lourd", emails: ["kevin@x.com"], phones: ["+33600000000"] }] };
+    const person = { knownBy: ["stripe"], company: "Acme", emailDomains: ["acme.com"] };
+    const v = await judgeConversation({ ...input, user, userIds: ["u1"], person }, context, tracking);
+    expect(body!.state.user).toEqual(user);
+    expect(body!.state.counterpartKnownByTheBrand).toEqual(person);
+    expect(JSON.stringify(body!.state)).not.toContain("u1");
+    expect(v.tags).toEqual(["personal_to_user", "professional_to_brand"]);
+    expect(v.tagScores.personal_to_user).toBe(0.7);
+  });
+
+  it("fails loud when a tag answer is missing", async () => {
+    stub({
+      topic: { type: "choice", choice: "this_brand", confidence: 1, probabilities: { this_brand: 1 } },
+      t_professional_to_brand: { type: "choice" },
+      o0: { type: "noul", noul: 0.5 },
+      o1: { type: "noul", noul: 0.5 },
+    });
+    await expect(judgeConversation(input, context, tracking)).rejects.toThrow(/no answer for tag professional_to_brand/);
   });
 
   it("fails loud on an unknown topic or a missing offer answer", async () => {
@@ -262,7 +310,7 @@ describe("WA-LEAD-RELEVANCE-1016: a supplier or another activity of the owner is
       return new Response(
         JSON.stringify({
           model: "jev-test",
-          answers: { topic: { type: "choice", choice: "other_business", confidence: 0.9, probabilities }, o0: { type: "noul", noul: 0.6 } },
+          answers: { ...TAG_ANSWERS, topic: { type: "choice", choice: "other_business", confidence: 0.9, probabilities }, o0: { type: "noul", noul: 0.6 } },
         }),
         { status: 200 },
       );

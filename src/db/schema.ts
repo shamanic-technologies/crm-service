@@ -1141,6 +1141,9 @@ export const people = pgTable(
     // brand's messaging groups and never wrote a word anywhere: a person (with a
     // human id, their memberships in the fact feed), listed only on demand.
     groupOnly: boolean("group_only").notNull().default(false),
+    // CONNECTION-TAGS-1017: personal_to_user | personal_not_to_user | professional_to_brand |
+    // professional_not_to_brand, each with its users / brand and what earned it (people/connection-tags.ts).
+    connectionTags: jsonb("connection_tags").notNull().default([]),
     relevance: jsonb("relevance"),
     offerIds: jsonb("offer_ids").notNull().default([]),
 
@@ -1618,6 +1621,12 @@ export const conversationVerdicts = pgTable(
     // offerId -> Jev's yes-probability; offer_ids = the ones at or above the bar.
     offerScores: jsonb("offer_scores"),
     offerIds: jsonb("offer_ids").notNull(),
+    // CONNECTION-TAGS-1017: tag -> Jev's yes-probability, the tags held (>= 0.5, else the
+    // most likely one), and the user(s) of the account the conversation is on. NULL tags =
+    // recorded before the tags, or nothing to judge (content = 'none').
+    tagScores: jsonb("tag_scores"),
+    tags: jsonb("tags"),
+    accountUserIds: jsonb("account_user_ids"),
     contextHash: text("context_hash").notNull(),
     judgedThrough: text("judged_through").notNull(),
     input: jsonb("input").notNull(),

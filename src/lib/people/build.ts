@@ -57,12 +57,15 @@ import {
   resolveSenderVerdicts,
   type SenderVerdictSummary,
 } from "./automated.js";
-import { personRelevance, resolvePeopleRelevance, type RelevanceSummary } from "./relevance.js";
+import { personRelevance, personView, readBrandContext, resolvePeopleRelevance, type PersonView, type RelevanceSummary } from "./relevance.js";
 import { leadAddressesFirst, resolvePersonState, type GhlDeal, type LeadObservation, type StripeStandingInput } from "./state.js";
 import { indexScopeMessages, type MessageIndexSummary } from "./search.js";
 import { emitScopeFacts, type FactEmissionSummary } from "./facts.js";
 import { persistPersonIds } from "./person-id.js";
 import { visitorLabel } from "../posthog/records.js";
+import { readAccountUsers } from "./account-users.js";
+import { CONNECTION_TAGS, personConnectionTags, type ConnectionTag, type TagLookups } from "./connection-tags.js";
+import { resolveGroupTags, type GroupTags, type GroupTagsSummary } from "./group-tags.js";
 import {
   humanEvidence,
   judgmentId,
@@ -133,6 +136,13 @@ export interface BuildSummary {
   humanIdentity?: HumanIdentitySummary & { peopleWithHumanId: number; peopleWithoutHumanId: number };
   /** WhatsApp ghost → phone resolution run before reading Matrix (absent on builds before it existed). */
   whatsappPhones?: PhoneResolutionResult | { status: "failed"; error: string };
+  /** CONNECTION-TAGS-1017: the groups' judgments, and how many people carry at least one tag. */
+  connectionTags?: GroupTagsSummary & {
+    people: number;
+    peopleTagged: number;
+    peopleUntagged: number;
+    byTag: Record<ConnectionTag, number>;
+  };
 }
 
 const NUMBER_IN_NAME = /\d[\d\s().-]{5,}\d/;
@@ -415,6 +425,34 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     clusters.filter((c) => !automated.get(c.personKey)),
     gmail.status === "ok",
   );
+  // CONNECTION-TAGS-1017: the brand's groups and each member's own posts in them (people/group-tags.ts).
+  const viewByContact = new Map<string, PersonView>();
+  for (const c of clusters) {
+    const view = personView(c);
+    for (const p of c.presences) if (p.source === "matrix") viewByContact.set(p.sourceRef, view);
+  }
+  const groupTags = await (async (): Promise<GroupTags> => {
+    try {
+      const context = relevance.context ?? (await readBrandContext(identity));
+      const users = relevance.users ?? (await readAccountUsers(identity, gmail.status === "ok"));
+      return await resolveGroupTags(identity, context, users, (id) => viewByContact.get(id) ?? null);
+    } catch (err) {
+      const error = (err as Error).message.slice(0, 1000);
+      console.error(`[crm-service] group tags failed scope=${scope.id}: ${error}`);
+      return { groups: new Map(), posters: new Map(), summary: { status: "failed", groups: 0, posters: 0, judged: 0, reused: 0, error } };
+    }
+  })();
+  const conversationTags: TagLookups["conversations"] = new Map();
+  for (const [key, v] of relevance.verdicts) {
+    if (v.content === "none") conversationTags.set(key, { noWords: true, userIds: v.userIds });
+    else if (v.tags) conversationTags.set(key, { tags: v.tags, scores: v.tagScores, userIds: v.userIds });
+  }
+  // A direct thread with no message to read is a direct thread with no words (the user wrote to them).
+  const gmailUserIds = [...new Set((relevance.users?.gmail ?? []).map((g) => g.user.userId).filter((u): u is string => !!u))].sort();
+  for (const key of relevance.nothingToRead) {
+    if (!conversationTags.has(key)) conversationTags.set(key, { noWords: true, userIds: key.startsWith("gmail:") ? gmailUserIds : [] });
+  }
+
   // A lead-service read that failed may be hiding a lead: never hide on it.
   const isOurLead = (c: PersonCluster) =>
     c.emails.some((e) => {
@@ -489,6 +527,13 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
         ? { notBusiness: false, offerIds: [] as string[], relevance: null }
         : personRelevance(c, relevance.verdicts, isOurLead(c))),
       groupOnly: isGroupOnly(c.presences),
+      connectionTags: personConnectionTags(c, {
+        brandId: scope.brandId,
+        automated: automated.get(c.personKey)!,
+        conversations: conversationTags,
+        groups: groupTags.groups,
+        posters: groupTags.posters,
+      }),
       possibleLeads: c.presences
         .filter((p) => p.source === "gohighlevel")
         .flatMap((p) => possibleLeadsByCrmContact.get(p.sourceRef) ?? [])
@@ -521,6 +566,13 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     ownAddresses: { status: own.status, addresses: own.addresses.size, domain: own.domain, error: own.error },
     senderVerdicts: { ...senders.summary, automatedPeople: rows.filter((r) => r.automated).length },
     relevance: { ...relevance.summary, notBusinessPeople: rows.filter((r) => r.notBusiness).length },
+    connectionTags: {
+      ...groupTags.summary,
+      people: rows.length,
+      peopleTagged: rows.filter((r) => r.connectionTags.length > 0).length,
+      peopleUntagged: rows.filter((r) => r.connectionTags.length === 0).length,
+      byTag: Object.fromEntries(CONNECTION_TAGS.map((t) => [t, rows.filter((r) => r.connectionTags.some((x) => x.tag === t)).length])) as Record<ConnectionTag, number>,
+    },
   };
 
   await db.transaction(async (tx) => {

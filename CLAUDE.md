@@ -19,6 +19,29 @@ feed the same registry, both layered bronze/silver/gold:
 
 As a CSV lead-provider it is a sibling of `apollo-service` / `apify-service`.
 
+**Role (owner 2026-10-17): the FACT REGISTRY.** Every fact from every source is attached to ONE
+humanId (human-service mints / merges it; crm-service asks and attaches, never mints) and, when
+the person speaks in a work role, to an organization (brand-service's company identity, not built
+yet). Every human carries at least one CONNECTION TAG (below). What lead-service or the dashboard
+do with them is not crm-service's concern.
+
+## Connection tags (`src/lib/people/connection-tags.ts`, CONNECTION-TAGS-1017)
+
+Four tags, up to all four per human (`people.connection_tags`, served as `connectionTags` on
+`GET /orgs/people`): `personal_to_user` / `personal_not_to_user` (judged against the USER who
+connected the account: matrix connection creator, Gmail mailbox owner = client-service member,
+`account-users.ts`) and `professional_to_brand` / `professional_not_to_brand` (against the scope's
+BRAND). Sources: a direct thread = four Jev `noul` in the SAME call as the topic choice
+(`relevance.ts`, state carries `user` + `counterpartKnownByTheBrand`; hash `v8` + users digest,
+`matrixPlans` is the ONE planner for the build AND the Matrix sync gate, else they re-judge each
+other); a thread with no words = `personal_to_user`; a group = `group-tags.ts`: `group:<room>`
+(the group, re-judged on rename / new message) inherited by silent members (never "to user"),
+`group:<room>|<contact>` (the member's own posts, with replies to / mentions of the user);
+the brand's own tools (CRM, CSV, Stripe, Clerk, PostHog, Instantly, Copilot, API) =
+`professional_to_brand`, no model; automated sender = `professional_not_to_brand`. A judged item
+keeps every tag >= 0.5, else its most likely one. Build summary `connectionTags` counts
+`peopleTagged` / `peopleUntagged`.
+
 ## Route tiers (service-architecture)
 
 - `/health`, `/openapi.json` — public, no auth.
