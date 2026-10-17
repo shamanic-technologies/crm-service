@@ -1546,6 +1546,25 @@ describe.skipIf(!RUN)("person layer", () => {
       expect(orgs.status).toBe(200);
       const xcom = orgs.body.organizations.find((o: { domains: string[] }) => o.domains.includes("x.com"));
       expect(xcom).toMatchObject({ people: 1, tags: [{ tag: "professional_to_brand", people: 1 }] });
+      // The registry tells lead-service through the fact feed: one connection_tag per tag held,
+      // one organization_link per company (with its professional tags), keyed on the person id.
+      const registryFacts = async () =>
+        (await db.execute(sql`
+          SELECT type, payload, human_id, live, person_key FROM people_facts
+          WHERE brand_id = ${BRAND} AND source = 'crm' AND type IN ('connection_tag', 'organization_link') AND live
+          ORDER BY feed_seq
+        `)) as unknown as { type: string; payload: Record<string, unknown>; live: boolean; person_key: string }[];
+      const before = await registryFacts();
+      expect(before.find((f) => f.person_key === "email:mom@family.com" && f.type === "connection_tag")?.payload).toMatchObject({
+        tag: "personal_to_user",
+        userIds: ["user-owner"],
+        brandId: null,
+      });
+      expect(before.find((f) => f.person_key === "email:alice@x.com" && f.type === "organization_link")?.payload).toMatchObject({
+        domain: "x.com",
+        tags: ["professional_to_brand"],
+      });
+
       // PEOPLE-CORRECTIONS-1017: the owner says Mom is a client at family.com, not a friend.
       const post = (body: Record<string, unknown>) =>
         request(app()).post("/orgs/people/corrections").set("x-api-key", API_KEY).set("x-org-id", ORG).set("x-user-id", USER).send({ brandId: BRAND, ...body });
@@ -1564,6 +1583,12 @@ describe.skipIf(!RUN)("person layer", () => {
       expect(momAfter.connectionTags.map((t: { tag: string }) => t.tag)).toEqual(["professional_to_brand"]);
       expect(momAfter.connectionTags[0].basis[0].kind).toBe("user_correction");
       expect(momAfter.organizations.map((o: { domain: string }) => o.domain)).toEqual(["family.com"]);
+      // The feed follows: her friend tag is withdrawn, the corrected ones are stated.
+      const momFacts = (await registryFacts()).filter((f) => f.person_key === "email:mom@family.com");
+      expect(momFacts.map((f) => [f.type, f.payload.tag ?? f.payload.domain])).toEqual([
+        ["connection_tag", "professional_to_brand"],
+        ["organization_link", "family.com"],
+      ]);
       // Undo the tag removal: the AI's friend tag is back on the next build.
       const undo = await request(app())
         .post(`/orgs/people/corrections/${removed.body.correction.correctionId}/undo`)
