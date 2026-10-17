@@ -44,6 +44,7 @@ import { STRIPE_SOURCE } from "../stripe/records.js";
 import { emailKey, keysOf, normalizeEmail, pickPersonKey, type Presence } from "./identity.js";
 import type { PersonConnectionTag } from "./connection-tags.js";
 import type { PersonOrganization } from "./organizations.js";
+import type { PersonRelation } from "./relations.js";
 
 export const FACT_TYPES = [
   "added_to_crm",
@@ -77,6 +78,9 @@ export const FACT_TYPES = [
   // reads them instead of re-deriving the personal / professional split and the company.
   "connection_tag",
   "organization_link",
+  // PERSON-RELATIONS-1017: one per person x capacity (personal / professional at a company / company
+  // unknown), with ONLY its contact points' emails, phones, keys and tags. Snapshot, like the two above.
+  "relation",
   "person_merged",
   "person_split",
   "withdrawn",
@@ -107,6 +111,7 @@ const FAMILIES = {
   csv_contact: { source: "csv", snapshot: false, immutable: true },
   crm_connection_tag: { source: "crm", snapshot: true, immutable: false },
   crm_organization: { source: "crm", snapshot: true, immutable: false },
+  crm_relation: { source: "crm", snapshot: true, immutable: false },
 } as const;
 export type FactFamily = keyof typeof FAMILIES;
 
@@ -287,7 +292,7 @@ export function standaloneRegistryCandidates(csv: CandidateFact[], builtKeys: Se
  * payload: a re-judgment that keeps the tag is no change.
  */
 export function registryCandidates(
-  rows: Pick<Person, "personId" | "identityKeys" | "emails" | "phones" | "displayName" | "connectionTags" | "organizations">[],
+  rows: Pick<Person, "personId" | "identityKeys" | "emails" | "phones" | "displayName" | "connectionTags" | "organizations" | "relations">[],
 ): CandidateFact[] {
   const out: CandidateFact[] = [];
   for (const r of rows) {
@@ -313,6 +318,30 @@ export function registryCandidates(
           userIds: [...t.userIds].sort(),
           brandId: t.brandId,
           basis: t.basis.map((b) => ({ kind: b.kind, ref: b.ref })).sort((a, b) => (`${a.kind}|${a.ref}` < `${b.kind}|${b.ref}` ? -1 : 1)),
+        },
+      });
+    }
+    for (const rel of (r.relations as PersonRelation[] | null) ?? []) {
+      out.push({
+        ...base,
+        naturalKey: `crm|relation|${rel.relationKey}`,
+        family: "crm_relation",
+        type: "relation",
+        payload: {
+          relationKey: rel.relationKey,
+          capacity: rel.capacity,
+          companyId: rel.companyId,
+          domain: rel.domain,
+          tags: rel.tags.map((t) => ({
+            tag: t.tag,
+            userIds: [...t.userIds].sort(),
+            brandId: t.brandId,
+            basis: t.basis.map((b) => ({ kind: b.kind, ref: b.ref })).sort((a, b) => (`${a.kind}|${a.ref}` < `${b.kind}|${b.ref}` ? -1 : 1)),
+          })),
+          contactPoints: rel.contactPoints.map((c) => ({ id: c.id, source: c.source, companyBasis: c.companyBasis })),
+          emails: rel.emails,
+          phones: rel.phones,
+          keys: rel.keys,
         },
       });
     }

@@ -21,6 +21,8 @@ import { resolveCompanies } from "../companies/client.js";
 import { CONNECTION_TAGS, type ConnectionTag, type PersonConnectionTag } from "./connection-tags.js";
 import { domainOfWebsite, type DomainKind, type PersonOrganization } from "./organizations.js";
 import { findPersonById } from "./person-id.js";
+import { presenceStableKey } from "./facts.js";
+import type { Presence } from "./identity.js";
 
 export const CORRECTION_KINDS = ["tag_add", "tag_remove", "organization_add", "organization_remove", "domain_kind"] as const;
 export type CorrectionKind = (typeof CORRECTION_KINDS)[number];
@@ -44,12 +46,18 @@ export interface CorrectionInput {
   domainKind?: DomainKind;
   /** organization_add: how the person speaks for it (professional tags); default = their professional tags. */
   tags?: ConnectionTag[];
+  /**
+   * PERSON-RELATIONS-1017: one contact point of the person (`<source>:<id>`, as served on each relation's
+   * `contactPoints`): the tag / company correction applies to that point only (its relation moves).
+   */
+  contactPoint?: string;
   reason?: string | null;
 }
 
 export type CorrectionRefusal =
   | { status: 400; reason: "invalid_correction"; error: string }
   | { status: 404; reason: "person_not_found"; error: string }
+  | { status: 404; reason: "contact_point_not_found"; error: string }
   | { status: 422; reason: "company_unresolved"; error: string }
   | { status: 422; reason: "tags_required"; error: string }
   | { status: 404; reason: "correction_not_found"; error: string };
@@ -77,7 +85,13 @@ export function correctionTarget(c: {
   companyId?: string;
   domain?: string;
   domainKind?: DomainKind;
+  contactPoint?: string;
 }): string {
+  const base = baseTarget(c);
+  return c.contactPoint ? `${base}@${c.contactPoint}` : base;
+}
+
+function baseTarget(c: { kind: CorrectionKind; tag?: ConnectionTag; companyId?: string; domain?: string }): string {
   switch (c.kind) {
     case "tag_add":
     case "tag_remove":
@@ -100,6 +114,14 @@ export async function stateCorrection(input: CorrectionInput): Promise<Correctio
     if (!person) return refuse({ status: 404, reason: "person_not_found", error: `no person ${input.personId} in this brand` });
   }
   const target: Record<string, unknown> = {};
+  if (input.contactPoint) {
+    if (kind === "domain_kind") return refuse({ status: 400, reason: "invalid_correction", error: "domain_kind takes no contactPoint" });
+    const points = ((person!.presences as Presence[]) ?? []).map(presenceStableKey);
+    if (!points.includes(input.contactPoint)) {
+      return refuse({ status: 404, reason: "contact_point_not_found", error: `person ${input.personId} holds no contact point ${input.contactPoint}` });
+    }
+    target.contactPoint = input.contactPoint;
+  }
   if (kind === "tag_add" || kind === "tag_remove") {
     if (!input.tag) return refuse({ status: 400, reason: "invalid_correction", error: `${kind} needs tag` });
     target.tag = input.tag;
@@ -138,6 +160,7 @@ export async function stateCorrection(input: CorrectionInput): Promise<Correctio
     tag: input.tag,
     companyId: target.companyId as string | undefined,
     domain: target.domain as string | undefined,
+    contactPoint: input.contactPoint,
   });
   const personKeys = person ? ((person.identityKeys as string[]) ?? []) : [];
   const existing = (
@@ -277,6 +300,8 @@ export function applyCorrections(
   let tags = person.connectionTags.map((t) => ({ ...t, basis: [...t.basis] }));
   let orgs = person.organizations.map((o) => ({ ...o, tags: o.tags.map((t) => ({ ...t })) }));
   for (const c of corrections) {
+    // A correction of ONE contact point moves that point's relation (people/relations.ts), not the person's summary.
+    if ((c.target as { contactPoint?: string }).contactPoint) continue;
     const basis = { kind: "user_correction", ref: c.id, probability: null };
     const t = c.target as { tag?: ConnectionTag; companyId?: string; domain?: string; tags?: ConnectionTag[] };
     if (c.kind === "tag_add" && t.tag) {

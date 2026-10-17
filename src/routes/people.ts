@@ -2,6 +2,8 @@ import { CONNECTION_TAGS, type PersonConnectionTag } from "../lib/people/connect
 import { CORRECTION_KINDS, correctionView, listCorrections, stateCorrection, undoCorrection } from "../lib/people/corrections.js";
 import { DOMAIN_KINDS } from "../lib/people/organizations.js";
 import type { PersonOrganization } from "../lib/people/organizations.js";
+import { personIdOfRelationKey, type PersonRelation } from "../lib/people/relations.js";
+import { presenceStableKey } from "../lib/people/facts.js";
 import { Router, type Response } from "express";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
@@ -201,6 +203,8 @@ function personView(row: typeof people.$inferSelect) {
     connectionTags: (row.connectionTags as PersonConnectionTag[] | null) ?? [],
     // PERSON-ORGANIZATIONS-1017: the companies the person speaks for, each with its professional tags.
     organizations: (row.organizations as PersonOrganization[] | null) ?? [],
+    // PERSON-RELATIONS-1017: the person x capacity rows, each with only its contact points.
+    relations: (row.relations as PersonRelation[] | null) ?? [],
     offerIds: row.offerIds as string[],
     relevance: row.relevance as PersonRelevance["relevance"],
     possibleLeads: row.possibleLeads as PossibleLead[],
@@ -468,13 +472,15 @@ const timelineQuerySchema = z
     brandId: brandIdSchema,
     personKey: z.string().min(3).max(320).optional(),
     personId: z.string().uuid().optional(),
+    // PERSON-RELATIONS-1017: one relation of the person (`rel:<personId>:...`): only its contact points' thread.
+    relationKey: z.string().min(3).max(200).optional(),
     // Paged read (DASH-LATENCY-1014): the `limit` latest items older than `before`.
     // Neither = the whole thread, unchanged (every writer reads it whole).
     limit: z.coerce.number().int().min(1).max(500).optional(),
     before: z.string().min(1).max(2000).optional(),
   })
-  .refine((q) => (q.personKey === undefined) !== (q.personId === undefined), {
-    message: "exactly one of personId (uuid) or personKey is required",
+  .refine((q) => [q.personKey, q.personId, q.relationKey].filter((x) => x !== undefined).length === 1, {
+    message: "exactly one of personId (uuid), personKey or relationKey is required",
   });
 
 /**
@@ -492,7 +498,11 @@ router.get(
     if (!parsed.success) {
       return res.status(400).json({ type: "validation", error: `invalid query: ${parsed.error.message}` });
     }
-    const { brandId, personKey, personId } = parsed.data;
+    const { brandId, personKey, relationKey } = parsed.data;
+    const personId = parsed.data.personId ?? (relationKey ? personIdOfRelationKey(relationKey) : undefined);
+    if (relationKey && !personId) {
+      return res.status(400).json({ type: "validation", error: "invalid query: relationKey must be a rel:<personId>:... key this service served" });
+    }
     const paged = parsed.data.limit !== undefined || parsed.data.before !== undefined;
     const before = parsed.data.before !== undefined ? decodeCursor(parsed.data.before) : null;
     if (parsed.data.before !== undefined && !before) {
@@ -509,10 +519,29 @@ router.get(
           error: `no person holds ${personId ? `id ${personId}` : personKey} for brand ${brandId} (read GET /orgs/people first; the index is built in the background)`,
         });
       }
+      // A relation's thread = the person's thread read over ONLY that relation's contact points.
+      let scoped = person;
+      if (relationKey) {
+        const relation = ((person.relations as PersonRelation[] | null) ?? []).find((r) => r.relationKey === relationKey);
+        if (!relation) {
+          return res.status(404).json({
+            type: "not_found",
+            reason: "relation_not_found",
+            error: `person ${person.personId} holds no relation ${relationKey} (its relations are rebuilt with the people index)`,
+          });
+        }
+        const points = new Set(relation.contactPoints.map((c) => c.id));
+        scoped = {
+          ...person,
+          presences: (person.presences as Presence[]).filter((p) => points.has(presenceStableKey(p))),
+          emails: relation.emails,
+          phones: relation.phones,
+        };
+      }
       const { scope } = await ensureScope(req.orgId!, brandId, req.userId!);
       const timeline = await readTimeline(
         scope,
-        person,
+        scoped,
         scope.sourceReads as BuildSummary | null,
         { orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId },
         { paged },
@@ -836,6 +865,7 @@ const correctionBodySchema = z.object({
   companyId: z.string().uuid().optional(),
   domainKind: z.enum(DOMAIN_KINDS).optional(),
   tags: z.array(z.enum(CONNECTION_TAGS)).max(4).optional(),
+  contactPoint: z.string().min(3).max(500).optional(),
   reason: z.string().max(2000).optional(),
 });
 

@@ -54,6 +54,19 @@ judged once fleet-wide (`domain_verdicts`, 100 per call), organization >= 0.5 on
 only where the presence giving it carries a PROFESSIONAL tag (`presenceConnectionTags`): a friend
 writing from a work address gets none. Facts do not carry the company yet.
 
+## Relations: person x capacity, the Unibox row grain (`src/lib/people/relations.ts`, PERSON-RELATIONS-1017)
+
+Owner 2026-10-17: a Unibox row is a human x organization, never the whole human (a friend's personal chat never
+shows in their professional row), generalized, no special case. Each CONTACT POINT (`presenceStableKey`: an address,
+a number, a thread, a CRM / Stripe / Clerk / PostHog record) is read on its own: capacity from its own tags
+(`professional_to_brand` wins; else personal if any personal tag; else `professional_not_to_brand`; untagged = in
+no relation), company = evidence (its own domain / CRM website) > Jev reading the point's OWN content (recorded
+thread input or its record) among the person's known companies, else unknown (`contact_point_org_verdicts`, re-asked
+when the point or the options move) > the user's correction (`contactPoint` on tag / organization corrections; a
+person-level `organization_add` claims every professional point of unknown company). `people.relations` =
+`rel:<personId>:personal | :org:<companyId> | :pro`, each with ONLY its points' emails / phones / keys / tags; fact
+`relation` (snapshot, source crm) on the feed; `GET /orgs/people/timeline?relationKey=` reads only its points.
+
 ## User corrections (`src/lib/people/corrections.ts`, PEOPLE-CORRECTIONS-1017)
 
 A user corrects what the registry worked out: `POST /orgs/people/corrections {brandId, kind, ...}`

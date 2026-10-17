@@ -71,6 +71,17 @@ import { resolveGroupTags, type GroupTags, type GroupTagsSummary } from "./group
 import { contactWebsites, overrideDomains, personOrganizations, resolveOrganizationLookups, type OrganizationsSummary } from "./organizations.js";
 import { activeCorrections, applyCorrections, correctionsOf, domainOverrides } from "./corrections.js";
 import {
+  correctPointTags,
+  knownCompanies,
+  personRelations,
+  readPoints,
+  resolvePointCompanies,
+  type ContactPointReading,
+  type PointOrgSummary,
+} from "./relations.js";
+import type { DomainKind } from "./organizations.js";
+import type { PeopleCorrection } from "../../db/schema.js";
+import {
   crmRecordKey,
   humanEvidence,
   recordKeys,
@@ -152,6 +163,8 @@ export interface BuildSummary {
   };
   /** PERSON-ORGANIZATIONS-1017: domains judged, companies resolved, human x organization links made. */
   organizations?: OrganizationsSummary;
+  /** PERSON-RELATIONS-1017: contact points whose company Jev was asked about (no evidence of their own). */
+  relations?: PointOrgSummary;
 }
 
 const NUMBER_IN_NAME = /\d[\d\s().-]{5,}\d/;
@@ -552,6 +565,25 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     groups: groupTags.groups,
     posters: groupTags.posters,
   });
+  // PERSON-RELATIONS-1017: each contact point read on its own (capacity, company), then grouped.
+  const emptyKinds = new Map<string, { kind: DomainKind; confidence: number }>();
+  const readingsOf = new Map<string, ContactPointReading[]>();
+  const correctionsByPerson = new Map<string, PeopleCorrection[]>();
+  for (const c of clusters) {
+    const mine = correctionsOf(c.identityKeys, corrections);
+    correctionsByPerson.set(c.personKey, mine);
+    const raw = readPoints(c.presences, tagLookupsOf(c), orgLookups?.kinds ?? emptyKinds, orgLookups?.companyOf ?? new Map(), websiteOf);
+    readingsOf.set(c.personKey, correctPointTags(raw, mine, scope.brandId));
+  }
+  const pointCompanies = await resolvePointCompanies(
+    identity,
+    [...readingsOf.values()].map((readings) => ({ readings, known: knownCompanies(readings) })),
+  ).catch((err) => {
+    const error = (err as Error).message.slice(0, 1000);
+    console.error(`[crm-service] contact point companies failed scope=${scope.id}: ${error}`);
+    return { answers: new Map(), summary: { status: "failed" as const, candidates: 0, reused: 0, judged: 0, error } };
+  });
+
   const rows = clusters.map((c) => {
     const ghlDeals: GhlDeal[] = c.presences
       .filter((p) => p.source === "gohighlevel")
@@ -671,6 +703,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       peopleUntagged: rows.filter((r) => r.connectionTags.length === 0).length,
       byTag: Object.fromEntries(CONNECTION_TAGS.map((t) => [t, rows.filter((r) => r.connectionTags.some((x) => x.tag === t)).length])) as Record<ConnectionTag, number>,
     },
+    relations: { ...pointCompanies.summary },
     organizations: orgLookups
       ? {
           status: orgLookups.domainKinds.status === "ok" && orgLookups.companies?.status !== "failed" ? "ok" : "failed",
@@ -686,7 +719,14 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
   await db.transaction(async (tx) => {
     // Same person, same opaque id as last build (people/person-id.ts).
     const { ids } = await persistPersonIds(tx, scope.orgId, scope.brandId, rows);
-    const withIds = rows.map((r) => ({ ...r, personId: ids.get(r.personKey)! }));
+    const withIds = rows.map((r) => {
+      const personId = ids.get(r.personKey)!;
+      return {
+        ...r,
+        personId,
+        relations: personRelations(personId, readingsOf.get(r.personKey) ?? [], pointCompanies.answers, correctionsByPerson.get(r.personKey) ?? []),
+      };
+    });
     await tx.delete(people).where(eq(people.scopeId, scope.id));
     for (let i = 0; i < withIds.length; i += 500) {
       await tx.insert(people).values(withIds.slice(i, i + 500));

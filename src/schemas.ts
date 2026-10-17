@@ -2080,6 +2080,26 @@ const PersonSchema = registry.register(
           description:
             "CONNECTION-TAGS-1017: in what capacity this human speaks, 0 to 4 tags at once (a friend who is also a client carries both). Empty = nothing judged yet (a Gmail thread whose mailbox was unreadable).",
         }),
+      relations: z
+        .array(
+          z.object({
+            relationKey: z.string().openapi({ description: "rel:<personId>:personal | rel:<personId>:org:<companyId> | rel:<personId>:pro (professional, company unknown). Stable across rebuilds." }),
+            capacity: z.enum(["personal", "professional"]),
+            companyId: z.string().nullable(),
+            domain: z.string().nullable(),
+            tags: z.array(z.object({ tag: z.enum(CONNECTION_TAGS), userIds: z.array(z.string()), brandId: z.string().nullable(), basis: z.array(z.object({ kind: z.string(), ref: z.string(), probability: z.number().nullable() })) })),
+            contactPoints: z
+              .array(z.object({ id: z.string(), source: z.string(), companyBasis: z.enum(["evidence", "jev", "user"]).nullable() }))
+              .openapi({ description: "Its contact points (`<source>:<id>`: an address, a number, a thread, a CRM / Stripe / Clerk / PostHog record) and how each one's company was decided." }),
+            emails: z.array(z.string()),
+            phones: z.array(z.string()),
+            keys: z.array(z.string()).openapi({ description: "Other identity keys of its points (messaging handles, the brand's user ids)." }),
+          }),
+        )
+        .openapi({
+          description:
+            "PERSON-RELATIONS-1017: the person x capacity rows. Each contact point is read on its own: capacity from its own tags (professional_to_brand wins; else personal if any personal tag; else professional_not_to_brand), company by evidence > Jev reading its content among the person's known companies > the user's correction. A relation carries ONLY its points' emails, phones, keys and tags.",
+        }),
       organizations: z
         .array(
           z.object({
@@ -2455,6 +2475,11 @@ registry.registerPath({
         description: "The person's opaque id (Person.personId). A retired id (merged away) opens the person it merged into.",
       }),
       personKey: z.string().optional().openapi({ example: "email:alice@acme.com", description: "Any identity key of the person." }),
+      relationKey: z.string().optional().openapi({
+        example: "rel:7b0f6a52-1c43-4b8e-9d2a-0f5e3c1a9b77:org:3f2b...",
+        description:
+          "PERSON-RELATIONS-1017: one relation of the person (Person.relations[].relationKey): the thread of ONLY its contact points (a friend's personal WhatsApp never shows in their professional row). 404 relation_not_found.",
+      }),
       limit: z.coerce.number().int().min(1).max(500).optional().openapi({
         description:
           "PAGED read: the `limit` latest items (default 10 when only `before` is given). The answer waits at most ~0.15 s for the threads' re-reads, then serves the store " +
@@ -2566,6 +2591,10 @@ registry.registerPath({
             companyId: z.string().uuid().optional(),
             domainKind: z.enum(["mailbox_provider", "organization"]).optional(),
             tags: z.array(z.enum(CONNECTION_TAGS)).optional(),
+            contactPoint: z.string().optional().openapi({
+              description:
+                "PERSON-RELATIONS-1017: one contact point of the person (as served in a relation's contactPoints, `<source>:<id>`): the tag / company correction applies to that point only, so its relation moves (e.g. this Gmail thread is personal; this Stripe account is Acme's). Absent = the whole person.",
+            }),
             reason: z.string().optional(),
           }),
         },
