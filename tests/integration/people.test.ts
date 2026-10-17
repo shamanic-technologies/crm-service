@@ -444,7 +444,7 @@ async function retryOnDeadlock(fn: () => Promise<unknown>): Promise<void> {
 }
 
 async function wipe() {
-  await retryOnDeadlock(() => db.execute(sql`TRUNCATE sender_verdicts, conversation_verdicts, domain_verdicts, company_keys, people_scopes, people, person_ids, person_id_aliases, person_merges, contact_uploads, lead_standing_observations, matrix_raw_events, conversations, matrix_leads, matrix_connections, ghl_opportunities, ghl_connections, contacts CASCADE`));
+  await retryOnDeadlock(() => db.execute(sql`TRUNCATE sender_verdicts, conversation_verdicts, domain_verdicts, company_keys, people_corrections, people_scopes, people, person_ids, person_id_aliases, person_merges, contact_uploads, lead_standing_observations, matrix_raw_events, conversations, matrix_leads, matrix_connections, ghl_opportunities, ghl_connections, contacts CASCADE`));
 }
 
 /** Alice in GoHighLevel (email + phone, a won deal) and on WhatsApp (phone only). */
@@ -528,9 +528,13 @@ function app() {
 
 async function buildNow() {
   const { scope } = await ensureScope(ORG, BRAND, USER);
-  const result = await runScopeBuild(scope);
-  expect(result.ok).toBe(true);
-  return result.summary!;
+  // A build a route kicked may be running: wait for it, then build (a skipped build read nothing new).
+  for (;;) {
+    const result = await runScopeBuild(scope);
+    expect(result.ok).toBe(true);
+    if (!result.skipped) return result.summary!;
+    await new Promise((r) => setTimeout(r, 50));
+  }
 }
 
 describe.skipIf(!RUN)("person layer", () => {
@@ -1542,6 +1546,37 @@ describe.skipIf(!RUN)("person layer", () => {
       expect(orgs.status).toBe(200);
       const xcom = orgs.body.organizations.find((o: { domains: string[] }) => o.domains.includes("x.com"));
       expect(xcom).toMatchObject({ people: 1, tags: [{ tag: "professional_to_brand", people: 1 }] });
+      // PEOPLE-CORRECTIONS-1017: the owner says Mom is a client at family.com, not a friend.
+      const post = (body: Record<string, unknown>) =>
+        request(app()).post("/orgs/people/corrections").set("x-api-key", API_KEY).set("x-org-id", ORG).set("x-user-id", USER).send({ brandId: BRAND, ...body });
+      const removed = await post({ kind: "tag_remove", personId: mom.personId, tag: "personal_to_user", reason: "my client" });
+      expect(removed.status).toBe(201);
+      expect((await post({ kind: "tag_remove", personId: mom.personId, tag: "personal_to_user" })).body.duplicate).toBe(true);
+      expect((await post({ kind: "tag_add", personId: mom.personId, tag: "professional_to_brand" })).status).toBe(201);
+      // No professional tag on her yet (no rebuild since): the user must say how she speaks for it.
+      expect((await post({ kind: "organization_add", personId: mom.personId, domain: "family.com" })).body.reason).toBe("tags_required");
+      const orgAdd = await post({ kind: "organization_add", personId: mom.personId, domain: "https://www.family.com", tags: ["professional_to_brand"] });
+      expect(orgAdd.status).toBe(201);
+      expect(orgAdd.body.correction.target).toMatchObject({ domain: "family.com", tags: ["professional_to_brand"] });
+      expect((await post({ kind: "tag_add", personId: "aaaaaaaa-1111-4111-8111-000000000999", tag: "personal_to_user" })).status).toBe(404);
+      await buildNow();
+      const momAfter = (await listPeople()).body.people.find((p: { personKey: string }) => p.personKey === "email:mom@family.com");
+      expect(momAfter.connectionTags.map((t: { tag: string }) => t.tag)).toEqual(["professional_to_brand"]);
+      expect(momAfter.connectionTags[0].basis[0].kind).toBe("user_correction");
+      expect(momAfter.organizations.map((o: { domain: string }) => o.domain)).toEqual(["family.com"]);
+      // Undo the tag removal: the AI's friend tag is back on the next build.
+      const undo = await request(app())
+        .post(`/orgs/people/corrections/${removed.body.correction.correctionId}/undo`)
+        .set("x-api-key", API_KEY).set("x-org-id", ORG).set("x-user-id", USER)
+        .send({ brandId: BRAND });
+      expect(undo.status).toBe(200);
+      await buildNow();
+      const momUndone = (await listPeople()).body.people.find((p: { personKey: string }) => p.personKey === "email:mom@family.com");
+      expect(momUndone.connectionTags.map((t: { tag: string }) => t.tag)).toEqual(["personal_to_user", "professional_to_brand"]);
+      const listed = await request(app()).get(`/orgs/people/corrections?brandId=${BRAND}`).set("x-api-key", API_KEY).set("x-org-id", ORG).set("x-user-id", USER);
+      expect(listed.body.corrections).toHaveLength(3);
+      expect(listed.body.corrections.filter((c: { undoneAt: string | null }) => c.undoneAt)).toHaveLength(1);
+
       // Domains are judged once: a rebuild asks Jev about none of them again.
       domainQuestions.length = 0;
       companyResolves.length = 0;

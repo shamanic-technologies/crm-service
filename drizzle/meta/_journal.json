@@ -337,6 +337,13 @@
       "when": 1792270000000,
       "tag": "0047_person_organizations",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1792280000000,
+      "tag": "0048_people_corrections",
+      "breakpoints": true
     }
   ]
 }

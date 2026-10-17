@@ -129,6 +129,9 @@ async function seedBrand(org: string, brand: string, tag: string) {
     INSERT INTO person_merges (org_id, brand_id, person_id_a, person_id_b, keys_a, keys_b, stated_by_user_id)
     VALUES (${org}, ${brand}, gen_random_uuid(), gen_random_uuid(), '["email:a@b.co"]', '["phone:+33600000000"]', 'user-1')`);
   await db.execute(sql`
+    INSERT INTO people_corrections (org_id, brand_id, kind, person_keys, target, target_key, stated_by_user_id)
+    VALUES (${org}, ${brand}, 'tag_add', '["email:a@b.co"]', '{"tag":"personal_to_user"}', 'tag_add:personal_to_user', 'user-1')`);
+  await db.execute(sql`
     INSERT INTO form_trigger_reports (org_id, brand_id, source, submission_id, answers, submitted_at, status)
     VALUES (${org}, ${brand}, 'gohighlevel', ${"sub-" + tag}, '[]', now(), 'reported')`);
   await db.execute(sql`
