@@ -344,6 +344,13 @@
       "when": 1792280000000,
       "tag": "0048_people_corrections",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1792290000000,
+      "tag": "0049_label_criteria_version",
+      "breakpoints": true
     }
   ]
 }

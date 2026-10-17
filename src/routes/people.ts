@@ -35,7 +35,6 @@ import {
 } from "../lib/people/outcomes.js";
 import { LEG_STEPS, listLegReachBrands, parseLegStep, readLegReach } from "../lib/people/leg-reach.js";
 import { familyOf, LEAD_FAMILIES, readBrandFamilies, type FamilyVerdict, type LeadFamily } from "../lib/people/families.js";
-import { readRelationships, RELATIONSHIP_TAGS, type Relationship, type RelationshipTag } from "../lib/people/relationships.js";
 import {
   matchesOf,
   messageHitsFor,
@@ -104,9 +103,6 @@ const listQuerySchema = z.object({
   q: z.string().max(SEARCH_MAX_LENGTH).optional(),
   // Unibox family filter (features-service's verdict on our lead). Absent = All.
   family: z.enum(LEAD_FAMILIES).optional(),
-  // Who the person is to the brand (lead-service's relationship tags): a tag, `untagged`
-  // (judged, no tag yet) or `unjudged` (lead-service never read their thread / no human id).
-  relationship: z.enum([...RELATIONSHIP_TAGS, "untagged", "unjudged"]).optional(),
   // People known ONLY as members of the brand's messaging groups, who never wrote a word.
   includeGroupMembers: z.enum(["true", "false"]).optional(),
 });
@@ -239,7 +235,7 @@ router.get(
     if (!parsed.success) {
       return res.status(400).json({ type: "validation", error: `invalid query: ${parsed.error.message}` });
     }
-    const { brandId, source, family, relationship } = parsed.data;
+    const { brandId, source, family } = parsed.data;
     const includeAutomated = parsed.data.includeAutomated === "true";
     const includeGroupMembers = parsed.data.includeGroupMembers === "true";
     const offerId = parsed.data.offerId ?? null;
@@ -327,43 +323,8 @@ router.get(
       );
       const population = members.length;
 
-      // Who each person is to the brand (lead-service's relationship tags, RELATIONSHIP-TAGS-1014).
-      const humanIds = [...new Set(members.map((m) => m.humanId).filter((h): h is string => !!h))];
-      const rel = await readRelationships({ orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId }, humanIds).then(
-        (byHuman) => ({ ok: true as const, byHuman }),
-        (err: Error) => ({ ok: false as const, error: err.message }),
-      );
-      if (relationship && !rel.ok) {
-        return res.status(502).json({
-          type: "upstream",
-          reason: "relationships_unavailable",
-          error: `cannot filter on relationship "${relationship}": ${rel.error}`,
-        });
-      }
-      const relationshipOf = (humanId: string | null): Relationship | null => (rel.ok && humanId ? rel.byHuman.get(humanId) ?? null : null);
-      const relationshipCounts = Object.fromEntries(RELATIONSHIP_TAGS.map((t) => [t, 0])) as Record<RelationshipTag, number>;
-      let untagged = 0;
-      let unjudged = 0;
-      const relationshipKeys = new Set<string>();
-      if (rel.ok) {
-        for (const m of members) {
-          const r = relationshipOf(m.humanId);
-          if (!r || !r.judgedAt) unjudged += 1;
-          else if (r.tags.length === 0) untagged += 1;
-          for (const t of r?.tags ?? []) relationshipCounts[t] += 1;
-          const hit =
-            relationship === "unjudged"
-              ? !r || !r.judgedAt
-              : relationship === "untagged"
-                ? !!r?.judgedAt && r.tags.length === 0
-                : !!relationship && (r?.tags ?? []).includes(relationship);
-          if (hit) relationshipKeys.add(m.personKey);
-        }
-      }
-      const relationships = rel.ok
-        ? { status: "ok" as const, error: null, filter: relationship ?? null, counts: relationshipCounts, untagged, unjudged, population }
-        : { status: "failed" as const, error: rel.error, filter: null, counts: null, untagged: null, unjudged: null, population };
-
+      // Who each person is to the brand is lead-service's: it serves the Unibox list itself
+      // (UNIBOX-FROM-LEAD-1017); this list no longer reads its relationships.
       const fam = await familiesRead;
       if (family && !fam.ok) {
         return res.status(502).json({
@@ -387,7 +348,6 @@ router.get(
       const listWhere = and(
         where,
         familyKeys ? keyed(familyKeys) : sql`true`,
-        relationship ? keyed([...relationshipKeys]) : sql`true`,
       );
       const withFamily = verdicts.size;
       const families = fam.ok
@@ -487,11 +447,8 @@ router.get(
         nextOffset: offset + rows.length < total ? offset + rows.length : null,
         ...(search ? { search } : {}),
         families,
-        relationships,
         people: rows.map((r, i) => ({
           ...personView(r),
-          // lead-service's relationship block, verbatim (null: no human id yet, or the read failed: `relationships.status`).
-          relationship: relationshipOf(r.humanId),
           // null = not one of our leads, OR the family read failed (`families.status` says which).
           family: verdicts.get(r.personKey)?.family ?? null,
           familyLostReason: verdicts.get(r.personKey)?.lostReason ?? null,

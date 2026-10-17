@@ -9,7 +9,7 @@ import { STATE_SOURCES } from "./lib/people/state.js";
 import { SOURCE_STATUSES } from "./lib/people/sources.js";
 import { TEXT_CLEAN_STATUSES, TIMELINE_SOURCE_STATUSES } from "./lib/people/timeline.js";
 import { FACT_SOURCES, FACT_TYPES } from "./lib/people/facts.js";
-import { RELATIONSHIP_POLICIES, RELATIONSHIP_TAGS } from "./lib/people/relationships.js";
+import { RELATIONSHIP_POLICIES } from "./lib/people/relationships.js";
 import { OUTCOME_STEPS } from "./lib/people/outcomes.js";
 import { SEGMENT_STEPS } from "./lib/people/segment.js";
 import { LEG_STEPS } from "./lib/people/leg-reach.js";
@@ -2266,36 +2266,9 @@ const PeopleListResponseSchema = registry.register(
           readAt: z.string().nullable().openapi({ description: "When crm-service read features-service (a read is shared for up to 60s)." }),
         })
         .openapi({ description: "The Unibox family filters (Won clients, Hot leads, Lost leads, Cold leads)." }),
-      relationships: z
-        .object({
-          status: z.enum(["ok", "failed"]).openapi({ description: "failed = lead-service could not be read: every person's relationship is null for THAT reason (see error)." }),
-          error: z.string().nullable(),
-          filter: z.string().nullable().openapi({ description: "The relationship filter applied (null = All)." }),
-          counts: z.record(z.string(), z.number().int()).nullable().openapi({ description: "People per relationship tag (YES tags) over this list's population; tags overlap (a person can be personal AND a customer)." }),
-          untagged: z.number().int().nullable().openapi({ description: "Judged, no tag yet." }),
-          unjudged: z.number().int().nullable().openapi({ description: "lead-service never read their thread, or no human id yet." }),
-          population: z.number().int(),
-        })
-        .openapi({ description: "Who the people are to the brand (lead-service's relationship tags, RELATIONSHIP-TAGS-1014)." }),
       groupMembersHidden: z.number().int().openapi({ description: "People hidden because they are known ONLY as members of the brand's messaging groups and never wrote a word (0 when includeGroupMembers=true)." }),
       people: z.array(
         PersonSchema.extend({
-          relationship: z
-            .object({
-              humanId: z.string().nullable(),
-              company: z
-                .object({ id: z.string().nullable(), name: z.string().nullable(), domain: z.string().nullable(), source: z.string() })
-                .nullable(),
-              tags: z.array(z.enum(RELATIONSHIP_TAGS)),
-              unsureTags: z.array(z.enum(RELATIONSHIP_TAGS)),
-              judgedAt: z.string().nullable(),
-              details: z.array(z.record(z.string(), z.unknown())),
-              policies: z.object({ business_only: z.boolean().optional() }).optional(),
-            })
-            .nullable().openapi({
-            description:
-              "lead-service's relationship block for this person's human, verbatim: tags (YES), unsureTags (waiting on the owner's review), judgedAt (null = never judged), company, details. Null when the person has no human id yet, or relationships.status = failed.",
-          }),
           family: z.enum(["won", "hot", "lost", "cold"]).nullable().openapi({
             description: "features-service's verdict on this person as our lead, verbatim; a person with several lead addresses takes the strongest (won > hot > lost > cold). Null = not one of our leads, or families.status = failed.",
           }),
@@ -2438,11 +2411,8 @@ registry.registerPath({
       offset: z.coerce.number().int().min(0).optional(),
       source: PeopleSourceSchema.optional().openapi({ description: "Only people present on this source." }),
       includeAutomated: z.enum(["true", "false"]).optional().openapi({ description: "Also return automated senders (person.automated = true). Default false: hidden." }),
-      includeNotBusiness: z.enum(["true", "false"]).optional().openapi({ description: "Kept for compatibility: since RELATIONSHIP-TAGS-1014 no person is notBusiness (who a person is to the brand is the `relationship` filter), so it changes nothing." }),
+      includeNotBusiness: z.enum(["true", "false"]).optional().openapi({ description: "Kept for compatibility: since RELATIONSHIP-TAGS-1014 no person is notBusiness (who a person is to the brand is lead-service's, which serves the Unibox list), so it changes nothing." }),
       includeGroupMembers: z.enum(["true", "false"]).optional().openapi({ description: "Also return people known ONLY as members of the brand's messaging groups (WhatsApp, LinkedIn...) who never wrote a word (person.groupOnly = true). Default false: hidden." }),
-      relationship: z.enum([...RELATIONSHIP_TAGS, "untagged", "unjudged"]).optional().openapi({
-        description: "Only people whose lead-service relationship carries this YES tag; `untagged` = judged, no tag; `unjudged` = never judged / no human id. lead-service unreadable = 502 relationships_unavailable.",
-      }),
       offerId: z.string().uuid().optional().openapi({ description: "Only people with a conversation Jev tied to this offer of the brand (person.offerIds contains it)." }),
       family: z.enum(["won", "hot", "lost", "cold"]).optional().openapi({
         description:
@@ -3316,6 +3286,50 @@ registry.registerPath({
     200: { description: "The answer: reachable, or not with the send's refusal code", content: { "application/json": { schema: WhatsappReachResponseSchema } } },
     400: { description: "Bad request (`code: invalid_request`)", content: { "application/json": { schema: ErrorResponseSchema } } },
     502: { description: "The WhatsApp bridge failed on a valid number, or run tracking failed (`code: bridge_error`)", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
+export const TeamMembershipRequestSchema = registry.register(
+  "TeamMembershipRequest",
+  z
+    .object({
+      brandId: z.string().uuid().optional().openapi({ description: "The brand whose own team is asked about. Else the x-brand-id header." }),
+      email: z.string().optional().openapi({ description: "The person's email." }),
+      phone: z.string().optional().openapi({ description: "The person's phone, international form (+<country><number>)." }),
+    })
+    .openapi("TeamMembershipRequest"),
+);
+
+export const TeamMembershipResponseSchema = registry.register(
+  "TeamMembershipResponse",
+  z
+    .object({
+      staff: z.boolean().openapi({ description: "One of distribute.you's staff (by email)." }),
+      ownTeam: z.boolean().openapi({ description: "One of the brand's own team: a linked WhatsApp account, the sales rep phone, or a member of the org (by phone or email)." }),
+      matches: z
+        .array(
+          z.object({
+            kind: z.enum(["staff", "linked_whatsapp_account", "sales_rep_phone", "org_member"]),
+            via: z.string().openapi({ description: "The address or number (E.164) that matched." }),
+            description: z.string().openapi({ description: "The kind in plain words, for a log." }),
+          }),
+        )
+        .openapi({ description: "Every way the person matched; empty = neither." }),
+    })
+    .openapi("TeamMembershipResponse"),
+);
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/people/team-membership",
+  summary: "Is this person our staff, or one of the brand's own team? (a fact, no refusal)",
+  description:
+    "A read for a pipe's strategy (WA-GIVEN-PURE-FACT-1017): the triggers report every person; who to skip is the pipe's call. Staff = a distribute.you staff address. Own team = one of the brand's linked WhatsApp numbers, its sales rep phone (brand-service), or any member of the org, by phone or address (client-service). No side effect, no cost. 502 `team_unreadable` when the sales rep or the org's members cannot be read: never answered as \"not own team\". Requires x-api-key, x-org-id, x-user-id; brand from body or x-brand-id.",
+  request: { body: { content: { "application/json": { schema: TeamMembershipRequestSchema } }, required: true } },
+  responses: {
+    200: { description: "The facts", content: { "application/json": { schema: TeamMembershipResponseSchema } } },
+    400: { description: "Bad request (`code: invalid_request`)", content: { "application/json": { schema: ErrorResponseSchema } } },
+    502: { description: "Sales rep or org members unreadable (`code: team_unreadable`), or run tracking failed", content: { "application/json": { schema: ErrorResponseSchema } } },
   },
 });
 

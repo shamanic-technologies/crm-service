@@ -251,6 +251,11 @@ every tag of a GoHighLevel connection gets ONE Jev `choice` `client | disqualifi
 recorded once per label, decided each sync after stage meanings (0 calls once all decided). >= 0.5 confidence → facts
 `client` / `disqualified` (family `ghl_funnel`; stage entries dated, tags undated, withdrawn when the tag goes). The
 serve's `sale` step = sale | standing payment | `client` fact. Read: `GET /orgs/gohighlevel/label-verdicts?brandId=`.
+**Former client** (FORMER-CLIENT-1017, owner 2026-10-17: lead-service's Type "Former customer", only what a source
+STATES, never a time guess): the choice is `client | former_client | disqualified | none` (`LABEL_CRITERIA_VERSION` 2,
+column `criteria_version`: an older verdict is re-decided in place); a `former_client` label emits `client` AND
+`former_client` facts (every `client` reader unchanged). Stripe states it with `subscription_changed` status
+`canceled` (a new subscription = a new fact).
 Doc Dinners: tag `client.` = 41 clients with no sale fact; stage/tag "Unqualified" judged `none` by stage meanings.
 
 ### Relationships (`relationships: "business_only"`) — a business pipe never writes to a friend
@@ -264,13 +269,12 @@ human-service from the pipe's strategy), both pools. Candidates are walked in po
 adds `relationships {policy, checked, skipped{reason}}`; `exhausted` = nothing allowed left AND
 nobody waiting on a first judgment.
 
-### Unibox relationship block
+### Unibox list: lead-service's (UNIBOX-FROM-LEAD-1017)
 
-`GET /orgs/people`: each row carries lead-service's `relationship` block verbatim (by `humanId`,
-read 60s-cached per human, `lib/people/relationships.ts`), `relationships {status, counts per YES
-tag, untagged, unjudged}` over the population, filter `relationship=<tag>|untagged|unjudged` (502
-when lead-service is unreadable). One row per human: human-service's merges (incl. org judgment
-links) come back as `human_identity` evidence, so two people one human holds collapse at build.
+lead-service serves the Unibox LIST and lead card (`/orgs/leads/unibox*`, scoped to `professional_to_brand`,
+read off our fact feed); `GET /orgs/people` no longer reads lead-service relationships (no `relationship`
+filter, block or counts). crm → lead, one way. The serve's `relationships: business_only` (above) still asks
+lead-service: that policy also excludes team, investors, suppliers, press (lead-service's Type).
 
 ### Reachability (`reachableBy`) — a serve FOR a pipe never burns whom it cannot reach
 
@@ -1232,6 +1236,10 @@ kind `reported`, reportedBy crm-service, fromStep `lead_found`), within ~1 min. 
   (first / last name as the source states them: PostHog `first_name`/`last_name`/`name`, Clerk's own; a greeting says "Hi Marie").
   Retries 1→60 min for 24h; 400/422 final. Read: `GET /orgs/phone-triggers?brandId=[&includeHistory=true]`; a pass now:
   `POST /internal/phone-triggers/watch`.
+- **Team membership read** (`lib/people/team-membership.ts`, WA-GIVEN-PURE-FACT-1017): `POST /orgs/people/team-membership
+  {brandId?, email?, phone?}` → `{staff, ownTeam, matches [{kind, via, description}]}` (staff = `isStaffEmail`; own team =
+  linked WhatsApp numbers, sales rep phone, org members by phone or address). A fact for the PIPE's strategy (who to skip
+  is never the trigger's call); unreadable sales rep / members = 502 `team_unreadable`, never "not own team".
 
 ## Reply trigger — a person writing to the brand on a mirrored channel is reported at once (`src/lib/reply-trigger/`)
 
