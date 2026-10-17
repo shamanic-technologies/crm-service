@@ -16,10 +16,10 @@
  *     ARTIFACT (a CSV upload, a connection) once it has finished its first sync, every
  *     number it holds is recorded `skipped / before_watch` (`phone_watch_artifacts`),
  *     so connecting a CRM or importing a file never fires on its backlog. A number
- *     learned from a chat the person opened is `conversation_channel`; a staff address
- *     is `staff`.
+ *     read off a chat channel is `conversation_channel` (not given). No WHO filter
+ *     (staff, own team): the answering pipe's strategy decides (WA-GIVEN-PURE-FACT-1017).
  *  3. DELIVER every pending / failed-and-due report: one ORG run per (org, brand),
- *     the brand's own numbers (`own_team`) dropped, the offer = the brand's only active
+ *     an impossible number dropped (`invalid_number`), the offer = the brand's only active
  *     offer, idempotency key `crm:phone_given:<brand>:<number>` (a retry returns
  *     campaign-service's first event). Retries 1 → 60 min for 24h; 400 / 422 final.
  *  A detection kicks the brand's people build (unawaited) so the person is known to
@@ -40,7 +40,6 @@ import { mirrorRecentlyUpdatedUsers } from "../auth/sync.js";
 import { runScopeBuild } from "../people/build.js";
 import { createRun, updateRun } from "../runs-client.js";
 import { readBrandOffers, pickOffer } from "../form-trigger/offer.js";
-import { readOwnTeam, ownTeamMatch } from "../reply-trigger/own-team.js";
 import {
   CampaignRefusal,
   campaignServiceConfigured,
@@ -206,7 +205,7 @@ export async function detectNewPhones(now: number = Date.now()): Promise<Pick<Ph
       sourceContactId: (r.external_id as string | null) ?? null,
       artifactId: (r.artifact_id as string | null) ?? null,
     };
-    const skip = phoneSkipReason(c, null);
+    const skip = phoneSkipReason(c);
     const inserted = await db
       .insert(phoneGivenReports)
       .values({
@@ -302,16 +301,16 @@ export async function deliverDue(now: number = Date.now()): Promise<PhoneWatchRe
     let failed = false;
     try {
       // Read once per brand; a brand-service outage leaves every report for the next pass.
-      const [offers, ownTeam] = await Promise.all([readBrandOffers(identity), readOwnTeam(identity)]);
+      const offers = await readBrandOffers(identity);
       const offer = pickOffer(null, [], offers);
       for (const r of reports) {
-        const outcome = await deliverOne(r, identity, offer, ownTeam, now);
+        const outcome = await deliverOne(r, identity, offer, now);
         if (outcome.status === PHONE_STATUS.FAILED) failed = true;
         delivered.push({ reportId: r.id, ...outcome });
       }
     } catch (err) {
       failed = true;
-      console.warn(`[crm-service][phone-trigger] brand ${brandId}: offers / own team unreadable, retried next pass: ${(err as Error).message}`);
+      console.warn(`[crm-service][phone-trigger] brand ${brandId}: offers unreadable, retried next pass: ${(err as Error).message}`);
     }
     await updateRun(run.id, failed ? "failed" : "completed", { orgId, userId, runId: run.id, brandIds: [brandId] });
   }
@@ -322,13 +321,8 @@ async function deliverOne(
   r: PhoneGivenReport,
   identity: { orgId: string; userId: string; runId: string; brandId: string },
   offer: ReturnType<typeof pickOffer>,
-  ownTeam: Awaited<ReturnType<typeof readOwnTeam>>,
   now: number,
 ): Promise<{ status: string; reason: string | null }> {
-  if (ownTeamMatch([r.phone], ownTeam)) {
-    await settle(r, now, { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.OWN_TEAM, runId: identity.runId });
-    return { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.OWN_TEAM };
-  }
   if (!dialablePhone([r.phone])) {
     await settle(r, now, { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.INVALID_NUMBER, runId: identity.runId });
     return { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.INVALID_NUMBER };

@@ -192,7 +192,7 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     expect((await reports()).filter((r) => r.phone === "+447911123003")).toHaveLength(1);
   });
 
-  it("staff, the brand's own numbers and a number learned from a chat are never reported", async () => {
+  it("staff and the brand's own numbers are reported (the pipe decides who to skip); a number read off a chat is not", async () => {
     await runPhoneWatchPass(T0);
     await db.insert(contacts).values([
       { orgId: ORG, brandId: BRAND, source: "clerk", externalId: "user_staff", phoneE164: "+447911123004", primaryEmail: "kevin@distribute.you", rawAttributes: {}, sourceConnectionId: clerkConn },
@@ -200,10 +200,10 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
       { orgId: ORG, brandId: BRAND, source: "matrix", channel: "whatsapp", channelHandle: "@whatsapp_447911123005:hs", phoneE164: "+447911123005", rawAttributes: {}, sourceConnectionId: "fefefefe-1111-4111-8111-0000000000c1" },
     ]);
     await runPhoneWatchPass(min(1));
-    expect(campaignCalls).toHaveLength(0);
+    expect(campaignCalls.map((c) => (c.person as Record<string, unknown>).phone).sort()).toEqual(["+447911123004", SALES_REP].sort());
     const byPhone = new Map((await reports()).map((r) => [r.phone, r]));
-    expect(byPhone.get("+447911123004")).toMatchObject({ status: "skipped", reason: "staff" });
-    expect(byPhone.get(SALES_REP)).toMatchObject({ status: "skipped", reason: "own_team" });
+    expect(byPhone.get("+447911123004")).toMatchObject({ status: "reported", reason: null });
+    expect(byPhone.get(SALES_REP)).toMatchObject({ status: "reported", reason: null });
     expect(byPhone.get("+447911123005")).toMatchObject({ status: "skipped", reason: "conversation_channel" });
   });
 

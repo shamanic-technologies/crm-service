@@ -8,10 +8,12 @@
  * The occurrence's identity is (brand, number): reported once, whichever connector
  * states it first or again (a PostHog visitor who later signs up on Clerk with the
  * same number is ONE occurrence).
+ *
+ * The trigger states the FACT only (WA-GIVEN-PURE-FACT-1017, owner 2026-10-17): who a
+ * pipe then writes to or skips (staff, the brand's own team, someone who already wrote)
+ * is the answering pipe's strategy, which reads the person's timeline. Nothing here
+ * filters on WHO the person is; the only skips say the number was not GIVEN now.
  */
-import { isStaffEmail } from "../owner-telegram.js";
-import { ownTeamMatch, type OwnTeam } from "../reply-trigger/own-team.js";
-
 /** The trigger id declared in features-service's catalogue (kind `reported`, reportedBy crm-service). */
 export const PHONE_GIVEN_TRIGGER = "whatsapp_number_given";
 
@@ -25,9 +27,11 @@ export const PHONE_REASONS = {
    * they WROTE to the brand, which the reply trigger reports; they gave no number.
    */
   CONVERSATION_CHANNEL: "conversation_channel",
-  /** One of our staff (`isStaffEmail`), never a prospect. */
+  /**
+   * RETIRED reasons (WA-GIVEN-PURE-FACT-1017): rows recorded before it keep them; no new
+   * row gets them. Who to skip is the answering pipe's strategy.
+   */
   STAFF: "staff",
-  /** One of the brand's own numbers (a linked WhatsApp account, the sales rep phone, a member of the org). */
   OWN_TEAM: "own_team",
   /** A number nobody can be reached on (impossible under its country's plan): never offered. */
   INVALID_NUMBER: "invalid_number",
@@ -53,13 +57,12 @@ export interface PhoneCandidate {
 }
 
 /**
- * PURE: why a new number is NOT reported, or null when it is. Structural only: who
- * a campaign may write to beyond this is the answering pipe's strategy, never ours.
+ * PURE: why a new number is NOT reported, or null when it is. Only the fact's own
+ * definition: a number read off a chat channel (the bridge's identity of whoever is in
+ * the thread) was not GIVEN. Never who the person is (staff, own team): the pipe's call.
  */
-export function phoneSkipReason(c: PhoneCandidate, ownTeam: OwnTeam | null): string | null {
+export function phoneSkipReason(c: PhoneCandidate): string | null {
   if (c.channel) return PHONE_REASONS.CONVERSATION_CHANNEL;
-  if (isStaffEmail(c.email)) return PHONE_REASONS.STAFF;
-  if (ownTeam && ownTeamMatch([c.phone], ownTeam)) return PHONE_REASONS.OWN_TEAM;
   return null;
 }
 

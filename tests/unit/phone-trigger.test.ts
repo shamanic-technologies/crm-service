@@ -9,13 +9,12 @@ const base: PhoneCandidate = {
 };
 
 describe("phone given rules (WA-GIVEN-TRIGGER-1015)", () => {
-  it("skips a chat counterpart, staff and the brand's own numbers; reports anyone else", () => {
-    expect(phoneSkipReason(base, null)).toBeNull();
-    expect(phoneSkipReason({ ...base, channel: "whatsapp" }, null)).toBe("conversation_channel");
-    expect(phoneSkipReason({ ...base, email: "kevin@distribute.you" }, null)).toBe("staff");
-    // A sending-mailbox +tag identity is no staff address: a test through it stays possible.
-    expect(phoneSkipReason({ ...base, email: "k.lourd+probe@trydistribute.com" }, null)).toBeNull();
-    expect(phoneSkipReason(base, new Map([["447911123001", "the brand's sales rep phone"]]))).toBe("own_team");
+  it("reports staff and the brand's own numbers (the pipe decides who to skip); skips only a number read off a chat", () => {
+    expect(phoneSkipReason(base)).toBeNull();
+    expect(phoneSkipReason({ ...base, channel: "whatsapp" })).toBe("conversation_channel");
+    // WA-GIVEN-PURE-FACT-1017: a staff address and an own-team number are no longer filtered here.
+    expect(phoneSkipReason({ ...base, email: "kevin@distribute.you" })).toBeNull();
+    expect(phoneSkipReason({ ...base, email: "k.lourd+probe@trydistribute.com" })).toBeNull();
   });
 
   it("names the person by the number, adds the email when held, omits absent values", () => {
