@@ -600,6 +600,7 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
     a.use(peopleRoutes);
     const total = (await allFacts()).length;
     const seen: string[] = [];
+    const served: { source: string; type: string; contactPoint: string | null }[] = [];
     let since: string | undefined;
     for (let i = 0; i < 50; i++) {
       const r = await request(a)
@@ -608,11 +609,17 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
         .set("x-api-key", API_KEY);
       expect(r.status).toBe(200);
       seen.push(...r.body.facts.map((f: { factId: string }) => f.factId));
+      served.push(...r.body.facts);
       since = r.body.nextCursor;
       if (!r.body.hasMore) break;
     }
     expect(seen.length).toBe(total);
     expect(new Set(seen).size).toBe(total);
+    // PERSON-RELATIONS-1017: every source fact names its contact point; a CSV row and registry facts name none.
+    for (const f of served) {
+      if (f.source === "csv" || f.source === "crm") expect(f.contactPoint).toBeNull();
+      else expect(f.contactPoint).toMatch(new RegExp(`^${f.source}:.+`));
+    }
     const empty = await request(a).get("/internal/people/facts").query({ since }).set("x-api-key", API_KEY);
     expect(empty.body).toEqual({ facts: [], nextCursor: since, hasMore: false });
     expect((await request(a).get("/internal/people/facts").query({ since: "abc" }).set("x-api-key", API_KEY)).status).toBe(400);

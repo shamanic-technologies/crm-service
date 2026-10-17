@@ -2866,6 +2866,10 @@ export const PeopleFactSchema = registry.register(
     sourceRef: z.string().openapi({ description: "The vendor's own record id (appointment, opportunity, submission, contact, message, charge...)." }),
     payload: z.record(z.string(), z.unknown()).openapi({ description: "Type-specific, see crm-service CLAUDE.md (people fact feed)." }),
     withdrawnOf: z.string().uuid().optional().openapi({ description: "type=withdrawn only: the factId it withdraws." }),
+    contactPoint: z.string().nullable().openapi({
+      description:
+        "PERSON-RELATIONS-1017: the contact point the fact is about (`<source>:<id>`: gmail:<address>, matrix:<handle>, stripe:<customer>, clerk:<user>...), byte-equal to a `relation` fact's contactPoints[].id, so it files under its relation. Null for a CSV row, a registry fact (connection_tag / organization_link / relation) and bookkeeping (withdrawn / person_merged / person_split). Served on old facts too.",
+    }),
     humanId: z.string().uuid().nullable().openapi({
       description:
         "The fleet-wide human (human-service) the fact's person was at emission; pair a CRM contact with a lead by it. Null on a fact emitted " +
