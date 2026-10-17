@@ -76,6 +76,11 @@ class FakeHumans {
   canonical(h: string, orgId: string | null) {
     return this.component(h, orgId).sort()[0];
   }
+  /** The human holding an address, in ORG's view (null = nobody). */
+  humanOfEmail(email: string) {
+    const h = this.holder.get(`email:${email}`);
+    return h ? this.canonical(h, ORG) : null;
+  }
   resolve(b: { orgId?: string; emails?: string[]; phones?: string[]; create: boolean }) {
     const keys = [...(b.emails ?? []).map((e) => `email:${e.toLowerCase()}`), ...(b.phones ?? []).map((p) => `phone:${p}`)];
     const held = keys.map((k) => this.holder.get(k)).filter((x): x is string => !!x);
@@ -341,6 +346,44 @@ describe.skipIf(!RUN)("people x human-service: same human is human-service's cal
     expect(live.every((f) => f.humanId !== null)).toBe(true);
     const third = await build();
     expect(third.facts).toMatchObject({ status: "ok", humanIdentified: 0, emitted: 0 });
+  });
+
+  it("HUMAN-ID-COVERAGE-1017: an imported CSV row nobody talked to is no person, but its fact names its human", async () => {
+    await db.insert(contacts).values({
+      orgId: ORG,
+      brandId: BRAND,
+      source: "csv",
+      primaryEmail: "imported@csv.com",
+      fullName: "Ida Imported",
+      rawAttributes: {},
+      unsubscribed: false,
+    });
+    const first = await build();
+    expect(first.facts).toMatchObject({ status: "ok" });
+    expect(await personOf("imported@csv.com")).toBeUndefined();
+    const [fact] = await db
+      .select()
+      .from(peopleFacts)
+      .where(and(eq(peopleFacts.brandId, BRAND), eq(peopleFacts.live, true), eq(peopleFacts.source, "csv")));
+    expect(fact).toMatchObject({ type: "added_to_crm", subjectStandalone: true });
+    expect(fact.humanId).toBe(humans.humanOfEmail("imported@csv.com"));
+    const again = await build();
+    expect(again.facts).toMatchObject({ emitted: 0, humanIdentified: 0 });
+  });
+
+  it("HUMAN-ID-COVERAGE-1017: a CSV fact emitted before its human was known is re-stated with it", async () => {
+    await db.insert(contacts).values({ orgId: ORG, brandId: BRAND, source: "csv", primaryEmail: "late@csv.com", rawAttributes: {}, unsubscribed: false });
+    humans.down = true;
+    await build();
+    humans.down = false;
+    const second = await build();
+    expect(second.facts!.status).toBe("ok");
+    const live = await db
+      .select()
+      .from(peopleFacts)
+      .where(and(eq(peopleFacts.brandId, BRAND), eq(peopleFacts.live, true), eq(peopleFacts.type, "added_to_crm"), eq(peopleFacts.source, "csv")));
+    expect(live).toHaveLength(1);
+    expect(live[0].humanId).toBe(humans.humanOfEmail("late@csv.com"));
   });
 
   it("human-service down: the build still runs, a pairing merges locally as before", async () => {

@@ -35,7 +35,7 @@
 import { createHash } from "node:crypto";
 import { and, asc, eq, gt, inArray, sql, type SQL } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { people, peopleFacts, type PeopleFact, type PeopleScope, type Person } from "../../db/schema.js";
+import { humanKeys, people, peopleFacts, type PeopleFact, type PeopleScope, type Person } from "../../db/schema.js";
 import { eventsQuery, type FunnelEventSource } from "../gohighlevel/funnel-events.js";
 import { labelEventsQuery, type LabelEventRow } from "../gohighlevel/label-verdicts.js";
 import { GHL_SOURCE } from "../gohighlevel/records.js";
@@ -184,6 +184,13 @@ export function presenceStableKey(p: Presence): string {
 export class PersonIndex {
   private byPresence = new Map<string, FactPerson>();
   private byKey = new Map<string, FactPerson>();
+  /** identity key -> humanId (human-service's answer, `human_keys`): the human of a STANDALONE subject. */
+  private humanOfKey = new Map<string, string>();
+
+  /** HUMAN-ID-COVERAGE-1017: a record no person holds (a CSV row) still names its human. */
+  setHumans(humanOfKey: Map<string, string>): void {
+    this.humanOfKey = humanOfKey;
+  }
 
   constructor(
     rows: (Pick<Person, "personKey" | "emails" | "phones" | "displayName" | "identityKeys" | "presences"> & { humanId?: string | null })[],
@@ -211,10 +218,24 @@ export class PersonIndex {
       if (hit) return hit;
     }
     if (s.standalone && s.keys.length > 0) {
-      return { personKey: pickPersonKey(s.keys), emails: s.emails, phones: s.phones, fullName: s.fullName };
+      const humanId = [...s.keys].sort().map((k) => this.humanOfKey.get(k)).find((h) => !!h) ?? null;
+      return { personKey: pickPersonKey(s.keys), emails: s.emails, phones: s.phones, fullName: s.fullName, humanId };
     }
     return null;
   }
+}
+
+/** identity key -> humanId for the org, among `keys` (`human_keys`, refreshed by each people build). */
+async function humansOfKeys(tx: Pick<typeof db, "select">, orgId: string, keys: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  for (let i = 0; i < keys.length; i += 1000) {
+    const rows = await tx
+      .select({ key: humanKeys.identityKey, humanId: humanKeys.humanId })
+      .from(humanKeys)
+      .where(and(eq(humanKeys.orgId, orgId), inArray(humanKeys.identityKey, keys.slice(i, i + 1000))));
+    for (const r of rows) out.set(r.key, r.humanId);
+  }
+  return out;
 }
 
 // ─── candidates, per source ─────────────────────────────────────────────────
@@ -1032,6 +1053,12 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       .orderBy(asc(peopleFacts.feedSeq))) as PeopleFact[];
     const liveByKey = new Map(existing.filter((f) => f.live).map((f) => [f.naturalKey!, f]));
 
+    // The human of every standalone subject (a CSV row no person holds), from human-service's answers.
+    const standaloneKeys = new Set<string>();
+    for (const c of candidates.values()) if (c.subject.standalone) for (const k of c.subject.keys) standaloneKeys.add(k);
+    for (const f of liveByKey.values()) if (f.subjectStandalone) for (const k of (f.subjectKeys as string[] | null) ?? []) standaloneKeys.add(k);
+    index.setHumans(await humansOfKeys(tx, orgId, [...standaloneKeys]));
+
     const subjectOf = (f: PeopleFact) => ({
       presence: f.subjectPresence,
       keys: (f.subjectKeys as string[] | null) ?? [],
@@ -1237,7 +1264,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
     for (const live of liveByKey.values()) {
       if (restated.has(live.factId)) continue;
       const owner = ownerNow.get(live.factId) ?? live.ownerPersonKey!;
-      const person = personByKey.get(owner);
+      const person = personByKey.get(owner) ?? (live.subjectStandalone ? index.resolve(subjectOf(live)) : null);
       if (!person?.humanId || person.humanId === live.humanId) continue;
       withdrawals.push({ fact: live, reason: "human_identified" });
       humanIdentified++;

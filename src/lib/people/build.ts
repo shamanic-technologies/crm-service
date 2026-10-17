@@ -12,7 +12,7 @@
 import { resolveBrandWhatsappPhones, type PhoneResolutionResult } from "../whatsapp/phone-resolution.js";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { leadStandingObservations, people, peopleScopes, type PeopleScope } from "../../db/schema.js";
+import { contacts, leadStandingObservations, people, peopleScopes, type PeopleScope } from "../../db/schema.js";
 import { SERVICE_NAME } from "../../middleware/auth.js";
 import { createRun, updateRun } from "../runs-client.js";
 import {
@@ -277,6 +277,22 @@ export function personDisplayName(c: PersonCluster): string | null {
   return firstNonNull(c, "displayName") ?? c.presences.map((p) => visitorLabel(presenceWebsite(p))).find((v) => !!v) ?? null;
 }
 
+/** Every CSV contact of the brand holding an email or a phone, as the keys its row states together. */
+export async function readCsvIdentityRecords(orgId: string, brandId: string): Promise<IdentityRecord[]> {
+  const rows = await db
+    .select({ email: contacts.primaryEmail, phone: contacts.phoneE164 })
+    .from(contacts)
+    .where(
+      and(
+        eq(contacts.orgId, orgId),
+        eq(contacts.brandId, brandId),
+        eq(contacts.source, "csv"),
+        sql`(${contacts.primaryEmail} IS NOT NULL OR ${contacts.phoneE164} IS NOT NULL)`,
+      ),
+    );
+  return rows.map((r) => ({ emails: r.email ? [r.email] : [], phones: r.phone ? [r.phone] : [] }));
+}
+
 /** Read, merge, resolve, write. Returns what the build saw, per source. */
 export async function buildScopePeople(scope: PeopleScope, runId: string): Promise<BuildSummary> {
   const identity: SiblingIdentity = {
@@ -380,6 +396,9 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
       handles: handlesOf(p),
     })),
     ...allEvidence.filter((e) => !isJudgment(e)).map((e) => ({ emails: e.emails, phones: e.phones })),
+    // HUMAN-ID-COVERAGE-1017: every CSV row too (an imported contact nobody talked to yet is
+    // no person of the Unibox, but its facts name a human). Stated last: never holds back the rest.
+    ...(await readCsvIdentityRecords(scope.orgId, scope.brandId)),
   ];
   const kindsRead = new Set<Judgment["kind"]>(
     evidenceReads
