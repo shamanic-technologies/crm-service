@@ -31,7 +31,13 @@ import { judgeChoices, type ChoiceQuestion } from "../judgments-client.js";
 import { GHL_SOURCE, type DerivedStage } from "./records.js";
 import { findConnectionStages } from "./stage-meanings.js";
 
-export const LABEL_VERDICTS = ["client", "disqualified", "none"] as const;
+export const LABEL_VERDICTS = ["client", "former_client", "disqualified", "none"] as const;
+/**
+ * Bump when the options' wording changes: every label decided under an older version is re-decided
+ * in place on the next sync (it serves until then). v2 (FORMER-CLIENT-1017, owner 2026-10-17): a
+ * customer who STOPPED is `former_client`, no longer folded into `client`.
+ */
+export const LABEL_CRITERIA_VERSION = 2;
 export type LabelVerdict = (typeof LABEL_VERDICTS)[number];
 export type LabelKind = "stage" | "tag";
 
@@ -42,8 +48,11 @@ const LABELS_PER_CALL = 40;
 
 const VERDICT_CRITERIA: Record<LabelVerdict, string> = {
   client:
-    "the person is or was a paying customer of the business: closed, won, signed, paid, active client, " +
-    "onboarding or offboarding a client, past or inactive client",
+    "the person IS a paying customer of the business now: closed, won, signed, paid, active client, onboarding, " +
+    "renewed",
+  former_client:
+    "the person WAS a paying customer and stopped: inactive, churned, cancelled, lapsed, past, former or offboarded " +
+    "client, did not renew",
   disqualified:
     "the business judged the person NOT a fit and stopped pursuing them: unqualified, disqualified, " +
     "bad fit, spam, blocked, do not contact",
@@ -94,10 +103,11 @@ export async function findUndecidedLabels(conn: GhlConnection): Promise<LabelToD
 
   if (candidates.size === 0) return [];
   const decided = await db
-    .select({ kind: crmLabelVerdicts.kind, labelRef: crmLabelVerdicts.labelRef, label: crmLabelVerdicts.label })
+    .select({ kind: crmLabelVerdicts.kind, labelRef: crmLabelVerdicts.labelRef, label: crmLabelVerdicts.label, criteriaVersion: crmLabelVerdicts.criteriaVersion })
     .from(crmLabelVerdicts)
     .where(eq(crmLabelVerdicts.connectionId, conn.id));
-  for (const row of decided) candidates.delete(keyOf(row.kind, row.labelRef, row.label));
+  // A label decided under older wording is asked again (re-decided in place).
+  for (const row of decided) if (row.criteriaVersion >= LABEL_CRITERIA_VERSION) candidates.delete(keyOf(row.kind, row.labelRef, row.label));
   return [...candidates.values()];
 }
 
@@ -185,9 +195,22 @@ export async function decideLabelVerdicts(conn: GhlConnection, runId: string): P
           probabilities: decisions[j].probabilities,
           model,
           runId,
+          criteriaVersion: LABEL_CRITERIA_VERSION,
+          decidedAt: new Date(),
         })),
       )
-      .onConflictDoNothing({ target: [crmLabelVerdicts.connectionId, crmLabelVerdicts.kind, crmLabelVerdicts.labelRef, crmLabelVerdicts.label] })
+      .onConflictDoUpdate({
+        target: [crmLabelVerdicts.connectionId, crmLabelVerdicts.kind, crmLabelVerdicts.labelRef, crmLabelVerdicts.label],
+        set: {
+          verdict: sql`excluded.verdict`,
+          confidence: sql`excluded.confidence`,
+          probabilities: sql`excluded.probabilities`,
+          model: sql`excluded.model`,
+          runId: sql`excluded.run_id`,
+          criteriaVersion: sql`excluded.criteria_version`,
+          decidedAt: sql`excluded.decided_at`,
+        },
+      })
       .returning({ id: crmLabelVerdicts.id });
     recorded += rows.length;
   }
@@ -214,15 +237,19 @@ export async function readLabelVerdicts(orgId: string, brandId: string) {
 
 /**
  * The CRM label EVENTS of a brand: one row per (contact, stage entry) and per
- * (contact, tag) whose label is judged `client` / `disqualified` at or above the
- * confidence floor. A stage entry is dated by GoHighLevel's stage change date
+ * (contact, tag) whose label is judged `client` / `former_client` / `disqualified` at or above the
+ * confidence floor. A `former_client` label yields TWO rows: `client` (they bought: every reader of
+ * `client`, the serve's sale step included, is unchanged) and `former_client` (they stopped). A stage entry is dated by GoHighLevel's stage change date
  * (history, never withdrawn on absence like the other stage entries); a tag has
  * no date in GoHighLevel and is served undated while the contact carries it.
  */
+/** The steps a verdict states: a former client was a client too. */
+const STEPS_OF_VERDICT = sql`CASE v.verdict WHEN 'former_client' THEN ARRAY['client', 'former_client'] ELSE ARRAY[v.verdict] END`;
+
 export function labelEventsQuery(orgId: string, brandId: string): SQL {
   return sql`
     SELECT c.id AS contact_id, c.external_id AS external_contact_id, c.full_name,
-           v.verdict AS step, h.changed_at AS occurred_at, 'stage_entered_at' AS date_basis,
+           st.step, h.changed_at AS occurred_at, 'stage_entered_at' AS date_basis,
            'stage_label' AS source, h.opportunity_external_id AS source_id,
            h.pipeline_name, h.stage_name, NULL::text AS tag, v.confidence, h.observed_at
     FROM ghl_opportunity_history h
@@ -232,11 +259,12 @@ export function labelEventsQuery(orgId: string, brandId: string): SQL {
     JOIN contacts c
       ON c.org_id = h.org_id AND c.brand_id = h.brand_id
      AND c.source = ${GHL_SOURCE} AND c.external_id = h.external_contact_id
+    CROSS JOIN LATERAL unnest(${STEPS_OF_VERDICT}) AS st(step)
     WHERE h.org_id = ${orgId} AND h.brand_id = ${brandId} AND h.kind = 'stage'
-      AND v.verdict IN ('client', 'disqualified') AND v.confidence >= ${LABEL_VERDICT_MIN_CONFIDENCE}
+      AND v.verdict IN ('client', 'former_client', 'disqualified') AND v.confidence >= ${LABEL_VERDICT_MIN_CONFIDENCE}
     UNION ALL
     SELECT c.id, c.external_id, c.full_name,
-           v.verdict, NULL::timestamptz, 'undated',
+           st.step, NULL::timestamptz, 'undated',
            'contact_tag', c.external_id,
            NULL, NULL, v.label, v.confidence, NULL::timestamptz
     FROM contacts c
@@ -246,8 +274,9 @@ export function labelEventsQuery(orgId: string, brandId: string): SQL {
     ) t ON true
     JOIN crm_label_verdicts v
       ON v.connection_id = c.source_connection_id AND v.kind = 'tag' AND v.label_ref = '' AND v.label = t.key
+    CROSS JOIN LATERAL unnest(${STEPS_OF_VERDICT}) AS st(step)
     WHERE c.org_id = ${orgId} AND c.brand_id = ${brandId} AND c.source = ${GHL_SOURCE}
-      AND v.verdict IN ('client', 'disqualified') AND v.confidence >= ${LABEL_VERDICT_MIN_CONFIDENCE}
+      AND v.verdict IN ('client', 'former_client', 'disqualified') AND v.confidence >= ${LABEL_VERDICT_MIN_CONFIDENCE}
   `;
 }
 
@@ -255,7 +284,7 @@ export interface LabelEventRow {
   contact_id: string;
   external_contact_id: string;
   full_name: string | null;
-  step: "client" | "disqualified";
+  step: "client" | "former_client" | "disqualified";
   occurred_at: string | Date | null;
   date_basis: "stage_entered_at" | "undated";
   source: "stage_label" | "contact_tag";
