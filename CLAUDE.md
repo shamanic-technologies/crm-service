@@ -1519,6 +1519,8 @@ re-derives silver with no vendor call. API reads are free → no cost declared.
   (`visit` = one session aggregated over ALL its pageviews, `event` = custom
   non-`$` event). Window = `synced_through - 1h`; a capped stream resumes from
   its last row.
+  A person mirrored but never derived (a pass that died between bronze and silver) is re-derived by every
+  later pass (`personsBehindSilver`): the no-churn mirror never reports it changed again.
 - **Stripe, N accounts per brand**: each connection names the key-service
   provider holding its key (`credential_provider`: `stripe` = first account,
   `stripe-<label>` each further one; key-service registers any provider name,

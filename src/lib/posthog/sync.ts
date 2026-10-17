@@ -134,10 +134,31 @@ async function readBronze(
   return out;
 }
 
+/**
+ * Bronze persons whose silver contact is missing or older than the mirror. Bronze and
+ * silver are written in separate steps: a pass that dies between them (a vendor read
+ * failing, a restart) leaves a person mirrored but never derived, and the no-churn
+ * upsert never reports it as changed again, so the changed-only derive never retried
+ * it (2026-10-17: a paying client's PostHog person, mirrored at signup, had no contact,
+ * so their onboarding steps reached no thread). Every derive heals these too.
+ */
+async function personsBehindSilver(conn: PosthogConnection): Promise<string[]> {
+  const rows = (await db.execute(sql`
+    SELECT r.external_id FROM posthog_raw_records r
+    LEFT JOIN contacts c
+      ON c.org_id = r.org_id AND c.brand_id = r.brand_id AND c.source = ${POSTHOG_SOURCE} AND c.external_id = r.external_id
+    WHERE r.connection_id = ${conn.id} AND r.kind = 'person'
+      AND (c.id IS NULL OR c.last_rebuilt_at < r.mirrored_at)
+  `)) as unknown as { external_id: string }[];
+  return rows.map((r) => r.external_id);
+}
+
 async function deriveContacts(conn: PosthogConnection, externalIds?: string[]): Promise<number> {
   const now = new Date();
   let derived = 0;
-  for (const payload of await readBronze(conn, "person", externalIds)) {
+  const ids = externalIds ? [...new Set([...externalIds, ...(await personsBehindSilver(conn))])] : undefined;
+  if (ids && ids.length === 0) return 0;
+  for (const payload of await readBronze(conn, "person", ids)) {
     const c = derivePosthogContact(payload);
     if (!c) continue;
     const fields = {

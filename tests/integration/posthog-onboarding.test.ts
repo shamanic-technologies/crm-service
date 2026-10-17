@@ -154,6 +154,15 @@ describe.skipIf(!RUN)("a product's signup walk on the person (ONBOARDING-IN-UNIB
     // A second minute with nothing new changes nothing.
     expect(await mirrorRecentPersons(conn, new Date("2026-10-15T08:56:00Z"))).toMatchObject({ changed: [], created: 0, eventsChanged: 0 });
 
+    // A pass that died between bronze and silver left the person mirrored, never derived:
+    // the next pass heals it though nothing moved in PostHog (2026-10-17, a client's signup).
+    await db.delete(contacts).where(eq(contacts.brandId, BRAND));
+    expect(await mirrorRecentPersons(conn, new Date("2026-10-15T08:57:00Z"))).toMatchObject({ changed: [], created: 0 });
+    const [healed] = await db.select().from(contacts).where(eq(contacts.brandId, BRAND));
+    expect(healed).toMatchObject({ source: "posthog", externalId: "ph-visitor" });
+    const relinked = await db.select().from(posthogActivities).where(eq(posthogActivities.brandId, BRAND));
+    expect(relinked.every((a) => a.contactId === healed.id)).toBe(true);
+
     const { scope } = await ensureScope(ORG, BRAND, USER);
     expect((await runScopeBuild(scope)).ok).toBe(true);
     const [person] = await db.select().from(people).where(eq(people.brandId, BRAND));
