@@ -1025,8 +1025,10 @@ export const crmLabelVerdicts = pgTable(
     labelRef: text("label_ref").notNull(),
     label: text("label").notNull(),
     pipelineName: text("pipeline_name"),
-    // See LABEL_VERDICTS: client | disqualified | none
+    // See LABEL_VERDICTS: client | former_client | disqualified | none
     verdict: text("verdict").notNull(),
+    // LABEL_CRITERIA_VERSION the verdict was decided under; an older one is re-decided in place.
+    criteriaVersion: integer("criteria_version").notNull().default(1),
     confidence: doublePrecision("confidence").notNull(),
     probabilities: jsonb("probabilities").notNull(),
     model: text("model").notNull(),

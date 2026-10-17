@@ -57,6 +57,9 @@ export const FACT_TYPES = [
   // CRM-WARM-NURTURE-1015: a CRM stage / tag Jev judged as "is or was a paying customer" /
   // "the business judged the person not a fit" (lib/gohighlevel/label-verdicts.ts).
   "client",
+  // FORMER-CLIENT-1017: a CRM stage / tag Jev judged as "was a paying customer and stopped" (beside its
+  // `client` fact). Stripe states the same with `subscription_changed` status canceled.
+  "former_client",
   "disqualified",
   "payment",
   "refund",
