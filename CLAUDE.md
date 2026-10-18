@@ -1262,6 +1262,17 @@ a human of the brand typed in is theirs, skipped `human_in_conversation`, HUMAN-
 `positive_reply_received`. WHO is answered is the answering pipe's strategy there (lead-service refuses a non-lead:
 skip `person_not_admitted`), never filtered here. Same door as the form trigger (`lib/trigger-door.ts`).
 
+- **The Copilot's line = no trigger** (`copilot.ts`, SOPHIE-COPILOT-WA-1018, owner 2026-10-18: « Le copilot devient
+  Sophie »): on a linked account with automation allowed whose (org, brand) is the Copilot's scope
+  (`COPILOT_UNIBOX_ORG_ID` + `_BRAND_ID`, no brand literal), EVERY burst is handed to chat-service `POST
+  /internal/copilot/channel-messages` (`messageId` = first event id, reused on retry; thread = last 30 messages before
+  the burst; 202 accepted / 200 duplicate, anything else retried 1→60 min for 24h). No Jev, no `own_team` /
+  `not_positive` skip (staff test from their own numbers); kept: `before_watch`, `human_in_conversation`. A message
+  added before the answer is its own hand-off. Statuses `handoff_pending` → `handed_off` (`copilot`) | `handoff_failed`
+  (`copilot_unreachable`) | `skipped` (`copilot_phone_unknown`: a LID ghost with no known number). chat-service answers
+  via `POST /orgs/whatsapp/messages` (`copilot:<messageId>`, `skipIfReplied` false): a recorded send, so it ends the
+  burst and is never hand-typed. Campaign sends from the account are unchanged.
+
 - **Only a POSITIVE answer is reported** (owner 2026-10-16): one Jev `choice` per burst over `REPLY_KINDS`
   (`interested | info_requested | meeting_requested | not_interested | opt_out | wrong_person | neutral |
   automated`), judged on every word since our last one; P(the first three) >= 0.5 = reported (the email

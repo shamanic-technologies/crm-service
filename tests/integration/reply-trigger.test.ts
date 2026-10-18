@@ -54,9 +54,13 @@ let jevCalls = 0;
 /** What brand-service states as the brand's sales rep phone; a number = brand-service answers that status. */
 let repPhone: string | null | number = null;
 let memberPhones: string[] = [];
+/** chat-service's Copilot hand-off door (SOPHIE-COPILOT-WA-1018). */
+let copilotCalls: { headers: Headers; body: Record<string, unknown> }[] = [];
+let copilotAnswer: { status: number; body: unknown } = { status: 202, body: { status: "accepted" } };
 
 function installFetchStub() {
   campaignCalls = [];
+  copilotCalls = [];
   jevCalls = 0;
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
@@ -73,6 +77,10 @@ function installFetchStub() {
     }
     if (url.host === "brand.test" && url.pathname === `/internal/brands/${BRAND}/offers`) {
       return json({ offers: [{ offerId: ONLY_OFFER, name: "Only", status: "active" }, { offerId: OFFER, name: "Old", status: "archived" }] });
+    }
+    if (url.pathname === "/internal/copilot/channel-messages") {
+      copilotCalls.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) });
+      return json(copilotAnswer.body, copilotAnswer.status);
     }
     if (url.pathname === "/orgs/judgments") {
       jevCalls += 1;
@@ -465,6 +473,134 @@ describe.skipIf(!RUN)("reply trigger", () => {
       expect(await reports()).toHaveLength(0);
       repPhone = null;
       expect((await detectReplies(conn, run1)).detected).toBe(1);
+    });
+  });
+  describe("the Copilot's line: the assistant account of the brand the Copilot serves (SOPHIE-COPILOT-WA-1018)", () => {
+    const SOPHIE = "77776879632";
+    beforeEach(async () => {
+      process.env.COPILOT_UNIBOX_ORG_ID = ORG;
+      process.env.COPILOT_UNIBOX_BRAND_ID = BRAND;
+      copilotAnswer = { status: 202, body: { status: "accepted" } };
+      await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
+      conn = await fresh();
+    });
+    afterAll(() => {
+      delete process.env.COPILOT_UNIBOX_ORG_ID;
+      delete process.env.COPILOT_UNIBOX_BRAND_ID;
+    });
+
+    async function link(automationAllowed = true) {
+      await db.insert(matrixLinks).values({
+        orgId: ORG, brandId: BRAND, channel: "whatsapp", createdByUserId: USER, matrixUserId: OWN, status: "linked", method: "qr",
+        remoteLoginId: SOPHIE, connectionId: conn.id, linkedAt: new Date(), automationAllowed,
+        personaName: "Sophie", personaRole: "Distribute.you Assistant", personaInstructions: null,
+      });
+    }
+
+    it("every burst is handed to the Copilot ONCE with its thread, no Jev, no trigger; a retry reuses the messageId", async () => {
+      await link();
+      await send("$s0", min(0), CAMPAIGN);
+      await event("$s0", OWN, min(0), "Hi, it's Sophie from Distribute.you");
+      await event("$h1", GHOST, min(1), "No thanks");
+      await event("$h2", GHOST, min(2), "Actually, what does it cost?");
+      expect((await detectReplies(conn, run1)).detected).toBe(1);
+      expect(jevCalls).toBe(0);
+
+      copilotAnswer = { status: 503, body: { error: "down" } };
+      await deliverDueReplies();
+      expect((await reports())[0]).toMatchObject({ status: "handoff_failed", reason: "copilot_unreachable", attempts: 1 });
+      copilotAnswer = { status: 200, body: { status: "duplicate" } };
+      await deliverDueReplies(Date.now() + 2 * 60_000);
+      await deliverDueReplies(Date.now() + 10 * 60_000);
+
+      expect(campaignCalls).toHaveLength(0);
+      expect(copilotCalls).toHaveLength(2);
+      expect(copilotCalls[1].body.messageId).toBe(copilotCalls[0].body.messageId);
+      expect(copilotCalls[0].headers.get("x-api-key")).toBe(process.env.CHAT_SERVICE_API_KEY);
+      expect(copilotCalls[0].body).toEqual({
+        channel: "whatsapp",
+        messageId: "$h1",
+        orgId: ORG,
+        brandId: BRAND,
+        accountUserId: USER,
+        fromAccount: `+${SOPHIE}`,
+        assistant: { name: "Sophie", role: "Distribute.you Assistant", instructions: null },
+        sender: { phone: "+33770657585", name: "Kevin (WA)" },
+        text: "No thanks\nActually, what does it cost?",
+        at: new Date(min(2)).toISOString(),
+        thread: [{ at: new Date(min(0)).toISOString(), direction: "outbound", text: "Hi, it's Sophie from Distribute.you" }],
+      });
+      expect((await reports())[0]).toMatchObject({ status: "handed_off", reason: "copilot", phone: "+33770657585" });
+    });
+
+    it("a staff / own-team number writing to the assistant is handed off, never skipped as own team", async () => {
+      await link();
+      memberPhones = ["+33770657585"];
+      repPhone = "+33770657585";
+      await event("$t1", GHOST, min(1), "test from my own number");
+      expect((await detectReplies(conn, run1)).detected).toBe(1);
+      await deliverDueReplies();
+      expect(copilotCalls).toHaveLength(1);
+      expect(campaignCalls).toHaveLength(0);
+    });
+
+    it("a message the person adds before the Copilot answered is handed too; the Copilot's own send ends the burst and is no human takeover", async () => {
+      await link();
+      await event("$a1", GHOST, min(1), "Hello?");
+      await detectReplies(conn, run1);
+      await deliverDueReplies();
+      await event("$a2", GHOST, min(2), "Are you there?");
+      expect((await detectReplies(conn, run1)).detected).toBe(1);
+      await deliverDueReplies();
+      expect(copilotCalls.map((c) => c.body.messageId)).toEqual(["$a1", "$a2"]);
+      expect((copilotCalls[1].body.thread as { text: string }[]).map((t) => t.text)).toEqual(["Hello?"]);
+
+      // The Copilot answers through the send route (a whatsapp_sends row), mirrored as the account.
+      await db.insert(whatsappSends).values({
+        orgId: ORG, brandId: BRAND, idempotencyKey: "copilot:$a2", phone: "+33770657585", text: "Hi, Sophie here!", status: "sent",
+        connectionId: conn.id, roomId: ROOM, ghostMxid: GHOST, eventId: "$cop", sentAt: new Date(min(3)), fromAccount: `+${SOPHIE}`,
+      });
+      await event("$cop", OWN, min(3), "Hi, Sophie here!");
+      await event("$a3", GHOST, min(4), "Great, how much?");
+      expect((await detectReplies(conn, run1)).detected).toBe(1);
+      await deliverDueReplies();
+      expect(copilotCalls.map((c) => c.body.messageId)).toEqual(["$a1", "$a2", "$a3"]);
+      expect((await reports()).find((r) => r.anchorEventId === "$a3")).toMatchObject({ status: "handed_off" });
+    });
+
+    it("a human of the brand typed to the person by hand: silence, one responder", async () => {
+      await link();
+      await event("$m1", OWN, min(0), "Hey it's Kevin, typed on the phone");
+      await event("$m2", GHOST, min(1), "Hi Kevin!");
+      expect((await detectReplies(conn, run1)).skipped).toEqual([{ reason: "human_in_conversation", roomId: ROOM }]);
+      await deliverDueReplies();
+      expect(copilotCalls).toHaveLength(0);
+    });
+
+    it("no number known for the person: recorded copilot_phone_unknown, never silently", async () => {
+      await link();
+      await db.update(contacts).set({ phoneE164: null }).where(eq(contacts.brandId, BRAND));
+      await event("$u1", GHOST, min(1), "hello");
+      await detectReplies(conn, run1);
+      await deliverDueReplies();
+      expect(copilotCalls).toHaveLength(0);
+      expect((await reports())[0]).toMatchObject({ status: "skipped", reason: "copilot_phone_unknown" });
+    });
+
+    it("the brand's mirror-only account and any other brand behave as before", async () => {
+      await link(false);
+      await event("$o1", GHOST, min(1), "Hey, how much is it?");
+      expect((await detectReplies(conn, run1)).skipped).toEqual([{ reason: "automation_not_allowed", roomId: ROOM }]);
+      await db.delete(matrixLinks).where(eq(matrixLinks.brandId, BRAND));
+      await link(true);
+      process.env.COPILOT_UNIBOX_BRAND_ID = "a7c1d2e3-2222-4222-8222-0000000000ff";
+      await buildPerson();
+      await event("$o2", GHOST, min(2), "Still interested, can we talk?");
+      expect((await detectReplies(conn, run1)).detected).toBe(1);
+      expect(jevCalls).toBe(1);
+      await deliverDueReplies();
+      expect(campaignCalls).toHaveLength(1);
+      expect(copilotCalls).toHaveLength(0);
     });
   });
 });
