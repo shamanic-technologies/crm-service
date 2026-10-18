@@ -1178,7 +1178,8 @@ newest first, a person with none absent; a send with no campaign never matches. 
   (`whatsapp_phone_lookups`, global: LIDs are the same from every account; not-found
   re-asked after 30 days; ≤150 per pass, 400 ms apart), records `matrix_ghost_phones`
   and writes the phone on the brand's mirrored contacts of that ghost, so the build
-  merges the thread on the phone key. `BuildSummary.whatsappPhones` reports it.
+  merges the thread on the phone key. `BuildSummary.whatsappPhones` reports it. The brand's OWN linked numbers are
+  asked too (never from their own login), so a linked account seen as a ghost on a sibling line has its number.
 
 **Signup phones:** Clerk `derive` reads Clerk phone numbers THEN profile metadata
 (`public_metadata` / `unsafe_metadata` keys `phone|phoneNumber|phone_number`; distribute.you
@@ -1269,7 +1270,12 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   the burst; 202 accepted / 200 duplicate, anything else retried 1→60 min for 24h). No Jev, no `own_team` /
   `not_positive` skip (staff test from their own numbers); kept: `before_watch`, `human_in_conversation`. A message
   added before the answer is its own hand-off. Statuses `handoff_pending` → `handed_off` (`copilot`) | `handoff_failed`
-  (`copilot_unreachable`) | `skipped` (`copilot_phone_unknown`: a LID ghost with no known number). chat-service answers
+  (`copilot_unreachable`) | `skipped` (`copilot_phone_unknown`: a LID ghost with no known number). A sender whose number is a WhatsApp
+  account LINKED in crm (any org / brand, status linked; most recently linked wins) carries `sender.linkedBy {orgId,
+  userId}` = that link's org + who linked it (`linkedByOf`): chat-service answers with THAT user's access (owner
+  2026-10-18 « FAUX j'ai intégré ces deux nums »); absent when linked nowhere. The brand's own linked numbers are
+  resolved like CRM phones (each asked from ANOTHER connected account), so a linked account writing to the Copilot's
+  line as a LID ghost has its number. chat-service answers
   via `POST /orgs/whatsapp/messages` (`copilot:<messageId>`, `skipIfReplied` false): a recorded send, so it ends the
   burst and is never hand-typed. Campaign sends from the account are unchanged.
 

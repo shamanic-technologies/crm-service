@@ -18,12 +18,18 @@
  * (idempotency key `copilot:<messageId>`): a send recorded in `whatsapp_sends`,
  * so it ends the burst and is never read as hand-typed.
  *
+ * A sender whose number is a WhatsApp account LINKED in crm (Integrations, any
+ * org / brand, status linked) carries `sender.linkedBy {orgId, userId}` = that
+ * link's org and the user who linked it (the most recently linked when several):
+ * chat-service answers with THAT user's access (owner 2026-10-18 « FAUX j'ai
+ * intégré ces deux nums dans l'intégration »). Absent when linked nowhere.
+ *
  * Statuses on `reply_trigger_reports`: `handoff_pending` → `handed_off` (reason
  * `copilot`), `handoff_failed` (retried with backoff for 24h, same messageId),
  * or `skipped` / `copilot_phone_unknown` (a LID ghost no number is known for:
  * chat-service could not answer them).
  */
-import { and, eq, gt, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNotNull, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import {
   contacts,
@@ -103,6 +109,36 @@ export function threadBeforeBurst(events: MatrixEvent[], ownMxid: string, burstF
   return lines.slice(-HANDOFF_THREAD_MAX);
 }
 
+/** Who linked a WhatsApp number in Integrations: the link's org + the user who linked it. */
+export interface LinkedBy {
+  orgId: string;
+  userId: string;
+}
+
+/**
+ * The WhatsApp account linked in crm with this number (status linked, any org /
+ * brand), the most recently linked when several: its org + who linked it. Null
+ * when the number is linked nowhere.
+ */
+export async function linkedByOf(phone: string): Promise<LinkedBy | null> {
+  const digits = phone.replace(/\D/g, "");
+  if (!digits) return null;
+  const [row] = await db
+    .select({ orgId: matrixLinks.orgId, userId: matrixLinks.createdByUserId })
+    .from(matrixLinks)
+    .where(
+      and(
+        eq(matrixLinks.channel, "whatsapp"),
+        eq(matrixLinks.status, "linked"),
+        isNotNull(matrixLinks.remoteLoginId),
+        sql`regexp_replace(${matrixLinks.remoteLoginId}, '[^0-9]', '', 'g') = ${digits}`,
+      ),
+    )
+    .orderBy(sql`${matrixLinks.linkedAt} DESC NULLS LAST`, desc(matrixLinks.id))
+    .limit(1);
+  return row ?? null;
+}
+
 /** PURE: chat-service's `POST /internal/copilot/channel-messages` body. */
 export function copilotHandoffBody(input: {
   messageId: string;
@@ -111,7 +147,7 @@ export function copilotHandoffBody(input: {
   accountUserId: string;
   fromAccount: string;
   persona: SenderPersona | null;
-  sender: { phone: string; name: string | null };
+  sender: { phone: string; name: string | null; linkedBy?: LinkedBy | null };
   messages: BurstMessage[];
   thread: ThreadLine[];
 }): Record<string, unknown> {
@@ -128,7 +164,11 @@ export function copilotHandoffBody(input: {
       role: input.persona?.role ?? null,
       instructions: input.persona?.instructions ?? null,
     },
-    sender: { phone: input.sender.phone, name: input.sender.name },
+    sender: {
+      phone: input.sender.phone,
+      name: input.sender.name,
+      ...(input.sender.linkedBy ? { linkedBy: input.sender.linkedBy } : {}),
+    },
     text: input.messages.map((m) => m.text).join("\n").slice(0, HANDOFF_TEXT_MAX),
     at: last.at,
     thread: input.thread,
@@ -220,7 +260,7 @@ export async function handOffBurst(r: ReplyTriggerReport, conn: MatrixConnection
     accountUserId: conn.createdByUserId,
     fromAccount: link?.remoteLoginId ? `+${link.remoteLoginId.replace(/\D/g, "")}` : "",
     persona: link ? personaOf(link) : null,
-    sender: { phone: sender.phone, name: sender.name },
+    sender: { phone: sender.phone, name: sender.name, linkedBy: await linkedByOf(sender.phone) },
     messages,
     thread: threadBeforeBurst(events.map((e) => e.payload as unknown as MatrixEvent), conn.matrixUserId, r.anchorEventId, messages[0].at),
   });
