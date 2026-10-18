@@ -362,9 +362,42 @@ export function humanText(content: Record<string, unknown> | undefined): string 
 }
 
 /** The event an edit (`m.replace`) rewrites, or null when the event is not an edit. */
-function editTarget(e: MatrixEvent): string | null {
+export function editTarget(e: MatrixEvent): string | null {
   const rel = e.content?.["m.relates_to"] as { rel_type?: unknown; event_id?: unknown } | undefined;
   return rel?.rel_type === "m.replace" && typeof rel.event_id === "string" ? rel.event_id : null;
+}
+
+/**
+ * A room's messages with every edit FOLDED into the message it rewrites: the
+ * message keeps its id, sender and place, and takes the latest edit's
+ * `m.new_content` (Matrix spec: an edit counts only from the original sender).
+ * Sorted (`compareEvents`). An edit whose original was never mirrored stays as
+ * it is, so a reader can still skip it as an edit.
+ *
+ * Why every reader of words needs it (SOPHIE-COPILOT-WA-1018 follow-up 3): when
+ * WhatsApp cannot decrypt a message yet (typical right after a relink, new
+ * encryption sessions), the bridge posts an `m.notice` placeholder
+ * ("Decrypting message from WhatsApp failed, waiting for sender to re-send...",
+ * `fi.mau.whatsapp.undecryptable`), then delivers the person's real words as an
+ * EDIT of it. Notice = no words, edit = skipped: the 18:26 question to the
+ * Copilot's line on 2026-10-18 was read as nothing and never handed off.
+ */
+export function foldEdits(events: MatrixEvent[]): MatrixEvent[] {
+  const messages = events.filter((e) => e.type === "m.room.message").sort(compareEvents);
+  const byId = new Map(messages.map((m) => [m.event_id, m]));
+  const latest = new Map<string, Record<string, unknown>>();
+  const folded = new Set<string>();
+  for (const m of messages) {
+    const target = editTarget(m);
+    const original = target ? byId.get(target) : undefined;
+    if (!original || original.sender !== m.sender) continue;
+    folded.add(m.event_id);
+    const next = m.content?.["m.new_content"];
+    if (next && typeof next === "object") latest.set(original.event_id, next as Record<string, unknown>);
+  }
+  return messages
+    .filter((m) => !folded.has(m.event_id))
+    .map((m) => (latest.has(m.event_id) ? { ...m, content: latest.get(m.event_id) } : m));
 }
 
 /**

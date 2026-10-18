@@ -10,7 +10,7 @@ import {
   matrixLeads,
   matrixRawEvents,
 } from "../../src/db/schema.js";
-import { runSyncPass, rebuildFromBronze } from "../../src/lib/matrix/sync.js";
+import { runSyncPass, rebuildFromBronze, runLiveTick } from "../../src/lib/matrix/sync.js";
 import { serveNext } from "../../src/lib/serve.js";
 import type { MatrixEvent, MatrixSyncResponse } from "../../src/lib/matrix/client.js";
 
@@ -375,6 +375,33 @@ describe.skipIf(!RUN)("matrix ingestion", () => {
       .from(matrixRawEvents)
       .where(eq(matrixRawEvents.connectionId, connectionId));
     expect(rawAfter.length).toBe(countBefore);
+  });
+
+  it("the live watch reads a connection linked AFTER it started (a relink), from its first message, no restart", async () => {
+    process.env.REPLY_TRIGGER_DELIVERY = "off";
+    try {
+      // The watch is running and the brand has no connection yet.
+      await runLiveTick();
+      // The account is (re)linked: a NEW connection row, created after the process started.
+      const connectionId = await seedConnection();
+      // Its first tick mirrors the history and sets the never-history mark (nothing is reported from it).
+      syncPages = [page("s2", [message("$old", GHOST, "2026-08-02T10:00:00Z", "an old message")]), emptyPage("s3")];
+      await runLiveTick();
+      expect((await db.select().from(matrixConnections).where(eq(matrixConnections.id, connectionId)))[0].openReplyWatchSince).not.toBeNull();
+      // The person writes: the next tick reads it, no restart.
+      syncPages = [page("s4", [message("$live1", GHOST, new Date(Date.now() + 1000).toISOString(), "hi, is anyone there?")]), emptyPage("s5")];
+      await new Promise((r) => setTimeout(r, 20));
+      await runLiveTick();
+
+      const convRows = await db.select().from(conversations).where(eq(conversations.connectionId, connectionId));
+      expect(convRows).toHaveLength(1);
+      expect(convRows[0].lastEventId).toBe("$live1");
+      const replies = await db.execute(sql`SELECT anchor_event_id FROM reply_trigger_reports WHERE connection_id = ${connectionId}`);
+      expect((replies as unknown as { anchor_event_id: string }[]).map((r) => r.anchor_event_id)).toEqual(["$live1"]);
+    } finally {
+      delete process.env.REPLY_TRIGGER_DELIVERY;
+      await db.execute(sql`DELETE FROM reply_trigger_reports WHERE brand_id = ${BRAND}`);
+    }
   });
 
   it("produces exactly one contact and one conversation with correct counts, no LLM in that path", async () => {

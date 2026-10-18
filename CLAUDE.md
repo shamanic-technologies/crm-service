@@ -1298,7 +1298,13 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
 - **Rules = `thread.ts`, pure**: threads = `conversations` rows (a group is no conversation, never read); the person's
   human words since our last outbound = ONE burst = ONE row (`reply_trigger_reports`, UNIQUE on its first message,
   `idempotencyKey crm:matrix:reply:<event>`); ANY outbound ends it: one of our sends OR a message typed by hand on the
-  account (it ends the burst; the person's later bursts are then skipped `human_in_conversation`: a human took it, see "Human takeover"); bridge notices / uncaptioned media / edits are no answer; any brand
+  account (it ends the burst; the person's later bursts are then skipped `human_in_conversation`: a human took it, see "Human takeover"); bridge notices / uncaptioned media are no answer; an edit is
+  FOLDED into the message it rewrites (`foldEdits`, events.ts, same sender only): WhatsApp delivers a message the bridge
+  could not decrypt yet (common right after a relink) as an `m.notice` placeholder then the words as an EDIT of it; read
+  as "notice + edit = nothing", the Copilot line's 18:26 question of 2026-10-18 was never handed off (follow-up 3). Every
+  reader of words folds (reply burst, Copilot thread, takeover, groups); the assistant ping counts an edit whose original
+  had no words. A connection linked after boot is read by the next live tick (connections re-read each tick); its first
+  look is the never-history baseline; any brand
   send `sending` < 2 min holds the pass. Jev (`person|automated`, >= 0.75 silences; down = person) drops auto-replies.
 - **Own team = the org's members too** (`lib/org-members.ts`, OWN-TEAM-GMAIL-1016, owner 2026-10-16: his own pitch
   from his personal gmail, brand mailbox in copy, rang an AI Instant Call): client-service `GET /internal/users?orgId=

@@ -20,7 +20,7 @@ import { conversationVerdicts, matrixConnections, matrixGroupMembers, matrixGrou
 import type { ChatTrackingHeaders } from "../chat-client.js";
 import { judgeQuestions, type NoulQuestion } from "../judgments-client.js";
 import type { MatrixEvent } from "../matrix/client.js";
-import { compareEvents, humanText } from "../matrix/events.js";
+import { foldEdits, humanText } from "../matrix/events.js";
 import { accountUserView, userIdsOf, type AccountUsers, type AccountUserView } from "./account-users.js";
 import { CONNECTION_TAGS, tagQuestionText, tagsFromScores, type ConnectionTag, type TaggedItem, type TagScores } from "./connection-tags.js";
 import { clip, readTagScores, storedVerdicts, threadWindow, type BrandContext, type PersonView } from "./relevance.js";
@@ -41,7 +41,7 @@ export interface GroupLine {
 
 /** PURE: a group's messages as lines, human words only, edits folded away, oldest first. */
 export function groupLines(events: MatrixEvent[], ownMxids: Set<string>): GroupLine[] {
-  const messages = events.filter((e) => e.type === "m.room.message").sort(compareEvents);
+  const messages = foldEdits(events);
   const senderOf = new Map(messages.map((m) => [m.event_id, m.sender]));
   const out: GroupLine[] = [];
   for (const m of messages) {

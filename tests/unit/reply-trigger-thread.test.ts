@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { readThreadForReply, type RoomSend } from "../../src/lib/reply-trigger/thread.js";
 import { idempotencyKeyFor, nextAttemptDue, pickTaggedOffer, replyOccurrenceBody } from "../../src/lib/reply-trigger/watch.js";
 import type { MatrixEvent } from "../../src/lib/matrix/client.js";
+import { ASSISTANT_PING_SKIPS, classifyAssistantEvent } from "../../src/lib/assistant-pings.js";
 
 const OWN = "@crm_own:hs";
 const GHOST = "@whatsapp_lid-1:hs";
@@ -180,5 +181,44 @@ describe("replyOccurrenceBody", () => {
     expect(nextAttemptDue(1, last)).toBe(T0 + 60_000);
     expect(nextAttemptDue(3, last)).toBe(T0 + 240_000);
     expect(nextAttemptDue(20, last)).toBe(T0 + 3_600_000);
+  });
+});
+
+describe("a message WhatsApp could not decrypt (SOPHIE-COPILOT-WA-1018 follow-up 3)", () => {
+  // The bridge's placeholder, then the person's words as an EDIT of it (prod, 2026-10-18 18:26).
+  const notice = msg("$n", GHOST, 5, "Decrypting message from WhatsApp failed, waiting for sender to re-send...", {
+    msgtype: "m.notice",
+    "fi.mau.whatsapp.undecryptable": true,
+  });
+  const edit = msg("$e", GHOST, 5, "* How many campaigns run on Distribute.you?", {
+    "m.relates_to": { event_id: "$n", rel_type: "m.replace" },
+    "m.new_content": { msgtype: "m.text", body: "How many campaigns run on Distribute.you?" },
+  });
+
+  it("the words arriving as an edit are the person's burst, at the placeholder's place and id", () => {
+    expect(readThreadForReply([notice], OWN, [])).toEqual({ kind: "answered" });
+    expect(readThreadForReply([edit, notice], OWN, [])).toEqual({
+      kind: "unanswered",
+      campaignId: null,
+      burst: [{ eventId: "$n", at: new Date(at(5)).toISOString(), text: "How many campaigns run on Distribute.you?" }],
+    });
+    // Answered after it: nobody waiting.
+    expect(readThreadForReply([notice, edit, msg("$r", OWN, 6, "3 campaigns.")], OWN, [sent("$r", 6, null)])).toEqual({ kind: "answered" });
+  });
+
+  it("an edit of a message that had words stays no new word; an edit from someone else never rewrites it", () => {
+    const words = msg("$w", GHOST, 1, "hi");
+    const fix = msg("$f", GHOST, 2, "* hello", { "m.relates_to": { event_id: "$w", rel_type: "m.replace" }, "m.new_content": { msgtype: "m.text", body: "hello" } });
+    expect(readThreadForReply([words, fix], OWN, [])).toMatchObject({ burst: [{ eventId: "$w", text: "hello" }] });
+    const foreign = msg("$x", OWN, 7, "* hijack", { "m.relates_to": { event_id: "$n", rel_type: "m.replace" }, "m.new_content": { msgtype: "m.text", body: "hijack" } });
+    expect(readThreadForReply([notice, foreign], OWN, [])).toEqual({ kind: "answered" });
+  });
+
+  it("the assistant ping reads the edit that brings the words, never the placeholder", () => {
+    expect(classifyAssistantEvent(notice, OWN, [])).toEqual({ skip: ASSISTANT_PING_SKIPS.noText });
+    expect(classifyAssistantEvent(edit, OWN, [], notice)).toEqual({ direction: "inbound", text: "How many campaigns run on Distribute.you?" });
+    // An edit of a message that already had words is no new message.
+    expect(classifyAssistantEvent(edit, OWN, [], msg("$n", GHOST, 5, "earlier words"))).toEqual({ skip: ASSISTANT_PING_SKIPS.noText });
+    expect(classifyAssistantEvent(edit, OWN, [], null)).toEqual({ skip: ASSISTANT_PING_SKIPS.noText });
   });
 });

@@ -32,16 +32,11 @@
 import { sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import type { MatrixEvent } from "./client.js";
-import { humanText, phoneFromMxid, WHATSAPP_GHOST_PREFIX } from "./events.js";
+import { editTarget, foldEdits, humanText, phoneFromMxid, WHATSAPP_GHOST_PREFIX } from "./events.js";
 
 export interface OurSend {
   eventId: string | null;
   text: string;
-}
-
-function isEdit(e: MatrixEvent): boolean {
-  const rel = e.content?.["m.relates_to"] as { rel_type?: unknown } | undefined;
-  return rel?.rel_type === "m.replace";
 }
 
 /** PURE: the latest message a human of the brand typed by hand in these events, or null. */
@@ -49,8 +44,8 @@ export function lastHandTyped(events: MatrixEvent[], ownMxid: string, ours: OurS
   const ourIds = new Set(ours.map((s) => s.eventId).filter((x): x is string => !!x));
   const ourTexts = new Set(ours.map((s) => s.text.trim()).filter((t) => t.length > 0));
   let last: MatrixEvent | null = null;
-  for (const e of events) {
-    if (e.type !== "m.room.message" || e.sender !== ownMxid || isEdit(e)) continue;
+  for (const e of foldEdits(events)) {
+    if (e.sender !== ownMxid || editTarget(e)) continue;
     if (ourIds.has(e.event_id)) continue;
     const text = humanText(e.content);
     if (!text || ourTexts.has(text)) continue;
