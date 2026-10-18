@@ -321,6 +321,9 @@ export const matrixConnections = pgTable(
     // When the watch first looked at threads NO campaign opened (REPLY-ANY-LEAD-1015): those were
     // never read before, so their messages mirrored before it are history, never reported.
     openReplyWatchSince: timestamp("open_reply_watch_since", { withTimezone: true }),
+    // When the assistant ping watch first looked at this connection (SOPHIE-TG-PING-1018,
+    // lib/assistant-pings.ts): a message mirrored before it is history, never pinged.
+    assistantPingSince: timestamp("assistant_ping_since", { withTimezone: true }),
 
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
@@ -2130,6 +2133,43 @@ export const conversationPings = pgTable(
     uniqueIndex("conversation_pings_start_uq").on(table.source, table.startRef),
     index("conversation_pings_key_started_idx").on(table.conversationKey, table.startedAt),
   ],
+);
+
+/**
+ * One row per message exchanged with OUR assistant that the owner was (or was
+ * not) told about on Telegram (SOPHIE-TG-PING-1018, owner 2026-10-18: « Quand il
+ * y a une communication entre Sophie et un user, dans un sens ou dans l'autre,
+ * tu peux me notifier sur Telegram »). The assistant = the web Copilot and every
+ * linked account of the staff Unibox scope with automation on. Written BEFORE
+ * the send (UNIQUE on the message), so a re-delivered message, two passes at
+ * once or a restart never ping twice; a message not pinged on purpose (staff, a
+ * hand-typed message, a group) is recorded `skipped` with its reason.
+ */
+export const assistantMessagePings = pgTable(
+  "assistant_message_pings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    // 'copilot' (web chat) | 'matrix' (a linked messaging account)
+    source: text("source").notNull(),
+    // The Copilot message id / the Matrix event id.
+    messageRef: text("message_ref").notNull(),
+    // 'chat' | 'whatsapp' | 'linkedin' | ...
+    channel: text("channel").notNull(),
+    // 'inbound' (the person wrote to the assistant) | 'outbound' (the assistant wrote)
+    direction: text("direction").notNull(),
+    connectionId: uuid("connection_id"),
+    messageAt: timestamp("message_at", { withTimezone: true }).notNull(),
+    // 'pending' | 'sent' | 'failed' | 'unconfigured' | 'skipped'
+    status: text("status").notNull().default("pending"),
+    // Why a message was skipped: 'staff' | 'hand_typed' | 'not_conversation' | 'no_text'.
+    reason: text("reason"),
+    telegramMessageId: integer("telegram_message_id"),
+    text: text("text"),
+    error: text("error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("assistant_message_pings_message_uq").on(table.source, table.messageRef)],
 );
 
 /**

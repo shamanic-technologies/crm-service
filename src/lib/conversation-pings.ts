@@ -4,9 +4,10 @@
  * des notifs Telegram à chaque conversation d'un user avec notre AI chat et
  * notre API / MCP"). One ping per conversation start, never one per message.
  *
+ * The Copilot is no longer pinged here: it is our assistant, pinged per MESSAGE
+ * (SOPHIE-TG-PING-1018, `assistant-pings.ts`).
+ *
  * What one conversation is:
- *  - Copilot: one chat-service session. It starts at its first user message,
- *    and again when the user writes after 30 minutes of silence in it.
  *  - API / MCP: a burst of calls by one person on one channel, gaps under 30
  *    minutes (the same session the Unibox thread shows, `sessionsOf`).
  *
@@ -27,7 +28,7 @@ import { db } from "../db/index.js";
 import { apiCalls, conversationPings, copilotMessages, personIds, type ApiCall } from "../db/schema.js";
 import { copilotDestination, type CopilotDestination } from "./copilot/messages.js";
 import { describeRequest, describeResponse, type ApiCallChannel } from "./api-calls/calls.js";
-import { emailKey, normalizeEmail } from "./people/identity.js";
+import { emailKey } from "./people/identity.js";
 import { siblingGet, type SiblingIdentity } from "./people/siblings.js";
 import { brandNamesFor } from "./people/timeline.js";
 import { isStaffEmail, sendOwnerTelegram } from "./owner-telegram.js";
@@ -38,12 +39,12 @@ export const CONVERSATION_GAP_MS = 30 * 60 * 1000;
 export const DASHBOARD_ORIGIN = "https://dashboard.distribute.you";
 const FIRST_TEXT_MAX = 280;
 
-export type PingChannel = "chat" | ApiCallChannel;
+export type PingChannel = ApiCallChannel;
 
-const CHANNEL_LABEL: Record<PingChannel, string> = { chat: "AI chat", api: "API", mcp: "MCP" };
+const CHANNEL_LABEL: Record<PingChannel, string> = { api: "API", mcp: "MCP" };
 
 export interface StartCandidate {
-  source: "copilot" | "api";
+  source: "api";
   channel: PingChannel;
   conversationKey: string;
   /** The message id / call id. */
@@ -54,7 +55,6 @@ export interface StartCandidate {
 
 // ─── pure ───────────────────────────────────────────────────────────────────
 
-export const copilotConversationKey = (sessionId: string) => `copilot:${sessionId}`;
 export const apiConversationKey = (channel: ApiCallChannel, email: string) => `api:${channel}:${email}`;
 
 /** PURE: true when any of these addresses is staff (a person ever him pings nothing). */
@@ -74,7 +74,7 @@ export interface PingContent {
   name: string | null;
   orgName: string | null;
   brandNames: string[];
-  /** The first message (chat) or the plain-words first call (API / MCP). */
+  /** The plain-words first call. */
   first: string;
   threadUrl: string | null;
 }
@@ -82,10 +82,10 @@ export interface PingContent {
 /**
  * PURE: the message. Plain text, one fact per line:
  *
- *   New conversation on AI chat
+ *   New conversation on MCP
  *   Who: Jane Doe (jane@acme.com)
  *   Org: Acme
- *   First message: "Can you find me 50 dentists in Lyon?"
+ *   First call: tool distribute_list_emails: Listed emails for brand Acme. Answered: 12 emails (200, 120 ms)
  *   Thread: https://dashboard.distribute.you/v2/orgs/…/unibox?person=…
  */
 export function composePingText(c: PingContent): string {
@@ -93,7 +93,7 @@ export function composePingText(c: PingContent): string {
   lines.push(`Who: ${c.name ? `${c.name} (${c.email})` : c.email}`);
   if (c.orgName) lines.push(`Org: ${c.orgName}`);
   if (c.brandNames.length > 0) lines.push(`Brand${c.brandNames.length > 1 ? "s" : ""}: ${c.brandNames.join(", ")}`);
-  lines.push(c.channel === "chat" ? `First message: "${clip(c.first, FIRST_TEXT_MAX)}"` : `First call: ${clip(c.first, FIRST_TEXT_MAX)}`);
+  lines.push(`First call: ${clip(c.first, FIRST_TEXT_MAX)}`);
   if (c.threadUrl) lines.push(`Thread: ${c.threadUrl}`);
   return lines.join("\n");
 }
@@ -110,22 +110,6 @@ type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 /** True when the conversation already had activity in the 30 minutes before `c`. */
 async function hadEarlierActivity(tx: Tx, c: StartCandidate): Promise<boolean> {
   const from = new Date(c.at.getTime() - CONVERSATION_GAP_MS);
-  if (c.source === "copilot") {
-    const sessionId = c.conversationKey.slice("copilot:".length);
-    const [row] = await tx
-      .select({ id: copilotMessages.id })
-      .from(copilotMessages)
-      .where(
-        and(
-          eq(copilotMessages.sessionId, sessionId),
-          gte(copilotMessages.sentAt, from),
-          lt(copilotMessages.sentAt, c.at),
-          ne(copilotMessages.messageId, c.startRef),
-        ),
-      )
-      .limit(1);
-    return !!row;
-  }
   const [row] = await tx
     .select({ id: apiCalls.id })
     .from(apiCalls)
@@ -228,7 +212,7 @@ export async function readOrg(orgId: string, identity: SiblingIdentity): Promise
   return org;
 }
 
-async function readUserName(userId: string, identity: SiblingIdentity): Promise<string | null> {
+export async function readUserName(userId: string, identity: SiblingIdentity): Promise<string | null> {
   const r = await siblingGet("client", `/internal/users/${encodeURIComponent(userId)}`, identity);
   if (r.status === 404) return null;
   if (r.status !== 200) throw new Error(`client-service GET /internal/users/${userId} returned ${r.status}`);
@@ -241,19 +225,19 @@ async function readUserName(userId: string, identity: SiblingIdentity): Promise<
  * The person's opaque id in the staff Unibox, so the link opens their thread.
  * A brand-new chatter has none until the next people build (cron): the id is
  * minted here exactly as the build would mint it (`person_ids` is the build's
- * own memory, keyed on the identity key), so the build adopts it and the link
- * keeps working; a later merge keeps it working through `person_id_aliases`.
+ * own memory, keyed on the identity key: `email:<addr>`, `matrix:<contact id>`),
+ * so the build adopts it and the link keeps working; a later merge keeps it
+ * working through `person_id_aliases`.
  */
-async function personIdFor(dest: CopilotDestination, email: string): Promise<string> {
-  const key = emailKey(email);
+export async function mintPersonId(dest: CopilotDestination, identityKey: string): Promise<string> {
   await db
     .insert(personIds)
-    .values({ orgId: dest.orgId, brandId: dest.brandId, identityKey: key, personId: randomUUID() })
+    .values({ orgId: dest.orgId, brandId: dest.brandId, identityKey, personId: randomUUID() })
     .onConflictDoNothing({ target: [personIds.orgId, personIds.brandId, personIds.identityKey] });
   const [row] = await db
     .select({ personId: personIds.personId })
     .from(personIds)
-    .where(and(eq(personIds.orgId, dest.orgId), eq(personIds.brandId, dest.brandId), eq(personIds.identityKey, key)))
+    .where(and(eq(personIds.orgId, dest.orgId), eq(personIds.brandId, dest.brandId), eq(personIds.identityKey, identityKey)))
     .limit(1);
   return row.personId;
 }
@@ -274,7 +258,7 @@ async function threadUrlFor(dest: CopilotDestination, email: string, identity: S
     console.error(`[crm-service] conversation ping: no Clerk id for the staff org ${dest.orgId}: sent without a thread link`);
     return null;
   }
-  const personId = await attempt("person id", () => personIdFor(dest, email));
+  const personId = await attempt("person id", () => mintPersonId(dest, emailKey(email)));
   return personId ? uniboxThreadUrl(staffOrg.externalId, dest.brandId, personId) : null;
 }
 
@@ -294,60 +278,6 @@ async function deliver(pingId: string, text: string): Promise<void> {
 }
 
 // ─── entry points (called by the push routes, never awaited) ────────────────
-
-export interface CopilotPushed {
-  orgId: string;
-  userId: string;
-  email: string;
-  displayName?: string | null;
-  sessionId: string;
-  messages: { messageId: string; role: "user" | "assistant"; text: string; at: string }[];
-}
-
-/** After a Copilot turn is stored: ping when it starts a conversation. Never throws. */
-export async function announceCopilotStarts(turn: CopilotPushed, newMessageIds: string[], runId: string): Promise<void> {
-  try {
-    const dest = copilotDestination();
-    const email = normalizeEmail(turn.email);
-    if (!dest || !email) return;
-    const fresh = new Set(newMessageIds);
-    const candidates: StartCandidate[] = turn.messages
-      .filter((m) => m.role === "user" && fresh.has(m.messageId) && m.text.trim())
-      .map((m) => ({
-        source: "copilot",
-        channel: "chat",
-        conversationKey: copilotConversationKey(turn.sessionId),
-        startRef: m.messageId,
-        email,
-        at: new Date(m.at),
-      }));
-    if (candidates.length === 0) return;
-    if (await isStaffActor(email, turn.userId)) return;
-    const claimed = await claimStarts(candidates);
-    if (claimed.length === 0) return;
-    const identity: SiblingIdentity = { orgId: dest.orgId, userId: turn.userId, runId, brandId: dest.brandId };
-    const [org, userName, threadUrl] = await Promise.all([
-      attempt("chatting org", () => readOrg(turn.orgId, identity)),
-      turn.displayName?.trim() ? Promise.resolve(turn.displayName.trim()) : attempt("chatting user", () => readUserName(turn.userId, identity)),
-      threadUrlFor(dest, email, identity),
-    ]);
-    const textOf = new Map(turn.messages.map((m) => [m.messageId, m.text]));
-    for (const { id, candidate } of claimed) {
-      const text = composePingText({
-        channel: "chat",
-        email,
-        name: userName,
-        orgName: org?.name ?? null,
-        brandNames: [],
-        first: textOf.get(candidate.startRef) ?? "",
-        threadUrl,
-      });
-      await deliver(id, text);
-    }
-  } catch (err) {
-    console.error(`[crm-service] conversation ping for Copilot session ${turn.sessionId} failed:`, err);
-  }
-}
 
 /** After a batch of API / MCP calls is stored: ping each conversation it starts. Never throws. */
 export async function announceApiCallStarts(newCallIds: string[], runId: string): Promise<void> {

@@ -358,6 +358,13 @@
       "when": 1792300000000,
       "tag": "0050_person_relations",
       "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1792310000000,
+      "tag": "0051_assistant_message_pings",
+      "breakpoints": true
     }
   ]
 }

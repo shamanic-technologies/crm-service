@@ -3,7 +3,7 @@ import { apiKeyAuth, SERVICE_NAME } from "../middleware/auth.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { copilotDestination, storeCopilotTurn } from "../lib/copilot/messages.js";
 import { CopilotTurnRequestSchema } from "../schemas.js";
-import { announceCopilotStarts } from "../lib/conversation-pings.js";
+import { announceCopilotMessages } from "../lib/assistant-pings.js";
 
 const router = Router();
 
@@ -35,9 +35,9 @@ router.post("/internal/copilot/messages", apiKeyAuth, async (req, res) => {
     const { stored, duplicates, newMessageIds } = await storeCopilotTurn(parsed.data, runId);
     await updatePlatformRun(runId, "completed", SERVICE_NAME);
     res.json({ stored, duplicates });
-    // The owner's Telegram ping when this turn STARTS a conversation: after the
-    // answer, never awaited, never throws (lib/conversation-pings.ts).
-    void announceCopilotStarts(parsed.data, newMessageIds, runId);
+    // The owner's Telegram ping for each new message, both ways (SOPHIE-TG-PING-1018):
+    // after the answer, never awaited, never throws (lib/assistant-pings.ts).
+    void announceCopilotMessages(parsed.data, newMessageIds, runId);
     return;
   } catch (err) {
     await updatePlatformRun(runId, "failed", SERVICE_NAME).catch((e) =>

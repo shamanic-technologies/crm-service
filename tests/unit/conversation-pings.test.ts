@@ -3,7 +3,6 @@ import {
   anyStaff,
   apiConversationKey,
   composePingText,
-  copilotConversationKey,
   uniboxThreadUrl,
 } from "../../src/lib/conversation-pings.js";
 import { isStaffEmail } from "../../src/lib/owner-telegram.js";
@@ -25,31 +24,30 @@ describe("staff never pings", () => {
 });
 
 describe("what one conversation is", () => {
-  it("a Copilot session, or one person's calls on one channel", () => {
-    expect(copilotConversationKey("s-1")).toBe("copilot:s-1");
+  it("one person's calls on one channel", () => {
     expect(apiConversationKey("mcp", "jane@prospect.io")).toBe("api:mcp:jane@prospect.io");
     expect(apiConversationKey("api", "jane@prospect.io")).not.toBe(apiConversationKey("mcp", "jane@prospect.io"));
   });
 });
 
 describe("the message", () => {
-  it("a Copilot start: who, org, first message, thread", () => {
+  it("an API start: who, org, first call, thread", () => {
     expect(
       composePingText({
-        channel: "chat",
+        channel: "api",
         email: "jane@prospect.io",
         name: "Jane Doe",
         orgName: "Prospect",
         brandNames: [],
-        first: "Can you find me\n50 dentists in Lyon?",
+        first: "Listed emails\nfor brand AscendQE",
         threadUrl: uniboxThreadUrl("org_abc", "f4d73dab-1f9d-49b2-b16e-63ecde76a5eb", "11111111-2222-4333-8444-555555555555"),
       }),
     ).toBe(
       [
-        "New conversation on AI chat",
+        "New conversation on API",
         "Who: Jane Doe (jane@prospect.io)",
         "Org: Prospect",
-        'First message: "Can you find me 50 dentists in Lyon?"',
+        "First call: Listed emails for brand AscendQE",
         "Thread: https://dashboard.distribute.you/v2/orgs/org_abc/brands/f4d73dab-1f9d-49b2-b16e-63ecde76a5eb/unibox?person=11111111-2222-4333-8444-555555555555",
       ].join("\n"),
     );

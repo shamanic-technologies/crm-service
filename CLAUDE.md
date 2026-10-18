@@ -1685,15 +1685,31 @@ skippedNoEmail }`; 503 when the staff scope is unset. Idempotent on `callId`.
   burst (same channel, gaps under 30 min).
 - No cost (platform run), no facts, not in the message search index.
 
+## Owner Telegram ping for EVERY message with our assistant (`src/lib/assistant-pings.ts`)
+
+SOPHIE-TG-PING-1018 (owner 2026-10-18: « Quand il y a une communication entre Sophie et un user, dans un sens ou
+dans l'autre, tu peux me notifier sur Telegram »): one ping per MESSAGE, both directions. Assistant = the web Copilot
+(each new message of a pushed turn, both roles) + every linked account of the staff Unibox scope with automation on
+(`matrix_links.automation_allowed`, read from data; its name = the link's persona, the web Copilot takes the persona
+the scope's assistant accounts share, else "AI Copilot"). Ping = `<from> → <to> (<channel>)`, Who (name, number,
+email), Org (web), Message (500 chars), Thread (staff Unibox link; an unbuilt person's id minted on `email:` /
+`matrix:<contact id>` as the build would). Matrix: run after each mirror (live watch + 5-min pass), never awaited,
+on the account's one-to-one threads only (a group = `not_conversation`); outbound counts only when it is one of our
+sends (`whatsapp_sends` event id / text: the ONE send path), else `hand_typed` (a person of ours). Never staff:
+Copilot = `isStaffActor`; Matrix = a staff address on the person or an own-team number (`readOwnTeam`: linked
+numbers, sales rep, org members; unreadable = nothing decided, next pass). `assistant_message_pings` UNIQUE
+(source, message ref), written BEFORE the send (skips recorded with their reason); never history:
+`matrix_connections.assistant_ping_since`, 24 h lookback. The Copilot is no longer in the conversation-start pings.
+⚠️ A Copilot WhatsApp turn pushed ALSO to `/internal/copilot/messages` would ping twice (once mirrored, once pushed).
+
 ## Owner Telegram ping at each conversation START (`src/lib/conversation-pings.ts`)
 
 Owner 2026-10-12: a Telegram message each time someone starts a conversation with
-us through the Copilot or our API / MCP. Same bot and chat as the fleet's owner
+us through our API / MCP (the Copilot moved to the per-message ping above). Same bot and chat as the fleet's owner
 alerts (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_CHAT_ID`); names and the Unibox
 link come from client-service (`CLIENT_SERVICE_URL` / `_API_KEY`).
 
-- **One conversation** = one Copilot session (again after 30 min of silence in
-  it), or one person's API / MCP calls on one channel, gaps under 30 min (same as
+- **One conversation** = one person's API / MCP calls on one channel, gaps under 30 min (same as
   `sessionsOf`). One ping per START, never per message or call.
 - **Staff never pings:** a staff address (`isStaffEmail`, mirrored from
   client-service / billing) or a user id EVER stored with one (copilot_messages or
