@@ -16,6 +16,12 @@
  * that ghost, so the next people build merges the thread into the person on the
  * phone key — positive evidence, no guess.
  *
+ * The brand's OWN linked numbers are asked too (SOPHIE-COPILOT-WA-1018): a
+ * linked account writing to another linked account of the brand (the owner's
+ * number to the Copilot's line) shows up there as a LID ghost, and its number
+ * is known only as the link's login. Each is asked from ANOTHER connected
+ * account (never from itself).
+ *
  * Asked once per phone, globally (WhatsApp ids are the same from every
  * account): `whatsapp_phone_lookups`. A number not on WhatsApp is asked again
  * after 30 days. Bounded per pass, spaced, so a brand with thousands of CRM
@@ -75,6 +81,10 @@ async function phonesToAsk(orgId: string, brandId: string): Promise<string[]> {
       UNION
       SELECT DISTINCT c.phone_e164 FROM contacts c
       WHERE c.org_id = ${orgId} AND c.brand_id = ${brandId} AND c.source <> 'matrix' AND c.phone_e164 IS NOT NULL
+      UNION
+      SELECT DISTINCT '+' || regexp_replace(l.remote_login_id, '[^0-9]', '', 'g') FROM matrix_links l
+      WHERE l.org_id = ${orgId} AND l.brand_id = ${brandId} AND l.channel = 'whatsapp' AND l.status = 'linked'
+        AND l.remote_login_id IS NOT NULL
     )
     SELECT k.phone FROM known k
     WHERE k.phone ~ '^\\+[0-9]{8,15}$'
@@ -102,11 +112,14 @@ export async function resolveBrandWhatsappPhones(orgId: string, brandId: string)
   if (linked.length === 0) return { status: "not_connected", ...empty };
   const phones = await phonesToAsk(orgId, brandId);
   if (phones.length === 0) return { status: "ok", ...empty };
-  const [account] = await connectedOnly(linked);
-  if (!account) return { status: "not_connected", ...empty, remaining: phones.length };
+  const connected = await connectedOnly(linked);
+  if (connected.length === 0) return { status: "not_connected", ...empty, remaining: phones.length };
 
   const result: PhoneResolutionResult = { status: "ok", ...empty, remaining: Math.max(0, phones.length - MAX_PER_PASS) };
   for (const phone of phones.slice(0, MAX_PER_PASS)) {
+    // A linked number is never asked from its own login (WhatsApp names itself differently).
+    const account = connected.find((a) => `+${a.loginId.replace(/\D/g, "")}` !== phone);
+    if (!account) continue;
     if (result.asked > 0 && GAP_MS > 0) await sleep(GAP_MS);
     result.asked += 1;
     try {

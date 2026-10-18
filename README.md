@@ -31,7 +31,9 @@ idempotent on `messageId`, filed ONLY under `COPILOT_UNIBOX_ORG_ID` /
 The other way round, a person writing on the Copilot's own WhatsApp line (the
 automation-on account of the Copilot's brand) is handed to chat-service
 `POST /internal/copilot/channel-messages` instead of firing a reply trigger; the
-Copilot answers through `POST /orgs/whatsapp/messages`. See `CLAUDE.md`
+Copilot answers through `POST /orgs/whatsapp/messages`. A sender whose number is a
+WhatsApp account linked in Integrations carries `sender.linkedBy {orgId, userId}`
+(who linked it), so the Copilot answers with that user's access. See `CLAUDE.md`
 ("Reply trigger", SOPHIE-COPILOT-WA-1018).
 
 `POST /orgs/contacts/upload` is `multipart/form-data`: `file` (CSV), `brandId`

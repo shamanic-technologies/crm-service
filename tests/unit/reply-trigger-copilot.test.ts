@@ -69,4 +69,26 @@ describe("the Copilot's line (SOPHIE-COPILOT-WA-1018)", () => {
       thread: [],
     });
   });
+
+  it("carries sender.linkedBy only when the number is linked in Integrations", () => {
+    const base = {
+      messageId: "$a",
+      orgId: ORG,
+      brandId: BRAND,
+      accountUserId: "bbbbbbbb-7777-4777-8777-0000000000aa",
+      fromAccount: "+77776879632",
+      persona: null,
+      messages: [{ eventId: "$a", at: "2026-10-18T10:00:00.000Z", text: "one" }],
+      thread: [],
+    };
+    const linkedBy = { orgId: ORG, userId: "bbbbbbbb-7777-4777-8777-0000000000bb" };
+    expect(copilotHandoffBody({ ...base, sender: { phone: "+33680478702", name: null, linkedBy } }).sender).toEqual({
+      phone: "+33680478702",
+      name: null,
+      linkedBy,
+    });
+    const unlinked = copilotHandoffBody({ ...base, sender: { phone: "+33600000001", name: "Ann", linkedBy: null } }).sender;
+    expect(unlinked).toEqual({ phone: "+33600000001", name: "Ann" });
+    expect("linkedBy" in (unlinked as object)).toBe(false);
+  });
 });

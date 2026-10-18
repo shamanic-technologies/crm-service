@@ -22,6 +22,7 @@ import whatsappRoutes from "../../src/routes/whatsapp.js";
 import contactsRoutes from "../../src/routes/contacts.js";
 import matrixRoutes from "../../src/routes/matrix.js";
 import { resolveBrandWhatsappPhones } from "../../src/lib/whatsapp/phone-resolution.js";
+import { linkedByOf } from "../../src/lib/reply-trigger/copilot.js";
 
 /**
  * The WhatsApp send and the people-pool serve, end to end against a real
@@ -72,6 +73,8 @@ const jidOfLid = (lid: string) => `${lid.replace(/^lid-/, "")}@lid`;
 const NETWORK: Record<string, { lid: string; room: string | null }> = {
   "33600000001": { lid: "lid-1", room: KNOWN_ROOM },
   "33600000002": { lid: "lid-2", room: null },
+  // The brand's pro account's own number, as WhatsApp names it from another login.
+  "33622222222": { lid: "lid-pro", room: null },
 };
 
 function installFetchStub() {
@@ -160,7 +163,7 @@ const headers = { "x-api-key": API_KEY, "x-org-id": ORG, "x-user-id": USER };
 async function wipe() {
   await db.delete(whatsappSends).where(eq(whatsappSends.orgId, ORG));
   await db.delete(conversations).where(eq(conversations.orgId, ORG));
-  await db.delete(whatsappPhoneLookups).where(inArray(whatsappPhoneLookups.phone, ["+33600000001", "+33600000002", "+33699999999", "+2541110229905"]));
+  await db.delete(whatsappPhoneLookups).where(inArray(whatsappPhoneLookups.phone, ["+33600000001", "+33600000002", "+33699999999", "+2541110229905", "+33611111111", "+33622222222"]));
   await db.delete(staffAlerts).where(like(staffAlerts.alertKey, "%babababa-1111-4111-8111-%"));
   await db.delete(matrixRawEvents).where(eq(matrixRawEvents.orgId, ORG));
   await db.delete(matrixLinks).where(eq(matrixLinks.orgId, ORG));
@@ -169,7 +172,7 @@ async function wipe() {
   await db.delete(contacts).where(eq(contacts.orgId, ORG));
   await db.delete(people).where(eq(people.orgId, ORG));
   await db.delete(peopleScopes).where(eq(peopleScopes.orgId, ORG));
-  await db.delete(matrixGhostPhones).where(inArray(matrixGhostPhones.ghostMxid, ["@whatsapp_lid-1:matrix.test", "@whatsapp_lid-2:matrix.test"]));
+  await db.delete(matrixGhostPhones).where(inArray(matrixGhostPhones.ghostMxid, ["@whatsapp_lid-1:matrix.test", "@whatsapp_lid-2:matrix.test", "@whatsapp_lid-pro:matrix.test"]));
 }
 
 async function linkAccount(matrixUserId = ACCOUNT, opts: { linkedAt?: Date } = {}) {
@@ -675,6 +678,53 @@ describe.skipIf(!RUN)("WhatsApp threads merge into the person by phone (DB)", ()
     const second = await resolveBrandWhatsappPhones(ORG, BRAND);
     expect(second.asked).toBe(0);
     expect(lookups).toEqual([]);
+  });
+
+  it("resolves the brand's own linked numbers, each from ANOTHER account, so its LID ghost on a sibling line has a number (SOPHIE-COPILOT-WA-1018)", async () => {
+    await linkAccount(ACCOUNT);
+    const { connectionId: proLine } = await linkAccount(ACCOUNT_PRO);
+    // The pro account writes to the first account: there it is a LID ghost.
+    const contactId = await mirroredThread(proLine, "@whatsapp_lid-pro:matrix.test", 2);
+
+    const res = await resolveBrandWhatsappPhones(ORG, BRAND);
+    expect(res).toMatchObject({ status: "ok", asked: 2, found: 1, notOnWhatsapp: 1 });
+    expect(lookups.sort()).toEqual(["+33611111111", "+33622222222"]);
+    const [g] = await db.select().from(matrixGhostPhones).where(eq(matrixGhostPhones.ghostMxid, "@whatsapp_lid-pro:matrix.test"));
+    expect(g.phone).toBe("+33622222222");
+    const [c] = await db.select().from(contacts).where(eq(contacts.id, contactId));
+    expect(c.phoneE164).toBe("+33622222222");
+  });
+
+  it("a lone linked account never asks the bridge about its own number", async () => {
+    await linkAccount(ACCOUNT);
+    const res = await resolveBrandWhatsappPhones(ORG, BRAND);
+    expect(res.asked).toBe(0);
+    expect(lookups).toEqual([]);
+  });
+});
+
+describe.skipIf(!RUN)("who linked a WhatsApp number (Copilot hand-off sender.linkedBy, DB)", () => {
+  beforeEach(async () => {
+    await wipe();
+    installFetchStub();
+  });
+  afterAll(wipe);
+
+  it("names the link's org + the user who linked it, the most recent link when several; nobody for an unlinked number", async () => {
+    await linkAccount(ACCOUNT, { linkedAt: new Date("2026-10-10T00:00:00Z") });
+    expect(await linkedByOf("+33611111111")).toEqual({ orgId: ORG, userId: USER });
+    expect(await linkedByOf("+33600000001")).toBeNull();
+
+    // A second, newer link of the same number by another user wins.
+    await db.insert(matrixLinks).values({
+      orgId: ORG, brandId: BRAND, channel: "whatsapp", createdByUserId: "user-wa-2", matrixUserId: "@crm_wa_b:matrix.test",
+      status: "linked", method: "qr", remoteLoginId: "33611111111", linkedAt: new Date("2026-10-12T00:00:00Z"),
+    });
+    expect(await linkedByOf("+33611111111")).toEqual({ orgId: ORG, userId: "user-wa-2" });
+
+    // An unlinked one no longer counts.
+    await db.update(matrixLinks).set({ status: "unlinked" }).where(eq(matrixLinks.createdByUserId, "user-wa-2"));
+    expect(await linkedByOf("+33611111111")).toEqual({ orgId: ORG, userId: USER });
   });
 });
 
