@@ -57,6 +57,36 @@ describe("personConnectionTags", () => {
     ]);
   });
 
+  describe("an empty Stripe customer (STRIPE-GHOST-1018)", () => {
+    const standing = (paidCharges: number, refundedCharges = 0) => ({ stripe: { subscriptionStatuses: [], paidCharges, refundedCharges, netPaidMinor: {} } });
+    const ghost = (extra: Record<string, unknown> = {}) => presence("stripe", { phones: [], displayName: null, detail: standing(0), ...extra });
+
+    it("no email, phone, name nor charge: no tag, so it is in nobody's Unibox", () => {
+      expect(personConnectionTags({ presences: [ghost()] }, lookups())).toEqual([]);
+      expect(personConnectionTags({ presences: [ghost({ displayName: "  " })] }, lookups())).toEqual([]);
+    });
+
+    it("the same customer with an email, a phone, a name or a charge is professional, to the brand", () => {
+      for (const extra of [
+        { emails: ["a@acme.com"] },
+        { phones: ["+33612345678"] },
+        { displayName: "Marie" },
+        { detail: standing(1) },
+        { detail: standing(0, 1) },
+      ]) {
+        expect(tagsOf(personConnectionTags({ presences: [ghost(extra)] }, lookups()))).toEqual(["professional_to_brand"]);
+      }
+    });
+
+    it("merged with another source, the person keeps that source's tags", () => {
+      expect(tagsOf(personConnectionTags({ presences: [ghost(), presence("clerk")] }, lookups()))).toEqual(["professional_to_brand"]);
+    });
+
+    it("a Stripe presence whose standing was not read is not proven empty", () => {
+      expect(tagsOf(personConnectionTags({ presences: [presence("stripe")] }, lookups()))).toEqual(["professional_to_brand"]);
+    });
+  });
+
   it("a friend on WhatsApp who is also a client carries both tags, the personal one naming the user", () => {
     const conversations: TagLookups["conversations"] = new Map([
       ["matrix:c1", { tags: ["personal_to_user"], scores: scores({ personal_to_user: 0.9 }), userIds: ["u-kevin"] }],
