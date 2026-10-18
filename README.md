@@ -28,6 +28,12 @@ idempotent on `messageId`, filed ONLY under `COPILOT_UNIBOX_ORG_ID` /
 `COPILOT_UNIBOX_BRAND_ID` (never the chatting org). Full contract in `CLAUDE.md`
 ("Copilot chat") and `openapi.json`.
 
+The other way round, a person writing on the Copilot's own WhatsApp line (the
+automation-on account of the Copilot's brand) is handed to chat-service
+`POST /internal/copilot/channel-messages` instead of firing a reply trigger; the
+Copilot answers through `POST /orgs/whatsapp/messages`. See `CLAUDE.md`
+("Reply trigger", SOPHIE-COPILOT-WA-1018).
+
 `POST /orgs/contacts/upload` is `multipart/form-data`: `file` (CSV), `brandId`
 (required), `columnMapping` (optional JSON override). Bronze is written in chunked
 batches; silver promotion is kicked off asynchronously after the response returns.

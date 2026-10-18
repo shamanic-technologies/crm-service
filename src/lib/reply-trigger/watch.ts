@@ -33,6 +33,11 @@
  * looks; a message mirrored before them is history (`before_watch`, never
  * reported). One row per burst (UNIQUE on its first message), and
  * campaign-service gets `idempotencyKey = crm:<source>:reply:<first message event id>`.
+ *
+ * THE COPILOT'S LINE (SOPHIE-COPILOT-WA-1018, ./copilot.ts): on an account with
+ * automation allowed whose brand is the one the Copilot serves, every burst is
+ * handed to chat-service instead (no Jev, no own-team skip, no trigger); history
+ * and the human takeover still hold.
  */
 import { and, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
@@ -71,6 +76,7 @@ import { readBrandOffers } from "../form-trigger/offer.js";
 import { ownTeamMatch, readOwnTeam, type OwnTeam } from "./own-team.js";
 import { readThreadForReply, type BurstMessage, type RoomSend } from "./thread.js";
 import { humanTypedTo } from "../matrix/human-takeover.js";
+import { copilotAnswersOn, deliverDueHandoffs, HANDOFF_STATUS, HANDOFF_STATUSES } from "./copilot.js";
 
 const SERVICE_NAME = "crm-service";
 const SOURCE = "matrix";
@@ -375,6 +381,8 @@ export async function detectReplies(
     .limit(1);
 
   const automationAllowed = await automationAllowedOn(conn.id);
+  // The Copilot's own line (SOPHIE-COPILOT-WA-1018, ./copilot.ts): every burst is handed to it, no trigger.
+  const copilot = copilotAnswersOn(conn, automationAllowed);
 
   for (const { roomId, campaign } of threads) {
     const since = (campaign ? conn.replyWatchSince : conn.openReplyWatchSince).getTime();
@@ -415,7 +423,10 @@ export async function detectReplies(
           inArray(replyTriggerReports.anchorEventId, reading.burst.map((m) => m.eventId)),
         ),
       );
-    if (existing.some((r) => !PASS_THROUGH_REASONS.includes(r.reason ?? ""))) continue;
+    // On the Copilot's line a hand-off does not end the burst: what the person adds before its answer is handed too.
+    const endsBurst = (r: ReplyTriggerReport) =>
+      !PASS_THROUGH_REASONS.includes(r.reason ?? "") && !(copilot && HANDOFF_STATUSES.includes(r.status));
+    if (existing.some(endsBurst)) continue;
     const coveredThrough = Math.max(0, ...existing.map((r) => r.lastMessageAt.getTime()));
     const uncovered = reading.burst.filter((m) => Date.parse(m.at) > coveredThrough);
     if (uncovered.length === 0) continue;
@@ -436,7 +447,7 @@ export async function detectReplies(
       conversation?.contactPhone,
       ...rows.filter((r) => r.sender !== conn.matrixUserId).map((r) => phoneFromMxid(r.sender, conn.counterpartPrefix)),
     ];
-    const own = fresh.length > 0 && automationAllowed ? ownTeamMatch(otherSide, await team()) : null;
+    const own = fresh.length > 0 && automationAllowed && !copilot ? ownTeamMatch(otherSide, await team()) : null;
 
     let status: string = REPLY_STATUS.PENDING;
     let reason: string | null = null;
@@ -444,7 +455,7 @@ export async function detectReplies(
     if (fresh.length === 0) {
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.BEFORE_WATCH;
-    } else if (!automationAllowed) {
+    } else if (!automationAllowed && !copilot) {
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.AUTOMATION_NOT_ALLOWED;
     } else if (own) {
@@ -460,6 +471,9 @@ export async function detectReplies(
     ) {
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.HUMAN_IN_CONVERSATION;
+    } else if (copilot) {
+      // No Jev, no own-team skip: the Copilot answers every person who writes, staff testing included.
+      status = HANDOFF_STATUS.PENDING;
     } else {
       judgment = await judgeBurst(
         { orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId, channel: conn.channel, where: `connection ${conn.id}` },
@@ -495,10 +509,10 @@ export async function detectReplies(
       .onConflictDoNothing()
       .returning({ id: replyTriggerReports.id });
     if (inserted.length === 0) continue;
-    if (status === REPLY_STATUS.PENDING) out.detected += 1;
+    if (status === REPLY_STATUS.PENDING || status === HANDOFF_STATUS.PENDING) out.detected += 1;
     else out.skipped.push({ reason: reason!, roomId });
     console.log(
-      `[crm-service][reply-trigger] ${status === REPLY_STATUS.PENDING ? "detected" : `skipped (${reason})`} a reply burst of ` +
+      `[crm-service][reply-trigger] ${status === REPLY_STATUS.PENDING ? "detected" : status === HANDOFF_STATUS.PENDING ? "for the Copilot:" : `skipped (${reason})`} a reply burst of ` +
         `${burst.length} message(s) in ${conn.channel} room ${roomId} (brand ${conn.brandId}, ` +
         `${reading.campaignId ? `campaign ${reading.campaignId}` : "no campaign wrote in it"}), first ${burst[0].at}` +
         (own ? `: ${own.phone} is ${own.role}, never a prospect` : ""),
@@ -803,10 +817,12 @@ export async function deliverDueReplies(
   now: number = Date.now(),
   opts: { rebuild?: (orgId: string, brandId: string) => Promise<void> } = {},
 ): Promise<{ reportId: string; status: string; reason: string | null }[]> {
-  if (!campaignServiceConfigured() || delivering) return [];
+  // The Copilot's line first (chat-service, ./copilot.ts): never waits on campaign-service.
+  const handedOff = await deliverDueHandoffs(now);
+  if (!campaignServiceConfigured() || delivering) return handedOff;
   delivering = true;
   try {
-    const delivered: { reportId: string; status: string; reason: string | null }[] = [];
+    const delivered: { reportId: string; status: string; reason: string | null }[] = [...handedOff];
     const groups = new Map<string, MatrixReport[]>();
     for (const r of (await dueReports(now, SOURCE)) as MatrixReport[]) groups.set(`${r.orgId}|${r.brandId}`, [...(groups.get(`${r.orgId}|${r.brandId}`) ?? []), r]);
     for (const reports of groups.values()) {
