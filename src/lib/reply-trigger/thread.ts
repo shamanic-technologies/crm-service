@@ -17,11 +17,14 @@
  *    burst; that burst is then skipped `human_in_conversation` by the watch:
  *    a human of the brand took the conversation, HUMAN-IN-THREAD-1016);
  *  - only words a human wrote count (`humanText`): a bridge notice, an
- *    uncaptioned photo, an edit of an earlier message are not an answer. A
- *    reaction is not a message at all.
+ *    uncaptioned photo are not an answer. An edit is folded into the message
+ *    it rewrites (`foldEdits`): no new word, but its words ARE the message's,
+ *    so a WhatsApp message the bridge could not decrypt (a notice, then the
+ *    real words as an edit of it) is the person's words at the notice's place.
+ *    A reaction is not a message at all.
  */
 import type { MatrixEvent } from "../matrix/client.js";
-import { compareEvents, humanText } from "../matrix/events.js";
+import { editTarget, foldEdits, humanText } from "../matrix/events.js";
 
 /** One send through our send route into this thread (any status). */
 export interface RoomSend {
@@ -51,11 +54,6 @@ export type ThreadReading =
 /** Max characters of one message carried forward (the door caps `item` at 20k). */
 export const MESSAGE_TEXT_CAP = 2000;
 
-function editTarget(e: MatrixEvent): string | null {
-  const rel = e.content?.["m.relates_to"] as { rel_type?: unknown; event_id?: unknown } | undefined;
-  return rel?.rel_type === "m.replace" && typeof rel.event_id === "string" ? rel.event_id : null;
-}
-
 type Entry =
   | { at: number; tie: string; kind: "ours"; campaignId: string | null }
   | { at: number; tie: string; kind: "event"; event: MatrixEvent };
@@ -63,7 +61,7 @@ type Entry =
 export function readThreadForReply(events: MatrixEvent[], ownMxid: string, sends: RoomSend[]): ThreadReading {
   if (sends.some((s) => s.status === "sending")) return { kind: "send_in_flight" };
 
-  const messages = events.filter((e) => e.type === "m.room.message").sort(compareEvents);
+  const messages = foldEdits(events);
   const byId = new Map(messages.map((m) => [m.event_id, m]));
   const sent = sends.filter((s) => s.status === "sent" && s.eventId);
   const ourIds = new Set(sent.map((s) => s.eventId!));
@@ -103,7 +101,7 @@ export function readThreadForReply(events: MatrixEvent[], ownMxid: string, sends
       burst = [];
       continue;
     }
-    if (target) continue; // an edit of an earlier message: not a new word
+    if (target) continue; // an edit whose original was never mirrored: not a new word
     const text = humanText(ev.content);
     if (!text) continue;
     if (burst.length === 0) campaignOfBurst = lastCampaignId;

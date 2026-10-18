@@ -35,7 +35,10 @@ Copilot answers through `POST /orgs/whatsapp/messages`. A sender whose number is
 WhatsApp account linked in Integrations carries `sender.linkedBy {orgId, userId}`
 (who linked it), so the Copilot answers with that user's access. The brand's own
 linked numbers are never "taken over by a human", so the owner testing from
-his own numbers is always answered. See `CLAUDE.md`
+his own numbers is always answered. A message WhatsApp could not decrypt at
+first (a bridge notice, then the words as an edit of it, common right after a
+relink) is handed off once, with the words. A relinked account is watched from
+its next message, no restart. See `CLAUDE.md`
 ("Reply trigger", SOPHIE-COPILOT-WA-1018).
 
 `POST /orgs/contacts/upload` is `multipart/form-data`: `file` (CSV), `brandId`

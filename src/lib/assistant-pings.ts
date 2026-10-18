@@ -38,7 +38,7 @@ import {
 import { COPILOT_SENDER_NAME, copilotDestination, type CopilotDestination } from "./copilot/messages.js";
 import { isStaffActor, mintPersonId, readOrg, readUserName, uniboxThreadUrl } from "./conversation-pings.js";
 import type { MatrixEvent } from "./matrix/client.js";
-import { humanText, phoneFromMxid } from "./matrix/events.js";
+import { editTarget, humanText, phoneFromMxid } from "./matrix/events.js";
 import { normalizeEmail } from "./people/identity.js";
 import type { SiblingIdentity } from "./people/siblings.js";
 import { ownTeamMatch, readOwnTeam } from "./reply-trigger/own-team.js";
@@ -116,14 +116,25 @@ export interface OurSend {
  * as the account; it is the ASSISTANT only when it is one of our sends (its
  * event id, or its text while the send's event id is not recorded yet), else a
  * person of ours typed it by hand on the account.
+ *
+ * An edit is no new message, EXCEPT when the message it rewrites (same sender)
+ * carried no words: WhatsApp delivers a message the bridge could not decrypt as
+ * a notice, then the real words as an edit of it (`foldEdits`). `replaced` = the
+ * rewritten event when mirrored, else null.
  */
 export function classifyAssistantEvent(
   e: MatrixEvent,
   accountMxid: string,
   ours: OurSend[],
+  replaced: MatrixEvent | null = null,
 ): { direction: "inbound" | "outbound"; text: string } | { skip: string } {
-  const rel = e.content?.["m.relates_to"] as { rel_type?: unknown } | undefined;
-  const text = rel?.rel_type === "m.replace" ? "" : humanText(e.content);
+  const isEdit = editTarget(e) !== null;
+  const revealsWords = isEdit && !!replaced && replaced.sender === e.sender && !humanText(replaced.content);
+  const text = !isEdit
+    ? humanText(e.content)
+    : revealsWords
+      ? humanText(e.content?.["m.new_content"] as Record<string, unknown> | undefined)
+      : "";
   if (!text) return { skip: ASSISTANT_PING_SKIPS.noText };
   if (e.sender !== accountMxid) return { direction: "inbound", text };
   const ourIds = new Set(ours.map((s) => s.eventId).filter((x): x is string => !!x));
@@ -294,6 +305,8 @@ interface Candidate {
   sender: string;
   origin_server_ts: Date | string;
   payload: MatrixEvent;
+  /** The event this one edits (`m.replace`), when mirrored on the connection. */
+  replaced: MatrixEvent | null;
 }
 
 interface ThreadRow {
@@ -335,8 +348,12 @@ export async function announceAssistantMatrixMessages(conn: MatrixConnection, no
     const since = await watchSince(conn);
     const floor = new Date(Math.max(since.getTime(), now - ASSISTANT_PING_LOOKBACK_MS));
     const candidates = (await db.execute(sql`
-      SELECT e.event_id, e.room_id, e.sender, e.origin_server_ts, e.payload
+      SELECT e.event_id, e.room_id, e.sender, e.origin_server_ts, e.payload, r.payload AS replaced
       FROM matrix_raw_events e
+      LEFT JOIN matrix_raw_events r
+        ON r.event_id = e.payload->'content'->'m.relates_to'->>'event_id'
+        AND r.connection_id = e.connection_id
+        AND e.payload->'content'->'m.relates_to'->>'rel_type' = 'm.replace'
       WHERE e.connection_id = ${conn.id}
         AND e.event_type = 'm.room.message'
         AND e.ingested_at >= ${since.toISOString()}
@@ -377,7 +394,7 @@ export async function announceAssistantMatrixMessages(conn: MatrixConnection, no
         const at = new Date(c.origin_server_ts);
         const base = { source: "matrix" as const, messageRef: c.event_id, channel: conn.channel, connectionId: conn.id, messageAt: at };
         const thread = threadOf.get(c.room_id);
-        const kind = classifyAssistantEvent(c.payload, conn.matrixUserId, ourSends);
+        const kind = classifyAssistantEvent(c.payload, conn.matrixUserId, ourSends, c.replaced);
         if (!thread || "skip" in kind) {
           const reason = !thread ? ASSISTANT_PING_SKIPS.notConversation : (kind as { skip: string }).skip;
           await claim({ ...base, direction: c.sender === conn.matrixUserId ? "outbound" : "inbound", status: "skipped", reason });

@@ -533,6 +533,37 @@ describe.skipIf(!RUN)("reply trigger", () => {
       expect((await reports())[0]).toMatchObject({ status: "handed_off", reason: "copilot", phone: "+33770657585" });
     });
 
+    it("a message WhatsApp could not decrypt (a notice, then the words as an edit of it) is handed off ONCE with the words (follow-up 3)", async () => {
+      await link();
+      // The prod shape of 2026-10-18 18:26 on the relinked line: both events carry the same timestamp.
+      const notice = {
+        event_id: "$undecrypted", type: "m.room.message", sender: GHOST, origin_server_ts: min(1),
+        content: { msgtype: "m.notice", body: "Decrypting message from WhatsApp failed, waiting for sender to re-send... ([learn more](https://faq.whatsapp.com/))", "fi.mau.whatsapp.undecryptable": true },
+      };
+      const edit = {
+        event_id: "$decrypted", type: "m.room.message", sender: GHOST, origin_server_ts: min(1),
+        content: {
+          msgtype: "m.text", body: "* How many campaigns run on Distribute.you?",
+          "m.relates_to": { event_id: "$undecrypted", rel_type: "m.replace" },
+          "m.new_content": { msgtype: "m.text", body: "How many campaigns run on Distribute.you?" },
+        },
+      };
+      for (const e of [notice, edit]) {
+        await db.insert(matrixRawEvents).values({
+          orgId: ORG, brandId: BRAND, connectionId: conn.id, eventId: e.event_id, roomId: ROOM, sender: GHOST, eventType: "m.room.message",
+          originServerTs: new Date(e.origin_server_ts), ingestedAt: new Date(), payload: e,
+        });
+      }
+      expect((await detectReplies(conn, run1)).detected).toBe(1);
+      await deliverDueReplies();
+      expect((await detectReplies(conn, run1)).detected).toBe(0);
+      await deliverDueReplies(Date.now() + 10 * 60_000);
+      expect(copilotCalls).toHaveLength(1);
+      expect(copilotCalls[0].body).toMatchObject({ messageId: "$undecrypted", text: "How many campaigns run on Distribute.you?" });
+      expect(await reports()).toHaveLength(1);
+      expect((await reports())[0]).toMatchObject({ status: "handed_off", anchorEventId: "$undecrypted" });
+    });
+
     it("a staff / own-team number writing to the assistant is handed off, never skipped as own team", async () => {
       await link();
       memberPhones = ["+33770657585"];

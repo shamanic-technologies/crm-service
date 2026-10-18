@@ -45,7 +45,7 @@ import {
 } from "../../db/schema.js";
 import { isCopilotDestination } from "../copilot/messages.js";
 import type { MatrixEvent } from "../matrix/client.js";
-import { compareEvents, humanText, phoneFromMxid } from "../matrix/events.js";
+import { editTarget, foldEdits, humanText, phoneFromMxid } from "../matrix/events.js";
 import { personaOf, type SenderPersona } from "../matrix/persona.js";
 import { dialablePhone } from "../trigger-door.js";
 import type { BurstMessage } from "./thread.js";
@@ -86,22 +86,17 @@ export interface ThreadLine {
   text: string;
 }
 
-function isEdit(e: MatrixEvent): boolean {
-  const rel = e.content?.["m.relates_to"] as { rel_type?: unknown } | undefined;
-  return rel?.rel_type === "m.replace";
-}
-
 /**
  * PURE: the conversation BEFORE the burst (messages strictly before its first
  * one), oldest first, the latest `HANDOFF_THREAD_MAX`. Our sends (campaign,
  * Copilot) are mirrored as the account's messages: outbound. Only human words
- * (`humanText`), no edit.
+ * (`humanText`), edits folded into what they rewrite (`foldEdits`).
  */
 export function threadBeforeBurst(events: MatrixEvent[], ownMxid: string, burstFirstEventId: string, burstFirstAt: string): ThreadLine[] {
   const firstTs = Date.parse(burstFirstAt);
   const lines: ThreadLine[] = [];
-  for (const e of [...events].filter((x) => x.type === "m.room.message").sort(compareEvents)) {
-    if (e.event_id === burstFirstEventId || e.origin_server_ts >= firstTs || isEdit(e)) continue;
+  for (const e of foldEdits(events)) {
+    if (e.event_id === burstFirstEventId || e.origin_server_ts >= firstTs || editTarget(e)) continue;
     const text = humanText(e.content);
     if (!text) continue;
     lines.push({ at: new Date(e.origin_server_ts).toISOString(), direction: e.sender === ownMxid ? "outbound" : "inbound", text });
