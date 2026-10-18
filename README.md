@@ -33,7 +33,9 @@ automation-on account of the Copilot's brand) is handed to chat-service
 `POST /internal/copilot/channel-messages` instead of firing a reply trigger; the
 Copilot answers through `POST /orgs/whatsapp/messages`. A sender whose number is a
 WhatsApp account linked in Integrations carries `sender.linkedBy {orgId, userId}`
-(who linked it), so the Copilot answers with that user's access. See `CLAUDE.md`
+(who linked it), so the Copilot answers with that user's access. The brand's own
+linked numbers are never "taken over by a human", so the owner testing from
+his own numbers is always answered. See `CLAUDE.md`
 ("Reply trigger", SOPHIE-COPILOT-WA-1018).
 
 `POST /orgs/contacts/upload` is `multipart/form-data`: `file` (CSV), `brandId`
