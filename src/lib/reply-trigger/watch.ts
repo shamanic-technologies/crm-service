@@ -423,9 +423,13 @@ export async function detectReplies(
           inArray(replyTriggerReports.anchorEventId, reading.burst.map((m) => m.eventId)),
         ),
       );
-    // On the Copilot's line a hand-off does not end the burst: what the person adds before its answer is handed too.
+    // On the Copilot's line neither a hand-off nor a skip ends the burst: what the person adds before an answer
+    // is decided again (a skip recorded under older rules, own_team before the line was the Copilot's, or a takeover
+    // read wrongly, would otherwise swallow every later message of the unanswered thread).
     const endsBurst = (r: ReplyTriggerReport) =>
-      !PASS_THROUGH_REASONS.includes(r.reason ?? "") && !(copilot && HANDOFF_STATUSES.includes(r.status));
+      copilot
+        ? !(r.status === REPLY_STATUS.SKIPPED || HANDOFF_STATUSES.includes(r.status))
+        : !PASS_THROUGH_REASONS.includes(r.reason ?? "");
     if (existing.some(endsBurst)) continue;
     const coveredThrough = Math.max(0, ...existing.map((r) => r.lastMessageAt.getTime()));
     const uncovered = reading.burst.filter((m) => Date.parse(m.at) > coveredThrough);

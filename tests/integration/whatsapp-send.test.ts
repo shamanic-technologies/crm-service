@@ -485,6 +485,20 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
     expect(sends).toHaveLength(2);
   });
 
+  it("a send to one of the brand's own linked numbers is never refused human_in_conversation, even after hand-typed messages (SOPHIE-COPILOT-WA-1018)", async () => {
+    const personal = await linkAccount(ACCOUNT, { linkedAt: new Date("2026-10-01T00:00:00Z") });
+    await linkAccount(ACCOUNT_PRO, { linkedAt: new Date("2026-10-02T00:00:00Z") });
+    // The owner typed by hand from his personal account to his pro account (seen there as a LID ghost).
+    await mirroredThread(personal.connectionId, "@whatsapp_lid-pro:matrix.test", 3);
+    await ownMessage(personal.connectionId, ACCOUNT, "$hand-own", "note to my other number");
+    const res = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33622222222", text: "Sophie here", idempotencyKey: "k-own-linked" });
+    expect(res.status).toBe(200);
+    expect(sends).toHaveLength(1);
+  });
+
   it("refuses automation_not_allowed, nothing sent, when no linked account allows automated sends (SOPHIE-WA-1016)", async () => {
     const personal = await linkAccount(ACCOUNT);
     const pro = await linkAccount(ACCOUNT_PRO);

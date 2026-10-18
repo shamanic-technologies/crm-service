@@ -1155,6 +1155,10 @@ newest first, a person with none absent; a send with no campaign never matches. 
   handed back, timed pauses (Jelou 15 min-4 h) cannot cover a multi-day talk; we have no hand-back. A new lead (no thread,
   or only our automated messages) still gets the welcome. Gmail not covered (crm sends no email; a responder mail and a
   typed one look the same in the store). Reverses REPLY-ANY-LEAD-1015's "a hand-typed message is just one of ours" (10-15).
+  The brand's OWN linked accounts are never taken over (`isOwnLinkedAccount`, SOPHIE-COPILOT-WA-1018): a person whose
+  ghost's number (ghost phones, mirrored contact, phone ghost) is a `linked` login of the brand's channel is never
+  `human_in_conversation`, at send nor at the reply trigger (the owner typing between his own two linked numbers made
+  both "taken" and silenced the Copilot for him).
 - **Which account writes** (owner 2026-10-12: the pro number, not the personal one,
   unless a conversation already exists there): the account whose conversation with the
   ghost HAS MESSAGES (latest), else the link marked `outreach_default` (`PATCH
@@ -1270,7 +1274,8 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   the burst; 202 accepted / 200 duplicate, anything else retried 1→60 min for 24h). No Jev, no `own_team` /
   `not_positive` skip (staff test from their own numbers); kept: `before_watch`, `human_in_conversation`. A message
   added before the answer is its own hand-off. Statuses `handoff_pending` → `handed_off` (`copilot`) | `handoff_failed`
-  (`copilot_unreachable`) | `skipped` (`copilot_phone_unknown`: a LID ghost with no known number). A sender whose number is a WhatsApp
+  (`copilot_unreachable`) | `skipped` (on this line no row ends the burst, a skip included: each later message is
+  decided again, so a skip recorded under older rules never swallows the unanswered thread) (`copilot_phone_unknown`: a LID ghost with no known number). A sender whose number is a WhatsApp
   account LINKED in crm (any org / brand, status linked; most recently linked wins) carries `sender.linkedBy {orgId,
   userId}` = that link's org + who linked it (`linkedByOf`): chat-service answers with THAT user's access (owner
   2026-10-18 « FAUX j'ai intégré ces deux nums »); absent when linked nowhere. The brand's own linked numbers are

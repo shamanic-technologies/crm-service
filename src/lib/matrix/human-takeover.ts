@@ -21,11 +21,18 @@
  * Person-level, not room-level: every conversation the brand's accounts of that
  * channel hold with the person's ghost(s) counts. The owner talking to a lead by
  * hand on his personal number makes that lead his on the assistant number too.
+ *
+ * The brand's OWN linked accounts are never a lead a human took over
+ * (SOPHIE-COPILOT-WA-1018): the owner typing between his own two linked numbers
+ * made each of them "taken", so the Copilot neither answered them on its line
+ * nor could reply. A person whose ghost stands for a number linked on the
+ * brand's channel (`matrix_ghost_phones`, the mirrored contact's phone, or a
+ * phone ghost) is never in a human's conversation.
  */
 import { sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import type { MatrixEvent } from "./client.js";
-import { humanText } from "./events.js";
+import { humanText, phoneFromMxid, WHATSAPP_GHOST_PREFIX } from "./events.js";
 
 export interface OurSend {
   eventId: string | null;
@@ -72,6 +79,7 @@ export async function humanTypedTo(input: {
 }): Promise<HandTyped | null> {
   const ghosts = [...new Set(input.ghosts.filter((g) => !!g))];
   if (ghosts.length === 0) return null;
+  if (await isOwnLinkedAccount({ ...input, ghosts })) return null;
   const rooms = (await db.execute(sql`
     SELECT DISTINCT v.connection_id, v.room_id, m.matrix_user_id
     FROM conversations v
@@ -105,4 +113,36 @@ export async function humanTypedTo(input: {
     }
   }
   return found;
+}
+
+/**
+ * Do these ghosts stand for one of the brand's own linked accounts on `channel`?
+ * Their number (the bridge's answer, the mirrored contact's phone, a phone
+ * ghost) is the login of a `linked` link of the brand.
+ */
+export async function isOwnLinkedAccount(input: { orgId: string; brandId: string; channel: string; ghosts: string[] }): Promise<boolean> {
+  if (input.ghosts.length === 0) return false;
+  const ghostList = sql.join(input.ghosts.map((g) => sql`${g}`), sql`, `);
+  const known = (await db.execute(sql`
+    SELECT phone FROM matrix_ghost_phones WHERE ghost_mxid IN (${ghostList})
+    UNION
+    SELECT phone_e164 FROM contacts
+    WHERE org_id = ${input.orgId} AND brand_id = ${input.brandId} AND channel_handle IN (${ghostList}) AND phone_e164 IS NOT NULL
+  `)) as unknown as { phone: string }[];
+  const phones = new Set(known.map((r) => r.phone));
+  for (const g of input.ghosts) {
+    const p = phoneFromMxid(g, WHATSAPP_GHOST_PREFIX);
+    if (p) phones.add(p);
+  }
+  if (phones.size === 0) return false;
+  const digits = [...phones].map((p) => p.replace(/[^0-9]/g, "")).filter((d) => d.length > 0);
+  if (digits.length === 0) return false;
+  const rows = (await db.execute(sql`
+    SELECT 1 FROM matrix_links
+    WHERE org_id = ${input.orgId} AND brand_id = ${input.brandId} AND channel = ${input.channel}
+      AND status = 'linked' AND remote_login_id IS NOT NULL
+      AND regexp_replace(remote_login_id, '[^0-9]', '', 'g') IN (${sql.join(digits.map((d) => sql`${d}`), sql`, `)})
+    LIMIT 1
+  `)) as unknown as unknown[];
+  return rows.length > 0;
 }

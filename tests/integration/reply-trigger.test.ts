@@ -577,6 +577,37 @@ describe.skipIf(!RUN)("reply trigger", () => {
       expect(copilotCalls).toHaveLength(0);
     });
 
+    it("one of the brand's own linked accounts the owner typed to by hand is no human takeover: handed off with linkedBy", async () => {
+      await link();
+      // +33770657585 (the person's number) is another linked account of the brand: the owner typed between his own numbers.
+      await db.insert(matrixLinks).values({
+        orgId: ORG, brandId: BRAND, channel: "whatsapp", createdByUserId: USER, status: "linked", method: "qr", remoteLoginId: "33770657585",
+        linkedAt: new Date(),
+      });
+      await event("$own0", OWN, min(0), "typed by hand between my own two numbers");
+      await event("$own1", GHOST, min(1), "Hi Sophie, how many campaigns run?");
+      expect((await detectReplies(conn, run1)).detected).toBe(1);
+      await deliverDueReplies();
+      expect(copilotCalls).toHaveLength(1);
+      expect(copilotCalls[0].body.sender).toEqual({ phone: "+33770657585", name: "Kevin (WA)", linkedBy: { orgId: ORG, userId: USER } });
+      expect((await reports())[0]).toMatchObject({ status: "handed_off", reason: "copilot" });
+    });
+
+    it("a skip recorded under older rules never swallows the person's later messages on the Copilot's line", async () => {
+      await link();
+      await event("$old1", GHOST, min(1), "test before the line was the Copilot's");
+      await db.insert(replyTriggerReports).values({
+        orgId: ORG, brandId: BRAND, source: "matrix", channel: "whatsapp", connectionId: conn.id, roomId: ROOM, conversationId,
+        anchorEventId: "$old1", campaignId: null, messages: [{ eventId: "$old1", at: new Date(min(1)).toISOString(), text: "test before the line was the Copilot's" }],
+        firstMessageAt: new Date(min(1)), lastMessageAt: new Date(min(1)), judgment: null, detectedAt: new Date(), status: "skipped", reason: "own_team",
+      });
+      await event("$new1", GHOST, min(2), "Hello again?");
+      expect((await detectReplies(conn, run1)).detected).toBe(1);
+      await deliverDueReplies();
+      expect(copilotCalls.map((c) => c.body.messageId)).toEqual(["$new1"]);
+      expect((copilotCalls[0].body.thread as { text: string }[]).map((t) => t.text)).toEqual(["test before the line was the Copilot's"]);
+    });
+
     it("no number known for the person: recorded copilot_phone_unknown, never silently", async () => {
       await link();
       await db.update(contacts).set({ phoneE164: null }).where(eq(contacts.brandId, BRAND));
