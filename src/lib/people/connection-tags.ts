@@ -26,7 +26,9 @@
  *   - a group the person never wrote in: the group's own verdict, never "to user" (they never
  *     wrote to anybody);
  *   - a record of the brand's own tools (CRM, CSV, Stripe, auth provider, PostHog, our cold
- *     email, the Copilot, the API): professional_to_brand, no model;
+ *     email, the Copilot, the API): professional_to_brand, no model; EXCEPT an empty Stripe
+ *     customer (no email, phone, name, nor any charge: an abandoned checkout), which is nobody
+ *     anyone can talk to and earns no tag (STRIPE-GHOST-1018);
  *   - an automated sender (Gmail-only, judged automated): professional_not_to_brand.
  * Tags of every presence are UNIONED: a friend who is also a client carries both.
  */
@@ -91,7 +93,14 @@ interface GroupLike {
 }
 
 export interface PersonLikeForTags {
-  presences: { source: string; emails: string[]; sourceRef?: string; detail: Record<string, unknown> }[];
+  presences: {
+    source: string;
+    emails: string[];
+    phones?: string[];
+    displayName?: string | null;
+    sourceRef?: string;
+    detail: Record<string, unknown>;
+  }[];
   evidence?: { kind: string; ref?: string }[];
 }
 
@@ -108,10 +117,24 @@ export interface TagLookups {
 
 type PresenceLike = PersonLikeForTags["presences"][number];
 
+/**
+ * PURE: a Stripe customer that states nothing to reach or know a person by: no email, no phone,
+ * no name, and Stripe records not one charge for it (STRIPE-GHOST-1018, owner 2026-10-18: 44
+ * abandoned checkouts rendered as "Unknown" Unibox rows). Only a presence whose Stripe standing
+ * is READ counts as empty: no standing = not proven empty. Its facts stay recorded.
+ */
+export function isEmptyStripeCustomer(p: PresenceLike): boolean {
+  if (p.source !== "stripe") return false;
+  const standing = p.detail.stripe as { paidCharges?: unknown; refundedCharges?: unknown } | undefined;
+  if (!standing || typeof standing.paidCharges !== "number" || typeof standing.refundedCharges !== "number") return false;
+  if (standing.paidCharges + standing.refundedCharges > 0) return false;
+  return p.emails.length === 0 && (p.phones ?? []).length === 0 && !p.displayName?.trim();
+}
+
 /** PURE: the tags ONE presence earns (its threads, its groups, the brand tool holding it). */
 export function presenceConnectionTags(p: PresenceLike, x: TagLookups): PersonConnectionTag[] {
   return collect((add, addItem) => {
-    if (BRAND_TOOL_SOURCES.has(p.source)) {
+    if (BRAND_TOOL_SOURCES.has(p.source) && !isEmptyStripeCustomer(p)) {
       add("professional_to_brand", [], { kind: "source", ref: p.source, probability: null });
     }
     const keys: string[] = [];

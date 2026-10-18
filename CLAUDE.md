@@ -38,7 +38,7 @@ other); a thread with no words = `personal_to_user`; a group = `group-tags.ts`: 
 (the group, re-judged on rename / new message) inherited by silent members (never "to user"),
 `group:<room>|<contact>` (the member's own posts, with replies to / mentions of the user);
 the brand's own tools (CRM, CSV, Stripe, Clerk, PostHog, Instantly, Copilot, API) =
-`professional_to_brand`, no model; automated sender = `professional_not_to_brand`. A judged item
+`professional_to_brand`, no model (except an EMPTY Stripe customer: no email, phone, name nor charge = no tag, out of the Unibox, facts kept, `isEmptyStripeCustomer`, STRIPE-GHOST-1018); automated sender = `professional_not_to_brand`. A judged item
 keeps every tag >= 0.5, else its most likely one. Build summary `connectionTags` counts
 `peopleTagged` / `peopleUntagged`.
 
