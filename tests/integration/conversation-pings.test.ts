@@ -1,16 +1,13 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
-import express from "express";
-import request from "supertest";
 import { eq, sql } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
 import { conversationPings } from "../../src/db/schema.js";
-import { storeCopilotTurn } from "../../src/lib/copilot/messages.js";
 import { storeApiCalls, type ApiCallInput } from "../../src/lib/api-calls/calls.js";
-import { announceApiCallStarts, announceCopilotStarts, type CopilotPushed } from "../../src/lib/conversation-pings.js";
-import copilotRoutes from "../../src/routes/copilot.js";
+import { announceApiCallStarts } from "../../src/lib/conversation-pings.js";
 
 /**
- * The owner's Telegram ping at each conversation START (Copilot, API, MCP),
+ * The owner's Telegram ping at each conversation START (API, MCP; the Copilot is
+ * pinged per message, tests/integration/assistant-pings.test.ts),
  * against a real Postgres (gated on CRM_TEST_DB). Telegram, client-service,
  * brand-service and runs-service are stubbed at `fetch`.
  */
@@ -68,21 +65,6 @@ function installFetchStub() {
 
 const at = (minutes: number) => new Date(Date.UTC(2026, 9, 12, 10, 0, 0) + minutes * 60_000).toISOString();
 
-const turn = (over: Partial<CopilotPushed> & { messages: CopilotPushed["messages"] }): CopilotPushed => ({
-  orgId: CHAT_ORG,
-  userId: USER_JANE,
-  email: "jane@prospect.io",
-  displayName: null,
-  sessionId: "sess-1",
-  ...over,
-});
-
-/** What the route does: store, then announce (awaited here). */
-async function chat(t: CopilotPushed) {
-  const { newMessageIds } = await storeCopilotTurn(t, "run-1");
-  await announceCopilotStarts(t, newMessageIds, "run-1");
-}
-
 const apiCall = (callId: string, minutes: number, over: Partial<ApiCallInput> = {}): ApiCallInput => ({
   callId,
   channel: "api",
@@ -120,55 +102,9 @@ describe.skipIf(!RUN)("owner Telegram ping at each conversation start", () => {
   });
   afterAll(wipe);
 
-  it("Copilot: one ping when a conversation starts, none for the next messages, none on a retried push", async () => {
-    await chat(
-      turn({
-        messages: [
-          { messageId: "m-1", role: "user", text: "Can you find me 50 dentists in Lyon?", at: at(0) },
-          { messageId: "m-2", role: "assistant", text: "Sure.", at: at(0.1) },
-        ],
-      }),
-    );
-    expect(sent).toHaveLength(1);
-    const [personRow] = (await db.execute(sql`SELECT person_id FROM person_ids WHERE org_id = ${STAFF_ORG} AND identity_key = 'email:jane@prospect.io'`)) as unknown as { person_id: string }[];
-    expect(sent[0]).toBe(
-      [
-        "New conversation on AI chat",
-        "Who: Jane Doe (jane@prospect.io)",
-        "Org: Prospect Inc",
-        'First message: "Can you find me 50 dentists in Lyon?"',
-        `Thread: https://dashboard.distribute.you/v2/orgs/org_staff/brands/${BRAND}/unibox?person=${personRow.person_id}`,
-      ].join("\n"),
-    );
-
-    // A second message of the same conversation: no ping.
-    await chat(turn({ messages: [{ messageId: "m-3", role: "user", text: "In Lyon only", at: at(2) }] }));
-    // The same turn pushed again (chat-service retry): no ping.
-    const replay = turn({ messages: [{ messageId: "m-1", role: "user", text: "Can you find me 50 dentists in Lyon?", at: at(0) }] });
-    await chat(replay);
-    // Even a replay that claims the message is new (a restart mid-announce) does not ping twice.
-    await announceCopilotStarts(replay, ["m-1"], "run-1");
-    expect(sent).toHaveLength(1);
-
-    const [ping] = await db.select().from(conversationPings).where(eq(conversationPings.startRef, "m-1"));
-    expect(ping).toMatchObject({ source: "copilot", channel: "chat", status: "sent", telegramMessageId: 1001 });
-  }, 30_000);
-
-  it("Copilot: a new session, or the same session after 30 minutes of silence, is a new conversation", async () => {
-    await chat(turn({ messages: [{ messageId: "a-1", role: "user", text: "hi", at: at(0) }] }));
-    await chat(turn({ sessionId: "sess-2", messages: [{ messageId: "b-1", role: "user", text: "another topic", at: at(5) }] }));
-    await chat(turn({ messages: [{ messageId: "a-2", role: "user", text: "back again", at: at(45) }] }));
-    expect(sent.map((t) => t.split("\n").find((l) => l.startsWith("First message")))).toEqual([
-      'First message: "hi"',
-      'First message: "another topic"',
-      'First message: "back again"',
-    ]);
-  }, 30_000);
-
   it("staff never pings: a staff address, or a user id ever seen with one", async () => {
-    await chat(turn({ userId: USER_KEVIN, email: "kevin@distribute.you", messages: [{ messageId: "k-1", role: "user", text: "test", at: at(0) }] }));
+    await calls([apiCall("kc-0", 0, { userId: USER_KEVIN, email: "kevin@distribute.you" })]);
     // The same person under an outside address later: still him.
-    await chat(turn({ userId: USER_KEVIN, email: "kev@outside.io", sessionId: "sess-k2", messages: [{ messageId: "k-2", role: "user", text: "test", at: at(60) }] }));
     await calls([apiCall("kc-1", 120, { userId: USER_KEVIN, email: "kev@outside.io" })]);
     expect(sent).toHaveLength(0);
     expect(await db.select().from(conversationPings).where(eq(conversationPings.email, "kev@outside.io"))).toHaveLength(0);
@@ -197,23 +133,9 @@ describe.skipIf(!RUN)("owner Telegram ping at each conversation start", () => {
 
   it("a Telegram failure is recorded and logged, never thrown, never retried", async () => {
     telegramDown = true;
-    await expect(chat(turn({ messages: [{ messageId: "f-1", role: "user", text: "hi", at: at(0) }] }))).resolves.toBeUndefined();
+    await expect(calls([apiCall("f-1", 0)])).resolves.toBeUndefined();
     const [ping] = await db.select().from(conversationPings).where(eq(conversationPings.startRef, "f-1"));
     expect(ping).toMatchObject({ status: "failed", telegramMessageId: null });
     expect(ping.error).toContain("502");
-  }, 30_000);
-
-  it("the push route answers before the ping and keeps its shape", async () => {
-    const a = express();
-    a.use(express.json());
-    a.use(copilotRoutes);
-    const res = await request(a)
-      .post("/internal/copilot/messages")
-      .set("x-api-key", API_KEY)
-      .send(turn({ messages: [{ messageId: "r-1", role: "user", text: "hello", at: at(0) }] }));
-    expect(res.status).toBe(200);
-    expect(res.body).toEqual({ stored: 1, duplicates: 0 });
-    for (let i = 0; i < 50 && sent.length === 0; i++) await new Promise((r) => setTimeout(r, 50));
-    expect(sent).toHaveLength(1);
   }, 30_000);
 });

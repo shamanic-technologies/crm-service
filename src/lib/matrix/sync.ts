@@ -48,6 +48,7 @@ import {
 } from "./events.js";
 import { readThread, THREAD_WINDOW } from "./leads.js";
 import { readAccountUsers } from "../people/account-users.js";
+import { announceAssistantMatrixMessages } from "../assistant-pings.js";
 import { deliverDueReplies, detectReplies, type ReplyDetection } from "../reply-trigger/watch.js";
 import {
   hidesConversation,
@@ -689,6 +690,9 @@ async function syncConnectionLocked(conn: MatrixConnection): Promise<ConnectionS
       else leadsSkippedUnchanged += 1;
     }
 
+    // The owner's Telegram ping per message with our assistant (SOPHIE-TG-PING-1018): never awaited, never throws.
+    void announceAssistantMatrixMessages(conn);
+
     // After bronze + silver: the timeline already serves what we are about to report.
     let replies: ReplyDetection | null = null;
     try {
@@ -803,6 +807,8 @@ export async function liveSyncConnection(conn: MatrixConnection): Promise<number
     const bronze = await ingestBronze(current);
     if (bronze.eventsIngested === 0) return 0;
     for (const roomId of bronze.rooms) await rebuildRoom(current, roomId);
+    // The owner's Telegram ping per message with our assistant (SOPHIE-TG-PING-1018): never awaited, never throws.
+    void announceAssistantMatrixMessages(current);
 
     const ids = { orgId: current.orgId, userId: current.createdByUserId, brandIds: [current.brandId] };
     let runId: Promise<string> | null = null;
