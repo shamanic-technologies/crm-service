@@ -1050,7 +1050,11 @@ owner had written to. A recorded fact, never an address-shape guess.
   inbound, unmatched, and every other source): instantly-service's verbatim
   statement of WHICH `email_sent` fact the email is; `subjectKey` = lead-service's
   fact id / source ref, so the Unibox pairs email and label by identity, never by
-  clock (the two stamps of one send differ by ~1 min). Stored items predating
+  clock (the two stamps of one send differ by ~1 min).
+  A Matrix / Gmail message that IS a live fact carries `ref.factId` (`lib/people/fact-ids.ts`,
+  UNIBOX-FACT-ID-1019: natural key `matrix|<event>` / `gmail|<address>|<message id>`, one indexed
+  query, attached after paging and never in a cursor): the dashboard's key to features-service's
+  "written by" rows. No live fact = absent. Stored items predating
   `STORE_FORMAT` 3 serve null until their background re-read.
 - **Search = `GET /orgs/people?q=`** (`search.ts`), same order/paging/filters,
   plain case-insensitive substring, no model. Matches name, company (person +
