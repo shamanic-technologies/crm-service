@@ -39,6 +39,7 @@ import { COPILOT_SENDER_NAME, copilotDestination, type CopilotDestination } from
 import { isStaffActor, mintPersonId, readOrg, readUserName, uniboxThreadUrl } from "./conversation-pings.js";
 import type { MatrixEvent } from "./matrix/client.js";
 import { editTarget, humanText, phoneFromMxid } from "./matrix/events.js";
+import { isVoiceNote, withVoiceTranscripts } from "./matrix/voice-notes.js";
 import { normalizeEmail } from "./people/identity.js";
 import type { SiblingIdentity } from "./people/siblings.js";
 import { ownTeamMatch, readOwnTeam } from "./reply-trigger/own-team.js";
@@ -49,6 +50,8 @@ const SERVICE_NAME = "crm-service";
 const MESSAGE_MAX = 500;
 /** A mirrored message older than this is never pinged (the scan stays bounded). */
 export const ASSISTANT_PING_LOOKBACK_MS = 24 * 3_600_000;
+/** How long a voice note's ping waits for its transcript before it is decided without words. */
+export const VOICE_NOTE_PING_WAIT_MS = 10 * 60_000;
 
 export const ASSISTANT_PING_SKIPS = {
   staff: "staff",
@@ -307,6 +310,9 @@ interface Candidate {
   payload: MatrixEvent;
   /** The event this one edits (`m.replace`), when mirrored on the connection. */
   replaced: MatrixEvent | null;
+  /** Its transcript when it is a transcribed voice note (SOPHIE-VOICE-1019). */
+  voice_status: string | null;
+  voice_text: string | null;
 }
 
 interface ThreadRow {
@@ -348,8 +354,10 @@ export async function announceAssistantMatrixMessages(conn: MatrixConnection, no
     const since = await watchSince(conn);
     const floor = new Date(Math.max(since.getTime(), now - ASSISTANT_PING_LOOKBACK_MS));
     const candidates = (await db.execute(sql`
-      SELECT e.event_id, e.room_id, e.sender, e.origin_server_ts, e.payload, r.payload AS replaced
+      SELECT e.event_id, e.room_id, e.sender, e.origin_server_ts, e.payload, r.payload AS replaced,
+             t.status AS voice_status, t.text AS voice_text
       FROM matrix_raw_events e
+      LEFT JOIN voice_note_transcripts t ON t.event_id = e.event_id
       LEFT JOIN matrix_raw_events r
         ON r.event_id = e.payload->'content'->'m.relates_to'->>'event_id'
         AND r.connection_id = e.connection_id
@@ -394,7 +402,14 @@ export async function announceAssistantMatrixMessages(conn: MatrixConnection, no
         const at = new Date(c.origin_server_ts);
         const base = { source: "matrix" as const, messageRef: c.event_id, channel: conn.channel, connectionId: conn.id, messageAt: at };
         const thread = threadOf.get(c.room_id);
-        const kind = classifyAssistantEvent(c.payload, conn.matrixUserId, ourSends, c.replaced);
+        // A voice note pings what was SAID (SOPHIE-VOICE-1019): left unrecorded until the reply watch
+        // transcribed it (it re-runs this right after), pinged without words only past the wait.
+        let payload = c.payload;
+        if (isVoiceNote(payload.content) && c.sender !== conn.matrixUserId) {
+          if (c.voice_status) payload = withVoiceTranscripts([payload], new Map([[c.event_id, { status: c.voice_status, text: c.voice_text }]]))[0];
+          else if (now - at.getTime() < VOICE_NOTE_PING_WAIT_MS) continue;
+        }
+        const kind = classifyAssistantEvent(payload, conn.matrixUserId, ourSends, c.replaced);
         if (!thread || "skip" in kind) {
           const reason = !thread ? ASSISTANT_PING_SKIPS.notConversation : (kind as { skip: string }).skip;
           await claim({ ...base, direction: c.sender === conn.matrixUserId ? "outbound" : "inbound", status: "skipped", reason });

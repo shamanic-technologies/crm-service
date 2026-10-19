@@ -45,6 +45,7 @@ import { emailKey, keysOf, normalizeEmail, pickPersonKey, type Presence } from "
 import type { PersonConnectionTag } from "./connection-tags.js";
 import type { PersonOrganization } from "./organizations.js";
 import type { PersonRelation } from "./relations.js";
+import { voiceNoteText } from "../matrix/voice-notes.js";
 
 export const FACT_TYPES = [
   "added_to_crm",
@@ -573,6 +574,12 @@ async function ghlCandidates(orgId: string, brandId: string): Promise<CandidateF
   return out;
 }
 
+/** A message's words; a voice note's are its transcript when it has one (SOPHIE-VOICE-1019). */
+function messageText(e: { body: string | null; voice_status: string | null; voice_text: string | null }): string | null {
+  if (e.body?.trim() || !e.voice_status) return e.body;
+  return voiceNoteText({ status: e.voice_status, text: e.voice_text });
+}
+
 async function matrixCandidates(orgId: string, brandId: string): Promise<CandidateFact[]> {
   const events = await rows<{
     contact_id: string;
@@ -586,14 +593,18 @@ async function matrixCandidates(orgId: string, brandId: string): Promise<Candida
     channel_handle: string;
     full_name: string | null;
     own_mxid: string;
+    voice_status: string | null;
+    voice_text: string | null;
   }>(sql`
     SELECT e.event_id, e.room_id, e.sender, e.origin_server_ts,
            e.payload->'content'->>'body' AS body, e.payload->'content'->>'msgtype' AS msgtype,
-           v.channel, c.id AS contact_id, c.channel_handle, c.full_name, mc.matrix_user_id AS own_mxid
+           v.channel, c.id AS contact_id, c.channel_handle, c.full_name, mc.matrix_user_id AS own_mxid,
+           t.status AS voice_status, t.text AS voice_text
     FROM matrix_raw_events e
     JOIN conversations v ON v.connection_id = e.connection_id AND v.room_id = e.room_id
     JOIN contacts c ON c.id = v.contact_id
     JOIN matrix_connections mc ON mc.id = e.connection_id
+    LEFT JOIN voice_note_transcripts t ON t.event_id = e.event_id
     WHERE e.org_id = ${orgId} AND e.brand_id = ${brandId} AND e.event_type = 'm.room.message'
   `);
   return events.map((e) => ({
@@ -606,7 +617,7 @@ async function matrixCandidates(orgId: string, brandId: string): Promise<Candida
     crmContactId: e.contact_id,
     occurredAt: iso(e.origin_server_ts),
     dateBasis: "sent_at",
-    payload: { channel: e.channel, threadId: e.room_id, text: e.body, msgtype: e.msgtype },
+    payload: { channel: e.channel, threadId: e.room_id, text: messageText(e), msgtype: e.msgtype },
     subject: presenceSubject("matrix", e.channel_handle, e.full_name),
   }));
 }

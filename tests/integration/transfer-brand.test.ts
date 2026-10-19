@@ -151,6 +151,9 @@ async function seedBrand(org: string, brand: string, tag: string) {
     INSERT INTO phone_watch_artifacts (org_id, brand_id, artifact_id, source)
     VALUES (${org}, ${brand}, gen_random_uuid(), 'clerk')`);
   await db.execute(sql`
+    INSERT INTO voice_note_transcripts (event_id, org_id, brand_id, connection_id, room_id, status, text)
+    VALUES (${"$voice-" + tag + "-" + Math.random().toString(16).slice(2)}, ${org}, ${brand}, gen_random_uuid(), '!room', 'completed', 'hello')`);
+  await db.execute(sql`
     INSERT INTO conversation_verdicts (org_id, brand_id, conversation_key, source, topic, confidence, probabilities,
       brand_probability, offer_scores, offer_ids, context_hash, judged_through, input, model, run_id)
     VALUES (${org}, ${brand}, 'gmail:a@b.co', 'gmail', 'this_brand', 0.9, '{}', 0.9, '{}', '[]', 'h', 'm', '{}', 'jev', 'run-1')`);

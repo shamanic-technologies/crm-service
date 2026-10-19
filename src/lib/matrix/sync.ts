@@ -49,6 +49,7 @@ import {
 import { readThread, THREAD_WINDOW } from "./leads.js";
 import { readAccountUsers } from "../people/account-users.js";
 import { announceAssistantMatrixMessages } from "../assistant-pings.js";
+import { overlayVoiceTranscripts } from "./voice-notes.js";
 import { deliverDueReplies, detectReplies, type ReplyDetection } from "../reply-trigger/watch.js";
 import {
   hidesConversation,
@@ -591,7 +592,7 @@ async function computeLead(
     .orderBy(asc(matrixRawEvents.originServerTs), asc(matrixRawEvents.eventId));
 
   const lines = renderThread(
-    rows.map((r) => r.payload as unknown as MatrixEvent),
+    await overlayVoiceTranscripts(rows.map((r) => r.payload as unknown as MatrixEvent)),
     conn.matrixUserId,
     THREAD_WINDOW,
   );
@@ -697,6 +698,8 @@ async function syncConnectionLocked(conn: MatrixConnection): Promise<ConnectionS
     let replies: ReplyDetection | null = null;
     try {
       replies = await detectReplies(conn, async () => run.id);
+      // A voice note's ping waited for its words (SOPHIE-VOICE-1019).
+      if (replies.voiceNotesTranscribed) void announceAssistantMatrixMessages(conn);
     } catch (err) {
       // The mirror itself is fine; the next pass re-reads every campaign thread that moved.
       console.error(`[crm-service][reply-trigger] detection failed for connection ${conn.id}:`, err);
@@ -816,6 +819,8 @@ export async function liveSyncConnection(conn: MatrixConnection): Promise<number
       (runId ??= createRun({ ...ids, serviceName: SERVICE_NAME, taskName: "matrix.live" }).then((r) => r.id));
     try {
       const replies = await detectReplies(current, lazyRun, Date.now(), { rooms: [...bronze.rooms] });
+      // A voice note's ping waited for its words (SOPHIE-VOICE-1019).
+      if (replies.voiceNotesTranscribed) void announceAssistantMatrixMessages(current);
       if (runId) await updateRun(await runId, "completed", { ...ids, runId: await runId });
       return replies.detected;
     } catch (err) {

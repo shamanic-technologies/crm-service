@@ -55,6 +55,7 @@ import type { ChatTrackingHeaders } from "../chat-client.js";
 import { judgeQuestions, type ChoiceQuestion, type NoulQuestion } from "../judgments-client.js";
 import type { MatrixEvent } from "../matrix/client.js";
 import { renderThread } from "../matrix/events.js";
+import { overlayVoiceTranscripts } from "../matrix/voice-notes.js";
 import { mapLimit, siblingGet, siblingGetOk, type SiblingIdentity } from "./siblings.js";
 import { accountUserView, readAccountUsers, userIdsOf, type AccountUserView, type AccountUsers } from "./account-users.js";
 import { CONNECTION_TAGS, tagQuestionText, tagsFromScores, type ConnectionTag, type TagScores } from "./connection-tags.js";
@@ -469,7 +470,7 @@ export async function matrixConversationInput(conversationId: string): Promise<(
     .orderBy(asc(matrixRawEvents.originServerTs), asc(matrixRawEvents.eventId));
   const lines = threadWindow(
     renderThread(
-      events.map((e) => e.payload as unknown as MatrixEvent),
+      await overlayVoiceTranscripts(events.map((e) => e.payload as unknown as MatrixEvent)),
       row.ownMxid,
       Number.POSITIVE_INFINITY,
     ),

@@ -12,6 +12,7 @@ import {
   matrixRawEvents,
   people,
   peopleScopes,
+  voiceNoteTranscripts,
   whatsappSends,
   type MatrixConnection,
 } from "../../src/db/schema.js";
@@ -112,6 +113,7 @@ async function event(id: string, sender: string, body: string, room = ROOM) {
 }
 
 async function wipe() {
+  await db.delete(voiceNoteTranscripts).where(eq(voiceNoteTranscripts.orgId, STAFF_ORG));
   await db.execute(sql`DELETE FROM assistant_message_pings WHERE message_ref LIKE 'sp-%' OR message_ref LIKE '$sp-%'`);
   await db.execute(sql`DELETE FROM copilot_messages WHERE org_id = ${STAFF_ORG}`);
   await db.execute(sql`DELETE FROM person_ids WHERE org_id = ${STAFF_ORG}`);
@@ -236,6 +238,33 @@ describe.skipIf(!RUN)("owner Telegram ping per message with our assistant", () =
       // The next pass (and the 5-min pass at the same time) sees the same events: nothing more.
       await Promise.all([announceAssistantMatrixMessages(conn), announceAssistantMatrixMessages(conn)]);
       expect(sent).toHaveLength(2);
+    }, 30_000);
+
+    it("a voice note pings what was SAID once transcribed; untranscribed it waits, then pings without words (SOPHIE-VOICE-1019)", async () => {
+      const voice = async (id: string, ts: number) =>
+        db.insert(matrixRawEvents).values({
+          orgId: STAFF_ORG, brandId: BRAND, connectionId: conn.id, eventId: id, roomId: ROOM, sender: GHOST, eventType: "m.room.message",
+          originServerTs: new Date(ts), ingestedAt: new Date(),
+          payload: { event_id: id, type: "m.room.message", sender: GHOST, origin_server_ts: ts, content: { msgtype: "m.audio", body: "", url: `mxc://hs/${id.slice(1)}`, filename: "Voice message.ogg", info: { mimetype: "audio/ogg" } } },
+        });
+      await voice("$sp-voice-1", Date.now());
+      // Not transcribed yet: nothing decided.
+      expect(await announceAssistantMatrixMessages(conn)).toBe(0);
+      expect(sent).toHaveLength(0);
+      await db.insert(voiceNoteTranscripts).values({
+        eventId: "$sp-voice-1", orgId: STAFF_ORG, brandId: BRAND, connectionId: conn.id, roomId: ROOM, status: "completed", text: "How many campaigns run on Distribute.you?",
+      });
+      expect(await announceAssistantMatrixMessages(conn)).toBe(1);
+      expect(sent[0].split("\n")[2]).toBe('Message: "🎤 Voice note: How many campaigns run on Distribute.you?"');
+
+      // Never transcribed (history, automation off) and past the wait: decided, no words to ping.
+      await voice("$sp-voice-2", Date.now());
+      await announceAssistantMatrixMessages(conn);
+      expect(await db.select().from(assistantMessagePings).where(eq(assistantMessagePings.messageRef, "$sp-voice-2"))).toHaveLength(0);
+      await announceAssistantMatrixMessages(conn, Date.now() + 11 * 60_000);
+      expect(sent).toHaveLength(1);
+      const [skip] = await db.select().from(assistantMessagePings).where(eq(assistantMessagePings.messageRef, "$sp-voice-2"));
+      expect(skip).toMatchObject({ status: "skipped", reason: "no_text" });
     }, 30_000);
 
     it("the built person names the link; history before the watch never pings", async () => {

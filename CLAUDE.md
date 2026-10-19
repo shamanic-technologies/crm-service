@@ -115,7 +115,10 @@ There are exactly THREE such calls, all once-per-artifact, never per row:
 3. stage meaning, one Jev call per GoHighLevel sync that finds a pipeline stage
    NAME never decided before (recorded, so every later sync makes zero calls);
 4. business relevance, one Jev call per personal-channel conversation (Gmail
-   correspondent, Matrix DM), re-asked only when it moves (see "Sales leads only").
+   correspondent, Matrix DM), re-asked only when it moves (see "Sales leads only");
+5. voice-note transcription, one `POST /orgs/transcriptions` per voice note an
+   automation is about to read (SOPHIE-VOICE-1019, `src/lib/matrix/voice-notes.ts`,
+   see "Voice notes" under the reply trigger), stored once, never redone.
 
 Everything else GoHighLevel sends arrives already structured, so deriving it is
 pure code — no model, no metered call, no catalogue row.
@@ -1340,6 +1343,24 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   (any non-gmail presence), else the ONE brand with the highest `conversation_verdicts` brand probability, else the
   oldest scope; other brands record nothing. Offer: conversation tag > only active offer. Delivery: one org run per
   scope, `person_not_built` → rebuild → deliver.
+
+## Voice notes — what a person SAID is read like what they wrote (`src/lib/matrix/voice-notes.ts`, SOPHIE-VOICE-1019)
+
+Owner 2026-10-19: « fais-lui toujours écrire par texte »: a voice note is understood, the assistant always answers in
+TEXT (no voice reply). The bridge mirrors a voice note as `m.audio`, empty body, file at `mxc://` (`humanText` = "").
+In `detectReplies`, on an account with automation allowed (the Copilot's line AND the reply trigger: one rule, no
+per-number case), each voice note of the unanswered burst (`untranscribedVoiceNotesInBurst`, the burst rule of
+`readThreadForReply`) mirrored since the watch started is downloaded from the homeserver with the account's token
+and sent inline to chat-service `POST /orgs/transcriptions` (org-billed: x-org-id = the account's org, x-user-id = who
+linked it, x-run-id = the sync's run, same identity as the burst's Jev call; chat-service provisions, authorizes,
+actualizes). One retry on a 5xx / unreachable, then `failed`: the person is still answered. Stored once in
+`voice_note_transcripts` (UNIQUE event id, `run_id` + `chat_run_id` = where the cost rows are). EVERY reader overlays
+it (`overlayVoiceTranscripts` / `voiceNoteText`): burst + Jev, Copilot hand-off text and thread, Unibox timeline,
+fact feed, lead reading, relevance, owner ping. Words = `🎤 Voice note: <transcript>`, else `🎤 Voice note (could not
+be understood)` (failed or nothing said); byte-equal to chat-service `VOICE_NOTE_PREFIX` / `VOICE_NOTE_UNREADABLE`,
+whose Copilot block says what they mean. A voice note nobody transcribed (history, automation off) stays silent.
+The owner ping of an inbound voice note waits (unrecorded) up to `VOICE_NOTE_PING_WAIT_MS` (10 min) for its words; the
+sync re-runs the pings right after a pass that transcribed (`voiceNotesTranscribed`).
 
 ## Boot: the port binds BEFORE migrations
 
