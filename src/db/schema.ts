@@ -2484,3 +2484,40 @@ export const contactPointOrgVerdicts = pgTable(
   },
   (table) => [uniqueIndex("contact_point_org_verdicts_uq").on(table.orgId, table.brandId, table.contactPoint)],
 );
+
+/**
+ * VOICE NOTES, TRANSCRIBED (SOPHIE-VOICE-1019): the words of a voice note
+ * (`m.audio`) a person sent on a linked account whose automation reads it (the
+ * assistant line, the reply trigger). One row per mirrored event, never
+ * re-transcribed. Silver beside bronze: the raw event stays as mirrored; every
+ * reader of words overlays this (`matrix/voice-notes.ts`), so the Unibox, the
+ * owner's ping, the Copilot and Jev all read the same text.
+ * Spend: chat-service `POST /orgs/transcriptions`, org-billed under the
+ * connection's org (its cost rows are on `chat_run_id`, child of `run_id`).
+ */
+export const voiceNoteTranscripts = pgTable(
+  "voice_note_transcripts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    eventId: text("event_id").notNull(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    connectionId: uuid("connection_id").notNull(),
+    roomId: text("room_id").notNull(),
+    // 'completed' (text may be empty: nothing spoken) | 'failed' (could not be transcribed)
+    status: text("status").notNull(),
+    text: text("text"),
+    languages: jsonb("languages").$type<string[] | null>(),
+    model: text("model"),
+    // 'too_large' | 'media_unreachable' | 'chat_service_refused' | 'chat_service_unreachable'
+    errorCode: text("error_code"),
+    error: text("error"),
+    sizeBytes: integer("size_bytes"),
+    durationMs: integer("duration_ms"),
+    runId: text("run_id"),
+    chatRunId: text("chat_run_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("voice_note_transcripts_event_uq").on(table.eventId)],
+);
+export type VoiceNoteTranscript = typeof voiceNoteTranscripts.$inferSelect;

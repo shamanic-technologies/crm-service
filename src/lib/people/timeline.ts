@@ -79,6 +79,7 @@ import {
 } from "../api-calls/calls.js";
 import { siblingGetOk } from "./siblings.js";
 import { deferApiAnswer } from "./item-fill.js";
+import { readVoiceTranscripts, voiceNoteText } from "../matrix/voice-notes.js";
 
 export const TIMELINE_SOURCE_STATUSES = ["ok", "empty", "not_connected", "failed"] as const;
 export type TimelineSourceStatus = (typeof TIMELINE_SOURCE_STATUSES)[number];
@@ -177,6 +178,20 @@ const notConnected = (asked: string[] = []): SourceResult => ({ status: "not_con
 
 // ─── matrix ─────────────────────────────────────────────────────────────────
 
+/**
+ * A voice note carries no words in bronze (empty body): when it was transcribed
+ * (SOPHIE-VOICE-1019), the Unibox shows what was said, `🎤 Voice note: <words>`.
+ */
+async function withVoiceNoteWords(items: TimelineItem[]): Promise<void> {
+  const silent = items.filter((i) => !i.text?.trim() && typeof i.ref?.eventId === "string");
+  if (silent.length === 0) return;
+  const transcripts = await readVoiceTranscripts(silent.map((i) => i.ref!.eventId as string));
+  for (const i of silent) {
+    const t = transcripts.get(i.ref!.eventId as string);
+    if (t) i.text = voiceNoteText(t);
+  }
+}
+
 async function matrixItems(presences: Presence[]): Promise<SourceResult> {
   const conversationIds = presences
     .map((p) => p.detail.conversationId)
@@ -219,6 +234,7 @@ async function matrixItems(presences: Presence[]): Promise<SourceResult> {
     }
   }
   if (conversationIds.length === 0) {
+    await withVoiceNoteWords(groupItems);
     return { status: groupItems.length ? "ok" : "empty", items: groupItems, error: null, asked: [] };
   }
   const convs = await db
@@ -264,6 +280,7 @@ async function matrixItems(presences: Presence[]): Promise<SourceResult> {
     }
   }
   items.push(...groupItems);
+  await withVoiceNoteWords(items);
   return { status: items.length ? "ok" : "empty", items, error: null, asked: conversationIds };
 }
 

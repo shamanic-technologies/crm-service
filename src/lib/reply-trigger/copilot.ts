@@ -47,6 +47,7 @@ import { isCopilotDestination } from "../copilot/messages.js";
 import type { MatrixEvent } from "../matrix/client.js";
 import { editTarget, foldEdits, humanText, phoneFromMxid } from "../matrix/events.js";
 import { personaOf, type SenderPersona } from "../matrix/persona.js";
+import { overlayVoiceTranscripts } from "../matrix/voice-notes.js";
 import { dialablePhone } from "../trigger-door.js";
 import type { BurstMessage } from "./thread.js";
 
@@ -257,7 +258,12 @@ export async function handOffBurst(r: ReplyTriggerReport, conn: MatrixConnection
     persona: link ? personaOf(link) : null,
     sender: { phone: sender.phone, name: sender.name, linkedBy: await linkedByOf(sender.phone) },
     messages,
-    thread: threadBeforeBurst(events.map((e) => e.payload as unknown as MatrixEvent), conn.matrixUserId, r.anchorEventId, messages[0].at),
+    thread: threadBeforeBurst(
+      await overlayVoiceTranscripts(events.map((e) => e.payload as unknown as MatrixEvent)),
+      conn.matrixUserId,
+      r.anchorEventId,
+      messages[0].at,
+    ),
   });
   const who = { phone: sender.phone, fullName: sender.name };
   try {

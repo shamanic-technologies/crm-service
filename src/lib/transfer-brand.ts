@@ -28,6 +28,7 @@ import {
   contactServes,
   matrixConnections,
   matrixLinks,
+  voiceNoteTranscripts,
   matrixRawEvents,
   conversations,
   matrixLeads,
@@ -135,6 +136,8 @@ export const TRANSFER_TABLES: PgTable[] = [
   // Phone numbers the brand learned ("WhatsApp number given") and the sources the watch looked at.
   phoneGivenReports,
   phoneWatchArtifacts,
+  // What the brand's voice notes said (SOPHIE-VOICE-1019), beside the bronze events they read.
+  voiceNoteTranscripts,
 ];
 
 export interface TransferBrandInput {

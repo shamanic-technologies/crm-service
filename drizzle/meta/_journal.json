@@ -365,6 +365,13 @@
       "when": 1792310000000,
       "tag": "0051_assistant_message_pings",
       "breakpoints": true
+    },
+    {
+      "idx": 52,
+      "version": "7",
+      "when": 1792320000000,
+      "tag": "0052_voice_note_transcripts",
+      "breakpoints": true
     }
   ]
 }

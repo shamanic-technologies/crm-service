@@ -72,6 +72,7 @@ import {
   type DoorIdentity,
 } from "../trigger-door.js";
 import { phoneFromMxid } from "../matrix/events.js";
+import { overlayVoiceTranscripts, transcribeVoiceNote, untranscribedVoiceNotesInBurst } from "../matrix/voice-notes.js";
 import { readBrandOffers } from "../form-trigger/offer.js";
 import { ownTeamMatch, readOwnTeam, type OwnTeam } from "./own-team.js";
 import { readThreadForReply, type BurstMessage, type RoomSend } from "./thread.js";
@@ -172,6 +173,8 @@ export interface ReplyDetection {
   detected: number;
   skipped: { reason: string; roomId: string }[];
   error?: string;
+  /** Voice notes transcribed in this pass (SOPHIE-VOICE-1019): their owner ping can now say what they said. */
+  voiceNotesTranscribed?: number;
 }
 
 /** PURE: when a failed report is next due. */
@@ -404,11 +407,23 @@ export async function detectReplies(
         ),
       );
     out.threadsRead += 1;
-    const reading = readThreadForReply(
-      rows.map((r) => r.payload as unknown as MatrixEvent),
-      conn.matrixUserId,
-      roomSends,
-    );
+    // Voice notes (SOPHIE-VOICE-1019): stored transcripts are read as the person's words; a voice note of the
+    // burst an automation is about to read, mirrored since the watch started, is transcribed first (once).
+    const raw = rows.map((r) => r.payload as unknown as MatrixEvent);
+    let events = await overlayVoiceTranscripts(raw);
+    if (automationAllowed) {
+      const mirroredAt = new Map(rows.map((r) => [r.eventId, r.ingestedAt.getTime()]));
+      const unheard = untranscribedVoiceNotesInBurst(events, conn.matrixUserId, roomSends).filter(
+        (e) => (mirroredAt.get(e.event_id) ?? 0) >= since,
+      );
+      if (unheard.length > 0) {
+        const who = { orgId: conn.orgId, userId: conn.createdByUserId, runId: await runId(), brandId: conn.brandId };
+        for (const e of unheard) await transcribeVoiceNote(conn, roomId, e, who);
+        out.voiceNotesTranscribed = (out.voiceNotesTranscribed ?? 0) + unheard.length;
+        events = await overlayVoiceTranscripts(raw);
+      }
+    }
+    const reading = readThreadForReply(events, conn.matrixUserId, roomSends);
     if (reading.kind !== "unanswered") continue;
 
     // What of this burst is already recorded: a reported / pending / skipped row ends it, except an
@@ -583,7 +598,7 @@ async function currentBurst(r: MatrixReport, ownMxid: string): Promise<BurstMess
     .select({ eventId: whatsappSends.eventId, campaignId: whatsappSends.campaignId, status: whatsappSends.status, sentAt: whatsappSends.sentAt })
     .from(whatsappSends)
     .where(and(eq(whatsappSends.connectionId, r.connectionId), eq(whatsappSends.roomId, r.roomId)));
-  const reading = readThreadForReply(rows.map((x) => x.payload as unknown as MatrixEvent), ownMxid, sends);
+  const reading = readThreadForReply(await overlayVoiceTranscripts(rows.map((x) => x.payload as unknown as MatrixEvent)), ownMxid, sends);
   const burst = reading.kind === "unanswered" ? reading.burst : [];
   const from = burst.findIndex((m) => m.eventId === r.anchorEventId);
   // Answered since, or the anchor is not in the current burst: what was detected stands.

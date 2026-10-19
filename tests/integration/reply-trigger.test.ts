@@ -11,6 +11,7 @@ import {
   people,
   peopleScopes,
   replyTriggerReports,
+  voiceNoteTranscripts,
   whatsappSends,
   type MatrixConnection,
 } from "../../src/db/schema.js";
@@ -44,6 +45,9 @@ process.env.BRAND_SERVICE_URL = "http://brand.test";
 process.env.BRAND_SERVICE_API_KEY = "brand-key";
 process.env.CLIENT_SERVICE_URL = "http://client.test";
 process.env.CLIENT_SERVICE_API_KEY = "client-key";
+process.env.MATRIX_HOMESERVER_URL = "http://hs.test";
+process.env.VOICE_NOTE_RETRY_DELAY_MS = "0";
+process.env.MATRIX_ACCESS_TOKEN = process.env.MATRIX_ACCESS_TOKEN || "platform-token";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -57,10 +61,18 @@ let memberPhones: string[] = [];
 /** chat-service's Copilot hand-off door (SOPHIE-COPILOT-WA-1018). */
 let copilotCalls: { headers: Headers; body: Record<string, unknown> }[] = [];
 let copilotAnswer: { status: number; body: unknown } = { status: 202, body: { status: "accepted" } };
+/** chat-service's transcription (SOPHIE-VOICE-1019) and the homeserver's media download. */
+let transcriptionCalls: { headers: Headers; body: Record<string, unknown> }[] = [];
+const TRANSCRIBED = { status: 200, body: { text: "How many campaigns run on Distribute.you?", languages: ["en"], segments: [], model: "gemini-3.8-flash", tokensInput: 100, tokensOutput: 12, runId: "a7c1d2e3-2222-4222-8222-0000000000e1" } };
+let transcriptionAnswer: { status: number; body: unknown } = TRANSCRIBED;
+let mediaCalls: { url: string; auth: string | null }[] = [];
 
 function installFetchStub() {
   campaignCalls = [];
   copilotCalls = [];
+  transcriptionCalls = [];
+  transcriptionAnswer = TRANSCRIBED;
+  mediaCalls = [];
   jevCalls = 0;
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
@@ -77,6 +89,14 @@ function installFetchStub() {
     }
     if (url.host === "brand.test" && url.pathname === `/internal/brands/${BRAND}/offers`) {
       return json({ offers: [{ offerId: ONLY_OFFER, name: "Only", status: "active" }, { offerId: OFFER, name: "Old", status: "archived" }] });
+    }
+    if (url.host === "hs.test" && url.pathname.startsWith("/_matrix/client/v1/media/download/")) {
+      mediaCalls.push({ url: url.pathname, auth: new Headers(init?.headers).get("authorization") });
+      return new Response(Buffer.from("OggS voice"), { status: 200, headers: { "content-type": "audio/ogg; codecs=opus" } });
+    }
+    if (url.pathname === "/orgs/transcriptions") {
+      transcriptionCalls.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) });
+      return json(transcriptionAnswer.body, transcriptionAnswer.status);
     }
     if (url.pathname === "/internal/copilot/channel-messages") {
       copilotCalls.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) });
@@ -128,6 +148,7 @@ async function reports() {
 }
 
 async function cleanup() {
+  await db.delete(voiceNoteTranscripts).where(eq(voiceNoteTranscripts.brandId, BRAND));
   await db.delete(replyTriggerReports).where(eq(replyTriggerReports.brandId, BRAND));
   await db.delete(conversationVerdicts).where(eq(conversationVerdicts.brandId, BRAND));
   await db.delete(whatsappSends).where(eq(whatsappSends.brandId, BRAND));
@@ -562,6 +583,69 @@ describe.skipIf(!RUN)("reply trigger", () => {
       expect(copilotCalls[0].body).toMatchObject({ messageId: "$undecrypted", text: "How many campaigns run on Distribute.you?" });
       expect(await reports()).toHaveLength(1);
       expect((await reports())[0]).toMatchObject({ status: "handed_off", anchorEventId: "$undecrypted" });
+    });
+
+    async function voiceNote(id: string, at: number, ingestedAt = new Date()) {
+      await db.insert(matrixRawEvents).values({
+        orgId: ORG, brandId: BRAND, connectionId: conn.id, eventId: id, roomId: ROOM, sender: GHOST, eventType: "m.room.message",
+        originServerTs: new Date(at), ingestedAt,
+        payload: {
+          event_id: id, type: "m.room.message", sender: GHOST, origin_server_ts: at,
+          // The bridge's prod shape (2026-10-18): empty body, the file on the homeserver.
+          content: { url: `mxc://hs.test/media-${id.slice(1)}`, body: "", info: { size: 5540, duration: 4000, mimetype: "audio/ogg; codecs=opus" }, msgtype: "m.audio", filename: "Voice message.ogg", "org.matrix.msc3245.voice": {} },
+        },
+      });
+    }
+
+    it("a voice note is transcribed ONCE, org-billed under the account, and handed to the Copilot as its words (SOPHIE-VOICE-1019)", async () => {
+      await link();
+      await voiceNote("$v1", min(1));
+      expect((await detectReplies(conn, run1)).detected).toBe(1);
+      expect(transcriptionCalls).toHaveLength(1);
+      expect(mediaCalls[0].url).toBe("/_matrix/client/v1/media/download/hs.test/media-v1");
+      expect(transcriptionCalls[0].headers.get("x-org-id")).toBe(ORG);
+      expect(transcriptionCalls[0].headers.get("x-user-id")).toBe(USER);
+      expect(transcriptionCalls[0].headers.get("x-run-id")).toBe("run-1");
+      expect(transcriptionCalls[0].headers.get("x-brand-id")).toBe(BRAND);
+      expect(transcriptionCalls[0].body).toEqual({ audio: { base64: Buffer.from("OggS voice").toString("base64"), mimeType: "audio/ogg; codecs=opus" }, durationSeconds: 4 });
+
+      await deliverDueReplies();
+      expect(copilotCalls).toHaveLength(1);
+      expect(copilotCalls[0].body).toMatchObject({ messageId: "$v1", text: "🎤 Voice note: How many campaigns run on Distribute.you?" });
+      const [stored] = await db.select().from(voiceNoteTranscripts).where(eq(voiceNoteTranscripts.eventId, "$v1"));
+      expect(stored).toMatchObject({ status: "completed", text: "How many campaigns run on Distribute.you?", runId: "run-1", chatRunId: "a7c1d2e3-2222-4222-8222-0000000000e1" });
+
+      // Read again: never transcribed twice; the next text message carries the voice note in its thread.
+      await db.insert(whatsappSends).values({
+        orgId: ORG, brandId: BRAND, idempotencyKey: "copilot:$v1", phone: "+33770657585", text: "We run 12.", status: "sent",
+        connectionId: conn.id, roomId: ROOM, ghostMxid: GHOST, eventId: "$cv", sentAt: new Date(min(2)), fromAccount: `+${SOPHIE}`,
+      });
+      await event("$cv", OWN, min(2), "We run 12.");
+      await event("$v2", GHOST, min(3), "Thanks!");
+      expect((await detectReplies(conn, run1)).detected).toBe(1);
+      await deliverDueReplies();
+      expect(transcriptionCalls).toHaveLength(1);
+      expect((copilotCalls[1].body.thread as { text: string }[]).map((t) => t.text)).toEqual(["🎤 Voice note: How many campaigns run on Distribute.you?", "We run 12."]);
+    });
+
+    it("a voice note that cannot be transcribed is still answered: the Copilot is told it could not be understood (SOPHIE-VOICE-1019)", async () => {
+      await link();
+      transcriptionAnswer = { status: 503, body: { error: "down" } };
+      await voiceNote("$v3", min(1));
+      expect((await detectReplies(conn, run1)).detected).toBe(1);
+      expect(transcriptionCalls).toHaveLength(2); // one retry, then decided
+      await deliverDueReplies();
+      expect(copilotCalls[0].body).toMatchObject({ messageId: "$v3", text: "🎤 Voice note (could not be understood)" });
+      const [stored] = await db.select().from(voiceNoteTranscripts).where(eq(voiceNoteTranscripts.eventId, "$v3"));
+      expect(stored).toMatchObject({ status: "failed", errorCode: "chat_service_unreachable" });
+    });
+
+    it("a voice note mirrored before the watch started is history: never transcribed (SOPHIE-VOICE-1019)", async () => {
+      await link();
+      await voiceNote("$v4", min(1), new Date(Date.now() - 10 * 60_000));
+      await detectReplies(conn, run1);
+      expect(transcriptionCalls).toHaveLength(0);
+      expect(copilotCalls).toHaveLength(0);
     });
 
     it("a staff / own-team number writing to the assistant is handed off, never skipped as own team", async () => {
