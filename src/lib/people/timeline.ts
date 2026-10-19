@@ -98,7 +98,11 @@ export interface TimelineItem {
   text: string | null;
   from: string | null;
   to: string[];
-  /** The source's own ids for this item (thread, message, campaign, contact...). */
+  /**
+   * The source's own ids for this item (thread, message, campaign, contact...). A message
+   * that IS one of our facts (Matrix, Gmail) also carries `factId` = the live fact's id on
+   * the people fact feed (UNIBOX-FACT-ID-1019); absent on anything else.
+   */
   ref: Record<string, string | null>;
   /**
    * Gmail messages only (null elsewhere): how `text` was derived by google-service,
@@ -771,7 +775,9 @@ export async function readTimeline(
  * a new message never shifts what "older than this" means.
  */
 export function itemKey(i: TimelineItem): string {
-  return `${i.source}|${i.channel}|${i.kind}|${i.direction ?? ""}|${i.event?.step ?? ""}|${JSON.stringify(i.ref)}`;
+  // `factId` is attached after paging (UNIBOX-FACT-ID-1019): never part of a position.
+  const { factId: _factId, ...ref } = i.ref ?? {};
+  return `${i.source}|${i.channel}|${i.kind}|${i.direction ?? ""}|${i.event?.step ?? ""}|${JSON.stringify(ref)}`;
 }
 
 interface Position {
