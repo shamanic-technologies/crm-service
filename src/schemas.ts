@@ -2316,7 +2316,13 @@ const TimelineItemSchema = z
     text: z.string().nullable(),
     from: z.string().nullable(),
     to: z.array(z.string()),
-    ref: z.record(z.string(), z.string().nullable()),
+    ref: z.record(z.string(), z.string().nullable()).openapi({
+      description:
+        "The source's own ids for this item (thread, message, campaign, contact...). " +
+        "`factId` (UNIBOX-FACT-ID-1019): on a message that IS one of our facts on the people fact feed (Matrix: WhatsApp / LinkedIn / Telegram..., `message_in` / `message_out` / `group_message`; Gmail `message_in` / `message_out`), " +
+        "the id of the LIVE fact (`factId` on GET /internal/people/facts; lead-service's copy keeps it as its message id). " +
+        "Absent on anything that is no fact here (events, cold email, Copilot, API calls) and on a message whose fact is not emitted (held, unattributed): never a guess.",
+    }),
     event: z
       .object({ step: z.string(), dateBasis: z.string(), detail: z.record(z.string(), z.unknown()) })
       .nullable()

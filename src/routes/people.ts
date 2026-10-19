@@ -22,6 +22,7 @@ import type { PossibleLead } from "../lib/people/sources.js";
 import type { LeadCompanyTags, LeadDisqualification, LeadHumanTags } from "../lib/people/state.js";
 import type { PersonRelevance } from "../lib/people/relevance.js";
 import { decodeCursor, findPerson, pageOf, readTimeline } from "../lib/people/timeline.js";
+import { attachFactIds } from "../lib/people/fact-ids.js";
 import { completeItems } from "../lib/people/item-fill.js";
 import { readFacts } from "../lib/people/facts.js";
 import { findPersonById } from "../lib/people/person-id.js";
@@ -550,7 +551,7 @@ router.get(
         const limit = parsed.data.limit ?? TIMELINE_PAGE_DEFAULT;
         const page = pageOf(timeline.items, limit, before);
         // Only the page's items get their heavy part (message text, API answer summary).
-        await completeItems(page.items);
+        await Promise.all([completeItems(page.items), attachFactIds(req.orgId!, brandId, person.emails as string[], page.items)]);
         return res.json({
           brandId,
           person: personView(person),
@@ -562,6 +563,7 @@ router.get(
           items: page.items,
         });
       }
+      await attachFactIds(req.orgId!, brandId, person.emails as string[], timeline.items);
       res.json({
         brandId,
         person: personView(person),
