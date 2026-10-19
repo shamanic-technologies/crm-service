@@ -41,6 +41,8 @@ const API_KEY = process.env.CRM_SERVICE_API_KEY || "test-crm-key";
 const SECRET = "bridge-secret-wa";
 
 process.env.MATRIX_HOMESERVER_URL = "http://hs.test";
+process.env.WHATSAPP_RECONNECT_WAIT_MS = "200";
+process.env.WHATSAPP_RECONNECT_POLL_MS = "20";
 process.env.MATRIX_APPSERVICE_TOKEN = "as-token-wa";
 process.env.MATRIX_WHATSAPP_PROVISIONING_URL = "http://wa.test";
 process.env.MATRIX_WHATSAPP_PROVISIONING_SECRET = SECRET;
@@ -609,7 +611,27 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
       .send({ brandId: BRAND, phone: "+33600000001", text: "x", idempotencyKey: "k5" });
     expect(offline.status).toBe(422);
     expect(offline.body.code).toBe("whatsapp_not_connected");
+    expect(offline.body.error).toMatch(/^WhatsApp logged out \+\d+.*Relink it from the Integrations page\.$/);
     expect(sends).toHaveLength(0);
+
+    // WA-NOT-CONNECTED-1019: a reconnect is transient: never "relink", never a
+    // recorded refusal, the same key sends once the account is back.
+    loginState = "TRANSIENT_DISCONNECT";
+    const reconnecting = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000001", text: "x", idempotencyKey: "k6" });
+    expect(reconnecting.status).toBe(502);
+    expect(reconnecting.body.error).toMatch(/WHATSAPP_RECONNECTING/);
+    expect(reconnecting.body.error).not.toMatch(/[Rr]elink it/);
+    expect(sends).toHaveLength(0);
+    loginState = "CONNECTED";
+    const back = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000001", text: "x", idempotencyKey: "k6" });
+    expect(back.status).toBe(200);
+    expect(back.body.status).toBe("sent");
   });
 
   it("a number that cannot exist is 'not on WhatsApp', a bridge 500 on a valid one stays a bridge error (WHATSAPP-RESOLVE-1015)", async () => {
