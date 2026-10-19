@@ -136,7 +136,16 @@ export function isInputStep(step: LoginStep): boolean {
 export interface BridgeLogin {
   id: string;
   name: string;
-  state: { state_event?: string; reason?: string; error?: string; message?: string } | null;
+  state: {
+    state_event?: string;
+    reason?: string;
+    error?: string;
+    message?: string;
+    /** Unix SECONDS the bridge stated it. */
+    timestamp?: number;
+    /** WhatsApp: `reachout_timelock_until` (ISO) = WhatsApp limits the number from writing to new people. */
+    info?: Record<string, unknown>;
+  } | null;
 }
 
 /** How long one display_and_wait may block: WhatsApp refreshes a QR every ≤60s. */

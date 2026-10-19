@@ -1119,6 +1119,13 @@ newest first, a person with none absent; a send with no campaign never matches. 
   `resolve_identifier` (`not_on_whatsapp`, impossible number included). 200 `{reachable: true, to, phoneSource,
   fromAccount}` | 200 `{reachable: false, code, error}`; 502 `bridge_error` only on a valid number. No send row, no
   message, no room (records the ghost phone like the send). Not covered: `wrong_room`, transient bridge failures.
+- **Not connected = WhatsApp logged it out, nothing else** (`accounts.ts` `loginStatus` / `sendReadiness`, WA-NOT-CONNECTED-1019):
+  CONNECTED / BACKFILLING send; BAD_CREDENTIALS / LOGGED_OUT / login gone = refused `whatsapp_not_connected` with the bridge's
+  words, when, and WhatsApp's `reachout_timelock_until` (`describeLoggedOut`); any other state (TRANSIENT_DISCONNECT,
+  CONNECTING...) is re-asked every 1 s for 10 s (`WHATSAPP_RECONNECT_WAIT_MS`), then 502 `bridge_error` `WHATSAPP_RECONNECTING`
+  (row `failed`, the same key retries; never "relink"). Prod 2026-10-18/19: WhatsApp REMOVED the assistant number's linked
+  device 2 s after a send, twice (`stream:error 401 device_removed` right after a reach-out timelock notice on a new number):
+  a real logout, only a relink brings it back; the refusals between were true.
 - Phone = `phone` if given, else the person's first phone from `people` (looked up by email).
 - Account = the brand's `matrix_links` whatsapp `linked` rows whose bridge login is
   `CONNECTED` (`/whoami`), oldest first; one already in a DM with the number wins.

@@ -23,10 +23,10 @@ import { createHash } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { matrixLinks, people, whatsappSends } from "../../db/schema.js";
-import { createDm, resolveIdentifier } from "../matrix/bridge.js";
+import { BridgeError, createDm, resolveIdentifier } from "../matrix/bridge.js";
 import { bridgeSaysNoSuchNumber } from "./number-validity.js";
 import { alertRefusal } from "./staff-alert.js";
-import { connectedOnly, linkedWhatsappAccounts, personaOf, type SenderPersona, type WhatsappAccount } from "./accounts.js";
+import { describeLoggedOut, linkedWhatsappAccounts, sendReadiness, personaOf, type SenderPersona, type WhatsappAccount } from "./accounts.js";
 import { recordGhostPhone } from "./phone-resolution.js";
 import { humanTypedTo } from "../matrix/human-takeover.js";
 import { joinRoom, readRoomBridgeInfo, sendText } from "../matrix/client.js";
@@ -250,14 +250,25 @@ async function sendableAccounts(req: ReachRequest): Promise<WhatsappAccount[]> {
         : "None of the brand's linked WhatsApp accounts is allowed to send automated messages. Allow one (or link a dedicated number) from the dashboard.",
     );
   }
-  const connected = await connectedOnly(allowed);
-  if (connected.length === 0) {
-    throw new SendRefusal(
-      "whatsapp_not_connected",
-      "The brand's WhatsApp is linked but not connected right now (logged out or offline). Relink it from the dashboard.",
+  const ready = await sendReadiness(allowed);
+  if (ready.connected.length > 0) return ready.connected;
+  // Still reconnecting after the wait: transient, never "relink", never recorded
+  // as a final refusal (the send row is `failed`, the same key retries; 502 bridge_error).
+  if (ready.reconnecting.length > 0) {
+    const states = ready.reconnecting.map((r) => `+${digitsOf(r.account.loginId)} ${r.stateEvent ?? "no state yet"}`).join(", ");
+    throw new BridgeError(
+      503,
+      "WHATSAPP_RECONNECTING",
+      `the brand's WhatsApp is reconnecting right now (${states}); nothing was sent, try again in a minute. No relink needed.`,
     );
   }
-  return connected;
+  throw new SendRefusal(
+    "whatsapp_not_connected",
+    describeLoggedOut(
+      ready.loggedOut.map((l) => ({ loginId: digitsOf(l.account.loginId), status: l.status })),
+      new Date(),
+    ),
+  );
 }
 
 /**
