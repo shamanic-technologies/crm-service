@@ -23,7 +23,7 @@ import type { MatrixEvent } from "../matrix/client.js";
 import { foldEdits, humanText } from "../matrix/events.js";
 import { accountUserView, userIdsOf, type AccountUsers, type AccountUserView } from "./account-users.js";
 import { CONNECTION_TAGS, tagQuestionText, tagsFromScores, type ConnectionTag, type TaggedItem, type TagScores } from "./connection-tags.js";
-import { clip, readTagScores, storedVerdicts, threadWindow, type BrandContext, type PersonView } from "./relevance.js";
+import { clip, offersShownToJev, readTagScores, storedVerdicts, threadWindow, type BrandContext, type PersonView } from "./relevance.js";
 import { mapLimit, type SiblingIdentity } from "./siblings.js";
 
 const CONCURRENCY = 4;
@@ -259,7 +259,7 @@ export async function resolveGroupTags(
       const state = {
         task: `${task} Here the counterpart is the GROUP as a whole: what is it, and what do its members talk about?`,
         brand: context.brand,
-        offers: context.offers.map((o) => ({ name: o.name, description: o.description, whatItSells: o.profile ?? null })),
+        offers: offersShownToJev(context),
         otherBrandsOfTheSameOwner: context.otherBrandsOfTheSameOwner,
         user: user.view,
         group: input.group,
@@ -313,7 +313,7 @@ export async function resolveGroupTags(
           `${task} Here the counterpart is ONE MEMBER, judged on their own posts in the group. A post is "to the user" ` +
           "only when it replies to the user or mentions them (each post says so); otherwise a personal post is not to the user.",
         brand: context.brand,
-        offers: context.offers.map((o) => ({ name: o.name, description: o.description, whatItSells: o.profile ?? null })),
+        offers: offersShownToJev(context),
         otherBrandsOfTheSameOwner: context.otherBrandsOfTheSameOwner,
         user: user.view,
         group: { ...input.group, judgedAs: group?.tags ?? null },

@@ -83,6 +83,17 @@ const CONCURRENCY = 4;
 const FIRST_MESSAGES = 10;
 const LAST_MESSAGES = 20;
 const MESSAGE_CHARS = 400;
+/**
+ * A quoted history: its START (the reply's own words, the latest quoted message) and its END
+ * (reply-on-top mail puts the conversation's FIRST message last), at most QUOTED_HEAD_CHARS +
+ * QUOTED_TAIL_CHARS. At most QUOTED_THREADS threads carry one (the earliest held): a thread
+ * window is then at most 30 x 400 + 3 x 3,000 characters, ~5.5k input tokens.
+ */
+const QUOTED_HEAD_CHARS = 1000;
+const QUOTED_TAIL_CHARS = 2000;
+const QUOTED_THREADS = 3;
+/** Every message google-service holds with the person (its max): the window is cut here, from the start. */
+const GMAIL_READ_LIMIT = 500;
 
 /**
  * The owner keeps ONE kind of conversation: a SALES LEAD of the brand (owner,
@@ -105,7 +116,11 @@ const TOPIC_CRITERIA: Record<Topic, string> = {
     "residency or visa help, housing, rooms or co-living, courses, coaching or training, a job or community " +
     "they recruit for), even when money, a deal or a contract is discussed. (3) The accountant, lawyer, " +
     "bank and the company's own admin; mentors, advisors, investors, journalists and press, candidates, " +
-    "networking contacts; and work inside another company the owner runs or is employed by.",
+    "networking contacts; and work inside another company the owner runs or is employed by. (4) A prospect " +
+    "the owner pitches ANOTHER company's product or service to: the owner introduces, represents or sells " +
+    "for a client or partner company (its events, its software, its service), whatever signature or mailbox " +
+    "the emails go out under. That prospect is a lead of the other company, not of this brand, unless the " +
+    "conversation turns to buying this brand's own offers.",
   this_brand:
     "the counterpart is a SALES LEAD of the brand: someone the owner sells THIS brand's offers to, or who " +
     "buys, uses, asks about, tries or negotiates THEM: a prospect, a client, a user, or a partner who refers " +
@@ -119,12 +134,21 @@ const TOPIC_CRITERIA: Record<Topic, string> = {
 
 export interface BrandContext {
   brand: { name: string; website: string | null; description: string | null };
-  offers: { offerId: string; name: string; description: string | null; profile?: Record<string, string> | null }[];
+  /** Each ACTIVE offer as the client created it: its name and its "what we offer" text (brand-service `description`). */
+  offers: { offerId: string; name: string; description: string | null }[];
   otherBrandsOfTheSameOwner: { name: string; website: string | null }[];
   hash: string;
 }
 
-/** The brand, its active offers and the org's other brands, from brand-service. Fails loud. */
+/**
+ * The brand, its active offers and the org's other brands, from brand-service. Fails loud.
+ *
+ * WHOLE-THREAD-JEV-1021 (owner 2026-10-21: « il faut toujours que tu décrives la marque dans Jev,
+ * notamment la liste des offres telles que créées sur notre plateforme »): each offer is shown as
+ * the client CREATED it, its name and its "what we offer" text, never its Q&A nor its documents.
+ * v7 (WA-LEAD-RELEVANCE-1016) showed each offer's brand profile instead (`runtime-context`: the
+ * offer's Hormozi Q&A, dream outcome, likelihood...), a text the client never wrote as "what we sell".
+ */
 export async function readBrandContext(identity: SiblingIdentity): Promise<BrandContext> {
   const id = encodeURIComponent(identity.brandId);
   const [brand, offers, orgBrands, fields] = await Promise.all([
@@ -138,58 +162,34 @@ export async function readBrandContext(identity: SiblingIdentity): Promise<Brand
     siblingGetOk<{ fields: { key: string; value: unknown }[] }>("brand", `/internal/brands/${id}/extracted-fields`, identity),
   ]);
   const overview = fields.fields.find((f) => f.key === "companyOverview")?.value;
-  const active = offers.offers.filter((o) => o.status === "active");
-  const profiles = await Promise.all(active.map((o) => readOfferProfile(identity, o.offerId)));
   const ctx = {
     brand: { name: brand.brand.name, website: brand.brand.domain ?? brand.brand.url },
     offers: offers.offers
       .filter((o) => o.status === "active")
-      .map((o) => ({ offerId: o.offerId, name: o.name, description: o.description }))
+      .map((o) => ({ offerId: o.offerId, name: o.name, description: o.description?.trim() ? o.description.trim() : null }))
       .sort((a, b) => (a.offerId < b.offerId ? -1 : 1)),
     otherBrandsOfTheSameOwner: orgBrands.brands
       .filter((b) => b.id !== identity.brandId)
       .map((b) => ({ name: b.name ?? b.domain ?? "unnamed", website: b.domain }))
       .sort((a, b) => (a.name < b.name ? -1 : 1)),
   };
-  // The description is re-extracted every few days in different words: it is shown to
-  // Jev but kept OUT of the hash, so a re-extraction never re-judges every conversation.
-  // The offers' profiles too: what each offer IS, worded like the description (re-extracted, out of the hash).
-  const profileOf = new Map(active.map((o, k) => [o.offerId, profiles[k]]));
+  // The brand description is re-extracted every few days in different words: it is shown to
+  // Jev but kept OUT of the hash, so a re-extraction never re-judges every conversation. An
+  // offer's own text is the client's: in the hash, a rewrite re-judges once.
   return {
     ...ctx,
     brand: { ...ctx.brand, description: typeof overview === "string" && overview.trim() ? overview.trim() : null },
-    offers: ctx.offers.map((o) => ({ ...o, profile: profileOf.get(o.offerId) ?? null })),
     // v6 (2026-10-10): sales leads only. v7 (WA-LEAD-RELEVANCE-1016): the owner's other
     // activities and suppliers selling to the owner are other work. Each bump re-judges once.
     // v8 (CONNECTION-TAGS-1017): the four connection tags + who the user is.
-    hash: createHash("sha256").update(JSON.stringify(["v8", ctx])).digest("hex").slice(0, 32),
+    // v9 (WHOLE-THREAD-JEV-1021): the whole thread with its quoted history, offers as created.
+    hash: createHash("sha256").update(JSON.stringify(["v9", ctx])).digest("hex").slice(0, 32),
   };
 }
 
-const PROFILE_FIELD_CHARS = 600;
-
-/**
- * What ONE offer sells, in the brand's own words: brand-service's brand profile
- * for that offer (the confirmed fields over the extracted ones). Without it Jev
- * judged "a lead of Distribute.you" knowing only the brand name and an offer
- * called "Product-led", so any deal the owner discussed read as the brand's
- * (WA-LEAD-RELEVANCE-1016). Null = brand-service holds no profile. Fails loud.
- */
-async function readOfferProfile(identity: SiblingIdentity, offerId: string): Promise<Record<string, string> | null> {
-  const body = await siblingGetOk<{ brandProfile: { fields: Record<string, string | string[]> } | null }>(
-    "brand",
-    `/internal/brands/${encodeURIComponent(identity.brandId)}/runtime-context?offerId=${encodeURIComponent(offerId)}`,
-    identity,
-  );
-  const fields = body.brandProfile?.fields;
-  if (!fields) return null;
-  const out: Record<string, string> = {};
-  for (const key of Object.keys(fields).sort()) {
-    const v = fields[key];
-    const text = (Array.isArray(v) ? v.join("; ") : String(v ?? "")).trim();
-    if (text) out[key] = clipTo(text, PROFILE_FIELD_CHARS);
-  }
-  return Object.keys(out).length ? out : null;
+/** PURE: the offers as every Jev question about this brand is shown them (conversation, group, member). */
+export function offersShownToJev(context: BrandContext): { key: string; name: string; whatWeOffer: string | null }[] {
+  return context.offers.map((o, k) => ({ key: `o${k}`, name: o.name, whatWeOffer: o.description }));
 }
 
 export interface ConversationMessage {
@@ -197,6 +197,14 @@ export interface ConversationMessage {
   direction: string;
   subject?: string | null;
   text: string;
+  /**
+   * The message's ORIGINAL body, quoted history included, on the OLDEST message we hold of an
+   * email thread when cleaning removed something from it. An earlier message of the thread sent
+   * from another tool or mailbox is not in the mirror; the quote this reply carries is all that
+   * is left of it (WHOLE-THREAD-JEV-1021: Regina's reply quoted the cold email pitching a dinner
+   * events team; without it Jev read "How do you handle these events?" as a lead of the brand).
+   */
+  quotedHistory?: string;
 }
 
 /** What the brand's own tools already know about the counterpart (no model). */
@@ -280,13 +288,18 @@ function clipTo(s: string, max: number): string {
   const chars = Array.from(s.replace(LONE_SURROGATE, "\uFFFD"));
   return chars.length > max ? `${chars.slice(0, max).join("")}…` : chars.join("");
 }
+/** PURE: the first `head` and the last `tail` characters, cut on code points, `…` where the middle went. */
+export function clipEnds(s: string, head: number, tail: number): string {
+  const chars = Array.from(s.replace(LONE_SURROGATE, "\uFFFD"));
+  if (chars.length <= head + tail) return chars.join("");
+  return `${chars.slice(0, head).join("")}\n…\n${chars.slice(-tail).join("")}`;
+}
 
-/** One Jev call: the topic choice plus one yes/no per active offer. Fails loud on a malformed answer. */
-export async function judgeConversation(
+/** PURE: exactly what Jev is shown and asked about one conversation (the judge and the replay eval share it). */
+export function conversationJudgment(
   input: ConversationInput,
   context: BrandContext,
-  tracking: ChatTrackingHeaders,
-): Promise<Verdict & { model: string }> {
+): { state: Record<string, unknown>; questions: Record<string, ChoiceQuestion | NoulQuestion> } {
   const state = {
     task:
       "A business owner connected their own inbox. It mixes their private life, the suppliers who sell to " +
@@ -294,7 +307,7 @@ export async function judgeConversation(
       "conversations with the sales leads of the brand below. Judge whether the counterpart in this one " +
       "conversation is a sales lead of THIS brand: someone who could buy, or buys, what this brand sells.",
     brand: context.brand,
-    offers: context.offers.map((o, k) => ({ key: `o${k}`, name: o.name, description: o.description, whatItSells: o.profile ?? null })),
+    offers: offersShownToJev(context),
     otherBrandsOfTheSameOwner: context.otherBrandsOfTheSameOwner,
     user: input.user ?? null,
     counterpartKnownByTheBrand: input.person ?? null,
@@ -302,7 +315,12 @@ export async function judgeConversation(
       kind: "direct, one to one, on the user's own account",
       channel: input.channel,
       counterpart: { ...input.counterpart, names: input.counterpart.names.map(clip) },
-      messages: input.messages.map((m) => ({ ...m, subject: m.subject ? clip(m.subject) : m.subject, text: clip(m.text) })),
+      messages: input.messages.map((m) => ({
+        ...m,
+        subject: m.subject ? clip(m.subject) : m.subject,
+        text: clip(m.text),
+        ...(m.quotedHistory ? { quotedHistory: clipEnds(m.quotedHistory, QUOTED_HEAD_CHARS, QUOTED_TAIL_CHARS) } : {}),
+      })),
     },
   };
   const questions: Record<string, ChoiceQuestion | NoulQuestion> = {
@@ -314,9 +332,13 @@ export async function judgeConversation(
         "description and offers in the state) is its sales lead, and a client stays one while the owner runs " +
         "their account, campaigns, credits or billing, whatever else they chat about (tools, ideas, small " +
         "talk). A counterpart selling to the owner, or a deal about something this brand does not sell (another " +
-        "activity of the owner), is other work, even when the owner writes first or money is discussed; " +
+        "activity of the owner, or another company's offer the owner pitches for a client: name what is " +
+        "offered and whose it is), is other work, even when the owner writes first or money is discussed; " +
         "accountant, mentor, investor and press are other work too; the owner's private life is personal. " +
-        "Judge the whole conversation, not one polite or logistical message.",
+        "Judge the whole conversation from its START, not one polite or logistical message: a message's " +
+        "quotedHistory is the earlier exchange it quotes, written before the first message held here (often " +
+        "sent from another tool or mailbox), so read it as the beginning of the conversation: who wrote first " +
+        "and what they offered says what the conversation is about.",
       criteria: TOPIC_CRITERIA,
     },
   };
@@ -331,6 +353,16 @@ export async function judgeConversation(
         "asks about it, buys it, uses it, sells it, invests in it or negotiates it?",
     };
   });
+  return { state, questions };
+}
+
+/** One Jev call: the topic choice plus one yes/no per active offer. Fails loud on a malformed answer. */
+export async function judgeConversation(
+  input: ConversationInput,
+  context: BrandContext,
+  tracking: ChatTrackingHeaders,
+): Promise<Verdict & { model: string }> {
+  const { state, questions } = conversationJudgment(input, context);
   const result = await judgeQuestions(state, questions, tracking);
 
   const topic = result.answers.topic;
@@ -385,16 +417,21 @@ export function readTagScores(answers: Record<string, unknown>, key: string): Ta
 
 interface GmailConversation {
   threads: {
-    messages: {
-      direction: string;
-      fromEmail: string | null;
-      subject: string | null;
-      snippet: string | null;
-      bodyText?: string | null;
-      bodyStatus?: string;
-      sentAt: string | null;
-    }[];
+    threadId: string;
+    messages: GmailMessage[];
   }[];
+}
+
+interface GmailMessage {
+  direction: string;
+  fromEmail: string | null;
+  subject: string | null;
+  snippet: string | null;
+  bodyText?: string | null;
+  bodyTextOriginal?: string | null;
+  bodyStatus?: string;
+  bodyCleanStatus?: string;
+  sentAt: string | null;
 }
 
 export interface GmailPlan {
@@ -404,28 +441,55 @@ export interface GmailPlan {
 }
 
 /**
- * The latest messages of the org's mailbox with `email`, via google-service.
- * Null = google-service holds no message; a message with neither subject nor
- * text is dropped, so `messages: []` = messages exist, no words in them.
+ * PURE: what Jev reads of the mailbox's exchange with one person, oldest first, `threadWindow`ed.
+ * The OLDEST message held of each thread carries its original body (`quotedHistory`) when
+ * cleaning removed something from it (google-service's `bodyCleanStatus` `cleaned`), for the
+ * QUOTED_THREADS earliest threads: the start of a thread sent from another tool or mailbox only
+ * lives there. A message with neither subject nor text is dropped.
+ */
+export function gmailMessages(conversation: GmailConversation): ConversationMessage[] {
+  const quoted = new Set<GmailMessage>();
+  const firsts = conversation.threads
+    .map((t) => [...t.messages].sort((a, b) => ((a.sentAt ?? "") < (b.sentAt ?? "") ? -1 : 1))[0])
+    .filter((m): m is GmailMessage => !!m)
+    .sort((a, b) => ((a.sentAt ?? "") < (b.sentAt ?? "") ? -1 : 1));
+  for (const m of firsts) {
+    if (quoted.size >= QUOTED_THREADS) break;
+    const original = m.bodyStatus === "ok" ? m.bodyTextOriginal?.trim() : null;
+    if (m.bodyCleanStatus === "cleaned" && original && original !== (m.bodyText ?? "").trim()) quoted.add(m);
+  }
+  const messages = conversation.threads
+    .flatMap((t) => t.messages)
+    .sort((a, b) => ((a.sentAt ?? "") < (b.sentAt ?? "") ? -1 : 1))
+    .map((m): ConversationMessage => ({
+      at: m.sentAt,
+      direction: m.direction,
+      subject: m.subject,
+      text: ((m.bodyStatus === "ok" && m.bodyText ? m.bodyText : m.snippet) ?? "").trim(),
+      ...(quoted.has(m) ? { quotedHistory: m.bodyTextOriginal!.trim() } : {}),
+    }))
+    .filter((m) => m.text || m.subject?.trim() || m.quotedHistory);
+  return threadWindow(messages);
+}
+
+/**
+ * The mailbox's whole exchange with `email` (up to GMAIL_READ_LIMIT messages, from the start),
+ * via google-service. Null = google-service holds no message; `messages: []` = messages exist,
+ * no words in them. Until WHOLE-THREAD-JEV-1021 only the latest 20 were read.
  */
 export async function gmailConversationInput(identity: SiblingIdentity, plan: GmailPlan): Promise<ConversationInput | null> {
-  const r = await siblingGet("google", `/orgs/google/conversation?email=${encodeURIComponent(plan.email)}&limit=20`, identity);
+  const r = await siblingGet(
+    "google",
+    `/orgs/google/conversation?email=${encodeURIComponent(plan.email)}&limit=${GMAIL_READ_LIMIT}`,
+    identity,
+  );
   const reason = (r.body as { reason?: string } | null)?.reason;
   if (r.status === 404 && (reason === "no_messages" || reason === "no_google_account_connected")) return null;
   if (r.status !== 200) {
     throw new Error(`google-service conversation for ${plan.email} returned ${r.status}: ${JSON.stringify(r.body).slice(0, 200)}`);
   }
-  const all = (r.body as GmailConversation).threads.flatMap((t) => t.messages);
-  if (all.length === 0) return null;
-  const messages = all
-    .sort((a, b) => ((a.sentAt ?? "") < (b.sentAt ?? "") ? -1 : 1))
-    .map((m) => ({
-      at: m.sentAt,
-      direction: m.direction,
-      subject: m.subject,
-      text: ((m.bodyStatus === "ok" && m.bodyText ? m.bodyText : m.snippet) ?? "").trim(),
-    }))
-    .filter((m) => m.text || m.subject?.trim());
+  const body = r.body as GmailConversation;
+  if (body.threads.every((t) => t.messages.length === 0)) return null;
   return {
     key: `gmail:${plan.email}`,
     source: "gmail",
@@ -433,7 +497,7 @@ export async function gmailConversationInput(identity: SiblingIdentity, plan: Gm
     channel: "email",
     kind: "direct",
     counterpart: { names: plan.names, email: plan.email, phone: null },
-    messages: threadWindow(messages),
+    messages: gmailMessages(body),
   };
 }
 
