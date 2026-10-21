@@ -946,12 +946,19 @@ owner had written to. A recorded fact, never an address-shape guess.
   pitching the owner (even in the brand's own field), the owner's OTHER
   activities (anything sold / rented / taught that is not a brand offer:
   visa help, co-living, coaching), accountant, bank, mentors, investors, press
-  (state = brand name + website + `companyOverview`, each ACTIVE offer with its
-  brand profile = `runtime-context?offerId=` fields as `whatItSells`, the org's
-  other brands; overview + profiles NOT in the context hash). Jev reads the
-  thread's first 10 + last 20 messages (`threadWindow`). WA-LEAD-RELEVANCE-1016
-  (v7): Jev knew only "Distribute.you" + an offer named "Product-led", so a Brazil
-  visa deal (0.81), co-living rooms and a vendor pitch (0.87) read as leads.
+  (state = brand name + website + `companyOverview`, each ACTIVE offer AS CREATED:
+  name + its "what we offer" `description` (`offersShownToJev`; never its Q&A
+  brand profile nor its documents, owner 2026-10-21), the org's other brands;
+  overview NOT in the context hash). Jev reads the WHOLE thread from its start
+  (WHOLE-THREAD-JEV-1021): Gmail reads every message google-service holds (limit
+  500), the oldest held message of each of the 3 earliest threads carries its
+  ORIGINAL body as `quotedHistory` when cleaning removed something (an earlier
+  message sent from another tool / mailbox lives only there; first 1000 + last
+  2000 chars), then first 10 + last 20 messages (`threadWindow`). Regina (a Doc
+  Dinners prospect) read as a distribute.you lead at 0.80 because the cold email
+  her reply answered was only in its quote; with it 0.10. Jev is noisy (±0.2 run
+  to run on one input): replay a set, never one row. WA-LEAD-RELEVANCE-1016 (v7):
+  a Brazil visa deal (0.81), co-living rooms and a vendor pitch (0.87) read as leads.
   Plus one `noul` per active offer. Text is clipped on code points (Jev refuses
   a lone surrogate). Recorded in `conversation_verdicts` keyed (org, brand,
   `gmail:<addr>` | `matrix:<conv id>`): Gmail is per ORG, so each brand judges

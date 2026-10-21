@@ -2,7 +2,10 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   BRAND_MIN_PROBABILITY,
   clip,
+  clipEnds,
   conversationKeysOf,
+  gmailMessages,
+  offersShownToJev,
   hidesConversation,
   isPersonalChannelOnly,
   judgeConversation,
@@ -274,8 +277,7 @@ describe("WA-LEAD-RELEVANCE-1016: a supplier or another activity of the owner is
       {
         offerId: "offer-a",
         name: "Product-led",
-        description: null,
-        profile: { dreamOutcome: "Meetings on your calendar with buyers who asked for them.", services: "Autonomous multi-channel acquisition" },
+        description: "Meetings on your calendar with buyers who asked for them.",
       },
     ],
     otherBrandsOfTheSameOwner: [],
@@ -300,7 +302,7 @@ describe("WA-LEAD-RELEVANCE-1016: a supplier or another activity of the owner is
     ["inbound", "What are the fees for the Brazil residency? Is the fast track visa possible from Dubai?"],
     ["outbound", "Fast track is $15,000 fees, I'll send the invoice"],
   ]);
-  let body: { state: { offers: { whatItSells: Record<string, string> | null }[] }; questions: { topic: { instructions: string; criteria: Record<string, string> } } } | null =
+  let body: { state: { offers: { name: string; whatWeOffer: string | null }[] }; questions: { topic: { instructions: string; criteria: Record<string, string> } } } | null =
     null;
   function stubJev(probabilities: Record<string, number>) {
     process.env.CHAT_SERVICE_URL = "http://chat.test";
@@ -322,7 +324,7 @@ describe("WA-LEAD-RELEVANCE-1016: a supplier or another activity of the owner is
     it(`${name}: Jev is shown what the brand sells and told such a thread is other work, and its answer hides it`, async () => {
       stubJev({ personal: 0.02, other_business: 0.9, this_brand: 0.08 });
       const v = await judgeConversation(input, context, tracking);
-      expect(body!.state.offers[0].whatItSells).toEqual(context.offers[0].profile);
+      expect(body!.state.offers[0]).toEqual({ key: "o0", name: "Product-led", whatWeOffer: context.offers[0].description });
       const topic = body!.questions.topic;
       expect(topic.criteria.other_business).toMatch(/SELLER and the owner the buyer/);
       expect(topic.criteria.other_business).toMatch(/OTHER activities/);
@@ -353,11 +355,11 @@ describe("threadWindow", () => {
 
 describe("readBrandContext", () => {
   afterEach(() => vi.unstubAllGlobals());
-  it("reads each ACTIVE offer's brand profile (what it sells), kept out of the hash", async () => {
+  it("WHOLE-THREAD-JEV-1021: each ACTIVE offer as the client created it (name + what we offer), never its Q&A profile", async () => {
     process.env.BRAND_SERVICE_URL = "http://brand.test";
     process.env.BRAND_SERVICE_API_KEY = "k";
     const asked: string[] = [];
-    let dream = "Meetings on your calendar.";
+    let overview = "Distribute.you gets B2B meetings.";
     vi.stubGlobal("fetch", async (url: string) => {
       const u = new URL(url);
       asked.push(u.pathname + u.search);
@@ -365,25 +367,123 @@ describe("readBrandContext", () => {
       if (u.pathname.endsWith("/offers")) {
         return json({
           offers: [
-            { offerId: "o-active", name: "Product-led", description: null, status: "active" },
+            { offerId: "o-active", name: "Product-led", description: " Done-for-you outbound that books meetings. ", status: "active" },
+            { offerId: "o-blank", name: "Sales-led", description: "  ", status: "active" },
             { offerId: "o-archived", name: "Angel round", description: null, status: "archived" },
           ],
         });
       }
-      if (u.pathname.endsWith("/runtime-context")) {
-        return json({ brand: {}, brandProfile: { fields: { dreamOutcome: dream, services: ["Acquisition", "Cold email"], empty: " " } } });
-      }
       if (u.pathname === "/orgs/brands") return json({ brands: [] });
-      if (u.pathname.endsWith("/extracted-fields")) return json({ fields: [] });
+      if (u.pathname.endsWith("/extracted-fields")) return json({ fields: [{ key: "companyOverview", value: overview }] });
       return json({ brand: { name: "Distribute.you", domain: "distribute.you", url: null } });
     });
     const identity = { orgId: "o", brandId: "b", userId: "u", runId: "r" };
     const ctx = await readBrandContext(identity);
-    expect(asked.filter((a) => a.includes("runtime-context"))).toEqual(["/internal/brands/b/runtime-context?offerId=o-active"]);
+    expect(asked.some((a) => a.includes("runtime-context"))).toBe(false);
+    expect(ctx.brand).toEqual({ name: "Distribute.you", website: "distribute.you", description: overview });
     expect(ctx.offers).toEqual([
-      { offerId: "o-active", name: "Product-led", description: null, profile: { dreamOutcome: dream, services: "Acquisition; Cold email" } },
+      { offerId: "o-active", name: "Product-led", description: "Done-for-you outbound that books meetings." },
+      { offerId: "o-blank", name: "Sales-led", description: null },
     ]);
-    dream = "Meetings, worded differently after a re-extraction.";
+    expect(offersShownToJev(ctx)).toEqual([
+      { key: "o0", name: "Product-led", whatWeOffer: "Done-for-you outbound that books meetings." },
+      { key: "o1", name: "Sales-led", whatWeOffer: null },
+    ]);
+    overview = "Worded differently after a re-extraction.";
     expect((await readBrandContext(identity)).hash).toBe(ctx.hash);
+  });
+});
+
+describe("WHOLE-THREAD-JEV-1021: Jev reads the whole thread from its start", () => {
+  // Prod 2026-10-19: Regina's reply is the oldest message the mirror holds; the cold email it
+  // answers was sent from another mailbox and lives only in her reply's quoted history.
+  const COLD = "From: Kevin Lourd <kevin@pressbeat.ai>\nSubject: Garland chiropractic dinner events\n\nPhilip, I represent a team that runs educational dinner events for chiropractic practices.";
+  const msg = (over: Record<string, unknown>) => ({
+    direction: "inbound",
+    fromEmail: "regina@x.com",
+    subject: "Re: Garland chiropractic dinner events",
+    snippet: null,
+    bodyStatus: "ok",
+    bodyCleanStatus: "cleaned",
+    ...over,
+  });
+
+  it("the oldest held message of a thread carries its quoted history; later ones do not", () => {
+    const out = gmailMessages({
+      threads: [
+        {
+          threadId: "t1",
+          messages: [
+            msg({ sentAt: "2026-08-27T06:58:29Z", direction: "outbound", bodyText: "Happy to help", bodyTextOriginal: `Happy to help\n> How do you handle these events?\n> ${COLD}` }),
+            msg({ sentAt: "2026-08-26T20:08:57Z", bodyText: "Hi Kevin, How do you handle these events?", bodyTextOriginal: `Hi Kevin, How do you handle these events?\n\n${COLD}` }),
+          ],
+        },
+      ],
+    });
+    expect(out.map((m) => m.text)).toEqual(["Hi Kevin, How do you handle these events?", "Happy to help"]);
+    expect(out[0].quotedHistory).toContain("educational dinner events for chiropractic practices");
+    expect(out[1].quotedHistory).toBeUndefined();
+  });
+
+  it("no quoted history when cleaning removed nothing or the body was not cleaned", () => {
+    const out = gmailMessages({
+      threads: [
+        { threadId: "a", messages: [msg({ sentAt: "2026-01-01T00:00:00Z", bodyText: "Hello", bodyTextOriginal: "Hello" })] },
+        { threadId: "b", messages: [msg({ sentAt: "2026-01-02T00:00:00Z", bodyText: "Hi", bodyTextOriginal: `Hi\n${COLD}`, bodyCleanStatus: "not_cleaned" })] },
+      ],
+    });
+    expect(out.every((m) => m.quotedHistory === undefined)).toBe(true);
+  });
+
+  it("Jev is shown the quoted history beside the brand and its offers as created, and told to read it as the start", async () => {
+    process.env.CHAT_SERVICE_URL = "http://chat.test";
+    process.env.CHAT_SERVICE_API_KEY = "k";
+    let body: { state: Record<string, any>; questions: Record<string, any> } | null = null;
+    vi.stubGlobal("fetch", async (_u: string, init: RequestInit) => {
+      body = JSON.parse(String(init.body));
+      const probabilities = { personal: 0.01, other_business: 0.69, this_brand: 0.3 };
+      return new Response(
+        JSON.stringify({ model: "jev-test", answers: { ...TAG_ANSWERS, topic: { type: "choice", choice: "other_business", confidence: 0.69, probabilities }, o0: { type: "noul", noul: 0.1 } } }),
+        { status: 200 },
+      );
+    });
+    const context: BrandContext = {
+      brand: { name: "Distribute.you", website: "distribute.you", description: "B2B meetings, done for you." },
+      offers: [{ offerId: "o-a", name: "Product-led", description: "Done-for-you outbound that books meetings." }],
+      otherBrandsOfTheSameOwner: [],
+      hash: "h",
+    };
+    const input: ConversationInput = {
+      key: "gmail:regina@x.com",
+      source: "gmail",
+      judgedThrough: "m",
+      channel: "email",
+      counterpart: { names: ["Regina"], email: "regina@x.com", phone: null },
+      messages: [{ at: null, direction: "inbound", text: "How do you handle these events?", quotedHistory: COLD }],
+    };
+    const v = await judgeConversation(input, context, { orgId: "o", userId: "u", runId: "r" });
+    vi.unstubAllGlobals();
+    expect(body!.state.brand).toEqual(context.brand);
+    expect(body!.state.offers).toEqual([{ key: "o0", name: "Product-led", whatWeOffer: "Done-for-you outbound that books meetings." }]);
+    expect(body!.state.conversation.messages[0].quotedHistory).toBe(COLD);
+    expect(body!.questions.topic.instructions).toMatch(/quotedHistory/);
+    expect(hidesConversation(v)).toBe(true);
+  });
+
+  it("a long thread stays under the cap with its start and its end", () => {
+    const long = "A".repeat(5000) + "MIDDLE" + "Z".repeat(5000);
+    const messages = Array.from({ length: 120 }, (_, i) =>
+      msg({ sentAt: `2026-01-01T00:${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}Z`, bodyText: `m${i}`, bodyTextOriginal: i === 0 ? `m0\n${long}` : `m${i}` }),
+    );
+    const out = gmailMessages({ threads: [{ threadId: "t", messages }] });
+    expect(out).toHaveLength(30);
+    expect(out[0].text).toBe("m0");
+    expect(out[9].text).toBe("m9");
+    expect(out[29].text).toBe("m119");
+    const q = clipEnds(out[0].quotedHistory!, 1000, 2000);
+    expect(q.startsWith("m0\nAAA")).toBe(true);
+    expect(q.endsWith("ZZZ")).toBe(true);
+    expect(q).not.toContain("MIDDLE");
+    expect(Array.from(q).length).toBeLessThanOrEqual(3003);
   });
 });
