@@ -130,8 +130,11 @@ const TOPIC_CRITERIA: Record<Topic, string> = {
 
 export interface BrandContext {
   brand: { name: string; website: string | null; description: string | null };
-  /** Each ACTIVE offer as the client created it: its name and its "what we offer" text (brand-service `description`). */
-  offers: { offerId: string; name: string; description: string | null }[];
+  /**
+   * Each ACTIVE offer as the client created it: its name and its "what we offer" text (`whatWeOfferOf`:
+   * the offer's stated `services`, its "Your offer → Service sold" point, else its own `description`).
+   */
+  offers: { offerId: string; name: string; whatWeOffer: string | null }[];
   otherBrandsOfTheSameOwner: { name: string; website: string | null }[];
   hash: string;
 }
@@ -158,11 +161,12 @@ export async function readBrandContext(identity: SiblingIdentity): Promise<Brand
     siblingGetOk<{ fields: { key: string; value: unknown }[] }>("brand", `/internal/brands/${id}/extracted-fields`, identity),
   ]);
   const overview = fields.fields.find((f) => f.key === "companyOverview")?.value;
+  const active = offers.offers.filter((o) => o.status === "active");
+  const stated = await Promise.all(active.map((o) => readOfferUserFields(identity, o.offerId)));
   const ctx = {
     brand: { name: brand.brand.name, website: brand.brand.domain ?? brand.brand.url },
-    offers: offers.offers
-      .filter((o) => o.status === "active")
-      .map((o) => ({ offerId: o.offerId, name: o.name, description: o.description?.trim() ? o.description.trim() : null }))
+    offers: active
+      .map((o, k) => ({ offerId: o.offerId, name: o.name, whatWeOffer: whatWeOfferOf({ description: o.description, fields: stated[k] }) }))
       .sort((a, b) => (a.offerId < b.offerId ? -1 : 1)),
     otherBrandsOfTheSameOwner: orgBrands.brands
       .filter((b) => b.id !== identity.brandId)
@@ -171,7 +175,7 @@ export async function readBrandContext(identity: SiblingIdentity): Promise<Brand
   };
   // The brand description is re-extracted every few days in different words: it is shown to
   // Jev but kept OUT of the hash, so a re-extraction never re-judges every conversation. An
-  // offer's own text is the client's: in the hash, a rewrite re-judges once.
+  // offer's "what we offer" is the client's statement: in the hash, a rewrite re-judges once.
   return {
     ...ctx,
     brand: { ...ctx.brand, description: typeof overview === "string" && overview.trim() ? overview.trim() : null },
@@ -179,13 +183,44 @@ export async function readBrandContext(identity: SiblingIdentity): Promise<Brand
     // activities and suppliers selling to the owner are other work. Each bump re-judges once.
     // v8 (CONNECTION-TAGS-1017): the four connection tags + who the user is.
     // v9 (WHOLE-THREAD-JEV-1021): the whole thread with its quoted history, offers as created.
-    hash: createHash("sha256").update(JSON.stringify(["v9", ctx])).digest("hex").slice(0, 32),
+    // v10: "what we offer" = the offer's stated Service sold (v9 read the empty `description`).
+    hash: createHash("sha256").update(JSON.stringify(["v10", ctx])).digest("hex").slice(0, 32),
   };
+}
+
+/**
+ * PURE: the offer's "what we offer" text as the client stated it on the platform ("Your offer →
+ * Service sold": the user field `services`, a list joined), else its own `description`, else null.
+ * The SAME rule as lead-service's relationship judge (`whatWeOfferOf`), so both judges read one text.
+ */
+export function whatWeOfferOf(offer: { description: string | null; fields: Record<string, unknown> }): string | null {
+  const v = offer.fields.services;
+  const stated = Array.isArray(v)
+    ? v.filter((x): x is string => typeof x === "string" && !!x.trim()).map((x) => x.trim()).join("; ")
+    : typeof v === "string"
+      ? v.trim()
+      : "";
+  if (stated) return stated;
+  return offer.description?.trim() || null;
+}
+
+/** The offer's user fields (brand-service `/orgs/brands/{b}/offers/{o}/user-fields`), values only. Fails loud. */
+async function readOfferUserFields(identity: SiblingIdentity, offerId: string): Promise<Record<string, unknown>> {
+  const body = await siblingGetOk<{ fields?: Record<string, { value: unknown } | null> }>(
+    "brand",
+    `/orgs/brands/${encodeURIComponent(identity.brandId)}/offers/${encodeURIComponent(offerId)}/user-fields`,
+    identity,
+  );
+  const out: Record<string, unknown> = {};
+  for (const [k, f] of Object.entries(body.fields ?? {})) {
+    if (f && f.value !== null && f.value !== undefined && f.value !== "") out[k] = f.value;
+  }
+  return out;
 }
 
 /** PURE: the offers as every Jev question about this brand is shown them (conversation, group, member). */
 export function offersShownToJev(context: BrandContext): { key: string; name: string; whatWeOffer: string | null }[] {
-  return context.offers.map((o, k) => ({ key: `o${k}`, name: o.name, whatWeOffer: o.description }));
+  return context.offers.map((o, k) => ({ key: `o${k}`, name: o.name, whatWeOffer: o.whatWeOffer }));
 }
 
 export interface ConversationMessage {

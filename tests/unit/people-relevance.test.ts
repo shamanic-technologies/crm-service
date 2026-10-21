@@ -6,6 +6,7 @@ import {
   conversationKeysOf,
   gmailMessages,
   offersShownToJev,
+  whatWeOfferOf,
   hidesConversation,
   isPersonalChannelOnly,
   judgeConversation,
@@ -148,8 +149,8 @@ describe("judgeConversation", () => {
   const context: BrandContext = {
     brand: { name: "Acme", website: "acme.com", description: "Acme sells software." },
     offers: [
-      { offerId: "offer-a", name: "Pro plan", description: null },
-      { offerId: "offer-b", name: "Angel round", description: null },
+      { offerId: "offer-a", name: "Pro plan", whatWeOffer: null },
+      { offerId: "offer-b", name: "Angel round", whatWeOffer: null },
     ],
     otherBrandsOfTheSameOwner: [{ name: "Other Co", website: "other.co" }],
     hash: "h",
@@ -277,7 +278,7 @@ describe("WA-LEAD-RELEVANCE-1016: a supplier or another activity of the owner is
       {
         offerId: "offer-a",
         name: "Product-led",
-        description: "Meetings on your calendar with buyers who asked for them.",
+        whatWeOffer: "Meetings on your calendar with buyers who asked for them.",
       },
     ],
     otherBrandsOfTheSameOwner: [],
@@ -324,7 +325,7 @@ describe("WA-LEAD-RELEVANCE-1016: a supplier or another activity of the owner is
     it(`${name}: Jev is shown what the brand sells and told such a thread is other work, and its answer hides it`, async () => {
       stubJev({ personal: 0.02, other_business: 0.9, this_brand: 0.08 });
       const v = await judgeConversation(input, context, tracking);
-      expect(body!.state.offers[0]).toEqual({ key: "o0", name: "Product-led", whatWeOffer: context.offers[0].description });
+      expect(body!.state.offers[0]).toEqual({ key: "o0", name: "Product-led", whatWeOffer: context.offers[0].whatWeOffer });
       const topic = body!.questions.topic;
       expect(topic.criteria.other_business).toMatch(/SELLER and the owner the buyer/);
       expect(topic.criteria.other_business).toMatch(/OTHER activities/);
@@ -355,11 +356,12 @@ describe("threadWindow", () => {
 
 describe("readBrandContext", () => {
   afterEach(() => vi.unstubAllGlobals());
-  it("WHOLE-THREAD-JEV-1021: each ACTIVE offer as the client created it (name + what we offer), never its Q&A profile", async () => {
+  it("WHOLE-THREAD-JEV-1021: each ACTIVE offer as the client created it (name + Service sold, else its text), never its Q&A", async () => {
     process.env.BRAND_SERVICE_URL = "http://brand.test";
     process.env.BRAND_SERVICE_API_KEY = "k";
     const asked: string[] = [];
     let overview = "Distribute.you gets B2B meetings.";
+    let services: unknown = ["Autonomous multi-channel acquisition", " Cold email "];
     vi.stubGlobal("fetch", async (url: string) => {
       const u = new URL(url);
       asked.push(u.pathname + u.search);
@@ -375,22 +377,40 @@ describe("readBrandContext", () => {
       }
       if (u.pathname === "/orgs/brands") return json({ brands: [] });
       if (u.pathname.endsWith("/extracted-fields")) return json({ fields: [{ key: "companyOverview", value: overview }] });
+      if (u.pathname === "/orgs/brands/b/offers/o-active/user-fields") {
+        return json({ fields: { services: { value: services, provenance: "confirmed" }, dreamOutcome: { value: "More meetings", provenance: "confirmed" } } });
+      }
+      if (u.pathname.endsWith("/user-fields")) return json({ fields: { dreamOutcome: { value: "Q&A, never shown" } } });
       return json({ brand: { name: "Distribute.you", domain: "distribute.you", url: null } });
     });
     const identity = { orgId: "o", brandId: "b", userId: "u", runId: "r" };
     const ctx = await readBrandContext(identity);
     expect(asked.some((a) => a.includes("runtime-context"))).toBe(false);
+    expect(asked.filter((a) => a.endsWith("/user-fields")).sort()).toEqual([
+      "/orgs/brands/b/offers/o-active/user-fields",
+      "/orgs/brands/b/offers/o-blank/user-fields",
+    ]);
     expect(ctx.brand).toEqual({ name: "Distribute.you", website: "distribute.you", description: overview });
     expect(ctx.offers).toEqual([
-      { offerId: "o-active", name: "Product-led", description: "Done-for-you outbound that books meetings." },
-      { offerId: "o-blank", name: "Sales-led", description: null },
+      { offerId: "o-active", name: "Product-led", whatWeOffer: "Autonomous multi-channel acquisition; Cold email" },
+      { offerId: "o-blank", name: "Sales-led", whatWeOffer: null },
     ]);
     expect(offersShownToJev(ctx)).toEqual([
-      { key: "o0", name: "Product-led", whatWeOffer: "Done-for-you outbound that books meetings." },
+      { key: "o0", name: "Product-led", whatWeOffer: "Autonomous multi-channel acquisition; Cold email" },
       { key: "o1", name: "Sales-led", whatWeOffer: null },
     ]);
     overview = "Worded differently after a re-extraction.";
     expect((await readBrandContext(identity)).hash).toBe(ctx.hash);
+    // The client rewrites what the offer sells: every conversation is judged again.
+    services = ["Done-for-you outbound"];
+    expect((await readBrandContext(identity)).hash).not.toBe(ctx.hash);
+  });
+
+  it("whatWeOfferOf: Service sold first (a list joined), else the offer's own text, else nothing (lead-service's rule)", () => {
+    expect(whatWeOfferOf({ description: null, fields: { services: ["Autonomous Sales Meetings Acquisition"] } })).toBe("Autonomous Sales Meetings Acquisition");
+    expect(whatWeOfferOf({ description: "Dinner events for chiropractors", fields: {} })).toBe("Dinner events for chiropractors");
+    expect(whatWeOfferOf({ description: "ignored", fields: { services: "Cold email" } })).toBe("Cold email");
+    expect(whatWeOfferOf({ description: null, fields: { dreamOutcome: ["More patients"] } })).toBeNull();
   });
 });
 
@@ -449,7 +469,7 @@ describe("WHOLE-THREAD-JEV-1021: Jev reads the whole thread from its start", () 
     });
     const context: BrandContext = {
       brand: { name: "Distribute.you", website: "distribute.you", description: "B2B meetings, done for you." },
-      offers: [{ offerId: "o-a", name: "Product-led", description: "Done-for-you outbound that books meetings." }],
+      offers: [{ offerId: "o-a", name: "Product-led", whatWeOffer: "Done-for-you outbound that books meetings." }],
       otherBrandsOfTheSameOwner: [],
       hash: "h",
     };
