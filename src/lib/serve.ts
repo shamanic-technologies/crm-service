@@ -5,6 +5,7 @@ import { PERSON_REPLIED_SQL } from "./people/conversation.js";
 import { STAFF_DOMAIN, STAFF_EMAIL_LIST } from "./owner-telegram.js";
 import { businessOnlyVerdict, queryRelationships, type Relationship, type RelationshipPolicy } from "./people/relationships.js";
 import type { SiblingIdentity } from "./people/siblings.js";
+import { emailUnknownCounts, handOutEmailUnknown, type EmailUnknownCounts } from "./contacts/email-lookup.js";
 import {
   csvStepFilterSql,
   perStageSegments,
@@ -66,6 +67,15 @@ export interface ServedContact {
   sourceUploadId: string;
   sourceRowId: string;
   lastRebuiltAt: string;
+  // CRM-ADD-ONE-CONTACT-1021: structured fields a CSV column or a contact added one by one states.
+  companyName: string | null;
+  companyDomain: string | null;
+  jobTitle: string | null;
+  linkedinUrl: string | null;
+  /** The client's own words about the person (contacts added one by one). */
+  note: string | null;
+  /** `known` = primaryEmail is the address; `unknown` = handed out to have its email looked up (`includeEmailUnknown`). */
+  emailStatus: "known" | "unknown";
 }
 
 export interface ServeNextResult {
@@ -95,9 +105,14 @@ interface RawContactRow {
   source_upload_id: string;
   source_row_id: string;
   last_rebuilt_at: string | Date;
+  company_name?: string | null;
+  company_domain?: string | null;
+  job_title?: string | null;
+  linkedin_url?: string | null;
+  note?: string | null;
 }
 
-function toServedContact(r: RawContactRow): ServedContact {
+export function toServedContact(r: RawContactRow): ServedContact {
   return {
     id: r.id,
     orgId: r.org_id,
@@ -114,6 +129,12 @@ function toServedContact(r: RawContactRow): ServedContact {
     sourceRowId: r.source_row_id,
     lastRebuiltAt:
       r.last_rebuilt_at instanceof Date ? r.last_rebuilt_at.toISOString() : r.last_rebuilt_at,
+    companyName: r.company_name ?? null,
+    companyDomain: r.company_domain ?? null,
+    jobTitle: r.job_title ?? null,
+    linkedinUrl: r.linkedin_url ?? null,
+    note: r.note ?? null,
+    emailStatus: r.primary_email ? "known" : "unknown",
   };
 }
 
@@ -211,7 +232,8 @@ export async function serveNext(
       SELECT c.id, c.org_id, c.brand_id, c.primary_email, c.phone_e164,
              c.full_name, c.first_name, c.last_name, c.raw_attributes,
              c.consent_status, c.unsubscribed, c.source_upload_id,
-             c.source_row_id, c.last_rebuilt_at
+             c.source_row_id, c.last_rebuilt_at, c.company_name, c.company_domain,
+             c.job_title, c.linkedin_url, c.note
       FROM sendable_contacts c
       WHERE c.org_id = ${orgId}
         AND c.brand_id = ${brandId}${files}
@@ -264,6 +286,46 @@ async function countRemaining(
       )
   `)) as unknown as { remaining: number }[];
   return res[0]?.remaining ?? 0;
+}
+
+/**
+ * `includeEmailUnknown` (CSV pool, opt-in, CRM-ADD-ONE-CONTACT-1021): after the sendable
+ * contacts, fill what is left of `limit` with contacts whose email is not known yet, handed
+ * out for the caller to look the email up (lib/contacts/email-lookup.ts). They come in the
+ * same `contacts` list with `primaryEmail: null`, `emailStatus: "unknown"` and what finds
+ * the email (names, companyName, companyDomain, linkedinUrl, jobTitle). Same file, reach and
+ * step filters as the serve. `exhausted` = nothing sendable AND nothing left to look up.
+ */
+export async function withEmailUnknown(
+  base: ServeNextResult,
+  orgId: string,
+  brandId: string,
+  limit: number,
+  runId: string,
+  uploadIds?: string[],
+  reach: readonly Reach[] = [],
+  steps?: StepFilter,
+): Promise<ServeNextResult & { emailUnknown: EmailUnknownCounts & { served: number } }> {
+  const extra = sql`${uploadFilter(uploadIds)}${csvReachFilter(reach)}${csvStepFilterSql(orgId, brandId, steps)}`;
+  const handed = (await handOutEmailUnknown(orgId, brandId, limit - base.served, runId, extra)).map(toServedContact);
+  const counts = await emailUnknownCounts(orgId, brandId, extra);
+  return {
+    contacts: [...base.contacts, ...handed],
+    served: base.served + handed.length,
+    exhausted: base.exhausted && counts.remaining === 0,
+    emailUnknown: { ...counts, served: handed.length },
+  };
+}
+
+/** The email-unknown counts beside serve-stats (`includeEmailUnknown=true`, CSV pool). */
+export function serveStatsEmailUnknown(
+  orgId: string,
+  brandId: string,
+  uploadIds?: string[],
+  reach: readonly Reach[] = [],
+  steps?: StepFilter,
+): Promise<EmailUnknownCounts> {
+  return emailUnknownCounts(orgId, brandId, sql`${uploadFilter(uploadIds)}${csvReachFilter(reach)}${csvStepFilterSql(orgId, brandId, steps)}`);
 }
 
 export interface ServeStats {
@@ -463,6 +525,12 @@ function toServedPerson(r: RawPersonRow): ServedPerson {
     sourceUploadId: null,
     sourceRowId: null,
     lastRebuiltAt: r.built_at instanceof Date ? r.built_at.toISOString() : r.built_at,
+    companyName: null,
+    companyDomain: null,
+    jobTitle: null,
+    linkedinUrl: null,
+    note: null,
+    emailStatus: "known",
     pool: "people",
     personId: r.person_id,
     humanId: r.human_id ?? null,

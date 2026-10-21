@@ -361,10 +361,35 @@ subset of the brand's `contact_uploads`. Both serve routes take an OPTIONAL
   forwards ONLY `brandId`, so `uploadIds` is stripped there — a per-file read
   through the gateway needs that proxy widened to a passthrough.
 
+### Contacts added one by one + email unknown (`src/lib/contacts/`, CRM-ADD-ONE-CONTACT-1021)
+
+Owner 2026-10-21 (AscendQE: "we know someone, can you reach him?"): a client adds ONE person, JSON, from the
+Copilot / API / MCP: `POST /orgs/contacts {brandId, email?, phone?, firstName?, lastName?, fullName?, companyName?,
+companyDomain?, jobTitle?, linkedinUrl?, note?}` (x-user-id) → 201 `{contactId, created, matchedOn, emailStatus:
+known|unknown|not_found, contact}` (200 = already held). Needs an email, a LinkedIn, or a name + company
+(`not_enough_to_find`). Free: no lookup, no model.
+- Each brand holds ONE `contact_uploads` row of `kind = 'manual'` ("Contacts added one by one"): the person IS a CSV
+  contact (`sendable_contacts`, serve, file toggle, facts, people evidence all unchanged). Bronze append-only: every
+  add is a new raw row; silver = one contact per cluster of rows sharing an email / LinkedIn (`deriveManualRecords`,
+  anchor = first row, id stable, later values win, notes all kept), re-derived in place (`rederiveManual`).
+- A person already in a FILE of the brand (same email / LinkedIn) is taken over: their file contact is copied into
+  the statement (`fromContact`: phone, opt-out, raw attributes kept) and every file promote skips rows the manual
+  list holds (`manualHeldKeys`). A file promote's email takeover deletes CSV rows only (it used to hit any source).
+- **Email unknown** (generic: any CSV-pool contact with no email, a name and a company domain / name / LinkedIn):
+  `serve-next {includeEmailUnknown: true}` (CSV pool only; refused with `people`) fills the rest of `limit` with them
+  (`primaryEmail: null`, `emailStatus: "unknown"`), recorded `handed_out` in `contact_email_lookups` (keyed on the
+  bronze row; again after `CRM_EMAIL_LOOKUP_HANDOUT_TTL_HOURS` 24 h if never resolved). The caller (human-service,
+  inside the campaign's caps) writes back `POST /orgs/contacts/{id}/email-lookup {brandId, status: found|not_found,
+  email?}`: found = the contact gets the email AND the address is marked served (the hand-out was its serve; an
+  address another contact holds = `duplicateOf`, not copied); not_found = never handed out again. Under
+  `relationships: business_only` none is handed out (no human to judge: `skipped`). `serve-stats?includeEmailUnknown=true`
+  adds the counts. Structured `company_domain`, `job_title`, `linkedin_url`, `note` on `contacts`; CSV column typing
+  types `company_name | company_domain | job_title | linkedin_url` too (also kept in `raw_attributes`, unchanged).
+
 ## Column typing (the mapping step)
 
 CSV headers from arbitrary CRM exports must be classified against the FIXED enum
-`{email, phone, first_name, last_name, full_name, other}`. Exactly **one**
+`{email, phone, first_name, last_name, full_name, company_name, company_domain, job_title, linkedin_url, other}`. Exactly **one**
 chat-service `/complete` call per upload:
 
 - `columnMapping` override present → use it (provenance `override`), skip the LLM.

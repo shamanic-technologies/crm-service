@@ -31,6 +31,9 @@ async function seedBrand(org: string, brand: string, tag: string) {
   await db.execute(sql`
     INSERT INTO contact_serves (org_id, brand_id, contact_id, email, served_run_id)
     VALUES (${org}, ${brand}, ${contact.id}, ${tag + "@x.com"}, 'run')`);
+  await db.execute(sql`
+    INSERT INTO contact_email_lookups (org_id, brand_id, source_row_id, contact_id, status, handed_out_run_id)
+    VALUES (${org}, ${brand}, gen_random_uuid(), ${contact.id}, 'handed_out', 'run')`);
 
   const [mx] = await db.execute<{ id: string }>(sql`
     INSERT INTO matrix_connections (org_id, brand_id, channel, matrix_user_id, counterpart_prefix, created_by_user_id)

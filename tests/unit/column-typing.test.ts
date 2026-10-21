@@ -55,7 +55,8 @@ describe("heuristicMapping (chat-service fallback)", () => {
     const m = heuristicMapping(["e-mail", "Contact Name", "Company", "Notes"]);
     expect(m["e-mail"]).toBe("email");
     expect(m["Contact Name"]).toBe("full_name");
-    expect(m["Company"]).toBe("other");
+    // CRM-ADD-ONE-CONTACT-1021: a company column is now structured (still kept in raw_attributes).
+    expect(m["Company"]).toBe("company_name");
     expect(m["Notes"]).toBe("other");
   });
 

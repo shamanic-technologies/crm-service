@@ -73,6 +73,7 @@ import {
   phoneWatchArtifacts,
   peopleCorrections,
   contactPointOrgVerdicts,
+  contactEmailLookups,
 } from "../db/schema.js";
 
 export const TRANSFER_TABLES: PgTable[] = [
@@ -81,6 +82,8 @@ export const TRANSFER_TABLES: PgTable[] = [
   contactRowsRaw,
   contacts,
   contactServes,
+  // Email lookups of contacts whose email was not known (CRM-ADD-ONE-CONTACT-1021).
+  contactEmailLookups,
   matrixConnections,
   matrixLinks,
   matrixRawEvents,

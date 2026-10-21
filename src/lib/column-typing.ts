@@ -13,6 +13,10 @@ export const COLUMN_FIELDS = [
   "first_name",
   "last_name",
   "full_name",
+  "company_name",
+  "company_domain",
+  "job_title",
+  "linkedin_url",
   "other",
 ] as const;
 export type ColumnField = (typeof COLUMN_FIELDS)[number];
@@ -83,6 +87,10 @@ const HEURISTIC_RULES: ReadonlyArray<readonly [ColumnField, RegExp]> = [
   ["first_name", /\b(first[-_ ]?name|given[-_ ]?name|forename|fname|pr[eé]nom)\b/i],
   ["last_name", /\b(last[-_ ]?name|surname|family[-_ ]?name|lname|nom)\b/i],
   ["full_name", /(full[-_ ]?name|contact[-_ ]?name|customer[-_ ]?name|^\s*name\s*$)/i],
+  ["linkedin_url", /linked[-_ ]?in/i],
+  ["company_domain", /\b(website|web[-_ ]?site|domain|company[-_ ]?url|site)\b/i],
+  ["company_name", /\b(company|organi[sz]ation|employer|account[-_ ]?name|soci[eé]t[eé]|entreprise)\b/i],
+  ["job_title", /\b(job[-_ ]?title|title|position|role|poste|fonction)\b/i],
 ];
 
 export function heuristicMapping(headers: string[]): ColumnMapping {
@@ -107,7 +115,11 @@ const FIELD_CRITERIA: Record<ColumnField, string> = {
   first_name: "a person's first (given) name only",
   last_name: "a person's last (family) name only",
   full_name: "a person's whole name in a single column",
-  other: "anything that is not an email, a phone number or a person's name",
+  company_name: "the name of the company or organization the person works for",
+  company_domain: "the website or web domain of the person's company",
+  job_title: "the person's job title or role at their company",
+  linkedin_url: "a link to the person's own LinkedIn profile",
+  other: "anything else: not an email, a phone number, a person's name, their company, company website, job title or LinkedIn profile",
 };
 
 /**

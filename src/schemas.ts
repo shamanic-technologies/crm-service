@@ -95,9 +95,76 @@ export const ContactSchema = registry.register(
       sourceUploadId: z.string().uuid().nullable(),
       sourceRowId: z.string().uuid().nullable(),
       lastRebuiltAt: z.string(),
+      companyName: z.string().nullable().optional().openapi({ description: "The company the person works for, as stated (CSV column, CRM, or added one by one)." }),
+      companyDomain: z.string().nullable().optional().openapi({ description: "The company's bare web domain (ntt.com)." }),
+      jobTitle: z.string().nullable().optional(),
+      linkedinUrl: z.string().nullable().optional().openapi({ description: "The person's LinkedIn profile, canonical (https://www.linkedin.com/in/<slug>)." }),
+      note: z.string().nullable().optional().openapi({ description: "The client's own words about the person (contacts added one by one), for the email writer." }),
+      emailStatus: z.enum(["known", "unknown", "not_found"]).optional().openapi({
+        description:
+          "known = the contact holds an email (sendable like any CSV contact); unknown = not known yet: serve-next with includeEmailUnknown hands it out for the email to be looked up; not_found = a lookup found none (never handed out again).",
+      }),
     })
     .openapi("Contact"),
 );
+
+export const AddContactRequestSchema = registry.register(
+  "AddContactRequest",
+  z
+    .object({
+      brandId: z.string().uuid(),
+      email: z.string().email().nullish(),
+      phone: z.string().nullish().openapi({ description: "International form preferred (+33...)." }),
+      firstName: z.string().nullish(),
+      lastName: z.string().nullish(),
+      fullName: z.string().nullish(),
+      companyName: z.string().nullish(),
+      companyDomain: z.string().nullish().openapi({ description: "A domain or a URL (ntt.com, https://www.ntt.com/...)." }),
+      jobTitle: z.string().nullish(),
+      linkedinUrl: z.string().nullish().openapi({ description: "The person's LinkedIn profile URL." }),
+      note: z.string().max(5000).nullish().openapi({ description: "What the client knows about the person (\"I met him at X\"), stored with the contact for the email writer." }),
+    })
+    .openapi({ description: "Needs an email, a LinkedIn URL, or a name with a company (companyName or companyDomain)." }),
+);
+
+export const AddContactResponseSchema = registry.register(
+  "AddContactResponse",
+  z.object({
+    contactId: z.string().uuid().openapi({ description: "The contact's id (stable across later adds of the same person)." }),
+    created: z.boolean().openapi({ description: "false = the brand already held this person (same email or LinkedIn): the same contact, updated, never a second one." }),
+    matchedOn: z.enum(["email", "linkedin"]).nullable(),
+    emailStatus: z.enum(["known", "unknown", "not_found"]).openapi({ description: "known = sendable now; unknown = the email is looked up when a campaign serves the person; not_found = a lookup found none." }),
+    contact: ContactSchema,
+  }),
+);
+
+export const EmailLookupRequestSchema = registry.register(
+  "EmailLookupRequest",
+  z.object({
+    brandId: z.string().uuid(),
+    status: z.enum(["found", "not_found"]),
+    email: z.string().email().optional().openapi({ description: "Required with found, refused with not_found." }),
+  }),
+);
+
+export const EmailLookupResponseSchema = registry.register(
+  "EmailLookupResponse",
+  z.object({
+    contactId: z.string().uuid(),
+    status: z.enum(["found", "not_found"]),
+    email: z.string().nullable(),
+    emailStatus: z.enum(["known", "not_found"]),
+    duplicateOf: z.string().uuid().nullable().openapi({ description: "Another contact of the brand already held the found address: that contact is the person (the address is not copied)." }),
+    served: z.boolean().openapi({ description: "true = the found address is marked served for the brand: no serve ever hands it out again (the hand-out was its serve)." }),
+  }),
+);
+
+const EmailUnknownCountsSchema = z.object({
+  remaining: z.number().int().openapi({ description: "Email-unknown contacts that can be handed out now." }),
+  handedOut: z.number().int().openapi({ description: "Handed out, not written back yet (handed out again after 24 h)." }),
+  found: z.number().int(),
+  notFound: z.number().int(),
+});
 
 export const ContactsListResponseSchema = registry.register(
   "ContactsListResponse",
@@ -245,6 +312,10 @@ export const ServeNextRequestSchema = registry.register(
       stepFilter: StepFilterSchema.optional().openapi({
         description: "The serving pipe's funnel-step filter (see StepFilter). A person outside it is skipped and NOT marked served. Omit = unchanged behaviour.",
       }),
+      includeEmailUnknown: z.boolean().optional().openapi({
+        description:
+          "CSV pool only (refused with people). After the sendable contacts, fill the rest of `limit` with contacts whose email is NOT known yet but that carry a name AND a company domain, company name or LinkedIn: returned in `contacts` with primaryEmail null, emailStatus unknown. Each is recorded handed out (never handed out twice; again after 24 h if nobody wrote back). The caller looks the email up and writes it back: POST /orgs/contacts/{contactId}/email-lookup. Same opt-out, consent, file, reach and step rules. Under relationships=business_only none is handed out (no known person to judge yet). Omit = unchanged behaviour.",
+      }),
     })
     .openapi("ServeNextRequest"),
 );
@@ -281,6 +352,12 @@ export const ServeNextResponseSchema = registry.register(
         })
         .optional()
         .openapi({ description: "Present only when the request set `relationships`." }),
+      emailUnknown: EmailUnknownCountsSchema.extend({
+        served: z.number().int().openapi({ description: "Email-unknown contacts handed out by this call." }),
+        skipped: z.string().optional().openapi({ description: "Why none was handed out (business_only_needs_a_known_person)." }),
+      })
+        .optional()
+        .openapi({ description: "Present only when the request set includeEmailUnknown. With it, `exhausted` = nothing sendable AND nothing left to look up." }),
     })
     .openapi("ServeNextResponse"),
 );
@@ -347,6 +424,7 @@ export const ServeStatsResponseSchema = registry.register(
         .number()
         .int()
         .openapi({ description: "All sendable contacts in the requested scope." }),
+      emailUnknown: EmailUnknownCountsSchema.optional().openapi({ description: "CSV pool, with includeEmailUnknown=true." }),
       byStage: z
         .array(
           z.object({
@@ -444,6 +522,38 @@ registry.registerPath({
 
 registry.registerPath({
   method: "post",
+  path: "/orgs/contacts",
+  summary: "Add ONE person to a brand's CRM (no file)",
+  description:
+    "A client knows one person and wants them reached (Copilot, API, MCP). The person joins the brand's list \"Contacts added one by one\" (an upload of kind manual in GET /orgs/contacts/uploads) and is served like any CSV contact: with an email, sendable at once; without one, handed out by serve-next with includeEmailUnknown for the email to be looked up inside the campaign's caps. Adding the same email or LinkedIn again keeps ONE contact (created false, the new statement merged in; notes kept). A person already in a CSV file of the brand is taken over by this list (their file data kept). Free: no lookup, no model. Requires x-api-key, x-org-id, x-user-id. 201 created, 200 matched an existing contact; 400 validation | not_enough_to_find.",
+  request: { body: { content: { "application/json": { schema: AddContactRequestSchema } } } },
+  responses: {
+    201: { description: "Added", content: { "application/json": { schema: AddContactResponseSchema } } },
+    200: { description: "Already in the CRM: the same contact, updated", content: { "application/json": { schema: AddContactResponseSchema } } },
+    400: { description: "Bad request", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/contacts/{contactId}/email-lookup",
+  summary: "Write back what an email lookup found for a contact handed out with its email unknown",
+  description:
+    "found + email: the contact gets the email (a normal sendable contact) and the address is marked served for the brand (the hand-out was its serve). not_found: never handed out again. Idempotent, the latest statement wins. 404 contact_not_found; 409 email_already_known.",
+  request: {
+    params: z.object({ contactId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: EmailLookupRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Recorded", content: { "application/json": { schema: EmailLookupResponseSchema } } },
+    400: { description: "Bad request", content: { "application/json": { schema: ErrorResponseSchema } } },
+    404: { description: "Not a contact of this brand", content: { "application/json": { schema: ErrorResponseSchema } } },
+    409: { description: "The contact already holds an email", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
   path: "/orgs/contacts/serve-next",
   summary: "Serve the next batch of not-yet-served sendable contacts for a brand",
   description:
@@ -502,6 +612,7 @@ registry.registerPath({
       stepFilter: z.string().optional().openapi({
         description: "The pipe's StepFilter as URL-encoded JSON (both pools), e.g. {\"reached\":[\"form_submission\"],\"notReached\":[\"sale\",\"disqualified\"]}.",
       }),
+      includeEmailUnknown: z.enum(["true"]).optional().openapi({ description: "CSV pool: add `emailUnknown` counts (contacts whose email is looked up at serve time)." }),
     }),
   },
   responses: {
