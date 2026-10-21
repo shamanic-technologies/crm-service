@@ -161,7 +161,7 @@ describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
       reason: null,
       reasons: [],
       connectedSources: ["instantly", "gohighlevel"],
-      stepSources: { from: ["gohighlevel"], to: ["gohighlevel"] },
+      stepSources: { from: ["gohighlevel"], to: ["gohighlevel", "google_calendar"] },
     });
     expect(r.body.reachedFrom).toEqual({
       people: 5,

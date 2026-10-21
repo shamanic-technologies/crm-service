@@ -97,8 +97,9 @@ export const STEP_SOURCES: Record<LegStep, readonly string[]> = {
   website_visit: ["posthog"],
   signup: ["posthog", ...AUTH_PROVIDER_NAMES],
   form_submission: ["gohighlevel"],
-  meeting_booked: ["gohighlevel"],
-  meeting_attended: ["gohighlevel"],
+  // GOOGLE-CALENDAR-MEETING-FACTS-1021: a connected Google Calendar states bookings and Meet attendance too.
+  meeting_booked: ["gohighlevel", "google_calendar"],
+  meeting_attended: ["gohighlevel", "google_calendar"],
   sale: ["gohighlevel", "stripe"],
 };
 
@@ -111,6 +112,8 @@ interface ScopeRow {
   status: string;
   lastBuiltAt: Date | null;
   sourceReads: unknown;
+  /** The org's Google Calendar is mirrored (google-service owns the connection; not a people source). */
+  calendarConnected: boolean;
 }
 
 /** The scope's last build verdict per source (`source_reads.sources`). */
@@ -118,6 +121,7 @@ function sourceStatuses(scope: ScopeRow): Map<string, SourceStatus> {
   const out = new Map<string, SourceStatus>();
   const reads = scope.sourceReads as { sources?: { source: string; status: SourceStatus }[] } | null;
   for (const s of reads?.sources ?? []) out.set(s.source, s.status);
+  if (scope.calendarConnected) out.set("google_calendar", "ok");
   return out;
 }
 
@@ -154,6 +158,7 @@ const SCOPE_COLUMNS = {
   status: peopleScopes.status,
   lastBuiltAt: peopleScopes.lastBuiltAt,
   sourceReads: peopleScopes.sourceReads,
+  calendarConnected: sql<boolean>`EXISTS (SELECT 1 FROM calendar_events ce WHERE ce.org_id = ${peopleScopes.orgId})`,
 };
 
 export interface LegReachBrand {

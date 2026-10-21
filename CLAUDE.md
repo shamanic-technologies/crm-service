@@ -16,6 +16,7 @@ feed the same registry, both layered bronze/silver/gold:
 | `clerk` | MIRROR | the brand's AUTH PROVIDER: every user who signed up to its product, history included, read-only | NEVER |
 | `copilot` | PUSHED | each distribute.you Copilot chat turn (user message + answer), pushed by chat-service, filed ONLY under the staff Unibox scope | NEVER |
 | `api` | PUSHED | each call a client made to our API / MCP server with their own key (request + answer), pushed by api-service, filed ONLY under the staff Unibox scope | NEVER |
+| `google_calendar` | MIRROR | the org's connected Google Calendar (google-service reads it): meetings, attendees, Meet participants; each external attendee a `contacts` row | NEVER |
 
 As a CSV lead-provider it is a sibling of `apollo-service` / `apify-service`.
 
@@ -119,6 +120,8 @@ There are exactly THREE such calls, all once-per-artifact, never per row:
 5. voice-note transcription, one `POST /orgs/transcriptions` per voice note an
    automation is about to read (SOPHIE-VOICE-1019, `src/lib/matrix/voice-notes.ts`,
    see "Voice notes" under the reply trigger), stored once, never redone.
+6. calendar matching, one Jev `choice` per calendar attendee no person holds by address and one per
+   (Meet record, matched lead), recorded once (see "Google Calendar meetings");
 
 Everything else GoHighLevel sends arrives already structured, so deriving it is
 pure code — no model, no metered call, no catalogue row.
@@ -1372,6 +1375,32 @@ be understood)` (failed or nothing said); byte-equal to chat-service `VOICE_NOTE
 whose Copilot block says what they mean. A voice note nobody transcribed (history, automation off) stays silent.
 The owner ping of an inbound voice note waits (unrecorded) up to `VOICE_NOTE_PING_WAIT_MS` (10 min) for its words; the
 sync re-runs the pings right after a pass that transcribed (`voiceNotesTranscribed`).
+
+## Google Calendar meetings — a meeting with a lead is a funnel fact (`src/lib/calendar/`, GOOGLE-CALENDAR-MEETING-FACTS-1021)
+
+Owner 2026-10-21 (Jarygo Studios books through neocal, closes on Meet): a client connects his Google Calendar
+(google-service, `connection: "calendar"`); its meetings become the SAME `meeting_booked` / `meeting_attended` /
+`meeting_not_held` facts a GoHighLevel appointment states (source `google_calendar`, family `calendar_meeting`,
+snapshot), so lead-service reads them with no per-source branch.
+- **Feed** (`feed.ts`, every 5 min, first 60 s after boot, `CALENDAR_WATCH=off`): google-service
+  `GET /internal/calendar/events?cursor=` (cross-org, keyset, an event comes back on each change). Its routes demand
+  an identity: the read is filed under the staff org (`COPILOT_UNIBOX_*`, its scope's creator, one org run per pass).
+  Bronze `calendar_events` (latest per google row id), cursor `calendar_feed_cursors` moves only after its page is
+  stored. Orgs whose events moved (all every 15 min) → per scope `judgeScopeMeetings` on the scope's own org run,
+  then a people rebuild (`followUp`). `POST /internal/calendar/watch` = a pass now; `GET /orgs/calendar/meetings?brandId=`.
+- **Who** (`matching.ts`): an address is not a person. Attendees = all but the calendar owner, rooms, the org's
+  members (client-service) and decliners; each enters `contacts` (source `google_calendar`, external_id = address).
+  Same address as a person of the scope = that person; else Jev `choice` among the people sharing a name word (name,
+  address, meeting title) or an ORGANIZATION domain (`domain_verdicts`), + `none`, >= 0.5; none found = `no_candidate`
+  (no call). `calendar_attendee_matches` keyed (brand, address, input hash): asked again only when the question moves.
+- **Facts** (`meetings.ts`, pure): booked dated on `bookedAt` (event creation; lead-service's whose-win rule makes a
+  meeting booked before our first email "not caused by outreach"), key `google_calendar|<google event id>|<address>|booked`
+  (a moved meeting = the same key re-stated). Cancelled = + `meeting_not_held` at its start (as GoHighLevel); a cancel
+  then a later booking by the same person = ONE booking (the cancelled one emits nothing, the new one is dated at the
+  first, `rescheduledFrom`). Attended ONLY when Jev judged a Meet participant (display names only) to be the lead
+  (`calendar_attendance_verdicts`), dated `joinedAt`; Meet `not_meet|pending|no_record|unavailable` = unknown, no fact,
+  never a no-show. The subject is the matched PERSON's keys (an other-address attendee is never merged into them).
+- Leg reach: `meeting_booked` / `meeting_attended` are recorded by `google_calendar` too (org has mirrored events).
 
 ## Boot: the port binds BEFORE migrations
 

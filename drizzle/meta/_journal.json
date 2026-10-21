@@ -372,6 +372,13 @@
       "when": 1792320000000,
       "tag": "0052_voice_note_transcripts",
       "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "7",
+      "when": 1792330000000,
+      "tag": "0053_calendar_meetings",
+      "breakpoints": true
     }
   ]
 }

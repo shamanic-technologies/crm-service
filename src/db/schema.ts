@@ -2521,3 +2521,85 @@ export const voiceNoteTranscripts = pgTable(
   (table) => [uniqueIndex("voice_note_transcripts_event_uq").on(table.eventId)],
 );
 export type VoiceNoteTranscript = typeof voiceNoteTranscripts.$inferSelect;
+
+// ─── Google Calendar meetings (GOOGLE-CALENDAR-MEETING-FACTS-1021) ──────────
+//
+// google-service reads every connected Google Calendar and serves a cross-org
+// CHANGES feed of its events (attendees, Meet participants). crm-service mirrors
+// it (bronze), decides who among each brand's leads an attendee is and whether
+// that lead joined the Meet call (Jev, recorded once), and states meeting facts
+// on the people fact feed (people/facts.ts, lib/calendar/meetings.ts).
+
+/** Where the mirror of a sibling's changes feed stands. `caught_up_at` = it reached the end once. */
+export const calendarFeedCursors = pgTable("calendar_feed_cursors", {
+  feed: text("feed").primaryKey(),
+  cursor: text("cursor"),
+  caughtUpAt: timestamp("caught_up_at", { withTimezone: true }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/** Bronze: google-service's calendar event, verbatim (latest served version), keyed on its own row id. */
+export const calendarEvents = pgTable(
+  "calendar_events",
+  {
+    id: uuid("id").primaryKey(),
+    orgId: uuid("org_id").notNull(),
+    calendarEmail: text("calendar_email").notNull(),
+    googleEventId: text("google_event_id").notNull(),
+    status: text("status").notNull(),
+    payload: jsonb("payload").notNull(),
+    changedAt: timestamp("changed_at", { withTimezone: true }).notNull(),
+    mirroredAt: timestamp("mirrored_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("calendar_events_org_idx").on(table.orgId, table.googleEventId)],
+);
+export type CalendarEventRow = typeof calendarEvents.$inferSelect;
+
+/**
+ * Who an attendee is among the brand's people: `person_id` (null = nobody), `basis` `jev` | `no_candidate`.
+ * One row per (brand, attendee address, what was asked): asked again only when the question changes
+ * (new candidate people, new meeting titles).
+ */
+export const calendarAttendeeMatches = pgTable(
+  "calendar_attendee_matches",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    attendeeEmail: text("attendee_email").notNull(),
+    inputHash: text("input_hash").notNull(),
+    personId: text("person_id"),
+    basis: text("basis").notNull(),
+    confidence: doublePrecision("confidence"),
+    probabilities: jsonb("probabilities"),
+    candidates: jsonb("candidates").notNull(),
+    model: text("model"),
+    runId: text("run_id"),
+    judgedAt: timestamp("judged_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("calendar_attendee_matches_uq").on(table.orgId, table.brandId, table.attendeeEmail, table.inputHash)],
+);
+export type CalendarAttendeeMatch = typeof calendarAttendeeMatches.$inferSelect;
+
+/** Which Meet participant (index into the event's participants; null = none) Jev judged to be the lead. */
+export const calendarAttendanceVerdicts = pgTable(
+  "calendar_attendance_verdicts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    googleEventId: text("google_event_id").notNull(),
+    personId: text("person_id").notNull(),
+    inputHash: text("input_hash").notNull(),
+    participantIndex: integer("participant_index"),
+    confidence: doublePrecision("confidence").notNull(),
+    probabilities: jsonb("probabilities").notNull(),
+    model: text("model").notNull(),
+    runId: text("run_id").notNull(),
+    judgedAt: timestamp("judged_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("calendar_attendance_verdicts_uq").on(table.orgId, table.brandId, table.googleEventId, table.personId, table.inputHash),
+  ],
+);
+export type CalendarAttendanceVerdict = typeof calendarAttendanceVerdicts.$inferSelect;
