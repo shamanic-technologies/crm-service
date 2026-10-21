@@ -947,9 +947,11 @@ owner had written to. A recorded fact, never an address-shape guess.
   activities (anything sold / rented / taught that is not a brand offer:
   visa help, co-living, coaching), accountant, bank, mentors, investors, press
   (state = brand name + website + `companyOverview`, each ACTIVE offer AS CREATED:
-  name + its "what we offer" `description` (`offersShownToJev`; never its Q&A
-  brand profile nor its documents, owner 2026-10-21), the org's other brands;
-  overview NOT in the context hash). Jev reads the WHOLE thread from its start
+  name + its "what we offer" = `whatWeOfferOf` (the offer's user field `services`,
+  "Your offer → Service sold", list joined, else its `description`; lead-service's
+  relationship judge uses the same rule; `offersShownToJev`; never its Q&A nor its
+  documents, owner 2026-10-21), the org's other brands; overview NOT in the
+  context hash, the offer text IS). Jev reads the WHOLE thread from its start
   (WHOLE-THREAD-JEV-1021): Gmail reads every message google-service holds (limit
   500), the oldest held message of each of the 3 earliest threads carries its
   ORIGINAL body as `quotedHistory` when cleaning removed something (an earlier
