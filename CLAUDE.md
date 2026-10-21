@@ -295,6 +295,16 @@ read off our fact feed); `GET /orgs/people` no longer reads lead-service relatio
 filter, block or counts). crm → lead, one way. The serve's `relationships: business_only` (above) still asks
 lead-service: that policy also excludes team, investors, suppliers, press (lead-service's Type).
 
+### Latest message per relation: `POST /internal/people/relations/latest-messages` (UNIBOX-LAST-MESSAGE-PREVIEW-1021)
+
+lead-service's Unibox sweep asks, for one org + brand and <= 1000 relation keys, the LATEST message of each relation's
+thread as the timeline merges it (`src/lib/people/latest-messages.ts`): store (Gmail when connected, cold email) over
+the relation's addresses, Matrix DMs + the person's group posts, Copilot / API on the staff scope; events never answer.
+STORED data only, no sibling call. Each key answers `message` / `no_message` / `unreadable` (nothing found while a
+stored thread failed or was never read: `gaps`) / `unknown` (`reason`), never an empty answer read as "no message".
+The store pick is TWO steps (winner ids on narrow columns, then the winners' items): one step detoasted every item,
+392 addresses = 1.95 s on prod; two steps, 1,000 = 1.4 s cold. Keep it that way.
+
 ### Reachability (`reachableBy`) — a serve FOR a pipe never burns whom it cannot reach
 
 `serve-next` body / `serve-stats` query `reachableBy: "phone" | "email" | [both]` (owner
