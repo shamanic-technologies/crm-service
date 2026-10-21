@@ -28,6 +28,18 @@ export const CORRECTION_KINDS = ["tag_add", "tag_remove", "organization_add", "o
 export type CorrectionKind = (typeof CORRECTION_KINDS)[number];
 
 const PERSONAL = new Set<ConnectionTag>(["personal_to_user", "personal_not_to_user"]);
+/**
+ * The tag a stated one contradicts: "to brand" vs "not to brand", "to user" vs "not to user".
+ * A human stating one outranks the automatic answer holding the other (WHOLE-THREAD-JEV-1021:
+ * drmorley carried Jev's professional_to_brand beside the user's professional_not_to_brand, and
+ * lead-service read "to brand present" as a lead).
+ */
+const OPPOSITE: Record<ConnectionTag, ConnectionTag> = {
+  personal_to_user: "personal_not_to_user",
+  personal_not_to_user: "personal_to_user",
+  professional_to_brand: "professional_not_to_brand",
+  professional_not_to_brand: "professional_to_brand",
+};
 const isProfessional = (t: ConnectionTag) => !PERSONAL.has(t);
 
 export interface CorrectionInput {
@@ -305,6 +317,20 @@ export function applyCorrections(
     const basis = { kind: "user_correction", ref: c.id, probability: null };
     const t = c.target as { tag?: ConnectionTag; companyId?: string; domain?: string; tags?: ConnectionTag[] };
     if (c.kind === "tag_add" && t.tag) {
+      // The contradicting tag goes while this statement stands, whoever held it (Jev, a source, an earlier
+      // statement: corrections apply in stated order, the later wins). Undone, it is not applied: the tag comes back.
+      // On a company link the stated tag takes the contradicted one's place: the person still speaks for it.
+      const opposite = OPPOSITE[t.tag];
+      const stated = t.tag;
+      tags = tags.filter((x) => x.tag !== opposite);
+      orgs = orgs.map((o) => {
+        if (!o.tags.some((x) => x.tag === opposite)) return o;
+        const kept = o.tags.filter((x) => x.tag !== opposite);
+        const held = kept.find((x) => x.tag === stated);
+        if (held) held.basis.push(basis);
+        else kept.push({ tag: stated, userIds: [], brandId, basis: [basis] });
+        return { ...o, tags: CONNECTION_TAGS.filter((x) => kept.some((y) => y.tag === x)).map((x) => kept.find((y) => y.tag === x)!) };
+      });
       const held = tags.find((x) => x.tag === t.tag);
       if (held) held.basis.push(basis);
       else tags.push({ tag: t.tag, userIds: PERSONAL.has(t.tag) ? [c.statedByUserId] : [], brandId: PERSONAL.has(t.tag) ? null : brandId, basis: [basis] });
