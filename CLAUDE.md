@@ -945,8 +945,7 @@ owner had written to. A recorded fact, never an address-shape guess.
   partner) and `other_business` = any other work: suppliers / tools / vendors
   pitching the owner (even in the brand's own field), the owner's OTHER
   activities (anything sold / rented / taught that is not a brand offer:
-  visa help, co-living, coaching), accountant, bank, mentors, investors, press,
-  and a prospect the owner pitches ANOTHER company's offer to (an agency's client)
+  visa help, co-living, coaching), accountant, bank, mentors, investors, press
   (state = brand name + website + `companyOverview`, each ACTIVE offer AS CREATED:
   name + its "what we offer" `description` (`offersShownToJev`; never its Q&A
   brand profile nor its documents, owner 2026-10-21), the org's other brands;

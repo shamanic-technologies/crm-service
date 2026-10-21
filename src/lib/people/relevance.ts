@@ -116,11 +116,7 @@ const TOPIC_CRITERIA: Record<Topic, string> = {
     "residency or visa help, housing, rooms or co-living, courses, coaching or training, a job or community " +
     "they recruit for), even when money, a deal or a contract is discussed. (3) The accountant, lawyer, " +
     "bank and the company's own admin; mentors, advisors, investors, journalists and press, candidates, " +
-    "networking contacts; and work inside another company the owner runs or is employed by. (4) A prospect " +
-    "the owner pitches ANOTHER company's product or service to: the owner introduces, represents or sells " +
-    "for a client or partner company (its events, its software, its service), whatever signature or mailbox " +
-    "the emails go out under. That prospect is a lead of the other company, not of this brand, unless the " +
-    "conversation turns to buying this brand's own offers.",
+    "networking contacts; and work inside another company the owner runs or is employed by.",
   this_brand:
     "the counterpart is a SALES LEAD of the brand: someone the owner sells THIS brand's offers to, or who " +
     "buys, uses, asks about, tries or negotiates THEM: a prospect, a client, a user, or a partner who refers " +
@@ -332,8 +328,7 @@ export function conversationJudgment(
         "description and offers in the state) is its sales lead, and a client stays one while the owner runs " +
         "their account, campaigns, credits or billing, whatever else they chat about (tools, ideas, small " +
         "talk). A counterpart selling to the owner, or a deal about something this brand does not sell (another " +
-        "activity of the owner, or another company's offer the owner pitches for a client: name what is " +
-        "offered and whose it is), is other work, even when the owner writes first or money is discussed; " +
+        "activity of the owner), is other work, even when the owner writes first or money is discussed; " +
         "accountant, mentor, investor and press are other work too; the owner's private life is personal. " +
         "Judge the whole conversation from its START, not one polite or logistical message: a message's " +
         "quotedHistory is the earlier exchange it quotes, written before the first message held here (often " +

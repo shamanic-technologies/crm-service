@@ -467,8 +467,6 @@ describe("WHOLE-THREAD-JEV-1021: Jev reads the whole thread from its start", () 
     expect(body!.state.offers).toEqual([{ key: "o0", name: "Product-led", whatWeOffer: "Done-for-you outbound that books meetings." }]);
     expect(body!.state.conversation.messages[0].quotedHistory).toBe(COLD);
     expect(body!.questions.topic.instructions).toMatch(/quotedHistory/);
-    // A prospect pitched another company's offer (an agency's client) is that company's lead.
-    expect(body!.questions.topic.criteria.other_business).toMatch(/pitches ANOTHER company's product or service/);
     expect(hidesConversation(v)).toBe(true);
   });
 
