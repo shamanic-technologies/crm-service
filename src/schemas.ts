@@ -3559,6 +3559,60 @@ registry.registerPath({
   responses: { 200: { description: "What the pass mirrored, baselined, detected and reported" }, 502: { description: "The pass failed" } },
 });
 
+registry.registerPath({
+  method: "get",
+  path: "/orgs/calendar/meetings",
+  summary: "Meetings in the org's connected Google Calendar, who each attendee is among the brand's people, and the facts stated",
+  description:
+    "GOOGLE-CALENDAR-MEETING-FACTS-1021. google-service mirrors the org's connected Google Calendar; crm-service reads its " +
+    "changes feed every 5 min. An attendee whose address a person of the brand holds IS that person; any other attendee is " +
+    "judged by Jev against the brand's people (name, meeting title, domain), once. A matched attendee's meeting is a " +
+    "`meeting_booked` fact (dated on the booking), `meeting_attended` only when Jev judged a Google Meet participant to be " +
+    "that person, `meeting_not_held` when cancelled (a cancel then rebook by the same person is one booking). The org's " +
+    "own team and declined attendees are nobody.",
+  request: { query: z.object({ brandId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Meetings",
+      content: {
+        "application/json": {
+          schema: z.object({
+            meetings: z.array(
+              z.object({
+                googleEventId: z.string(),
+                calendarEmail: z.string(),
+                status: z.string(),
+                title: z.string().nullable(),
+                startAt: z.string().nullable(),
+                bookedAt: z.string().nullable(),
+                meetStatus: z.string(),
+                attendees: z.array(
+                  z.object({
+                    email: z.string(),
+                    displayName: z.string().nullable(),
+                    registered: z.boolean().describe("The attendee entered the brand's registry (false = the org's own team, or not judged yet)."),
+                    person: z
+                      .object({ personId: z.string(), displayName: z.string().nullable(), basis: z.enum(["same_address", "jev"]), confidence: z.number().nullable() })
+                      .nullable(),
+                  }),
+                ),
+                facts: z.array(z.object({ type: z.string(), attendeeEmail: z.string().nullable(), occurredAt: z.string().nullable(), dateBasis: z.string() })),
+              }),
+            ),
+          }),
+        },
+      },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/calendar/watch",
+  summary: "Run one calendar pass now: mirror google-service's calendar feed, judge attendees and Meet attendance (the loop runs every 5 min)",
+  responses: { 200: { description: "What the pass mirrored and judged per scope" }, 502: { description: "The pass failed" } },
+});
+
 export const ReplyTriggerReportSchema = z.object({
   id: z.string().uuid(),
   source: z.string().describe("`matrix` (WhatsApp, LinkedIn) | `gmail` (the org's connected mailbox)."),

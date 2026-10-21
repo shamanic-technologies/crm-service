@@ -154,6 +154,12 @@ async function seedBrand(org: string, brand: string, tag: string) {
     INSERT INTO voice_note_transcripts (event_id, org_id, brand_id, connection_id, room_id, status, text)
     VALUES (${"$voice-" + tag + "-" + Math.random().toString(16).slice(2)}, ${org}, ${brand}, gen_random_uuid(), '!room', 'completed', 'hello')`);
   await db.execute(sql`
+    INSERT INTO calendar_attendee_matches (org_id, brand_id, attendee_email, input_hash, person_id, basis, candidates)
+    VALUES (${org}, ${brand}, ${"att-" + tag + "@x.co"}, ${"h-" + Math.random().toString(16).slice(2)}, NULL, 'no_candidate', '[]')`);
+  await db.execute(sql`
+    INSERT INTO calendar_attendance_verdicts (org_id, brand_id, google_event_id, person_id, input_hash, participant_index, confidence, probabilities, model, run_id)
+    VALUES (${org}, ${brand}, ${"g-" + tag}, gen_random_uuid()::text, ${"h-" + Math.random().toString(16).slice(2)}, NULL, 0.9, '{}', 'jev', 'run-1')`);
+  await db.execute(sql`
     INSERT INTO conversation_verdicts (org_id, brand_id, conversation_key, source, topic, confidence, probabilities,
       brand_probability, offer_scores, offer_ids, context_hash, judged_through, input, model, run_id)
     VALUES (${org}, ${brand}, 'gmail:a@b.co', 'gmail', 'this_brand', 0.9, '{}', 0.9, '{}', '[]', 'h', 'm', '{}', 'jev', 'run-1')`);

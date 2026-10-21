@@ -21,10 +21,12 @@ import apiCallsRoutes from "./routes/api-calls.js";
 import formTriggerRoutes from "./routes/form-triggers.js";
 import phoneTriggerRoutes from "./routes/phone-triggers.js";
 import teamMembershipRoutes from "./routes/team-membership.js";
+import calendarRoutes from "./routes/calendar.js";
 import { startFreshnessWatch } from "./lib/people/freshness.js";
 import { startFormWatch } from "./lib/form-trigger/watch.js";
 import { startPhoneWatch } from "./lib/phone-trigger/watch.js";
 import { startMatrixLiveWatch } from "./lib/matrix/sync.js";
+import { startCalendarWatch } from "./lib/calendar/feed.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -77,6 +79,7 @@ app.use(copilotRoutes);
 app.use(whatsappRoutes);
 app.use(formTriggerRoutes);
 app.use(phoneTriggerRoutes);
+app.use(calendarRoutes);
 app.use(teamMembershipRoutes);
 
 app.use((_req, res) => {
@@ -114,6 +117,8 @@ if (process.env.NODE_ENV !== "test") {
         startPhoneWatch();
         // Mirrors every linked chat account every ~10s and reports a person's new message at once.
         startMatrixLiveWatch();
+        // Mirrors google-service's calendar feed and states meetings with the brand's people as facts.
+        startCalendarWatch();
       })
       .catch((err) => {
         console.error("[crm-service] Migration failed:", err);

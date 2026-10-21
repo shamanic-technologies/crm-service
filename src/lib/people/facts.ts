@@ -46,6 +46,8 @@ import type { PersonConnectionTag } from "./connection-tags.js";
 import type { PersonOrganization } from "./organizations.js";
 import type { PersonRelation } from "./relations.js";
 import { voiceNoteText } from "../matrix/voice-notes.js";
+import { meetingFactContext, readOrgEvents } from "../calendar/matching.js";
+import { meetingCandidateFacts } from "../calendar/meetings.js";
 
 export const FACT_TYPES = [
   "added_to_crm",
@@ -89,7 +91,7 @@ export const FACT_TYPES = [
 export type FactType = (typeof FACT_TYPES)[number];
 
 // `distribute_platform`: retired (see RETIRED_FAMILIES); kept because the feed still serves the facts it stated.
-export const FACT_SOURCES = ["gohighlevel", "gmail", "matrix", "stripe", "posthog", "clerk", "csv", "crm", "distribute_platform"] as const;
+export const FACT_SOURCES = ["gohighlevel", "gmail", "matrix", "stripe", "posthog", "clerk", "csv", "crm", "distribute_platform", "google_calendar"] as const;
 export type FactSource = (typeof FACT_SOURCES)[number];
 
 /**
@@ -113,6 +115,10 @@ const FAMILIES = {
   crm_connection_tag: { source: "crm", snapshot: true, immutable: false },
   crm_organization: { source: "crm", snapshot: true, immutable: false },
   crm_relation: { source: "crm", snapshot: true, immutable: false },
+  // GOOGLE-CALENDAR-MEETING-FACTS-1021: a meeting in a connected Google Calendar with a person of the brand
+  // (lib/calendar/meetings.ts). Snapshot: a booking whose attendee is no longer judged the person, or folded
+  // into a later booking (a cancel + rebook), is withdrawn.
+  calendar_meeting: { source: "google_calendar", snapshot: true, immutable: false },
 } as const;
 export type FactFamily = keyof typeof FAMILIES;
 
@@ -707,6 +713,29 @@ async function matrixGroupCandidates(orgId: string, brandId: string): Promise<Ca
 }
 
 /** Gmail messages from the scope's message store; `other` (a third party in the thread) is not the person. */
+/**
+ * Meetings in the org's connected Google Calendars with a person of THIS brand (GOOGLE-CALENDAR-MEETING-FACTS-1021):
+ * the same `meeting_booked` / `meeting_attended` / `meeting_not_held` facts GoHighLevel appointments state.
+ */
+async function calendarCandidates(
+  orgId: string,
+  brandId: string,
+  personRows: Pick<Person, "personId" | "displayName" | "company" | "emails" | "identityKeys" | "automated">[],
+): Promise<CandidateFact[]> {
+  const events = await readOrgEvents(orgId);
+  if (events.length === 0) return [];
+  const pool = personRows
+    .filter((r) => r.personId && !r.automated)
+    .map((r) => ({
+      personId: r.personId!,
+      displayName: r.displayName,
+      company: r.company,
+      emails: r.emails as string[],
+      identityKeys: r.identityKeys as string[],
+    }));
+  return meetingCandidateFacts(events, await meetingFactContext(orgId, brandId, pool));
+}
+
 async function gmailCandidates(scopeId: string): Promise<{ facts: CandidateFact[]; skippedOther: number }> {
   const stored = await rows<{ address: string; message_key: string; item: Record<string, unknown> }>(sql`
     SELECT address, message_key, item FROM people_message_texts
@@ -1015,18 +1044,22 @@ async function mirroredStripeIds(tx: Tx, orgId: string, brandId: string, ids: st
  * right after a reconnect, has not re-mirrored everything yet: nothing is gone.
  */
 async function connectedSources(orgId: string, brandId: string): Promise<Set<FactSource>> {
-  const [r] = await rows<{ ghl: boolean; posthog: boolean; stripe: boolean; clerk: boolean }>(sql`
+  const [r] = await rows<{ ghl: boolean; posthog: boolean; stripe: boolean; clerk: boolean; calendar: boolean }>(sql`
     SELECT
       EXISTS (SELECT 1 FROM ghl_connections WHERE org_id = ${orgId} AND brand_id = ${brandId} AND last_synced_at IS NOT NULL) AS ghl,
       EXISTS (SELECT 1 FROM posthog_connections WHERE org_id = ${orgId} AND brand_id = ${brandId} AND last_synced_at IS NOT NULL) AS posthog,
       EXISTS (SELECT 1 FROM stripe_connections WHERE org_id = ${orgId} AND brand_id = ${brandId} AND last_synced_at IS NOT NULL) AS stripe,
-      EXISTS (SELECT 1 FROM auth_connections WHERE org_id = ${orgId} AND brand_id = ${brandId} AND provider = 'clerk' AND last_synced_at IS NOT NULL) AS clerk
+      EXISTS (SELECT 1 FROM auth_connections WHERE org_id = ${orgId} AND brand_id = ${brandId} AND provider = 'clerk' AND last_synced_at IS NOT NULL) AS clerk,
+      -- The org's calendars are mirrored and the feed reached its end once (google-service owns the connection).
+      (EXISTS (SELECT 1 FROM calendar_events WHERE org_id = ${orgId})
+        AND EXISTS (SELECT 1 FROM calendar_feed_cursors WHERE caught_up_at IS NOT NULL)) AS calendar
   `);
   const out = new Set<FactSource>();
   if (r.ghl) out.add("gohighlevel");
   if (r.posthog) out.add("posthog");
   if (r.stripe) out.add("stripe");
   if (r.clerk) out.add("clerk");
+  if (r.calendar) out.add("google_calendar");
   return out;
 }
 
@@ -1154,7 +1187,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
     const personRows = await tx.select().from(people).where(eq(people.scopeId, scope.id));
     const index = new PersonIndex(personRows);
 
-    const [ghl, matrix, matrixGroups, gmail, posthog, stripe, clerk, csv, connected] = await Promise.all([
+    const [ghl, matrix, matrixGroups, gmail, posthog, stripe, clerk, csv, connected, calendar] = await Promise.all([
       ghlCandidates(orgId, brandId),
       matrixCandidates(orgId, brandId),
       matrixGroupCandidates(orgId, brandId),
@@ -1164,6 +1197,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       authCandidates(orgId, brandId, "clerk"),
       csvCandidates(orgId, brandId),
       connectedSources(orgId, brandId),
+      calendarCandidates(orgId, brandId, personRows),
     ]);
     // An auth provider connected = it alone states who signed up (it knows invited
     // teammates and staff; PostHog only knows who was identified). PostHog keeps
@@ -1184,7 +1218,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
     const builtKeys = new Set(personRows.flatMap((r) => r.identityKeys as string[]));
     const registry = [...registryCandidates(personRows), ...standaloneRegistryCandidates(csv, builtKeys, brandId)];
     const csvKeys = new Set(csv.map((c) => pickPersonKey(c.subject.keys)));
-    const all = [...ghl, ...matrix, ...matrixGroups, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv, ...registry].filter(
+    const all = [...ghl, ...matrix, ...matrixGroups, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv, ...calendar, ...registry].filter(
       (c) => !(authStatesSignups && c.family === "posthog_person"),
     );
     const candidates = new Map<string, CandidateFact>();
