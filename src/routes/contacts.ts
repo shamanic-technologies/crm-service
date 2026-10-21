@@ -4,7 +4,7 @@ import { createHash } from "crypto";
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../db/index.js";
-import { contactUploads, contactRowsRaw, contacts, NewContactRowRaw } from "../db/schema.js";
+import { contactUploads, contactRowsRaw, contacts, contactEmailLookups, NewContactRowRaw } from "../db/schema.js";
 import {
   apiKeyAuth,
   requireOrg,
@@ -35,12 +35,16 @@ import {
   normalizeUploadIdsQuery,
   normalizeReachQuery,
   REACH_CHANNELS,
+  serveStatsEmailUnknown,
+  withEmailUnknown,
   type PeopleFilter,
   type Reach,
 } from "../lib/serve.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { AmbiguousPersonError, stillFitsCsv, stillFitsPeople } from "../lib/still-fits.js";
 import { SERVICE_NAME } from "../middleware/auth.js";
+import { addManualContact, normalizeManualInput } from "../lib/contacts/manual.js";
+import { EmailLookupError, recordEmailLookup } from "../lib/contacts/email-lookup.js";
 
 const router = Router();
 
@@ -260,8 +264,12 @@ const serveNextBodySchema = z
     // The pipe's funnel-step filter (forwarded by human-service from the play's workflow,
     // CRM-WARM-NURTURE-1015): ANDed with the pool; clients always out when present.
     stepFilter: stepFilterSchema.optional(),
+    // CSV pool only (CRM-ADD-ONE-CONTACT-1021): also hand out contacts whose email is not known
+    // yet, for the caller to look it up and write it back (POST /orgs/contacts/{id}/email-lookup).
+    includeEmailUnknown: z.boolean().optional(),
   })
-  .refine((b) => !(b.uploadIds && b.people), { message: "uploadIds and people are exclusive" });
+  .refine((b) => !(b.uploadIds && b.people), { message: "uploadIds and people are exclusive" })
+  .refine((b) => !(b.includeEmailUnknown && b.people), { message: "includeEmailUnknown is for the CSV pool, not people" });
 
 const boolQuery = z.enum(["true", "false"]).transform((v) => v === "true");
 
@@ -318,15 +326,23 @@ router.post(
     const people = parsed.data.people ? { ...parsed.data.people, stepFilter } : undefined;
     const limit = parsed.data.limit ?? 100;
     const reach = reachOf(parsed.data.reachableBy);
+    const emailUnknown = parsed.data.includeEmailUnknown === true;
 
     if (parsed.data.relationships === "business_only") {
       // No user on a service call: the header is then not sent (never a placeholder identity).
       const identity = { orgId: req.orgId!, userId: req.userId ?? "", runId: req.runId!, brandId };
       try {
+        if (people) {
+          res.json(await serveNextPeopleBusinessOnly(identity, limit, req.runId!, people, reach));
+          return;
+        }
+        const base = await serveNextBusinessOnly(identity, limit, req.runId!, uploadIds, reach, stepFilter);
+        // A contact with no email has no human for lead-service to judge: `business_only`
+        // never hands it out (its rule: no human = no). Counted so the caller sees why.
         res.json(
-          people
-            ? await serveNextPeopleBusinessOnly(identity, limit, req.runId!, people, reach)
-            : await serveNextBusinessOnly(identity, limit, req.runId!, uploadIds, reach, stepFilter),
+          emailUnknown
+            ? { ...base, emailUnknown: { ...(await serveStatsEmailUnknown(req.orgId!, brandId, uploadIds, reach, stepFilter)), served: 0, skipped: "business_only_needs_a_known_person" } }
+            : base,
         );
       } catch (e) {
         if (e instanceof RelationshipsUnavailableError) {
@@ -342,7 +358,7 @@ router.post(
       return;
     }
     const result = await serveNext(req.orgId!, brandId, limit, req.runId!, uploadIds, reach, undefined, stepFilter);
-    res.json(result);
+    res.json(emailUnknown ? await withEmailUnknown(result, req.orgId!, brandId, limit, req.runId!, uploadIds, reach, stepFilter) : result);
   },
 );
 
@@ -462,6 +478,9 @@ router.get(
     }
 
     const stats = await serveStats(req.orgId!, brandParse.data, uploadIds, reach, stepFilter);
+    if (req.query.includeEmailUnknown === "true") {
+      return res.json({ ...stats, emailUnknown: await serveStatsEmailUnknown(req.orgId!, brandParse.data, uploadIds, reach, stepFilter) });
+    }
     res.json(stats);
   },
 );
@@ -481,15 +500,128 @@ router.get(
     const offset = Number(req.query.offset) || 0;
 
     const rows = await db
-      .select()
+      .select({ contact: contacts, lookup: contactEmailLookups.status })
       .from(contacts)
+      .leftJoin(
+        contactEmailLookups,
+        and(eq(contactEmailLookups.brandId, contacts.brandId), eq(contactEmailLookups.sourceRowId, contacts.sourceRowId)),
+      )
       .where(and(eq(contacts.orgId, req.orgId!), eq(contacts.brandId, brandParse.data)))
       // `id` breaks ties so the order is total and limit/offset paging is stable.
       .orderBy(desc(contacts.lastRebuiltAt), asc(contacts.id))
       .limit(limit)
       .offset(offset);
 
-    res.json({ contacts: rows });
+    res.json({ contacts: rows.map((r) => ({ ...r.contact, emailStatus: contactEmailStatus(r.contact.primaryEmail, r.lookup) })) });
+  },
+);
+
+/** known = holds an email (or a lookup found it on another contact); not_found = a lookup found none; else unknown. */
+function contactEmailStatus(email: string | null, lookup: string | null): "known" | "unknown" | "not_found" {
+  if (email || lookup === "found") return "known";
+  return lookup === "not_found" ? "not_found" : "unknown";
+}
+
+// ─── POST /orgs/contacts — add ONE person (CRM-ADD-ONE-CONTACT-1021) ─────────
+
+const optText = (max: number) => z.string().trim().max(max).nullish();
+const addContactBodySchema = z
+  .object({
+    brandId: z.string().uuid(),
+    email: z.string().trim().email().max(320).nullish(),
+    phone: optText(40),
+    firstName: optText(200),
+    lastName: optText(200),
+    fullName: optText(400),
+    companyName: optText(300),
+    companyDomain: optText(300),
+    jobTitle: optText(300),
+    linkedinUrl: optText(500),
+    note: optText(5000),
+  })
+  .strict();
+
+router.post(
+  "/orgs/contacts",
+  apiKeyAuth,
+  requireOrgAndUser("contacts.add"),
+  async (req: AuthenticatedRequest, res) => {
+    const parsed = addContactBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        type: "validation",
+        error: `brandId (uuid) required; optional email, phone, firstName, lastName, fullName, companyName, companyDomain, jobTitle, linkedinUrl, note: ${parsed.error.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`,
+      });
+    }
+    const { brandId, ...input } = parsed.data;
+    const v = normalizeManualInput(input);
+    if (input.linkedinUrl && !v.linkedinUrl) {
+      return res.status(400).json({ type: "validation", error: "linkedinUrl must be a LinkedIn URL (linkedin.com/in/...)" });
+    }
+    if (input.companyDomain && !v.companyDomain) {
+      return res.status(400).json({ type: "validation", error: "companyDomain must be a web domain (ntt.com) or a URL" });
+    }
+    const named = !!(v.fullName || v.firstName || v.lastName);
+    if (!v.email && !v.linkedinUrl && !(named && (v.companyName || v.companyDomain))) {
+      return res.status(400).json({
+        type: "not_enough_to_find",
+        error: "Give an email, a LinkedIn URL, or a name with a company (companyName or companyDomain)",
+      });
+    }
+    const added = await addManualContact({ orgId: req.orgId!, brandId, userId: req.userId ?? null, runId: req.runId! }, input);
+    const [row] = await db
+      .select({ contact: contacts, lookup: contactEmailLookups.status })
+      .from(contacts)
+      .leftJoin(
+        contactEmailLookups,
+        and(eq(contactEmailLookups.brandId, contacts.brandId), eq(contactEmailLookups.sourceRowId, contacts.sourceRowId)),
+      )
+      .where(eq(contacts.id, added.contactId));
+    res.status(added.created ? 201 : 200).json({
+      ...added,
+      contact: { ...row.contact, emailStatus: contactEmailStatus(row.contact.primaryEmail, row.lookup) },
+    });
+  },
+);
+
+// ─── POST /orgs/contacts/:contactId/email-lookup — what the serving side found ──
+
+const emailLookupBodySchema = z
+  .object({
+    brandId: z.string().uuid(),
+    status: z.enum(["found", "not_found"]),
+    email: z.string().trim().email().max(320).optional(),
+  })
+  .strict()
+  .refine((b) => (b.status === "found") === !!b.email, { message: "email is required with found, and only with found" });
+
+router.post(
+  "/orgs/contacts/:contactId/email-lookup",
+  apiKeyAuth,
+  requireOrg("contacts.email-lookup"),
+  async (req: AuthenticatedRequest, res) => {
+    const idParse = z.string().uuid().safeParse(req.params.contactId);
+    if (!idParse.success) return res.status(400).json({ type: "validation", error: "contactId must be a uuid" });
+    const parsed = emailLookupBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        type: "validation",
+        error: `brandId (uuid) and status found|not_found required, email with found: ${parsed.error.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`,
+      });
+    }
+    try {
+      res.json(
+        await recordEmailLookup(
+          { orgId: req.orgId!, brandId: parsed.data.brandId, runId: req.runId! },
+          idParse.data,
+          parsed.data.status,
+          parsed.data.email ?? null,
+        ),
+      );
+    } catch (e) {
+      if (e instanceof EmailLookupError) return res.status(e.status).json({ type: e.type, error: e.message });
+      throw e;
+    }
   },
 );
 
@@ -515,6 +647,7 @@ router.get(
         mappingProvenance: contactUploads.mappingProvenance,
         columnMapping: contactUploads.columnMapping,
         uploadedAt: contactUploads.uploadedAt,
+        kind: contactUploads.kind,
       })
       .from(contactUploads)
       .where(

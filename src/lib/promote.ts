@@ -2,6 +2,8 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { contactUploads, contactRowsRaw, contacts, NewContact } from "../db/schema.js";
 import { ColumnMapping, ColumnField } from "./column-typing.js";
+import { cleanText, normalizeDomain, normalizeEmail, normalizeLinkedinUrl, normalizePhone } from "./contacts/normalize.js";
+import { isManualUpload, manualHeldKeys, rederiveManual } from "./contacts/manual.js";
 
 /**
  * SILVER promotion — deterministic, idempotent projection of bronze raw rows into
@@ -22,6 +24,10 @@ interface SilverRecord {
   fullName: string | null;
   firstName: string | null;
   lastName: string | null;
+  companyName: string | null;
+  companyDomain: string | null;
+  jobTitle: string | null;
+  linkedinUrl: string | null;
   rawAttributes: Record<string, string>;
   consentStatus: "granted" | "denied" | "unknown";
   unsubscribed: boolean;
@@ -42,17 +48,12 @@ function firstNonEmpty(
   return null;
 }
 
-function normalizeEmail(raw: string | null): string | null {
-  if (!raw) return null;
-  const v = raw.trim().toLowerCase();
-  return v === "" ? null : v;
-}
-
-function normalizePhone(raw: string | null): string | null {
-  if (!raw) return null;
-  const cleaned = raw.replace(/[^\d+]/g, "");
-  return cleaned === "" || cleaned === "+" ? null : cleaned;
-}
+/**
+ * Columns typed to one of these structured fields are ALSO kept verbatim in
+ * raw_attributes, as they were when every such column was typed `other`: a reader of
+ * raw_attributes sees exactly what it saw before the fields existed.
+ */
+const ALSO_RAW: ReadonlySet<ColumnField> = new Set(["company_name", "company_domain", "job_title", "linkedin_url"]);
 
 /** Deterministically derive consent + unsubscribe from known column NAMES. */
 function deriveConsent(payload: Record<string, string>): {
@@ -103,10 +104,15 @@ export function deriveSilverRecord(
     fullName = [firstName, lastName].filter(Boolean).join(" ") || null;
   }
 
-  // Everything typed 'other' lands in raw_attributes verbatim.
+  const companyName = cleanText(firstNonEmpty(payload, headers, mapping, "company_name"));
+  const companyDomain = normalizeDomain(firstNonEmpty(payload, headers, mapping, "company_domain"));
+  const jobTitle = cleanText(firstNonEmpty(payload, headers, mapping, "job_title"));
+  const linkedinUrl = normalizeLinkedinUrl(firstNonEmpty(payload, headers, mapping, "linkedin_url"));
+
+  // Everything typed 'other' (and the structured fields above) lands in raw_attributes verbatim.
   const rawAttributes: Record<string, string> = {};
   for (const header of headers) {
-    if (mapping[header] === "other") {
+    if (mapping[header] === "other" || ALSO_RAW.has(mapping[header])) {
       const v = payload[header];
       if (v !== undefined && v !== null) rawAttributes[header] = String(v);
     }
@@ -120,6 +126,10 @@ export function deriveSilverRecord(
     fullName,
     firstName,
     lastName,
+    companyName,
+    companyDomain,
+    jobTitle,
+    linkedinUrl,
     rawAttributes,
     consentStatus,
     unsubscribed,
@@ -141,6 +151,12 @@ export async function promoteUpload(uploadId: string): Promise<PromoteResult> {
   const [upload] = await db.select().from(contactUploads).where(eq(contactUploads.id, uploadId));
   if (!upload) throw new Error(`[crm-service] promote: upload ${uploadId} not found`);
 
+  // The brand's contacts added one by one are their own derivation (lib/contacts/manual.ts).
+  if (isManualUpload(upload)) {
+    const out = await db.transaction((tx) => rederiveManual(tx, upload));
+    return { uploadId, rawRows: out.rawRows, contactsUpserted: out.contacts };
+  }
+
   const mapping = (upload.columnMapping ?? {}) as ColumnMapping;
   const headers = (upload.columnHeaders ?? []) as string[];
   if (!upload.columnMapping) {
@@ -156,6 +172,19 @@ export async function promoteUpload(uploadId: string): Promise<PromoteResult> {
   // (last row wins); null-email rows are kept individually.
   const emailMap = new Map<string, NewContact>();
   const noEmail: NewContact[] = [];
+  // A person the client added one by one is THEIR statement: a file row naming the same
+  // email or LinkedIn is not re-derived over it (CRM-ADD-ONE-CONTACT-1021).
+  const held = await manualHeldKeys(db, upload.orgId, upload.brandId);
+  // An email found by a lookup (`contact_email_lookups` found) fills a row stating none.
+  const found = new Map(
+    (
+      await db.execute(sql`
+        SELECT l.source_row_id, l.email FROM contact_email_lookups l
+        JOIN contact_rows_raw r ON r.id = l.source_row_id
+        WHERE r.upload_id = ${uploadId} AND l.status = 'found' AND l.email IS NOT NULL
+      `) as unknown as { source_row_id: string; email: string }[]
+    ).map((r) => [r.source_row_id, r.email]),
+  );
 
   for (const raw of rawRows) {
     const rec = deriveSilverRecord(
@@ -164,6 +193,8 @@ export async function promoteUpload(uploadId: string): Promise<PromoteResult> {
       mapping,
       raw.id,
     );
+    if (!rec.primaryEmail && found.has(raw.id) && !emailMap.has(found.get(raw.id)!)) rec.primaryEmail = found.get(raw.id)!;
+    if ((rec.primaryEmail && held.emails.has(rec.primaryEmail)) || (rec.linkedinUrl && held.linkedins.has(rec.linkedinUrl))) continue;
     const base: NewContact = {
       orgId: upload.orgId,
       brandId: upload.brandId,
@@ -172,6 +203,10 @@ export async function promoteUpload(uploadId: string): Promise<PromoteResult> {
       fullName: rec.fullName,
       firstName: rec.firstName,
       lastName: rec.lastName,
+      companyName: rec.companyName,
+      companyDomain: rec.companyDomain,
+      jobTitle: rec.jobTitle,
+      linkedinUrl: rec.linkedinUrl,
       rawAttributes: rec.rawAttributes,
       consentStatus: rec.consentStatus,
       unsubscribed: rec.unsubscribed,
@@ -221,6 +256,9 @@ export async function promoteUpload(uploadId: string): Promise<PromoteResult> {
           and(
             eq(contacts.orgId, upload.orgId),
             eq(contacts.brandId, upload.brandId),
+            // CSV rows only: a GoHighLevel / Stripe / ... contact sharing the email is another
+            // source's record (the email key is partial on source = 'csv'), never taken over.
+            eq(contacts.source, "csv"),
             inArray(sql`lower(${contacts.primaryEmail})`, emails),
           ),
         );

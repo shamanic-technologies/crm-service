@@ -48,6 +48,10 @@ export const contactUploads = pgTable(
     // uploaded -> promoting -> promoted | failed
     status: text("status").notNull().default("uploaded"),
 
+    // 'file' = an uploaded CSV; 'manual' = the brand's ONE list of contacts added one by one
+    // (POST /orgs/contacts, lib/contacts/manual.ts). At most one 'manual' row per (org, brand).
+    kind: text("kind").notNull().default("file"),
+
     // This service's own run id (from runs-service). parentRunId = inbound x-run-id.
     runId: text("run_id").notNull(),
     parentRunId: text("parent_run_id"),
@@ -61,6 +65,7 @@ export const contactUploads = pgTable(
       table.contentHash,
     ),
     index("contact_uploads_org_brand_idx").on(table.orgId, table.brandId),
+    uniqueIndex("contact_uploads_manual_uq").on(table.orgId, table.brandId).where(sql`${table.kind} = 'manual'`),
   ],
 );
 
@@ -158,6 +163,13 @@ export const contacts = pgTable(
     // the GoHighLevel derivation populates them.
     companyName: text("company_name"),
     website: text("website"),
+    // CRM-ADD-ONE-CONTACT-1021: what a CSV column or a contact added one by one states.
+    // `company_domain` = a bare host ("ntt.com"), `linkedin_url` = the canonical profile URL
+    // (dedup key of contacts added one by one), `note` = the client's own words about the person.
+    companyDomain: text("company_domain"),
+    jobTitle: text("job_title"),
+    linkedinUrl: text("linkedin_url"),
+    note: text("note"),
 
     city: text("city"),
     // The source's own word for the sub-national region — a state, a province, a
@@ -263,6 +275,36 @@ export const contactServes = pgTable(
   (table) => [
     uniqueIndex("contact_serves_brand_email_uq").on(table.brandId, table.email),
     index("contact_serves_org_brand_idx").on(table.orgId, table.brandId),
+  ],
+);
+
+/**
+ * EMAIL LOOKUPS — a CSV-pool contact whose email is not known yet, handed out by serve-next
+ * (`includeEmailUnknown`) so the serving side finds the email inside the campaign's caps.
+ * Keyed on the BRONZE row (`source_row_id`, stable across re-promotes), one row per (brand, row).
+ * `handed_out` -> `found` (email written back: the contact becomes sendable, marked served) |
+ * `not_found` (never handed out again). A `handed_out` row nobody resolved is handed out again
+ * after `CRM_EMAIL_LOOKUP_HANDOUT_TTL_HOURS` (24 h).
+ */
+export const contactEmailLookups = pgTable(
+  "contact_email_lookups",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    sourceRowId: uuid("source_row_id").notNull(),
+    contactId: uuid("contact_id").notNull(),
+    status: text("status").notNull(),
+    email: text("email"),
+    handedOutAt: timestamp("handed_out_at", { withTimezone: true }).notNull().defaultNow(),
+    handedOutRunId: text("handed_out_run_id").notNull(),
+    handOutCount: integer("hand_out_count").notNull().default(1),
+    resolvedAt: timestamp("resolved_at", { withTimezone: true }),
+    resolvedRunId: text("resolved_run_id"),
+  },
+  (table) => [
+    uniqueIndex("contact_email_lookups_brand_row_uq").on(table.brandId, table.sourceRowId),
+    index("contact_email_lookups_org_brand_idx").on(table.orgId, table.brandId),
   ],
 );
 
