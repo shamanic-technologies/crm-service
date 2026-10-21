@@ -62,6 +62,28 @@ describe("applyCorrections (PEOPLE-CORRECTIONS-1017)", () => {
     expect(out).toEqual({ connectionTags: [], organizations: [] });
   });
 
+  it("a stated tag outranks the automatic one it contradicts; undone, the automatic one is back (drmorley, 2026-10-21)", () => {
+    const jev: PersonConnectionTag = { tag: "professional_to_brand", userIds: [], brandId: "b", basis: [{ kind: "conversation", ref: "gmail:drmorley@spine.org", probability: 0.82 }] };
+    const spine = { companyId: "c-spine", domain: "spine.org", evidence: [], tags: [jev] };
+    const notOurs = corr("tag_add", { tag: "professional_not_to_brand" });
+    const out = applyCorrections({ connectionTags: [jev], organizations: [spine] }, [notOurs], "b");
+    const stated = { tag: "professional_not_to_brand", userIds: [], brandId: "b", basis: [{ kind: "user_correction", ref: notOurs.id, probability: null }] };
+    expect(out.connectionTags).toEqual([stated]);
+    // Still a person speaking for their company, now tagged as the user said.
+    expect(out.organizations).toEqual([{ ...spine, tags: [stated] }]);
+    // The correction undone = not among the active ones: Jev's tag is served again.
+    expect(applyCorrections({ connectionTags: [jev], organizations: [spine] }, [], "b").connectionTags).toEqual([jev]);
+  });
+
+  it("the later statement wins between two contradicting ones; the personal pair works the same", () => {
+    const out = applyCorrections(
+      { connectionTags: [friend], organizations: [] },
+      [corr("tag_add", { tag: "professional_to_brand" }), corr("tag_add", { tag: "professional_not_to_brand" }), corr("tag_add", { tag: "personal_not_to_user" })],
+      "b",
+    );
+    expect(out.connectionTags.map((t) => t.tag)).toEqual(["personal_not_to_user", "professional_not_to_brand"]);
+  });
+
   it("a correction follows the person by any key it held when stated", () => {
     const c = corr("tag_add", { tag: "personal_to_user" }, ["email:old@acme.com", "phone:+33600000000"]);
     expect(correctionsOf(["phone:+33600000000", "email:new@x.com"], [c])).toEqual([c]);

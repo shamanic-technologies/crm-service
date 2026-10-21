@@ -76,7 +76,9 @@ A user corrects what the registry worked out: `POST /orgs/people/corrections {br
 `POST /orgs/people/corrections/:id/undo`. Table `people_corrections` = statements (who, when, why,
 the person's identity keys at the time, never deleted: undo sets `undone_at`). Every build applies
 the active ones AFTER the automatic answers (`applyCorrections`, basis `user_correction`): a human
-statement always wins over Jev. An add takes back an active remove of the same thing (and back).
+statement always wins over Jev. A stated tag also drops the tag it contradicts (`OPPOSITE`: to brand /
+not to brand, to user / not to user), on the person and on their company links (replaced there by the
+stated one); undone, the automatic tag comes back (drmorley 2026-10-21 carried both, lead-service read a lead). An add takes back an active remove of the same thing (and back).
 Same person = stated merges (`/orgs/people/merges`); not the same person (split) is not built yet.
 A route that states something kicks a rebuild with `followUp` (a running build is followed by one
 more; before, the kick was silently skipped until the next cron).
