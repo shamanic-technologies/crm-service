@@ -13,6 +13,14 @@ import { RELATIONSHIP_POLICIES } from "./lib/people/relationships.js";
 import { OUTCOME_STEPS } from "./lib/people/outcomes.js";
 import { SEGMENT_STEPS } from "./lib/people/segment.js";
 import { LEG_STEPS } from "./lib/people/leg-reach.js";
+import {
+  GAP_REASONS,
+  LATEST_MESSAGE_STATUSES,
+  LATEST_MESSAGE_TEXT_MAX,
+  LATEST_MESSAGES_MAX_RELATIONS,
+  TEXT_BASES,
+  UNKNOWN_REASONS,
+} from "./lib/people/latest-messages.js";
 
 extendZodWithOpenApi(z);
 
@@ -3718,4 +3726,83 @@ registry.registerPath({
   path: "/internal/form-triggers/watch",
   summary: "Run one form-trigger watch pass now (the loop runs every 60s)",
   responses: { 200: { description: "What the pass saw and reported" }, 502: { description: "The pass failed" } },
+});
+
+// ─── POST /internal/people/relations/latest-messages (UNIBOX-LAST-MESSAGE-PREVIEW-1021) ──
+
+export const LatestMessagesRequestSchema = z
+  .object({
+    orgId: z.string().uuid(),
+    brandId: z.string().uuid(),
+    relationKeys: z
+      .array(z.string().min(3).max(200))
+      .min(1)
+      .max(LATEST_MESSAGES_MAX_RELATIONS)
+      .openapi({ description: `The relations (\`rel:<personId>:...\`, as served on the \`relation\` fact / people rows), 1..${LATEST_MESSAGES_MAX_RELATIONS}. Duplicates are answered once.` }),
+  })
+  .strict();
+
+const LatestMessageSchema = z.object({
+  at: z.string().nullable().openapi({ description: "ISO time the message was sent; null only when the source gave none (and the relation holds no dated message)." }),
+  source: z.enum(["gmail", "instantly", "matrix", "copilot", "api"]),
+  channel: z.string().openapi({ description: "email | whatsapp | telegram | discord | chat | api | mcp", example: "email" }),
+  direction: z.enum(["inbound", "outbound", "other"]).openapi({ description: "inbound = the person wrote; outbound = the brand did." }),
+  sentBy: z.enum(["person", "automation"]).nullable().openapi({
+    description:
+      "Outbound only (null inbound). automation = one of our machines (a cold-email sequence step, an automated WhatsApp send, the Copilot, the API); " +
+      "person = a human of the brand typed it (a WhatsApp / Telegram message from the brand's account that is none of our automated sends); " +
+      "null = the source does not say (a Gmail send, a cold-email send tied to no sequence step).",
+  }),
+  subject: z.string().nullable(),
+  text: z.string().nullable().openapi({ description: `The first ${LATEST_MESSAGE_TEXT_MAX} characters.` }),
+  textBasis: z.enum(TEXT_BASES).nullable().openapi({
+    description:
+      "cleaned = the sender's own words (Gmail cleaned by google-service); original = the body as stored, quoted history / signature included when the source sent them " +
+      "(cold email, Gmail not cleaned); snippet = Gmail's snippet; as_written = a chat message or a voice note's transcript; summary = our one-line description of an API / MCP answer.",
+  }),
+  textCleanStatus: z.string().nullable().openapi({ description: "Gmail only: google-service's bodyCleanStatus, verbatim." }),
+  textTruncated: z.boolean(),
+  from: z.string().nullable(),
+  ref: z.record(z.string(), z.string().nullable()).openapi({ description: "The source's own ids, as on the timeline item." }),
+});
+
+const LatestMessagesResponseSchema = z.object({
+  orgId: z.string().uuid(),
+  brandId: z.string().uuid(),
+  scope: z.object({ id: z.string().uuid(), status: z.string(), lastBuiltAt: z.string().nullable() }).nullable(),
+  counts: z.record(z.enum(LATEST_MESSAGE_STATUSES), z.number().int()),
+  relations: z.array(
+    z.object({
+      relationKey: z.string(),
+      status: z.enum(LATEST_MESSAGE_STATUSES).openapi({
+        description:
+          "message = the latest message of the thread (see gaps); no_message = every thread the relation calls for was read and holds no message; " +
+          "unreadable = no message found AND a thread could not be read / was never read yet (gaps); unknown = not a relation of this org + brand (reason).",
+      }),
+      reason: z.string().nullable().openapi({ description: `unknown: ${UNKNOWN_REASONS.join(" | ")}; unreadable: source_unreadable; else null.` }),
+      message: LatestMessageSchema.nullable(),
+      gaps: z
+        .array(z.object({ source: z.enum(["gmail", "instantly"]), address: z.string(), reason: z.enum(GAP_REASONS), error: z.string().nullable() }))
+        .openapi({ description: "Stored threads of the relation that failed their last read or were never read yet: a newer message may exist there." }),
+    }),
+  ),
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/people/relations/latest-messages",
+  summary: "The latest message of each relation's thread (Unibox row preview), many relations in one read",
+  description:
+    "For one org + brand and up to " +
+    LATEST_MESSAGES_MAX_RELATIONS +
+    " relation keys: the LATEST message of each relation's thread as `GET /orgs/people/timeline?relationKey=` merges it " +
+    "(Gmail and cold email from our message store, WhatsApp / Telegram / Discord DMs and group posts from our Matrix mirror, Copilot and API calls on the staff " +
+    "Unibox scope), ours or theirs, whichever is latest. Events (CRM steps, visits, payments) are not messages. Read from what is stored only (the store lags " +
+    "the sources by a few minutes at most): no sibling call, no model, no cost. One answer per distinct key, in the order asked.",
+  request: { body: { content: { "application/json": { schema: LatestMessagesRequestSchema } } } },
+  responses: {
+    200: { description: "One answer per relation", content: { "application/json": { schema: LatestMessagesResponseSchema } } },
+    400: { description: "Invalid body" },
+    502: { description: "Run tracking unavailable" },
+  },
 });

@@ -37,6 +37,8 @@ import {
   type OutcomeStep,
 } from "../lib/people/outcomes.js";
 import { LEG_STEPS, listLegReachBrands, parseLegStep, readLegReach } from "../lib/people/leg-reach.js";
+import { readLatestMessages } from "../lib/people/latest-messages.js";
+import { LatestMessagesRequestSchema } from "../schemas.js";
 import { familyOf, LEAD_FAMILIES, readBrandFamilies, type FamilyVerdict, type LeadFamily } from "../lib/people/families.js";
 import {
   matchesOf,
@@ -1084,6 +1086,24 @@ router.get("/internal/people/leg-reach", apiKeyAuth, async (req, res) => {
 router.get("/internal/people/leg-reach/brands", apiKeyAuth, async (_req, res) => {
   await withPlatformRun(res, "people.leg-reach.brands", async () => {
     res.json({ steps: LEG_STEPS, brands: await listLegReachBrands() });
+  });
+});
+
+// ─── POST /internal/people/relations/latest-messages (lead-service: the Unibox row preview) ──
+
+/**
+ * The latest message of each relation's thread, many relations in one read (people/latest-messages.ts).
+ * DB-only: no sibling call, no model, no cost. UNIBOX-LAST-MESSAGE-PREVIEW-1021.
+ */
+router.post("/internal/people/relations/latest-messages", apiKeyAuth, async (req, res) => {
+  const parsed = LatestMessagesRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ type: "validation", error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+  }
+  await withPlatformRun(res, "people.latest-messages.read", async () => {
+    const { orgId, brandId, relationKeys } = parsed.data;
+    const out = await readLatestMessages(orgId, brandId, relationKeys);
+    res.json({ orgId, brandId, ...out });
   });
 });
 
