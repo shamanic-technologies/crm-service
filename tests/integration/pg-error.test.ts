@@ -11,7 +11,7 @@ const TABLE = "pg_error_probe_sec2";
 // Gated on CRM_TEST_DB like the other DB-backed suites (CI sets it; the default URL is a mock).
 const RUN = !!process.env.CRM_TEST_DB;
 
-describe.skipIf(!RUN)("pgErrorOf against a real Postgres unique violation", () => {
+describe.skipIf(!RUN)("pgErrorOf + restored message against a real Postgres unique violation", () => {
   afterAll(async () => {
     await db.execute(sql.raw(`DROP TABLE IF EXISTS ${TABLE}`));
   });
@@ -30,6 +30,9 @@ describe.skipIf(!RUN)("pgErrorOf against a real Postgres unique violation", () =
     // drizzle's wrapper carries no SQLSTATE itself: reading `err.code` directly would miss it.
     expect((caught as { code?: unknown }).code).toBeUndefined();
     expect(pgErrorOf(caught).code).toBe("23505");
+    // The db client restores the database's own message: no SQL text, no bound values.
+    expect((caught as Error).message).toMatch(/^duplicate key value violates unique constraint/);
+    expect((caught as Error).message).not.toContain("Failed query");
     expect(isUniqueViolation(caught, `${TABLE}_k_uniq`)).toBe(true);
     expect(isUniqueViolation(caught, "some_other_index")).toBe(false);
   });
