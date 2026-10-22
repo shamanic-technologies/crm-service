@@ -7,8 +7,9 @@
  * lead-service pairing (its `paired` verdict on a CRM contact and one of our leads). Two records sharing a key are the same
  * person (that key IS the identity). A STATED merge (someone said two people are
  * one: `person_merges`) is evidence too: it ties every key both people held when
- * it was stated. Nothing else merges: no name matching, no domain matching, no
- * model. Unmerged stays two people.
+ * it was stated. So is a `name_twin` verdict: two people sharing a full name that
+ * Jev judged one human (people/name-twins.ts; the name only picks whom to ask).
+ * Nothing else merges: no domain matching. Unmerged stays two people.
  *
  * "Same HUMAN?" is human-service's call (people/humans.ts): every record is
  * stated to it, a judgment (stated merge, lead-service pairing) becomes an
@@ -95,6 +96,8 @@ export const EVIDENCE_KINDS = [
   "stripe_customer",
   "whatsapp_send",
   "stated_merge",
+  // Jev judged two people sharing a full name to be one human (people/name-twins.ts).
+  "name_twin",
   // human-service says these keys are ONE human (people/humans.ts).
   "human_identity",
 ] as const;

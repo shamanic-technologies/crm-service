@@ -59,6 +59,7 @@ import {
   resolveSenderVerdicts,
   type SenderVerdictSummary,
 } from "./automated.js";
+import { judgeNameTwins, readNameTwinEvidence, type NameTwinSummary } from "./name-twins.js";
 import { personRelevance, personView, readBrandContext, resolvePeopleRelevance, type PersonView, type RelevanceSummary } from "./relevance.js";
 import { leadAddressesFirst, resolvePersonState, type GhlDeal, type LeadObservation, type StripeStandingInput } from "./state.js";
 import { indexScopeMessages, type MessageIndexSummary } from "./search.js";
@@ -154,6 +155,8 @@ export interface BuildSummary {
   humanIdentity?: HumanIdentitySummary & { peopleWithHumanId: number; peopleWithoutHumanId: number };
   /** WhatsApp ghost → phone resolution run before reading Matrix (absent on builds before it existed). */
   whatsappPhones?: PhoneResolutionResult | { status: "failed"; error: string };
+  /** SAME-HUMAN-TWO-LEADS-1022: people sharing a full name, judged by Jev (people/name-twins.ts). */
+  nameTwins?: NameTwinSummary;
   /** CONNECTION-TAGS-1017: the groups' judgments, and how many people carry at least one tag. */
   connectionTags?: GroupTagsSummary & {
     people: number;
@@ -388,10 +391,14 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
   const reads: SourceRead[] = filtered.map((f) => f.read);
   const [gmail, , , gohighlevel, , stripe] = reads;
 
+  // SAME-HUMAN-TWO-LEADS-1022: two people of the last build sharing a full name are asked to Jev once (one
+  // human with two addresses?); a `same` answer is read as evidence just below, so this build already merges them.
+  const nameTwins = await judgeNameTwins(scope, identity);
   const evidenceReads: EvidenceRead[] = [
     await readCsvEvidence(scope.orgId, scope.brandId),
     await readWhatsappSendEvidence(scope.orgId, scope.brandId),
     await readStatedMergeEvidence(scope.orgId, scope.brandId),
+    await readNameTwinEvidence(scope.orgId, scope.brandId),
   ];
   if (gmail.status !== "not_connected") evidenceReads.push(await readGoogleContactEvidence(identity));
   // A pairing lead-service is only GUESSING (`toConfirm`) merges nothing: it rides on the CRM contact as a hint.
@@ -444,7 +451,9 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     evidence:
       e.kind === "stated_merge"
         ? `Stated in the brand's CRM (crm-service person merge ${e.ref}) that two people are one human`
-        : `lead-service paired the brand's CRM contact ${e.ref} with one of its leads`,
+        : e.kind === "name_twin"
+          ? `Jev judged two contacts of the brand sharing a full name to be one human (crm-service same-person verdict ${e.ref})`
+          : `lead-service paired the brand's CRM contact ${e.ref} with one of its leads`,
   }));
   // A record a messaging handle alone names (a group member who never wrote) is
   // stated LAST: the long tail of the brand's groups never holds back the rest.
@@ -465,7 +474,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
   ];
   const kindsRead = new Set<Judgment["kind"]>(
     evidenceReads
-      .filter((e) => e.status === "ok" && (e.kind === "stated_merge" || e.kind === "lead_pairing"))
+      .filter((e) => e.status === "ok" && (e.kind === "stated_merge" || e.kind === "lead_pairing" || e.kind === "name_twin"))
       .map((e) => e.kind as Judgment["kind"]),
   );
   const humans = await resolveScopeHumans(scope, records, judgments, kindsRead);
@@ -633,7 +642,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
         emails: e.emails,
         phones: e.phones,
         ...(e.keys ? { keys: e.keys } : {}),
-        ...(e.kind === "stated_merge" || e.kind === "lead_pairing" ? { heldBy: heldEvidence.includes(e) ? "human-service" : "crm-service" } : {}),
+        ...(e.kind === "stated_merge" || e.kind === "lead_pairing" || e.kind === "name_twin" ? { heldBy: heldEvidence.includes(e) ? "human-service" : "crm-service" } : {}),
       })),
       firstActivityAt: (() => {
         const d = minDate(c.presences.map((p) => p.firstActivityAt));
@@ -674,6 +683,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
   const withHuman = rows.filter((r) => r.humanId).length;
   const summary: BuildSummary = {
     whatsappPhones,
+    nameTwins,
     humanIdentity: { ...humans.summary, peopleWithHumanId: withHuman, peopleWithoutHumanId: rows.length - withHuman },
     people: rows.length,
     sources: reads.map((r) => ({

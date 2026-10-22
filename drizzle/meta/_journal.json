@@ -386,6 +386,13 @@
       "when": 1792340000000,
       "tag": "0054_contacts_added_one_by_one",
       "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1792430000000,
+      "tag": "0055_same_person_verdicts",
+      "breakpoints": true
     }
   ]
 }

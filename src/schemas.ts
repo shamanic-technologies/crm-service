@@ -2958,6 +2958,49 @@ registry.registerPath({
   },
 });
 
+const SamePersonVerdictSchema = z.object({
+  verdictId: z.string().uuid(),
+  name: z.string().openapi({ description: "The full name both people carry (folded, lower-cased)." }),
+  verdict: z.enum(["same", "different"]).openapi({ description: "same = Jev judged them one human (P >= 0.5): they show as ONE person." }),
+  probabilitySame: z.number(),
+  keysA: z.array(z.string()).openapi({ description: "Identity keys of the first person when asked (email:, phone:, ...)." }),
+  keysB: z.array(z.string()),
+  judgedAt: z.string(),
+  rejected: z.object({ at: z.string(), byUserId: z.string().nullable(), reason: z.string().nullable() }).nullable(),
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/people/same-person-verdicts",
+  summary: "List the automatic same-person checks of a brand",
+  description:
+    "Two people of a brand carrying the same full name (a work address and a personal Gmail, a CRM record and a chat) are asked once to Jev: one human or two. `same` ones show as ONE person (merge evidence kind `name_twin`, ref = verdictId, on GET /orgs/people). Newest first, rejected ones included.",
+  request: { headers: IDENTITY_HEADERS, query: z.object({ brandId: z.string().uuid() }) },
+  responses: {
+    200: { description: "The brand's verdicts", content: { "application/json": { schema: z.object({ brandId: z.string().uuid(), verdicts: z.array(SamePersonVerdictSchema) }) } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/people/same-person-verdicts/{verdictId}/reject",
+  summary: "Not the same person (undo an automatic merge)",
+  description:
+    "Say two people merged automatically because they share a name are NOT the same human. The verdict is rejected for good (never asked again) and a rebuild starts now: the two come back apart within about a minute. Idempotent: rejecting twice answers duplicate: true.",
+  request: {
+    headers: IDENTITY_HEADERS,
+    params: z.object({ verdictId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: z.object({ brandId: z.string().uuid(), reason: z.string().max(1000).optional() }) } } },
+  },
+  responses: {
+    200: {
+      description: "Rejected",
+      content: { "application/json": { schema: z.object({ verdict: SamePersonVerdictSchema, duplicate: z.boolean(), rebuild: z.enum(["started", "not_needed"]) }) } },
+    },
+    404: { description: "verdict_not_found" },
+  },
+});
+
 registry.registerPath({
   method: "post",
   path: "/internal/people/sync",

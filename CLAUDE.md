@@ -1014,6 +1014,15 @@ owner had written to. A recorded fact, never an address-shape guess.
   aliases, rebuilds: two people with their old ids. Idempotent both ways; refusals 404
   `person_not_found`, 422 `different_brand` | `same_person`, 409 `already_one_person`,
   404 `merge_not_found`. `GET /orgs/people/merges?brandId=` lists with `applied`.
+- **Same full name = asked to Jev once** (`name-twins.ts`, SAME-HUMAN-TWO-LEADS-1022: Lukas Stankevicius was two leads, a
+  work address and his personal Gmail, same meeting): at the START of each build, two people of the PREVIOUS build sharing
+  a full name (2+ words, any record; a name > 5 people carry is skipped) and not one human yet get ONE Jev `choice`
+  `same_human | different_humans` on a short card (names, addresses, company, sources, latest 3 stored messages x 500
+  chars; never whole threads: lead-service's old matcher drained the shared Jev credit, 2026-10-14). Recorded in
+  `same_person_verdicts` (pair of person keys); a `different` pair is re-asked only when its keys / name move. P >= 0.5 =
+  evidence `name_twin` of the SAME build, stated as an org link like a stated merge. "Not the same person" =
+  `POST /orgs/people/same-person-verdicts/:id/reject` (never asked again, link withdrawn next build); `GET` lists.
+  Prod 2026-10-22: 47 pairs fleet-wide (Distribute.you 5/5 real), ~$0.03 once. Summary `nameTwins`.
 - **"Same HUMAN?" is human-service's call** (`lib/people/humans.ts`, LEAD-REFONTE-1013, human-service
   `/internal/human-identities/*`). Each build states, before clustering: every record's email + phone
   keys TOGETHER (`resolve`, create; proof = fleet-wide merge there), cached per key set in

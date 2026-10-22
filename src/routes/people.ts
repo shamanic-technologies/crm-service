@@ -26,6 +26,7 @@ import { attachFactIds } from "../lib/people/fact-ids.js";
 import { completeItems } from "../lib/people/item-fill.js";
 import { readFacts } from "../lib/people/facts.js";
 import { findPersonById } from "../lib/people/person-id.js";
+import { listTwinVerdicts, rejectTwinVerdict, twinVerdictView } from "../lib/people/name-twins.js";
 import { listMerges, mergeApplied, mergeView, stateMerge, undoMerge } from "../lib/people/merges.js";
 import {
   CampaignReachUnavailable,
@@ -852,6 +853,59 @@ router.post(
       }
       if (!outcome.duplicate) await kickRebuild(req, body.data.brandId);
       res.json({ merge: mergeView(outcome.merge), duplicate: outcome.duplicate, rebuild: outcome.duplicate ? "not_needed" : "started" });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ─── Same-person verdicts: Jev on two people sharing a full name (SAME-HUMAN-TWO-LEADS-1022) ─
+
+/** Every verdict of the brand (same / different, rejected ones included), newest first. */
+router.get(
+  "/orgs/people/same-person-verdicts",
+  apiKeyAuth,
+  requireOrgAndUser("people.same_person_verdicts.list"),
+  async (req: AuthenticatedRequest, res, next) => {
+    const parsed = z.object({ brandId: brandIdSchema }).safeParse(req.query);
+    if (!parsed.success) {
+      return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
+    }
+    try {
+      const rows = await listTwinVerdicts(req.orgId!, parsed.data.brandId);
+      res.json({ brandId: parsed.data.brandId, verdicts: rows.map(twinVerdictView) });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+/** "Not the same person": the verdict is rejected for good; a rebuild starts now and splits them. */
+router.post(
+  "/orgs/people/same-person-verdicts/:verdictId/reject",
+  apiKeyAuth,
+  requireOrgAndUser("people.same_person_verdict.reject"),
+  async (req: AuthenticatedRequest, res, next) => {
+    const verdictId = z.string().uuid().safeParse(req.params.verdictId);
+    const body = z
+      .object({ brandId: brandIdSchema, reason: z.string().trim().min(1).max(1000).optional() })
+      .safeParse(req.body ?? {});
+    if (!verdictId.success || !body.success) {
+      return res.status(400).json({ type: "validation", error: "verdictId (uuid) path param and brandId (uuid) body are required" });
+    }
+    try {
+      const outcome = await rejectTwinVerdict({
+        orgId: req.orgId!,
+        brandId: body.data.brandId,
+        verdictId: verdictId.data,
+        userId: req.userId!,
+        reason: body.data.reason ?? null,
+      });
+      if (!outcome) {
+        return res.status(404).json({ type: "refused", reason: "verdict_not_found", error: `no same-person verdict ${verdictId.data} on this brand` });
+      }
+      if (!outcome.duplicate) await kickRebuild(req, body.data.brandId);
+      res.json({ verdict: twinVerdictView(outcome.verdict), duplicate: outcome.duplicate, rebuild: outcome.duplicate ? "not_needed" : "started" });
     } catch (err) {
       next(err);
     }

@@ -30,6 +30,7 @@ import {
   matrixLinks,
   voiceNoteTranscripts,
   calendarAttendeeMatches,
+  samePersonVerdicts,
   calendarAttendanceVerdicts,
   matrixRawEvents,
   conversations,
@@ -145,6 +146,7 @@ export const TRANSFER_TABLES: PgTable[] = [
   voiceNoteTranscripts,
   // Who each calendar attendee is among the brand's people, and who joined the Meet call (GOOGLE-CALENDAR-MEETING-FACTS-1021).
   calendarAttendeeMatches,
+  samePersonVerdicts,
   calendarAttendanceVerdicts,
 ];
 
