@@ -2645,3 +2645,35 @@ export const calendarAttendanceVerdicts = pgTable(
   ],
 );
 export type CalendarAttendanceVerdict = typeof calendarAttendanceVerdicts.$inferSelect;
+
+/**
+ * SAME-HUMAN-TWO-LEADS-1022: two people of a brand sharing a full name, judged by Jev once: one human or two.
+ * Keyed on the pair's person keys (sorted, `key_a` < `key_b`); `keys_a` / `keys_b` = every identity key each held
+ * when asked (what a `same` verdict ties). `verdict`: 'same' | 'different' (P(same) >= 0.5 = same). Re-asked only
+ * when a `different` pair's keys or name move (`input_hash`); a `same` one merges, so the pair is gone. A user who
+ * says "not the same person" sets `rejected_at`: never asked again, the merge is taken back at the next build.
+ */
+export const samePersonVerdicts = pgTable(
+  "same_person_verdicts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    keyA: text("key_a").notNull(),
+    keyB: text("key_b").notNull(),
+    name: text("name").notNull(),
+    keysA: jsonb("keys_a").notNull(),
+    keysB: jsonb("keys_b").notNull(),
+    inputHash: text("input_hash").notNull(),
+    verdict: text("verdict").notNull(),
+    probabilitySame: doublePrecision("probability_same").notNull(),
+    model: text("model").notNull(),
+    runId: text("run_id").notNull(),
+    judgedAt: timestamp("judged_at", { withTimezone: true }).notNull().defaultNow(),
+    rejectedAt: timestamp("rejected_at", { withTimezone: true }),
+    rejectedByUserId: text("rejected_by_user_id"),
+    rejectedReason: text("rejected_reason"),
+  },
+  (table) => [uniqueIndex("same_person_verdicts_pair_uq").on(table.orgId, table.brandId, table.keyA, table.keyB)],
+);
+export type SamePersonVerdict = typeof samePersonVerdicts.$inferSelect;

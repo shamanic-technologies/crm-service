@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
-import { contacts, ghlConnections, humanLinkStatements, people, peopleFacts } from "../../src/db/schema.js";
+import { contacts, ghlConnections, humanLinkStatements, people, peopleFacts, samePersonVerdicts } from "../../src/db/schema.js";
+import { rejectTwinVerdict } from "../../src/lib/people/name-twins.js";
 import { ensureScope, runScopeBuild } from "../../src/lib/people/build.js";
 
 /**
@@ -162,6 +163,9 @@ class FakeHumans {
 
 let humans = new FakeHumans();
 let leadPairings: unknown[] = [];
+/** Jev's P(same human) for the name-twin question; every question it was asked. */
+let twinSame = 0.9;
+let twinQuestions: { state: unknown }[] = [];
 const WRITTEN = (email: string) => ({
   campaignId: "camp-h",
   instantlyCampaignId: "self:h",
@@ -185,6 +189,15 @@ function installFetchStub() {
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     const method = init?.method ?? "GET";
+    if (url.host === "chat.test") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { state: unknown; questions: Record<string, unknown> };
+      if (url.pathname !== "/orgs/judgments" || !body.questions.same) return json({ error: "not stubbed" }, 503);
+      twinQuestions.push({ state: body.state });
+      return json({
+        model: "jev-test",
+        answers: { same: { type: "choice", choice: twinSame >= 0.5 ? "same_human" : "different_humans", confidence: Math.max(twinSame, 1 - twinSame), probabilities: { same_human: twinSame, different_humans: 1 - twinSame } } },
+      });
+    }
     if (url.host === "human.test") {
       return humans.handle(url.pathname, method, init?.body ? JSON.parse(String(init.body)) : null, url.searchParams);
     }
@@ -218,7 +231,7 @@ function installFetchStub() {
 }
 
 async function wipe() {
-  await db.execute(sql`TRUNCATE people_scopes, people, person_ids, person_id_aliases, person_merges, people_facts, lead_standing_observations, ghl_connections, contacts, human_keys, human_resolutions, human_link_statements, human_fact_statements, human_event_cursor, sender_verdicts, conversation_verdicts CASCADE`);
+  await db.execute(sql`TRUNCATE people_scopes, people, person_ids, person_id_aliases, person_merges, people_facts, lead_standing_observations, ghl_connections, contacts, human_keys, human_resolutions, human_link_statements, human_fact_statements, human_event_cursor, sender_verdicts, conversation_verdicts, same_person_verdicts CASCADE`);
 }
 
 let ghlIds: Record<string, string> = {};
@@ -313,6 +326,57 @@ describe.skipIf(!RUN)("people x human-service: same human is human-service's cal
     expect(((await personOf("b@y.com")).emails as string[])).toEqual(["b@y.com"]);
     const [statement] = await db.select().from(humanLinkStatements).where(eq(humanLinkStatements.brandId, BRAND));
     expect(statement.withdrawnAt).not.toBeNull();
+  });
+
+  it("two people sharing a full name: Jev says one human -> one person (org link); 'not the same' -> two again (SAME-HUMAN-TWO-LEADS-1022)", async () => {
+    const chatUrl = process.env.CHAT_SERVICE_URL;
+    const chatKey = process.env.CHAT_SERVICE_API_KEY;
+    process.env.CHAT_SERVICE_URL = "http://chat.test";
+    process.env.CHAT_SERVICE_API_KEY = "c";
+    twinSame = 0.9;
+    twinQuestions = [];
+    try {
+      const [ghl] = await db.select().from(ghlConnections).where(eq(ghlConnections.brandId, BRAND));
+      // Ben B again, from his personal Gmail: no record states both addresses.
+      await db.insert(contacts).values({
+        externalId: "ghl-b2", primaryEmail: "ben.personal@gmail.com", phoneE164: null, fullName: "Ben B", unsubscribed: false,
+        orgId: ORG, brandId: BRAND, source: "gohighlevel", rawAttributes: {}, sourceConnectionId: ghl.id,
+      });
+      // First build: two people (nothing to ask about yet: the judge reads the previous build's people).
+      await build();
+      expect((await personOf("b@y.com")).personKey).not.toBe((await personOf("ben.personal@gmail.com")).personKey);
+      expect(twinQuestions).toHaveLength(0);
+
+      // Second build: Jev is asked once, says one human -> one person, stated to human-service as an org link.
+      const second = await build();
+      expect(second.nameTwins).toMatchObject({ status: "ok", candidates: 1, judged: 1, same: 1 });
+      expect(JSON.stringify(twinQuestions[0].state)).toContain("ben.personal@gmail.com");
+      const ben = await personOf("b@y.com");
+      expect((ben.emails as string[]).sort()).toEqual(["b@y.com", "ben.personal@gmail.com"]);
+      expect(ben.mergeEvidence).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "name_twin", heldBy: "human-service" })]));
+      const link = humans.links.find((l) => l.scope === "org" && l.active)!;
+      expect(link.orgId).toBe(ORG);
+      const [verdict] = await db.select().from(samePersonVerdicts).where(eq(samePersonVerdicts.brandId, BRAND));
+      expect(verdict).toMatchObject({ verdict: "same", name: "ben b" });
+
+      // A third build asks nothing (recorded once).
+      await build();
+      expect(twinQuestions).toHaveLength(1);
+
+      // "Not the same person": the link is withdrawn, two people again, never asked again.
+      expect(await rejectTwinVerdict({ orgId: ORG, brandId: BRAND, verdictId: verdict.id, userId: USER, reason: "his father" })).toMatchObject({ duplicate: false });
+      const after = await build();
+      expect(after.humanIdentity!.linksWithdrawn).toBe(1);
+      expect(link.active).toBe(false);
+      expect((await personOf("b@y.com")).personKey).not.toBe((await personOf("ben.personal@gmail.com")).personKey);
+      await build();
+      expect(twinQuestions).toHaveLength(1);
+    } finally {
+      if (chatUrl === undefined) delete process.env.CHAT_SERVICE_URL;
+      else process.env.CHAT_SERVICE_URL = chatUrl;
+      if (chatKey === undefined) delete process.env.CHAT_SERVICE_API_KEY;
+      else process.env.CHAT_SERVICE_API_KEY = chatKey;
+    }
   });
 
   it("a merge human-service makes elsewhere (another service's proof) reaches our people through its event feed", async () => {

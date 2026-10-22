@@ -79,7 +79,7 @@ export function parseCrmRecordKey(k: string): CrmRecord | null {
 
 /** A judgment that two records are one human. */
 export interface Judgment {
-  kind: "lead_pairing" | "stated_merge";
+  kind: "lead_pairing" | "stated_merge" | "name_twin";
   ref: string;
   sides: [IdentityRecord, IdentityRecord];
   judgedBy: string;
