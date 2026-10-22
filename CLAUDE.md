@@ -1891,7 +1891,8 @@ apiKeyAuth, response `{ updatedTables: [{ tableName, count }] }`
   re-run reports 0 everywhere; a half-move from an earlier call without
   `targetBrandId` is finished.
 - ⚠️ **A new table with `brand_id` must be added to `TRANSFER_TABLES`** —
-  `tests/unit/transfer-brand.test.ts` fails otherwise.
+  `tests/unit/transfer-brand.test.ts` fails otherwise — AND seeded one row in
+  `tests/integration/transfer-brand.test.ts` (its counts expect every table).
 - The GoHighLevel credential lives in key-service, which moves it in its own
   transfer; the sync resolves it under the connection's (new) org.
 - ⚠️ **Registering the route is not enough to be CALLED.** brand-service finds
@@ -1997,7 +1998,8 @@ run separately. Do not read the chained failure as a signal about your change.
 file is `describe.skipIf(!RUN)`. To run them, create a scratch DB, export the
 `env:` block of `.github/workflows/*.yml` (`CRM_TEST_DB=1`, fake service URLs,
 `CRM_SERVICE_DATABASE_URL` → the scratch DB), `npm run db:migrate`, then
-`npx vitest run`. A run with any `skipped` file is not the gate. (Set 2026-10-08.)
+`npx vitest run`. A run with any `skipped` file is not the gate. (Set 2026-10-08.) Install with
+`npx -y pnpm@9 install --frozen-lockfile` (CI's pnpm 9; the machine's corepack pnpm crashes, `npm ci` fails on `edgesOut`).
 
 ## Release: there is no `staging` branch here
 
