@@ -163,6 +163,9 @@ async function seedBrand(org: string, brand: string, tag: string) {
     INSERT INTO calendar_attendance_verdicts (org_id, brand_id, google_event_id, person_id, input_hash, participant_index, confidence, probabilities, model, run_id)
     VALUES (${org}, ${brand}, ${"g-" + tag}, gen_random_uuid()::text, ${"h-" + Math.random().toString(16).slice(2)}, NULL, 0.9, '{}', 'jev', 'run-1')`);
   await db.execute(sql`
+    INSERT INTO same_person_verdicts (org_id, brand_id, key_a, key_b, name, keys_a, keys_b, input_hash, verdict, probability_same, model, run_id)
+    VALUES (${org}, ${brand}, ${"email:a-" + tag + "-" + Math.random().toString(16).slice(2) + "@x.co"}, 'email:b@x.co', 'ann bee', '[]', '[]', 'h', 'same', 0.9, 'jev', 'run-1')`);
+  await db.execute(sql`
     INSERT INTO conversation_verdicts (org_id, brand_id, conversation_key, source, topic, confidence, probabilities,
       brand_probability, offer_scores, offer_ids, context_hash, judged_through, input, model, run_id)
     VALUES (${org}, ${brand}, 'gmail:a@b.co', 'gmail', 'this_brand', 0.9, '{}', 0.9, '{}', '[]', 'h', 'm', '{}', 'jev', 'run-1')`);
