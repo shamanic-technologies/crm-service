@@ -60,7 +60,7 @@ import {
 import { majorAmount } from "../stripe/records.js";
 import { readFunnelEvents, type FunnelEvent } from "../gohighlevel/funnel-events.js";
 import type { BuildSummary } from "./build.js";
-import { PEOPLE_SOURCES, type PeopleSource, type Presence } from "./identity.js";
+import { keysOf, PEOPLE_SOURCES, type PeopleSource, type Presence } from "./identity.js";
 import type { SiblingIdentity } from "./siblings.js";
 import { readStoredTimeline, type StoredReadOptions, type StoredTimeline } from "./search.js";
 import { lookupLeadStanding } from "./sources.js";
@@ -167,6 +167,12 @@ export interface TimelineSource {
   readAt: string | null;
   /** store only: a re-read of one of its threads was still running when the answer left (read again shortly). */
   refreshing: boolean;
+  /**
+   * Mirror records (contact ids) of this source that state one of the person's identity keys but
+   * that the person index has not joined to them yet (the index was built before the record carried
+   * the key). Their items ARE in this answer (read through); empty = the index already held them all.
+   */
+  joinedAtRead: string[];
 }
 
 interface SourceResult {
@@ -678,6 +684,111 @@ export async function findPerson(orgId: string, brandId: string, key: string): P
   return row ?? null;
 }
 
+// ─── records not yet joined (TIMELINE-STALE-SOURCE-1023) ───────────────────
+
+/**
+ * The person index (`people.presences`) is rebuilt whole per scope, minutes apart. A mirrored
+ * record that starts stating one of a person's keys between two builds (a PostHog person who just
+ * typed their email at signup) is not on the person yet, and a read of the index alone answered
+ * that source `empty`: a real "nothing there" to a writer, who refused the person for good
+ * (2026-10-22, a visitor's 3 visits stored, his PostHog person given his email 2 min before the read).
+ * So the timeline reads those records THROUGH: every contact of a mirror source that states one of
+ * the person's identity keys (exactly as the build derives them) is read, joined or not, and the
+ * ones the index did not hold yet are named on the source (`joinedAtRead`).
+ */
+export const LATE_JOIN_SOURCES = ["gohighlevel", "posthog", "stripe", "clerk"] as const;
+export type LateJoinSource = (typeof LATE_JOIN_SOURCES)[number];
+
+export interface MirrorContactRow {
+  id: string;
+  source: string;
+  primaryEmail: string | null;
+  phoneE164: string | null;
+  externalId: string | null;
+  rawAttributes: unknown;
+}
+
+/** PURE: the identity keys a mirrored contact states, as the build derives them (people/sources.ts readers). */
+export function mirrorContactKeys(r: MirrorContactRow): string[] {
+  const raw = (r.rawAttributes ?? {}) as { emails?: unknown; phones?: unknown; distinctIds?: unknown };
+  const strings = (x: unknown) => (Array.isArray(x) ? x.filter((v): v is string => typeof v === "string") : []);
+  const one = (x: string | null) => (x ? [x] : []);
+  if (r.source === "clerk") {
+    return keysOf({ emails: strings(raw.emails), phones: strings(raw.phones), userIds: one(r.externalId) }, null);
+  }
+  return keysOf(
+    { emails: one(r.primaryEmail), phones: one(r.phoneE164), userIds: r.source === "posthog" ? strings(raw.distinctIds) : [] },
+    null,
+  );
+}
+
+/** PURE: the rows that state one of `identityKeys` and are not among the person's presences yet, as presences. */
+export function unjoinedPresences(rows: MirrorContactRow[], identityKeys: string[], presences: Presence[]): Presence[] {
+  const mine = new Set(identityKeys);
+  const held = new Set(presences.map((p) => `${p.source}|${p.sourceRef}`));
+  return rows
+    .filter((r) => (LATE_JOIN_SOURCES as readonly string[]).includes(r.source))
+    .filter((r) => !held.has(`${r.source}|${r.id}`))
+    .map((r) => ({ r, keys: mirrorContactKeys(r) }))
+    .filter(({ keys }) => keys.some((k) => mine.has(k)))
+    .map(({ r, keys }) => ({
+      source: r.source as LateJoinSource,
+      sourceRef: r.id,
+      displayName: null,
+      company: null,
+      emails: keys.filter((k) => k.startsWith("email:")).map((k) => k.slice(6)),
+      phones: keys.filter((k) => k.startsWith("phone:")).map((k) => k.slice(6)),
+      userIds: keys.filter((k) => k.startsWith("uid:")).map((k) => k.slice(4)),
+      firstActivityAt: null,
+      lastActivityAt: null,
+      messageCount: null,
+      inboundCount: null,
+      outboundCount: null,
+      detail: { contactId: r.id, externalId: r.externalId },
+    }));
+}
+
+const textArray = (xs: string[]) => sql`ARRAY[${sql.join(xs.map((x) => sql`${x}`), sql`, `)}]::text[]`;
+
+/** The brand's mirrored contacts of `sources` that may state one of the person's keys (exact check: unjoinedPresences). */
+export async function unjoinedRecords(person: Person, sources: LateJoinSource[]): Promise<Presence[]> {
+  const keys = person.identityKeys as string[];
+  const emails = keys.filter((k) => k.startsWith("email:")).map((k) => k.slice(6));
+  const phones = keys.filter((k) => k.startsWith("phone:")).map((k) => k.slice(6));
+  const uids = keys.filter((k) => k.startsWith("uid:")).map((k) => k.slice(4));
+  if (sources.length === 0 || emails.length + phones.length + uids.length === 0) return [];
+  const match = [
+    ...(emails.length
+      ? [sql`lower(${contacts.primaryEmail}) = ANY(${textArray(emails)})`, sql`(${contacts.rawAttributes}->'emails') ?| ${textArray(emails)}`]
+      : []),
+    ...(phones.length
+      ? [sql`${contacts.phoneE164} = ANY(${textArray(phones)})`, sql`(${contacts.rawAttributes}->'phones') ?| ${textArray(phones)}`]
+      : []),
+    ...(uids.length
+      ? [sql`${contacts.externalId} = ANY(${textArray(uids)})`, sql`(${contacts.rawAttributes}->'distinctIds') ?| ${textArray(uids)}`]
+      : []),
+  ];
+  const rows = await db
+    .select({
+      id: contacts.id,
+      source: contacts.source,
+      primaryEmail: contacts.primaryEmail,
+      phoneE164: contacts.phoneE164,
+      externalId: contacts.externalId,
+      rawAttributes: contacts.rawAttributes,
+    })
+    .from(contacts)
+    .where(
+      and(
+        eq(contacts.orgId, person.orgId),
+        eq(contacts.brandId, person.brandId),
+        inArray(contacts.source, sources),
+        sql`(${sql.join(match, sql` OR `)})`,
+      ),
+    );
+  return unjoinedPresences(rows, keys, person.presences as Presence[]);
+}
+
 const toFailed = (err: unknown, asked: string[] = []): SourceResult => ({
   status: "failed",
   items: [],
@@ -690,13 +801,28 @@ export async function readTimeline(
   person: Person,
   sourceReads: BuildSummary | null,
   identity: SiblingIdentity,
-  opts: StoredReadOptions = {},
-): Promise<{ sources: TimelineSource[]; items: TimelineItem[] }> {
+  opts: StoredReadOptions & {
+    /** false = do not read records not yet joined (a relation's thread: only its own contact points). */
+    lateJoin?: boolean;
+  } = {},
+): Promise<{ sources: TimelineSource[]; items: TimelineItem[]; indexCurrent: boolean }> {
   const presences = person.presences as Presence[];
-  const of = (s: PeopleSource) => presences.filter((p) => p.source === s);
   const connected = (s: PeopleSource) =>
     sourceReads?.sources.find((r) => r.source === s)?.status !== "not_connected";
   const emails = person.emails as string[];
+
+  // Records stating one of the person's keys that the index has not joined yet are read too.
+  let late: Presence[] = [];
+  let lateError: string | null = null;
+  if (opts.lateJoin !== false) {
+    try {
+      late = await unjoinedRecords(person, LATE_JOIN_SOURCES.filter(connected));
+    } catch (err) {
+      lateError = `could not check for records not yet joined to this person: ${(err as Error).message}`;
+      console.error(`[crm-service] timeline late-join read failed person=${person.personKey}:`, err);
+    }
+  }
+  const of = (s: PeopleSource) => [...presences, ...late].filter((p) => p.source === s);
 
   const storedRead = readStoredTimeline(
     scope,
@@ -730,6 +856,13 @@ export async function readTimeline(
     apiCallItems(person, identity, { deferAnswers: opts.paged }).catch((e) => toFailed(e, emails)),
   ]);
   const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api };
+  // The check itself failed: no late-join source may pose as complete (its index items are still served).
+  if (lateError) {
+    for (const s of LATE_JOIN_SOURCES) {
+      if (bySource[s].status === "not_connected") continue;
+      bySource[s] = { ...bySource[s], status: "failed", error: bySource[s].error ? `${bySource[s].error}; ${lateError}` : lateError };
+    }
+  }
   const csv = await csvRead;
 
   // Background pass: lead-service campaign discovery (+ any thread the deadline left unread).
@@ -760,8 +893,10 @@ export async function readTimeline(
       servedFrom: s === "gmail" || s === "instantly" ? ("store" as const) : ("mirror" as const),
       readAt: bySource[s].readAt ?? null,
       refreshing: bySource[s].refreshing ?? false,
+      joinedAtRead: late.filter((p) => p.source === s).map((p) => p.sourceRef),
     })),
     items,
+    indexCurrent: late.length === 0 && lateError === null,
   };
 }
 

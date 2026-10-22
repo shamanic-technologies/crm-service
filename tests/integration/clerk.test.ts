@@ -43,6 +43,8 @@ let clerkRefuses = false;
 let calls: string[] = [];
 let USERS: Record<string, unknown>[] = [];
 let MEMBERSHIPS: Record<string, unknown>[] = [];
+/** Bob's PostHog person not yet tied to him (TIMELINE-STALE-SOURCE-1023: he gives it his id minutes after the build). */
+let phBobHidden = false;
 
 /** A Clerk membership of `userId` in org `orgId`, created by `createdBy`. */
 const membership = (id: string, userId: string, orgId: string, createdBy: string | null) => ({
@@ -119,7 +121,7 @@ function hogqlAnswer(query: string) {
     json({ columns: cols, results: data.map((d) => cols.map((c) => d[c] ?? null)) });
   if (query.includes("count() AS n FROM persons")) return rows(["n"], [{ n: PH_PERSONS.length }]);
   if (query.includes("FROM persons AS p") && query.includes("WHERE NOT")) {
-    return rows(PH_COLS, query.includes("'user_bob'") ? PH_BY_AUTH_ID : []);
+    return rows(PH_COLS, query.includes("'user_bob'") && !phBobHidden ? PH_BY_AUTH_ID : []);
   }
   if (query.includes("FROM persons AS p")) return rows(PH_COLS, query.includes("toString(p.id) >") ? [] : PH_PERSONS);
   if (query.includes("event = '$pageview'")) {
@@ -231,6 +233,7 @@ describe.skipIf(!RUN)("Clerk auth provider", () => {
     clerkRefuses = false;
     USERS = [ann, bob];
     MEMBERSHIPS = [];
+    phBobHidden = false;
     installFetchStub();
     await wipe();
   });
@@ -359,6 +362,60 @@ describe.skipIf(!RUN)("Clerk auth provider", () => {
     const clerkSource = list.body.sources.find((s: { source: string }) => s.source === "clerk");
     expect(clerkSource).toMatchObject({ status: "ok", people: 2, sourceCount: 2 });
   });
+  it("a PostHog person tied to a signup AFTER the last build is read through on the timeline, named as not yet joined, never an empty source (TIMELINE-STALE-SOURCE-1023)", async () => {
+    // Albin 2026-10-22: Clerk signup indexed; his PostHog person (3 visits stored) got his identity minutes
+    // later; the timeline read before the next build answered PostHog `empty, asked: []`.
+    await connectClerk();
+    await syncMine();
+    keys = { ...keys, posthog: "phx_good" };
+    phBobHidden = true;
+    const ph = await asOrg(request(app()).post("/orgs/posthog/connections")).send({ brandId: BRAND, projectId: "171095", region: "eu" });
+    expect(ph.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 200));
+    await runPosthogSyncPass(ph.body.connection.id);
+    const { scope } = await ensureScope(ORG, BRAND, USER);
+    expect((await runScopeBuild(scope)).ok).toBe(true);
+    const bobRow = async () =>
+      (await db.select().from(people).where(eq(people.brandId, BRAND))).find((p) => p.personKey === "email:bob@y.com")!;
+    expect((await bobRow()).sources).toEqual(["clerk"]);
+
+    // His PostHog person now names him (his Clerk id); the sync mirrors it and its visit. No build yet.
+    phBobHidden = false;
+    await runPosthogSyncPass(ph.body.connection.id);
+    const [phBob] = await db
+      .select()
+      .from(contacts)
+      .where(and(eq(contacts.brandId, BRAND), eq(contacts.source, "posthog"), eq(contacts.externalId, "ph-bob")));
+    expect(phBob).toBeTruthy();
+    expect((await bobRow()).sources).toEqual(["clerk"]); // the index has not caught up
+
+    const read = () =>
+      asOrg(request(app()).get(`/orgs/people/timeline?brandId=${BRAND}&personKey=${encodeURIComponent("email:bob@y.com")}`));
+    const tl = await read();
+    expect(tl.status).toBe(200);
+    const posthog = tl.body.sources.find((s: { source: string }) => s.source === "posthog");
+    // Before: { status: "empty", asked: [] } and no visit. Now: the visit, and the record named as read through.
+    expect(posthog).toMatchObject({ status: "ok", items: 1, asked: [phBob.id], joinedAtRead: [phBob.id] });
+    expect(tl.body.indexCurrent).toBe(false);
+    expect(tl.body.items.map((i: { source: string; event: { step: string } }) => `${i.source}:${i.event.step}`)).toEqual([
+      "clerk:signup",
+      "posthog:visit",
+    ]);
+    // A source the index already held completely says so.
+    expect(tl.body.sources.find((s: { source: string }) => s.source === "clerk").joinedAtRead).toEqual([]);
+
+    // The read kicked a rebuild: the index joins him, and the next read is current.
+    for (let i = 0; i < 100 && !((await bobRow()).sources as string[]).includes("posthog"); i++) {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    expect((await bobRow()).sources).toEqual(["posthog", "clerk"]);
+    const after = await read();
+    expect(after.body.indexCurrent).toBe(true);
+    expect(after.body.sources.find((s: { source: string }) => s.source === "posthog")).toMatchObject({ status: "ok", joinedAtRead: [] });
+    // Let any coalesced follow-up build end before the next test wipes the brand.
+    while (!(await runScopeBuild(scope)).summary) await new Promise((r) => setTimeout(r, 100));
+  });
+
   it("a teammate invited into an organization someone else created is no signup; leaving it makes them one", async () => {
     // Ann created org_a and invited Bob into it.
     MEMBERSHIPS = [membership("mem_ann", "user_ann", "org_a", "user_ann"), membership("mem_bob", "user_bob", "org_a", "user_ann")];

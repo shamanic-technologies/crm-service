@@ -1099,7 +1099,13 @@ owner had written to. A recorded fact, never an address-shape guess.
   Instantly conversation per (campaign, address) — campaigns from the engaged
   row AND from lead-service, so a person cold-emailed but not engaged still
   shows the sends — Matrix raw events, GoHighLevel funnel events. Per source
-  `ok | empty | not_connected | failed` + what was `asked`. A Gmail item carries
+  `ok | empty | not_connected | failed` + what was `asked`. The index lags its
+  mirrors by a build (15-min cron + minutes per build): GoHighLevel / PostHog /
+  Stripe / Clerk records stating one of the person's keys but not yet joined are
+  READ THROUGH and named in `sources[].joinedAtRead`, top-level `indexCurrent:
+  false`, a rebuild kicked; a failed check = source `failed`, never a complete-
+  looking `empty` (TIMELINE-STALE-SOURCE-1023: a workflow refused a signup as "no
+  website visit" 2 min after his PostHog person got his email). A Gmail item carries
   `textClean {status, cleaned, original}` (null for other sources):
   google-service's `bodyCleanStatus` verbatim, `cleaned` true only for `cleaned`,
   `original` = `bodyTextOriginal`. google-service owns the cleaning; this only
