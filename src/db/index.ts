@@ -1,6 +1,8 @@
 import { drizzle, PostgresJsDatabase } from "drizzle-orm/postgres-js";
 import postgres, { Sql } from "postgres";
 import * as schema from "./schema.js";
+import { restorePostgresArrayTypes } from "./postgres-array-types.js";
+import { restoreDriverErrorMessages } from "../lib/pg-error.js";
 
 let sqlClient: Sql | null = null;
 let dbInstance: PostgresJsDatabase<typeof schema> | null = null;
@@ -31,10 +33,18 @@ export function getSql(): Sql {
   return sqlClient;
 }
 
+// drizzle-orm >= 0.41/0.44 runtime changes, restored to their 0.36 behaviour:
+// date[]/timestamp[]/numeric[] back to postgres.js (restorePostgresArrayTypes after every
+// drizzle(client)), and a failed query's message is the database's own again (no SQL text or
+// bound values in what we answer with or store).
+restoreDriverErrorMessages();
+
 export const db = new Proxy({} as PostgresJsDatabase<typeof schema>, {
   get(_, prop) {
     if (!dbInstance) {
       dbInstance = drizzle(getSql(), { schema });
+      // drizzle(client) re-installs its date[]/timestamp[]/numeric[] pass-through on every construct.
+      restorePostgresArrayTypes(getSql());
     }
     return (dbInstance as any)[prop];
   },

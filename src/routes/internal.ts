@@ -8,6 +8,7 @@ import { promoteUpload } from "../lib/promote.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { transferBrand } from "../lib/transfer-brand.js";
 import { TransferBrandRequestSchema } from "../schemas.js";
+import { pgErrorOf } from "../lib/pg-error.js";
 
 const router = Router();
 
@@ -104,12 +105,13 @@ router.post("/internal/transfer-brand", apiKeyAuth, async (req, res) => {
     );
     // The target already holds a row the move would duplicate (a merge into a
     // brand that has its own CRM data). The transaction rolled back: nothing moved.
-    const code = (err as { code?: string; cause?: { code?: string } }).code ??
-      (err as { cause?: { code?: string } }).cause?.code;
-    if (code === "23505") {
+    // drizzle-orm >= 0.44 wraps the postgres error in DrizzleQueryError ("Failed query: ..."):
+    // read the code AND the message from the postgres error itself.
+    const pg = pgErrorOf(err);
+    if (pg.code === "23505") {
       return res.status(409).json({
         type: "conflict",
-        error: `target already holds conflicting CRM data, nothing was moved: ${(err as Error).message}`,
+        error: `target already holds conflicting CRM data, nothing was moved: ${String(pg.message ?? (err as Error).message)}`,
       });
     }
     return res.status(500).json({ type: "internal", error: (err as Error).message });

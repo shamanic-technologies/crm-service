@@ -7,6 +7,7 @@ import { dirname, join } from "path";
 import { drizzle } from "drizzle-orm/postgres-js";
 import { migrate } from "drizzle-orm/postgres-js/migrator";
 import { getSql } from "./db/index.js";
+import { restorePostgresArrayTypes } from "./db/postgres-array-types.js";
 import healthRoutes from "./routes/health.js";
 import contactsRoutes from "./routes/contacts.js";
 import internalRoutes from "./routes/internal.js";
@@ -105,6 +106,8 @@ if (process.env.NODE_ENV !== "test") {
   if (dbUrl) {
     startServer();
     const migrateDb = drizzle(getSql());
+    // drizzle(client) re-installs its array-type pass-through on the SHARED client: undo it.
+    restorePostgresArrayTypes(getSql());
     migrate(migrateDb, { migrationsFolder: "./drizzle" })
       .then(() => {
         console.log("[crm-service] Migrations complete");
