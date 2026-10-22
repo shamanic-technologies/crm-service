@@ -2517,8 +2517,20 @@ const PersonTimelineResponseSchema = registry.register(
               "store only: a re-read of one of this source's threads was still running when the answer left; it lands in the store, read again in a few seconds. " +
               "On a PAGED read a thread with a good stored copy being re-read is `refreshing`, never `failed`.",
           }),
+          joinedAtRead: z.array(z.string()).openapi({
+            description:
+              "Mirror sources (GoHighLevel, PostHog, Stripe, Clerk): the records (contact ids) that state one of this person's identity keys " +
+              "but that the person index had not joined to them yet (built before the record carried the key, e.g. a PostHog person who typed " +
+              "their email minutes ago). Their items ARE in this answer, read through; a rebuild is kicked. Empty = the index already held every record. " +
+              "If that check itself fails, the source is `failed` (its indexed items still served), never a complete-looking `empty`.",
+          }),
         }),
       ),
+      indexCurrent: z.boolean().openapi({
+        description:
+          "false = at least one source served records the person index had not joined yet (`sources[].joinedAtRead`), or that check failed. " +
+          "The answer is still complete for those sources; the index catches up on the rebuild this read kicked.",
+      }),
       itemCount: z.number().int().openapi({ description: "Items in THIS response (the page, on a paged read)." }),
       totalItems: z.number().int().optional().openapi({ description: "Paged read only: items of the whole thread." }),
       page: z

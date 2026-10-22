@@ -548,8 +548,14 @@ router.get(
         scoped,
         scope.sourceReads as BuildSummary | null,
         { orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId },
-        { paged },
+        { paged, lateJoin: !relationKey },
       );
+      // A record read through (not yet joined): bring the index up to date now, not at the next cron.
+      if (!timeline.indexCurrent) {
+        setImmediate(() => {
+          runScopeBuild(scope, { followUp: true }).catch((e) => console.error("[crm-service] people build crashed:", e));
+        });
+      }
       if (paged) {
         const limit = parsed.data.limit ?? TIMELINE_PAGE_DEFAULT;
         const page = pageOf(timeline.items, limit, before);
@@ -559,6 +565,7 @@ router.get(
           brandId,
           person: personView(person),
           builtAt: person.builtAt.toISOString(),
+          indexCurrent: timeline.indexCurrent,
           sources: timeline.sources,
           itemCount: page.items.length,
           totalItems: page.totalItems,
@@ -571,6 +578,7 @@ router.get(
         brandId,
         person: personView(person),
         builtAt: person.builtAt.toISOString(),
+        indexCurrent: timeline.indexCurrent,
         sources: timeline.sources,
         itemCount: timeline.items.length,
         items: timeline.items,
