@@ -212,3 +212,34 @@ export async function updatePlatformRun(
     body: { status },
   });
 }
+
+/** One outcome occurrence a run states (COST-ACCOUNTING-1023): a catalogue step reached by one subject. */
+export interface OutcomeOccurrence {
+  outcomeKey: string;
+  subjectService: string;
+  subjectId: string;
+}
+
+export interface DeclareOutcomesBody {
+  produced?: OutcomeOccurrence[];
+  consumed?: OutcomeOccurrence[];
+}
+
+export interface DeclareOutcomesAnswer {
+  runId: string;
+  recordedCount: number;
+  alreadyRecordedCount: number;
+}
+
+/**
+ * State on an ORG run the outcome occurrences it produced and consumed (runs-service, the
+ * production-cost ledger). Idempotent there per (run, direction, key, subject): a replay answers
+ * `alreadyRecordedCount`. x-org-id must be the run's org (else 409 `run_org_mismatch`).
+ */
+export async function declareRunOutcomes(runId: string, orgId: string, body: DeclareOutcomesBody): Promise<DeclareOutcomesAnswer> {
+  return runsRequest<DeclareOutcomesAnswer>(`/v1/runs/${runId}/outcomes`, {
+    method: "POST",
+    identity: { orgId },
+    body,
+  });
+}

@@ -30,6 +30,7 @@ import { startPhoneWatch } from "./lib/phone-trigger/watch.js";
 import { startMatrixLiveWatch } from "./lib/matrix/sync.js";
 import { startCalendarWatch } from "./lib/calendar/feed.js";
 import { startLineWatch } from "./lib/whatsapp/line-health.js";
+import { startOutcomeDeclarations } from "./lib/reply-trigger/outcome.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -127,6 +128,8 @@ if (process.env.NODE_ENV !== "test") {
         startCalendarWatch();
         // Records every linked WhatsApp line's state (bridge /whoami) as spans + a daily series for Monitoring.
         startLineWatch();
+        // Declares each reply judged positive as a Positive reply on its judge run at runs-service (cost ledger).
+        startOutcomeDeclarations();
       })
       .catch((err) => {
         console.error("[crm-service] Migration failed:", err);
