@@ -75,11 +75,16 @@ import {
   peopleCorrections,
   contactPointOrgVerdicts,
   contactEmailLookups,
+  whatsappLineSpans,
+  whatsappLineDays,
 } from "../db/schema.js";
 
 export const TRANSFER_TABLES: PgTable[] = [
   contactUploads,
   whatsappSends,
+  // WhatsApp line health (WA-LINE-HEALTH-1023): a line's history follows its brand.
+  whatsappLineSpans,
+  whatsappLineDays,
   contactRowsRaw,
   contacts,
   contactServes,

@@ -3972,3 +3972,78 @@ registry.registerPath({
     502: { description: "Run tracking unavailable" },
   },
 });
+
+// ─── WhatsApp line health (WA-LINE-HEALTH-1023) ─────────────────────────────
+
+const LineStateSchema = z
+  .enum(["connected", "reconnecting", "logged_out", "bridge_unreachable"])
+  .describe(
+    "As the bridge states it: `connected` (CONNECTED / BACKFILLING) | `reconnecting` (any other bridge state: the bridge " +
+      "reconnects on its own; red once it lasts > 15 min) | `logged_out` (BAD_CREDENTIALS / LOGGED_OUT / login gone: only a " +
+      "QR relink brings it back) | `bridge_unreachable` (the bridge did not answer: nothing can be sent).",
+  );
+
+export const WhatsappLineDaySchema = z
+  .object({
+    day: z.string().describe("UTC day, YYYY-MM-DD"),
+    status: z
+      .enum(["ok", "down", "unknown"])
+      .describe("`down` = any minute logged out, bridge unreachable or reconnecting > 15 min (RED); `ok` = connected, never down; `unknown` = nothing observed"),
+    connectedMinutes: z.number().int(),
+    reconnectingMinutes: z.number().int().describe("Short reconnects the bridge finished on its own (not red)"),
+    downMinutes: z.number().int(),
+    unknownMinutes: z.number().int().describe("Minutes with no evidence (before history, or the watch not running). Today counts only elapsed minutes."),
+    recoveredOnItsOwn: z.number().int().describe("Reconnects that ended connected this day with no human: auto-healed"),
+    lastState: z.string().nullable(),
+    lastReason: z.string().nullable().describe("The bridge's own words at the day's last observed minute"),
+  })
+  .openapi("WhatsappLineDay");
+
+export const WhatsappLineHealthSchema = z
+  .object({
+    generatedAt: z.string(),
+    from: z.string().describe("First day of the window (UTC, YYYY-MM-DD)"),
+    to: z.string().describe("Last day of the window = today (UTC)"),
+    lines: z.array(
+      z.object({
+        orgId: z.string().uuid(),
+        brandId: z.string().uuid(),
+        phone: z.string().describe("The line's own number, E.164"),
+        linkId: z.string().uuid().nullable(),
+        linked: z.boolean().describe("Currently linked; false = an unlinked line that still has days in the window"),
+        current: z.object({
+          state: z.union([LineStateSchema, z.literal("unknown")]).describe("`unknown` = a linked line not checked in the last 15 min"),
+          down: z.boolean().describe("RED now: logged out, bridge unreachable, reconnecting > 15 min, or a linked line not checked in 15 min"),
+          since: z.string().nullable().describe("When this state began (the bridge's stated time when it gives one)"),
+          checkedAt: z.string().nullable().describe("Last time the watch read the bridge for this line"),
+          bridgeState: z.string().nullable().describe("The bridge's own state_event"),
+          reason: z.string().nullable().describe("The bridge's own words (e.g. \"You were logged out from another device...\")"),
+        }),
+        days: z.array(WhatsappLineDaySchema).describe("Oldest first; only days the line has history for"),
+      }),
+    ).describe("Linked lines first, then red first, then by number"),
+  })
+  .openapi("WhatsappLineHealth");
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/ops/whatsapp-lines",
+  summary: "Every linked WhatsApp line, fleet-wide: its state now + a stored daily series (dashboard v2 Monitoring)",
+  description:
+    "WA-LINE-HEALTH-1023. A watch asks the bridge (`/whoami`) for every linked WhatsApp line of every org / brand every 2 min " +
+    "and stores the answer as spans and a daily series (recomputed on boot). History before the watch is re-derived from our " +
+    "own sends (connected), `whatsapp_not_connected` refusals naming the number (logged out since the bridge's stated time) " +
+    "and relink times. Nothing is emailed or messaged: red on the Monitoring hub is the alert. Staff-only behind the gateway.",
+  request: { query: z.object({ days: z.coerce.number().int().min(1).max(90).optional().describe("Window in days, default 30") }) },
+  responses: {
+    200: { description: "Lines", content: { "application/json": { schema: WhatsappLineHealthSchema } } },
+    400: { description: "Invalid days" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/ops/whatsapp-lines/check",
+  summary: "Run one WhatsApp line watch pass now (the loop runs every 2 min)",
+  responses: { 200: { description: "Lines checked, per state, days recomputed" }, 502: { description: "The pass failed" } },
+});
