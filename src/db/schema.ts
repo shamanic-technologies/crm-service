@@ -13,6 +13,7 @@ import {
   uniqueIndex,
   index,
   primaryKey,
+  date,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -2677,3 +2678,55 @@ export const samePersonVerdicts = pgTable(
   (table) => [uniqueIndex("same_person_verdicts_pair_uq").on(table.orgId, table.brandId, table.keyA, table.keyB)],
 );
 export type SamePersonVerdict = typeof samePersonVerdicts.$inferSelect;
+
+// ─── WhatsApp line health (WA-LINE-HEALTH-1023) ─────────────────────────────
+//
+// Every linked WhatsApp line (org, brand, number) as the bridge states it, for the
+// dashboard v2 Monitoring hub. `whatsapp_line_spans` = one row per stretch of ONE state
+// (connected | reconnecting | logged_out | bridge_unreachable), `started_at` → `last_seen_at`,
+// `source` = 'watch' (the bridge's `/whoami`, every 2 min) | 'backfill' (re-derived on each
+// boot from past sends / refusals / relink times, only before the first watched span).
+// `whatsapp_line_days` = the stored daily series, recomputed from spans (each pass for the
+// days it touched, every day on boot). lib/whatsapp/line-health.ts.
+export const whatsappLineSpans = pgTable(
+  "whatsapp_line_spans",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    // E.164 with "+": the line's own number (the bridge login id).
+    phone: text("phone").notNull(),
+    linkId: uuid("link_id"),
+    state: text("state").notNull(),
+    bridgeState: text("bridge_state"),
+    reason: text("reason"),
+    startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+    lastSeenAt: timestamp("last_seen_at", { withTimezone: true }).notNull(),
+    source: text("source").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("whatsapp_line_spans_line_idx").on(table.orgId, table.brandId, table.phone, table.startedAt)],
+);
+export type WhatsappLineSpan = typeof whatsappLineSpans.$inferSelect;
+
+export const whatsappLineDays = pgTable(
+  "whatsapp_line_days",
+  {
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    phone: text("phone").notNull(),
+    day: date("day", { mode: "string" }).notNull(),
+    // 'ok' | 'down' | 'unknown'
+    status: text("status").notNull(),
+    connectedMinutes: integer("connected_minutes").notNull(),
+    reconnectingMinutes: integer("reconnecting_minutes").notNull(),
+    downMinutes: integer("down_minutes").notNull(),
+    unknownMinutes: integer("unknown_minutes").notNull(),
+    recoveredOnItsOwn: integer("recovered_on_its_own").notNull(),
+    lastState: text("last_state"),
+    lastReason: text("last_reason"),
+    computedAt: timestamp("computed_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("whatsapp_line_days_uq").on(table.orgId, table.brandId, table.phone, table.day)],
+);
+export type WhatsappLineDay = typeof whatsappLineDays.$inferSelect;

@@ -1224,6 +1224,13 @@ newest first, a person with none absent; a send with no campaign never matches. 
   row with email + phone is merge evidence `whatsapp_send`. After a send the connection is
   synced and the people scope rebuilt (unawaited), so the Unibox shows it within a minute.
 
+- **Line health for Monitoring** (`lib/whatsapp/line-health.ts` + pure `line-health-core.ts`, WA-LINE-HEALTH-1023): every
+  2 min one `/whoami` per linked WhatsApp line (every org / brand, `WHATSAPP_LINE_WATCH=off` stops it) → `whatsapp_line_spans`
+  (connected | reconnecting | logged_out | bridge_unreachable, from the bridge's stated time) → stored `whatsapp_line_days`
+  (minutes per state per UTC day; a reconnect > 15 min = down; `recoveredOnItsOwn` = the bridge healed itself). Boot: backfill
+  (spans `source=backfill`, replaced whole, only before the first watched span) from our sends, refusals naming the number and
+  relink times, then every day recomputed. Read `GET /internal/ops/whatsapp-lines?days=` (gateway staff route). SENDS NOTHING:
+  red on the Monitoring hub is the alert (owner rule). Prod 2026-10-19 → 10-22: +77776879632 logged out 3 days, nobody saw it.
 - **Human takeover = forever** (`lib/matrix/human-takeover.ts`, HUMAN-IN-THREAD-1016, owner 2026-10-16: « je ne veux plus
   que ça lui autoréponde à ma place, mais pour un nouveau lead et un premier message de bienvenue oui »): a message the brand's
   account TYPED (sender = the account, human words, not an edit, not one of our sends by event id or by text) in ANY of the

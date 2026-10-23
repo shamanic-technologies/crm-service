@@ -182,6 +182,12 @@ async function seedBrand(org: string, brand: string, tag: string) {
     INSERT INTO human_fact_statements (org_id, brand_id, subject, kind, human_id, fact_id)
     VALUES (${org}, ${brand}, 'csv:' || gen_random_uuid()::text, 'opt_out', gen_random_uuid(), gen_random_uuid())`);
   await db.execute(sql`
+    INSERT INTO whatsapp_line_spans (org_id, brand_id, phone, state, started_at, last_seen_at, source)
+    VALUES (${org}, ${brand}, '+33600000009', 'connected', now(), now(), 'watch')`);
+  await db.execute(sql`
+    INSERT INTO whatsapp_line_days (org_id, brand_id, phone, day, status, connected_minutes, reconnecting_minutes, down_minutes, unknown_minutes, recovered_on_its_own)
+    VALUES (${org}, ${brand}, '+33600000009', '2026-10-23', 'ok', 60, 0, 0, 0, 0)`);
+  await db.execute(sql`
     INSERT INTO whatsapp_sends (org_id, brand_id, idempotency_key, email, phone, text, status)
     VALUES (${org}, ${brand}, gen_random_uuid()::text, 'a@b.co', '+33600000001', 'hi', 'sent')`);
 }
