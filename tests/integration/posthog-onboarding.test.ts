@@ -145,6 +145,8 @@ describe.skipIf(!RUN)("a product's signup walk on the person (ONBOARDING-IN-UNIB
     const [c] = await db.select().from(contacts).where(eq(contacts.brandId, BRAND));
     expect(c).toMatchObject({ source: "posthog", externalId: "ph-visitor", primaryEmail: null, phoneE164: null, fullName: null });
     expect(c.rawAttributes).toMatchObject({ notSignup: true, website: "https://www.Acme.io/pricing" });
+    // WA-THREAD-IDENTITY-1023: the typed website is canonical silver, so it names their company.
+    expect(c).toMatchObject({ website: "https://www.Acme.io/pricing", companyDomain: "acme.io" });
     const acts = await db.select().from(posthogActivities).where(eq(posthogActivities.brandId, BRAND)).orderBy(posthogActivities.occurredAt);
     expect(acts.map((a) => [a.name, (a.detail as { properties: unknown }).properties])).toEqual([
       ["get_started_website_submitted", { website: "acme.io" }],

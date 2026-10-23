@@ -7,8 +7,9 @@
  *
  * - Company IDENTITY is brand-service's (`lib/companies/client.ts`): a company is a brand row, same
  *   domain = same id. crm-service states the evidence its tools hold and attaches the answer.
- * - Evidence, per presence of the person: every address's domain (a work email), and a CRM
- *   contact's website. Never a company NAME (no identity).
+ * - Evidence, per presence of the person: every address's domain (a work email), and the website
+ *   its record states, ANY source (a CRM contact's, the website a visitor typed on the brand's
+ *   PostHog-tracked form, WA-THREAD-IDENTITY-1023). Never a company NAME (no identity).
  * - A public mailbox domain (gmail.com, outlook.com, orange.fr...) is nobody's company: Jev judges
  *   each DOMAIN once, fleet-wide (`domain_verdicts`), never a list of ours. Unjudged = no link yet.
  * - The link exists only where the person speaks professionally: its tags = the professional tags
@@ -284,7 +285,27 @@ export function personOrganizations(
   return [...byCompany.values()].sort((a, b) => (a.domain < b.domain ? -1 : a.domain > b.domain ? 1 : 0));
 }
 
-/** The website each CRM contact states, by our contact id (GoHighLevel today). */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** PURE: our silver contact id a presence names (`detail.contactId`), any source; null when none. */
+export function presenceContactId(p: { detail: Record<string, unknown> }): string | null {
+  const id = p.detail?.contactId;
+  return typeof id === "string" && UUID.test(id) ? id : null;
+}
+
+/**
+ * PURE: the website a presence's record states, read off `contactWebsites`. Generic over sources
+ * (WA-THREAD-IDENTITY-1023: it read GoHighLevel only, so the website a signup typed on the brand's
+ * own form named no company and the writer saw none).
+ */
+export function websiteOfPresence(websites: Map<string, string>): (p: { source: string; detail: Record<string, unknown> }) => string | null {
+  return (p) => {
+    const id = presenceContactId(p);
+    return id ? (websites.get(id) ?? null) : null;
+  };
+}
+
+/** The website each contact states, by our contact id (any source: GoHighLevel, PostHog...). */
 export async function contactWebsites(contactIds: string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   for (let i = 0; i < contactIds.length; i += 1000) {

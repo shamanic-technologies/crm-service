@@ -1693,6 +1693,11 @@ re-derives silver with no vendor call. API reads are free → no cost declared.
   (`visit` = one session aggregated over ALL its pageviews, `event` = custom
   non-`$` event). Window = `synced_through - 1h`; a capped stream resumes from
   its last row.
+  The `website` property a person typed is canonical silver (`contacts.website` + `company_domain`, WA-THREAD-IDENTITY-1023):
+  it is company evidence like a CRM contact's website (`organizations.ts` `websiteOfPresence` reads EVERY source's contact,
+  it read GoHighLevel only, so a signup known by phone + typed website was served with no company). Migration 0057 carried
+  the rows derived before. The timeline already says what each custom event was in `text` ("Get started step done · step:
+  offer · ..."); `event.step` stays `event` (the dashboard keys on it): a reader wanting the step reads `text`.
   A person mirrored but never derived (a pass that died between bronze and silver) is re-derived by every
   later pass (`personsBehindSilver`): the no-churn mirror never reports it changed again.
 - **Stripe, N accounts per brand**: each connection names the key-service
