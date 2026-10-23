@@ -29,4 +29,19 @@ describe("parseCsv", () => {
     const { rows } = parseCsv(Buffer.from(csv));
     expect(rows).toHaveLength(2);
   });
+
+  it("strips a UTF-8 BOM and trims cells", () => {
+    const csv = "﻿Email , Name\n a@x.com , Alice \n\n";
+    const { headers, rows } = parseCsv(Buffer.from(csv));
+    expect(headers).toEqual(["Email", "Name"]);
+    expect(rows).toEqual([{ Email: "a@x.com", Name: "Alice" }]);
+  });
+
+  it("never replaces a row's prototype through a __proto__ header (csv-parse >= 7.0.2)", () => {
+    const csv = "__proto__,email\nhijacked,a@x.com\n";
+    const { rows } = parseCsv(Buffer.from(csv));
+    expect(rows).toHaveLength(1);
+    expect(typeof Object.getPrototypeOf(rows[0])).not.toBe("string");
+    expect(rows[0].email).toBe("a@x.com");
+  });
 });
