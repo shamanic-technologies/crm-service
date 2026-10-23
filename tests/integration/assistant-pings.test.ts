@@ -168,7 +168,10 @@ describe.skipIf(!RUN)("owner Telegram ping per message with our assistant", () =
       await chat(turn({ userId: USER_KEVIN, email: "kevin@distribute.you", messages: [{ messageId: "sp-k1", role: "user", text: "test", at: at(0) }] }));
       await chat(turn({ userId: USER_KEVIN, email: "kev@outside.io", messages: [{ messageId: "sp-k2", role: "assistant", text: "hello", at: at(1) }] }));
       expect(sent).toHaveLength(0);
-      const rows = await db.select().from(assistantMessagePings).where(eq(assistantMessagePings.source, "copilot"));
+      // Scoped to this file's refs: other files leave their own copilot pings behind.
+      const rows = (await db.select().from(assistantMessagePings).where(eq(assistantMessagePings.source, "copilot"))).filter((r) =>
+        r.messageRef.startsWith("sp-"),
+      );
       expect(rows.map((r) => [r.messageRef, r.status, r.reason]).sort()).toEqual([
         ["sp-k1", "skipped", "staff"],
         ["sp-k2", "skipped", "staff"],
