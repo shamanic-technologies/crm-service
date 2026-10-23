@@ -4,6 +4,7 @@ import { db } from "../../src/db/index.js";
 import { people, peopleMessageTexts, peopleScopes, replyTriggerReports, type PeopleScope } from "../../src/db/schema.js";
 import { detectGmailReplies } from "../../src/lib/reply-trigger/gmail.js";
 import { declareDuePositiveReplies, OUTCOME_GIVE_UP_MS } from "../../src/lib/reply-trigger/outcome.js";
+import { backfillPositiveReplies } from "../../src/lib/reply-trigger/outcome-backfill.js";
 
 /**
  * COST-ACCOUNTING-1023-P1 end to end against a real database: a person answers the brand's mailbox, Jev judges
@@ -41,11 +42,14 @@ let resolveAsks: Record<string, unknown>[] = [];
 let leadId: string | null = LEAD;
 let declareAnswer: { status: number; body: unknown } = { status: 201, body: { runId: JUDGE_RUN, recordedCount: 2, alreadyRecordedCount: 0 } };
 let jevChoice = "interested";
+let listedRuns: Array<Record<string, unknown>> = [];
+let runListAsks: URL[] = [];
 
 function installFetchStub() {
   runCreates = [];
   declarations = [];
   resolveAsks = [];
+  runListAsks = [];
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     const outcomes = url.pathname.match(/^\/v1\/runs\/([^/]+)\/outcomes$/);
@@ -57,6 +61,10 @@ function installFetchStub() {
       const body = JSON.parse(String(init?.body));
       runCreates.push({ headers: new Headers(init?.headers), body });
       return json({ id: body.taskName === "reply-trigger.judge" ? JUDGE_RUN : "run-" + Math.random().toString(16).slice(2) });
+    }
+    if (url.pathname === "/v1/runs" && (init?.method ?? "GET") === "GET") {
+      runListAsks.push(url);
+      return json({ runs: listedRuns, offset: 0 });
     }
     if (url.pathname.startsWith("/v1/runs")) return json({ id: "patched" });
     if (url.host === "instantly.test" && url.pathname === "/internal/accounts") return json({ accounts: [] });
@@ -233,5 +241,57 @@ describe.skipIf(!RUN)("Positive reply declared on its judge run (COST-ACCOUNTING
     expect(r).toMatchObject({ outcomeStatus: "refused", outcomeLeadId: LEAD });
     expect(r.outcomeLastError).toContain("unknown_outcome_key");
     expect((await declareDuePositiveReplies()).due).toBe(0);
+  });
+
+  it("COST-BACKFILL-1023-CRM: a positive reply judged before the forward path is declared on the run that judged it, as of its start; a re-run does nothing", async () => {
+    await seed(["gmail"]);
+    await mail("out-1", min(1), "Hi, would you like a demo?", true);
+    await mail("in-1", min(2), "Yes please, how much is it?");
+    await detectGmailReplies(scope, run1);
+    // What the row looked like before the forward declaration shipped: judged, reported, no outcome state.
+    const detectedAt = min(3);
+    await db
+      .update(replyTriggerReports)
+      .set({ judgeRunId: null, wroteBefore: null, outcomeStatus: null, outcomeNextAt: null, detectedAt })
+      .where(eq(replyTriggerReports.brandId, BRAND));
+    const PAST_RUN = "e9f0a1b2-5555-4555-8555-0000000000f9";
+    const at = (ms: number) => new Date(detectedAt.getTime() + ms).toISOString();
+    listedRuns = [
+      { id: PAST_RUN, serviceName: "crm-service", taskName: "reply-trigger.detect-gmail", startedAt: at(700), totalCostInUsdCents: "0.0103" },
+      // A pass that judged nothing (no spend) and another task: never the judge.
+      { id: "e9f0a1b2-5555-4555-8555-0000000000fa", serviceName: "crm-service", taskName: "reply-trigger.detect-gmail", startedAt: at(900), totalCostInUsdCents: "0" },
+      { id: "e9f0a1b2-5555-4555-8555-0000000000fb", serviceName: "crm-service", taskName: "people.build", startedAt: at(100), totalCostInUsdCents: "5" },
+    ];
+
+    const dry = await backfillPositiveReplies({ dryRun: true });
+    expect(dry).toMatchObject({ candidates: 1, matched: 1 });
+    expect((await report()).outcomeStatus).toBeNull();
+    expect(runListAsks[0].searchParams.get("include")).toBe("subtreeCost");
+
+    const pass = await backfillPositiveReplies();
+    expect(pass.rows).toEqual([expect.objectContaining({ judgeRunId: PAST_RUN, wroteBefore: true })]);
+    expect(await report()).toMatchObject({ judgeRunId: PAST_RUN, wroteBefore: true, outcomeStatus: "pending", outcomeOccurredAt: "run_started_at" });
+
+    await declareDuePositiveReplies();
+    expect(declarations).toHaveLength(1);
+    expect(declarations[0].runId).toBe(PAST_RUN);
+    expect(declarations[0].body).toEqual({
+      produced: [{ outcomeKey: "conversation", subjectService: "lead-service", subjectId: LEAD }],
+      consumed: [{ outcomeKey: "message_sent", subjectService: "lead-service", subjectId: LEAD }],
+      occurredAt: "run_started_at",
+    });
+    expect((await backfillPositiveReplies()).candidates).toBe(0);
+  });
+
+  it("COST-BACKFILL-1023-CRM: no judging run, or two, = unmatched, never declared", async () => {
+    await seed(["gmail"]);
+    await mail("in-1", min(1), "Interested, send details");
+    await detectGmailReplies(scope, run1);
+    await db.update(replyTriggerReports).set({ judgeRunId: null, outcomeStatus: null, outcomeNextAt: null }).where(eq(replyTriggerReports.brandId, BRAND));
+    listedRuns = [];
+    expect((await backfillPositiveReplies()).unmatched).toEqual({ no_judging_run: 1 });
+    expect(await report()).toMatchObject({ outcomeStatus: "unmatched", outcomeReason: "no_judging_run", judgeRunId: null });
+    expect((await declareDuePositiveReplies()).due).toBe(0);
+    expect((await backfillPositiveReplies()).candidates).toBe(0);
   });
 });

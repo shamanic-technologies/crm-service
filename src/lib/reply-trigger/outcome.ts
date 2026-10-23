@@ -54,12 +54,16 @@ const INTERVAL_MS = () => Number(process.env.OUTCOME_DECLARATIONS_INTERVAL_MS) |
 const SERVICE_NAME = "crm-service";
 const LOG = "[crm-service][reply-outcome]";
 
-/** PURE: what one positive reply states at runs-service. */
-export function positiveReplyOutcomeBody(leadId: string, wroteBefore: boolean): DeclareOutcomesBody {
+/**
+ * PURE: what one positive reply states at runs-service. `occurredAt` (a backfilled past reply,
+ * ./outcome-backfill.ts) makes it count as declared at that time; absent = on time.
+ */
+export function positiveReplyOutcomeBody(leadId: string, wroteBefore: boolean, occurredAt: string | null = null): DeclareOutcomesBody {
   const subject = { subjectService: LEAD_SUBJECT_SERVICE, subjectId: leadId };
   return {
     produced: [{ outcomeKey: POSITIVE_REPLY_OUTCOME, ...subject }],
     consumed: wroteBefore ? [{ outcomeKey: MESSAGE_SENT_OUTCOME, ...subject }] : [],
+    ...(occurredAt ? { occurredAt } : {}),
   };
 }
 
@@ -260,7 +264,7 @@ export async function declareDuePositiveReplies(now: number = Date.now()): Promi
         continue;
       }
       try {
-        const answer = await declareRunOutcomes(r.judgeRunId!, r.orgId, positiveReplyOutcomeBody(leadId, r.wroteBefore === true));
+        const answer = await declareRunOutcomes(r.judgeRunId!, r.orgId, positiveReplyOutcomeBody(leadId, r.wroteBefore === true, r.outcomeOccurredAt));
         await setOutcome(r.id, {
           outcomeStatus: OUTCOME_STATUS.DECLARED,
           outcomeReason: answer.recordedCount > 0 ? "recorded" : "already_recorded",
