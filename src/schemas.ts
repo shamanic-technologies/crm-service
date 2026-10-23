@@ -4036,6 +4036,9 @@ export const WhatsappLineHealthSchema = z
         phone: z.string().describe("The line's own number, E.164"),
         linkId: z.string().uuid().nullable(),
         linked: z.boolean().describe("Currently linked; false = an unlinked line that still has days in the window"),
+        brandName: z.string().nullable().describe("The brand's name (brand-service), plain words"),
+        orgName: z.string().nullable().describe("The org's name (client-service), plain words"),
+        namesUnresolvedReason: z.string().nullable().describe("Why brandName / orgName is null; null when both resolved"),
         current: z.object({
           state: z.union([LineStateSchema, z.literal("unknown")]).describe("`unknown` = a linked line not checked in the last 15 min"),
           down: z.boolean().describe("RED now: logged out, bridge unreachable, reconnecting > 15 min, or a linked line not checked in 15 min"),

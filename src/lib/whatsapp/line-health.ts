@@ -31,6 +31,7 @@ import {
   type LineState,
   type Span,
 } from "./line-health-core.js";
+import { lineNames } from "./line-names.js";
 
 const INTERVAL_MS = () => Number(process.env.WHATSAPP_LINE_WATCH_INTERVAL_MS ?? 120_000);
 /** Live: a same-state span grows across at most this gap (a crm-service outage longer than it = unknown minutes). */
@@ -348,6 +349,10 @@ export interface LineHealthView {
     phone: string;
     linkId: string | null;
     linked: boolean;
+    /** The brand's and the org's names in plain words; null with `namesUnresolvedReason` when unresolvable. */
+    brandName: string | null;
+    orgName: string | null;
+    namesUnresolvedReason: string | null;
     current: {
       state: LineState | "unknown";
       down: boolean;
@@ -400,8 +405,10 @@ export async function readLineHealth(days: number, now = new Date()): Promise<Li
   const daysBy = new Map<string, typeof dayRows>();
   for (const d of dayRows) daysBy.set(keyOf(d), [...(daysBy.get(keyOf(d)) ?? []), d]);
 
+  const names = await lineNames([...keys.values()]);
   const lines = [...keys.values()].map((k) => {
     const s = latestBy.get(keyOf(k));
+    const n = names.get(`${k.orgId}|${k.brandId}`);
     const fresh = !!s && s.source === "watch" && now.getTime() - s.lastSeenAt.getTime() <= STALE_MS;
     const state: LineState | "unknown" = k.linked && fresh ? (s!.state as LineState) : k.linked ? "unknown" : (s?.state as LineState) ?? "unknown";
     return {
@@ -410,6 +417,9 @@ export async function readLineHealth(days: number, now = new Date()): Promise<Li
       phone: k.phone,
       linkId: k.linkId,
       linked: k.linked,
+      brandName: n?.brandName ?? null,
+      orgName: n?.orgName ?? null,
+      namesUnresolvedReason: n?.namesUnresolvedReason ?? null,
       current: {
         state,
         // A linked line we cannot vouch for is red: unknown is never healthy.
