@@ -29,7 +29,7 @@ import { alertRefusal } from "./staff-alert.js";
 import { describeLoggedOut, linkedWhatsappAccounts, sendReadiness, personaOf, type SenderPersona, type WhatsappAccount } from "./accounts.js";
 import { recordGhostPhone } from "./phone-resolution.js";
 import { humanTypedTo } from "../matrix/human-takeover.js";
-import { joinRoom, readRoomBridgeInfo, sendText } from "../matrix/client.js";
+import { joinRoom, readRoomBridgeInfo, sendText, setTyping } from "../matrix/client.js";
 import { expectedChannelIds, roomDeliversTo } from "./room-check.js";
 import { emailKey, normalizeEmail, normalizePhone, phoneKey, type Presence } from "../people/identity.js";
 import { personReplied } from "../people/conversation.js";
@@ -145,7 +145,10 @@ function resultOf(row: SendRow, duplicate: boolean, previousSends: number, perso
  * Claim the idempotency key. Returns the row to send under, or the earlier
  * outcome (sent → its result; refused → the same refusal).
  */
-async function claim(req: SendRequest): Promise<{ row: SendRow } | { earlier: SendRow }> {
+async function claim(
+  req: SendRequest,
+  known: { phone: string; phoneSource: string } | null = null,
+): Promise<{ row: SendRow } | { earlier: SendRow }> {
   const inserted = await db
     .insert(whatsappSends)
     .values({
@@ -157,6 +160,7 @@ async function claim(req: SendRequest): Promise<{ row: SendRow } | { earlier: Se
       status: "sending",
       runId: req.runId,
       campaignId: req.campaignId,
+      ...(known ? { phone: known.phone, phoneSource: known.phoneSource } : {}),
     })
     .onConflictDoNothing({ target: [whatsappSends.orgId, whatsappSends.brandId, whatsappSends.idempotencyKey] })
     .returning();
@@ -315,11 +319,12 @@ async function hasReplied(req: ReachRequest, person: PersonView | null, phone: s
   return rows.length > 0;
 }
 
-async function countPreviousSends(req: SendRequest, phone: string, excludeId: string): Promise<number> {
+async function countPreviousSends(req: SendRequest, phone: string, excludeId: string | string[]): Promise<number> {
+  const excluded = sql.join((Array.isArray(excludeId) ? excludeId : [excludeId]).map((id) => sql`${id}::uuid`), sql`, `);
   const [row] = (await db.execute(sql`
     SELECT count(*)::int AS n FROM whatsapp_sends
     WHERE org_id = ${req.orgId} AND brand_id = ${req.brandId} AND status = 'sent'
-      AND phone = ${phone} AND id <> ${excludeId}
+      AND phone = ${phone} AND id NOT IN (${excluded})
   `)) as unknown as { n: number }[];
   return row?.n ?? 0;
 }
@@ -484,6 +489,31 @@ export async function reachWhatsApp(req: ReachRequest): Promise<ReachResult> {
   return { reachable: true, to: phone, phoneSource, fromAccount: `+${digitsOf(account.loginId)}`, persona: account.persona };
 }
 
+/**
+ * The account that writes and the room it writes into, checked to deliver to
+ * this person (5. room-check.ts: never post into a room the bridge maps to
+ * someone else).
+ */
+async function openRoom(
+  accounts: WhatsappAccount[],
+  who: Reach["who"],
+  phone: string,
+): Promise<{ account: WhatsappAccount; roomId: string; ghost: string }> {
+  const account = await chooseAccount(accounts, who.mxid);
+  const onAccount =
+    account === accounts[0] ? who : await resolveIdentifier("whatsapp", account.matrixUserId, account.loginId, phone);
+  let roomId = onAccount.dmRoomId;
+  let ghost = onAccount.mxid;
+  if (!roomId) {
+    const dm = await createDm("whatsapp", account.matrixUserId, account.loginId, phone);
+    if (!dm.dmRoomId) throw new Error(`[crm-service][whatsapp] create_dm for ${phone} answered no room`);
+    roomId = dm.dmRoomId;
+    ghost = dm.mxid;
+  }
+  ({ roomId, ghost } = await verifiedRoom(account, onAccount.id, phone, { roomId, ghost }));
+  return { account, roomId, ghost };
+}
+
 export async function sendWhatsApp(req: SendRequest): Promise<SendResult> {
   const claimed = await claim(req);
   if ("earlier" in claimed) {
@@ -499,21 +529,7 @@ export async function sendWhatsApp(req: SendRequest): Promise<SendResult> {
     //      SAME checks the reach check answers (reachWhatsApp).
     const { phone, phoneSource, accounts, who } = await resolveReach(req, (p, src) => finish(row.id, { phone: p, phoneSource: src }));
 
-    const account = await chooseAccount(accounts, who.mxid);
-    const onAccount =
-      account === accounts[0] ? who : await resolveIdentifier("whatsapp", account.matrixUserId, account.loginId, phone);
-    let roomId = onAccount.dmRoomId;
-    let ghost = onAccount.mxid;
-    if (!roomId) {
-      const dm = await createDm("whatsapp", account.matrixUserId, account.loginId, phone);
-      if (!dm.dmRoomId) throw new Error(`[crm-service][whatsapp] create_dm for ${phone} answered no room`);
-      roomId = dm.dmRoomId;
-      ghost = dm.mxid;
-    }
-
-    // 5. The room must deliver to THIS person: never post into a room the
-    //    bridge maps to someone else (room-check.ts).
-    ({ roomId, ghost } = await verifiedRoom(account, onAccount.id, phone, { roomId, ghost }));
+    const { account, roomId, ghost } = await openRoom(accounts, who, phone);
 
     // 6. Send.
     const eventId = await sendText(account.accessToken, roomId, txnIdFor(req.orgId, req.brandId, req.idempotencyKey), req.text);
@@ -545,6 +561,210 @@ export async function sendWhatsApp(req: SendRequest): Promise<SendResult> {
       );
     }
     throw err;
+  }
+}
+
+/**
+ * SEVERAL SHORT MESSAGES, IN ORDER, PACED LIKE A HUMAN (WA-BUBBLES-1023, owner
+ * 2026-10-23: « Tu ne peux pas envoyer des multi messages pour faire plus naturel ? »).
+ *
+ * One request carries 1..MAX_BUBBLES texts for one person. Every reach check
+ * (phone, skipIfReplied, accounts, not_on_whatsapp, human_in_conversation) and
+ * the room are decided ONCE, before bubble 1, with the single send's own code
+ * (resolveReach + openRoom): bubble 2+ go out on the same account and room and
+ * are never refused because bubble 1 just went out.
+ *
+ * Each bubble is its OWN `whatsapp_sends` row (key `bubbleKey`: bubble 1 = the
+ * caller's key, so a one-bubble send stores exactly what a `text` send stores),
+ * with its own text and event id: every reader matching a send row to the
+ * thread (sends list, `[automated WhatsApp]`, human takeover, echo check,
+ * assistant pings) sees every bubble as ours. Idempotent per bubble: a retry
+ * with the same key answers the bubbles already sent as duplicates and sends
+ * only the rest, on the account and room bubble 1 went out on. The rows 2..N
+ * are claimed before bubble 1 goes out, so a concurrent retry answers
+ * `send_in_progress` instead of racing the pacing.
+ *
+ * Pacing: before bubble 2+ the account shows "typing..." (bridged as WhatsApp's
+ * composing presence) for a pause scaled to the bubble's length, 2 to 6 s plus
+ * up to 0.8 s of jitter (`bubbleDelayMs`). Synchronous: at most 5 bubbles =
+ * about 30 s, far under the callers' timeouts (workflow-service http.call: 600 s).
+ */
+export const MAX_BUBBLES = 5;
+const BUBBLE_MIN_MS = 2_000;
+const BUBBLE_MAX_MS = 6_000;
+const BUBBLE_JITTER_MS = 800;
+const BUBBLE_MS_PER_CHAR = 40;
+
+/** The idempotency key of bubble `index` (0-based): bubble 1 keeps the caller's key. */
+export function bubbleKey(key: string, index: number): string {
+  return index === 0 ? key : `${key}#bubble-${index + 1}`;
+}
+
+/** The pause before a bubble, as if someone typed it: 1 s + 40 ms per character, within 2..6 s, plus jitter. */
+export function bubbleDelayMs(text: string, random: () => number = Math.random): number {
+  const typed = 1_000 + BUBBLE_MS_PER_CHAR * [...text].length;
+  return Math.round(Math.min(BUBBLE_MAX_MS, Math.max(BUBBLE_MIN_MS, typed)) + random() * BUBBLE_JITTER_MS);
+}
+
+export interface BubbleResult {
+  /** 0-based position in the request's `messages`. */
+  index: number;
+  sendId: string;
+  eventId: string;
+  sentAt: string;
+  /** True when this bubble had already been sent under this key: not sent again. */
+  duplicate: boolean;
+}
+
+export interface BubblesSendResult extends SendResult {
+  messages: BubbleResult[];
+}
+
+export interface BubblePacing {
+  sleep(ms: number): Promise<void>;
+  random(): number;
+}
+
+const realPacing: BubblePacing = {
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  random: Math.random,
+};
+
+interface Target {
+  account: WhatsappAccount;
+  roomId: string;
+  ghost: string;
+  phone: string;
+  phoneSource: string;
+}
+
+export async function sendWhatsAppBubbles(
+  req: SendRequest,
+  messages: string[],
+  pacing: BubblePacing = realPacing,
+): Promise<BubblesSendResult> {
+  if (messages.length < 1 || messages.length > MAX_BUBBLES) {
+    throw new Error(`[crm-service][whatsapp] 1..${MAX_BUBBLES} messages expected, got ${messages.length}`);
+  }
+  const bubbleReq = (i: number): SendRequest => ({ ...req, idempotencyKey: bubbleKey(req.idempotencyKey, i), text: messages[i] });
+
+  // Bubble 1: decides everything, once.
+  const lead = await claim(bubbleReq(0));
+  let target: Target;
+  /** Rows this call holds and has not sent yet (marked failed on any error, so a retry takes them over). */
+  const pending: { index: number; row: SendRow }[] = [];
+  const done: { index: number; row: SendRow; duplicate: boolean }[] = [];
+  if ("earlier" in lead) {
+    const e = lead.earlier;
+    if (e.status === "refused") throw new SendRefusal(e.errorCode as SendRefusalCode, e.error ?? e.errorCode!);
+    if (e.status !== "sent") throw new SendRefusal("send_in_progress", "A send with this idempotency key is in progress.", 409);
+    // Already decided and sent: the rest goes out on the same account and room, nothing re-checked.
+    const account = (await linkedWhatsappAccounts(req.orgId, req.brandId)).find((a) => a.connectionId === e.connectionId);
+    if (!account) {
+      throw new SendRefusal(
+        "whatsapp_not_linked",
+        `The WhatsApp account ${e.fromAccount} that sent the first message is no longer linked; the remaining messages were not sent.`,
+      );
+    }
+    target = { account, roomId: e.roomId!, ghost: e.ghostMxid!, phone: e.phone!, phoneSource: e.phoneSource! };
+    done.push({ index: 0, row: e, duplicate: true });
+  } else {
+    const row = lead.row;
+    try {
+      const reach = await resolveReach(req, (p, src) => finish(row.id, { phone: p, phoneSource: src }));
+      const room = await openRoom(reach.accounts, reach.who, reach.phone);
+      target = { ...room, phone: reach.phone, phoneSource: reach.phoneSource };
+    } catch (err) {
+      await recordUnsent([row], err, req);
+      throw err;
+    }
+    pending.push({ index: 0, row });
+  }
+
+  try {
+    // Hold bubbles 2..N before anything goes out.
+    for (let i = 1; i < messages.length; i++) {
+      const c = await claim(bubbleReq(i), { phone: target.phone, phoneSource: target.phoneSource });
+      if ("row" in c) pending.push({ index: i, row: c.row });
+      else if (c.earlier.status === "sent") done.push({ index: i, row: c.earlier, duplicate: true });
+      else throw new SendRefusal("send_in_progress", "A send with this idempotency key is in progress.", 409);
+    }
+
+    pending.sort((a, b) => a.index - b.index);
+    while (pending.length > 0) {
+      const { index, row } = pending[0];
+      if (index > 0) {
+        const pause = bubbleDelayMs(messages[index], pacing.random);
+        await setTyping(target.account.accessToken, target.roomId, target.account.matrixUserId, true, pause + 2_000);
+        await pacing.sleep(pause);
+      }
+      const eventId = await sendText(
+        target.account.accessToken,
+        target.roomId,
+        txnIdFor(req.orgId, req.brandId, bubbleKey(req.idempotencyKey, index)),
+        messages[index],
+      );
+      const sent = await finish(row.id, {
+        status: "sent",
+        phone: target.phone,
+        phoneSource: target.phoneSource,
+        connectionId: target.account.connectionId,
+        fromAccount: `+${digitsOf(target.account.loginId)}`,
+        roomId: target.roomId,
+        ghostMxid: target.ghost,
+        eventId,
+        sentAt: new Date(),
+      });
+      pending.shift();
+      done.push({ index, row: sent, duplicate: false });
+    }
+  } catch (err) {
+    await recordUnsent(pending.map((p) => p.row), err instanceof SendRefusal ? new Error(err.message) : err, req);
+    throw err;
+  }
+
+  done.sort((a, b) => a.index - b.index);
+  const first = done[0].row;
+  const result = resultOf(
+    first,
+    done.every((d) => d.duplicate),
+    await countPreviousSends(req, target.phone, done.map((d) => d.row.id)),
+    target.account.persona,
+  );
+  return {
+    ...result,
+    messages: done.map((d) => ({
+      index: d.index,
+      sendId: d.row.id,
+      eventId: d.row.eventId!,
+      sentAt: d.row.sentAt!.toISOString(),
+      duplicate: d.duplicate,
+    })),
+  };
+}
+
+/**
+ * Close rows that did not go out: a named refusal is recorded (and alerted) as
+ * the single send does; anything else is `failed`, so the same key retries.
+ */
+async function recordUnsent(rows: SendRow[], err: unknown, req: SendRequest): Promise<void> {
+  for (const row of rows) {
+    if (err instanceof SendRefusal) {
+      await finish(row.id, { status: "refused", errorCode: err.code, error: err.message });
+      void alertRefusal({
+        code: err.code,
+        orgId: req.orgId,
+        brandId: req.brandId,
+        campaignId: req.campaignId,
+        runId: req.runId,
+        userId: req.userId,
+        at: new Date(),
+      });
+    } else {
+      await finish(row.id, { status: "failed", error: (err as Error).message.slice(0, 1000) }).catch((e) =>
+        console.error(`[crm-service][whatsapp] could not record failed send ${row.id}:`, e),
+      );
+    }
   }
 }
 

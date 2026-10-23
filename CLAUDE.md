@@ -1180,6 +1180,15 @@ lists the person's sends. No cost.
 sends to a LIST of people in one call and one run (lead-service's pool check, WA-SENDS-BATCH-1014):
 `{sends: [{email, sendId, status, code, campaignId, sentAt, createdAt}], invalidEmails}`, every status,
 newest first, a person with none absent; a send with no campaign never matches. Keep the GET as is.
+- **Several bubbles in one send** (`sendWhatsAppBubbles`, WA-BUBBLES-1023, owner 2026-10-23 « Tu ne peux pas envoyer des
+  multi messages pour faire plus naturel ? »): body `messages: string[1..5]` instead of `text` (exactly one of the two). Checks
+  + room decided ONCE before bubble 1 (same codes, `resolveReach` + `openRoom`); bubbles 2+ go out on bubble 1's account and room,
+  never re-checked. Each bubble = its OWN send row, key `bubbleKey` (bubble 1 = the caller's key, then `<key>#bubble-N`), own
+  text + event id, so every reader matching send rows (sends list, `[automated WhatsApp]`, human takeover, echo, pings) sees each.
+  Rows 2..N claimed before bubble 1 (a concurrent retry = 409 `send_in_progress`); a retry answers sent bubbles `duplicate` and
+  sends the rest, unchecked. Pause before bubble 2+ = "typing..." (`setTyping`, bridged as WhatsApp composing) for 1 s + 40 ms/char
+  within 2..6 s + up to 0.8 s jitter (`bubbleDelayMs`); synchronous (5 bubbles ~30 s, callers wait 600 s). Response = the single
+  shape (bubble 1's ids; `duplicate` only when ALL were) + `messages: [{index, sendId, eventId, sentAt, duplicate}]`. `text` unchanged.
 - **Reach check, nothing sent** (LLM-SPEND-NO-SEND-1016: a workflow paid Opus ~$0.70 per draft for 28 people the
   send then refused): `POST /orgs/whatsapp/reach` (same auth + body as the send minus `text` / `idempotencyKey`) runs
   the send's OWN checks (`resolveReach` in send.ts, the one function both call), same order: phone (`no_phone_known`),
