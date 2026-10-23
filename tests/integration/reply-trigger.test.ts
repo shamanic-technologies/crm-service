@@ -733,6 +733,107 @@ describe.skipIf(!RUN)("reply trigger", () => {
       expect((await reports())[0]).toMatchObject({ status: "skipped", reason: "copilot_phone_unknown" });
     });
 
+    describe("our own automated sends landing on the line from another linked account (SOPHIE-BOT-LOOP-1023)", () => {
+      const KEVIN = "33770657585";
+      const ECHO = "Sorry, something went wrong on my side. Please send your message again in a minute.";
+      // The owner's other number, linked on the same brand: the Copilot answers on it too.
+      async function linkKevin() {
+        await db.insert(matrixLinks).values({
+          orgId: ORG, brandId: BRAND, channel: "whatsapp", createdByUserId: USER, status: "linked", method: "qr",
+          remoteLoginId: KEVIN, linkedAt: new Date(Date.now() - 3_600_000), automationAllowed: true, personaName: "Kevin",
+        });
+      }
+      // What crm recorded when the Copilot answered from Kevin's account TO this line (another connection, another room).
+      async function ourSendToSophie(at: number, text = ECHO) {
+        await db.insert(whatsappSends).values({
+          orgId: ORG, brandId: BRAND, idempotencyKey: `copilot:$from-kevin-${at}`, phone: `+${SOPHIE}`, text, status: "sent",
+          connectionId: "a7c1d2e3-2222-4222-8222-0000000000aa", roomId: "!kevin-side:hs", eventId: `$kevin-out-${at}`,
+          sentAt: new Date(at), createdAt: new Date(at), fromAccount: `+${KEVIN}`,
+        });
+      }
+
+      it("AC1: an automated send from linked account A arriving on the Copilot's line B: no hand-off, no trigger, a skipped row says why", async () => {
+        await link();
+        await linkKevin();
+        await ourSendToSophie(min(1));
+        await event("$echo1", GHOST, min(1) + 300, ECHO);
+        const d = await detectReplies(conn, run1);
+        expect(d.detected).toBe(0);
+        expect(d.skipped).toEqual([{ reason: "own_automated_send", roomId: ROOM }]);
+        await deliverDueReplies();
+        await deliverDueReplies(Date.now() + 10 * 60_000);
+        expect(copilotCalls).toHaveLength(0);
+        expect(campaignCalls).toHaveLength(0);
+        expect(jevCalls).toBe(0);
+        expect(await reports()).toHaveLength(1);
+        expect((await reports())[0]).toMatchObject({ status: "skipped", reason: "own_automated_send", anchorEventId: "$echo1" });
+        // The next pass records nothing more for it.
+        expect((await detectReplies(conn, run1)).skipped).toEqual([]);
+      });
+
+      it("AC2: the owner typing BY HAND from linked account A to line B is handed off, even right after our echo", async () => {
+        await link();
+        await linkKevin();
+        await ourSendToSophie(min(1));
+        await event("$echo1", GHOST, min(1), ECHO);
+        expect((await detectReplies(conn, run1)).detected).toBe(0);
+        await event("$hand1", GHOST, min(2), "Hi Sophie, how many campaigns are running?");
+        expect((await detectReplies(conn, run1)).detected).toBe(1);
+        await deliverDueReplies();
+        expect(copilotCalls).toHaveLength(1);
+        expect(copilotCalls[0].body).toMatchObject({ messageId: "$hand1", text: "Hi Sophie, how many campaigns are running?" });
+        expect(copilotCalls[0].body.sender).toMatchObject({ phone: `+${KEVIN}` });
+      });
+
+      it("AC2: the same words typed by hand long after our send are a person's words, handed off", async () => {
+        await link();
+        await linkKevin();
+        await ourSendToSophie(min(-25));
+        await event("$late", GHOST, min(1), ECHO);
+        expect((await detectReplies(conn, run1)).detected).toBe(1);
+        await deliverDueReplies();
+        expect(copilotCalls.map((c) => c.body.messageId)).toEqual(["$late"]);
+      });
+
+      it("AC3: a stranger's message is handed off as today; our send to ANOTHER number never silences it", async () => {
+        await link();
+        await db.insert(whatsappSends).values({
+          orgId: ORG, brandId: BRAND, idempotencyKey: "copilot:$elsewhere", phone: "+15550001111", text: "Hello there", status: "sent",
+          connectionId: conn.id, roomId: "!elsewhere:hs", eventId: "$elsewhere", sentAt: new Date(min(1)), createdAt: new Date(min(1)), fromAccount: `+${SOPHIE}`,
+        });
+        await event("$s1", GHOST, min(1), "Hello there");
+        expect((await detectReplies(conn, run1)).detected).toBe(1);
+        await deliverDueReplies();
+        expect(copilotCalls.map((c) => c.body.messageId)).toEqual(["$s1"]);
+      });
+
+      it("a hand-off recorded before the fix that is only our echo is settled skipped at delivery, never sent to the Copilot", async () => {
+        await link();
+        await ourSendToSophie(min(1));
+        await event("$old-echo", GHOST, min(1), ECHO);
+        await db.insert(replyTriggerReports).values({
+          orgId: ORG, brandId: BRAND, source: "matrix", channel: "whatsapp", connectionId: conn.id, roomId: ROOM, conversationId,
+          anchorEventId: "$old-echo", campaignId: null, messages: [{ eventId: "$old-echo", at: new Date(min(1)).toISOString(), text: ECHO }],
+          firstMessageAt: new Date(min(1)), lastMessageAt: new Date(min(1)), judgment: null, detectedAt: new Date(), status: "handoff_failed", reason: "copilot_unreachable",
+        });
+        await deliverDueReplies();
+        expect(copilotCalls).toHaveLength(0);
+        expect((await reports())[0]).toMatchObject({ status: "skipped", reason: "own_automated_send" });
+      });
+
+      it("off the Copilot's line too: our echo never fires the reply trigger nor a Jev call", async () => {
+        await link();
+        process.env.COPILOT_UNIBOX_BRAND_ID = "a7c1d2e3-2222-4222-8222-0000000000ff";
+        await buildPerson();
+        await ourSendToSophie(min(1), "Great, let's book a call tomorrow?");
+        await event("$wf-echo", GHOST, min(1), "Great, let's book a call tomorrow?");
+        expect((await detectReplies(conn, run1)).skipped).toEqual([{ reason: "own_automated_send", roomId: ROOM }]);
+        await deliverDueReplies();
+        expect(jevCalls).toBe(0);
+        expect(campaignCalls).toHaveLength(0);
+      });
+    });
+
     it("the brand's mirror-only account and any other brand behave as before", async () => {
       await link(false);
       await event("$o1", GHOST, min(1), "Hey, how much is it?");

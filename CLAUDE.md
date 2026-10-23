@@ -1345,6 +1345,10 @@ a human of the brand typed in is theirs, skipped `human_in_conversation`, HUMAN-
 `positive_reply_received`. WHO is answered is the answering pipe's strategy there (lead-service refuses a non-lead:
 skip `person_not_admitted`), never filtered here. Same door as the form trigger (`lib/trigger-door.ts`).
 
+- **Our own automated send is never a person writing** (`own-automated.ts`, SOPHIE-BOT-LOOP-1023): a message received on a
+  WhatsApp account whose number + exact text match a `whatsapp_sends` row (sent/sending, -15 min..+2 min) is the echo
+  of our send from another linked account: `skipped / own_automated_send`, no hand-off, no trigger, re-checked at
+  hand-off time. Two linked Copilot lines ping-ponged ~10 s/turn for 3 days without it. Hand-typed = no send row = answered.
 - **The Copilot's line = no trigger** (`copilot.ts`, SOPHIE-COPILOT-WA-1018, owner 2026-10-18: « Le copilot devient
   Sophie »): on a linked account with automation allowed whose (org, brand) is the Copilot's scope
   (`COPILOT_UNIBOX_ORG_ID` + `_BRAND_ID`, no brand literal), EVERY burst is handed to chat-service `POST

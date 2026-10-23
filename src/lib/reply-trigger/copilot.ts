@@ -49,6 +49,7 @@ import { editTarget, foldEdits, humanText, phoneFromMxid } from "../matrix/event
 import { personaOf, type SenderPersona } from "../matrix/persona.js";
 import { overlayVoiceTranscripts } from "../matrix/voice-notes.js";
 import { dialablePhone } from "../trigger-door.js";
+import { ourAutomatedEchoesOn } from "./own-automated.js";
 import type { BurstMessage } from "./thread.js";
 
 export const HANDOFF_STATUS = {
@@ -64,6 +65,8 @@ export const HANDOFF_REASONS = {
   COPILOT_UNREACHABLE: "copilot_unreachable",
   /** No dialable number is known for the person (a LID ghost never resolved): nobody to answer. */
   COPILOT_PHONE_UNKNOWN: "copilot_phone_unknown",
+  /** Every message of the burst is the echo of one of our own automated sends (SOPHIE-BOT-LOOP-1023): never answered. */
+  OWN_AUTOMATED_SEND: "own_automated_send",
 } as const;
 
 /** At most this many earlier messages of the conversation travel with a hand-off. */
@@ -223,6 +226,14 @@ async function senderOf(r: ReplyTriggerReport, conn: MatrixConnection): Promise<
 
 /** Hand ONE recorded burst to chat-service. */
 export async function handOffBurst(r: ReplyTriggerReport, conn: MatrixConnection, now: number): Promise<{ status: string; reason: string | null }> {
+  // A burst recorded before SOPHIE-BOT-LOOP-1023 (or still retried) that is only our own sends' echo: never answered.
+  const recorded = r.messages as BurstMessage[];
+  const echoes = await ourAutomatedEchoesOn(conn.id, conn.channel, recorded);
+  if (recorded.length > 0 && recorded.every((m) => echoes.has(m.eventId))) {
+    console.log(`[crm-service][copilot-handoff] report ${r.id} (brand ${r.brandId}): only the echo of our own automated sends, never handed off`);
+    await settle(r, now, { status: "skipped", reason: HANDOFF_REASONS.OWN_AUTOMATED_SEND, lastError: null });
+    return { status: "skipped", reason: HANDOFF_REASONS.OWN_AUTOMATED_SEND };
+  }
   const sender = await senderOf(r, conn);
   if (!sender.phone) {
     console.warn(
