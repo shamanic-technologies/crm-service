@@ -78,6 +78,7 @@ import { ownTeamMatch, readOwnTeam, type OwnTeam } from "./own-team.js";
 import { readThreadForReply, type BurstMessage, type RoomSend } from "./thread.js";
 import { humanTypedTo } from "../matrix/human-takeover.js";
 import { copilotAnswersOn, deliverDueHandoffs, HANDOFF_STATUS, HANDOFF_STATUSES } from "./copilot.js";
+import { ourAutomatedEchoesOn } from "./own-automated.js";
 
 const SERVICE_NAME = "crm-service";
 const SOURCE = "matrix";
@@ -142,6 +143,12 @@ export const REPLY_REASONS = {
   NOT_POSITIVE: "not_positive",
   /** Every message of the burst was mirrored before the watch started. */
   BEFORE_WATCH: "before_watch",
+  /**
+   * Every message of the burst is the echo of one of OUR automated sends (Copilot, workflow, campaign)
+   * addressed to this account from another linked account (SOPHIE-BOT-LOOP-1023, ./own-automated.ts):
+   * no person wrote it, nothing answers it.
+   */
+  OWN_AUTOMATED_SEND: "own_automated_send",
   /**
    * The thread is on a linked account the brand keeps out of automation
    * (`matrix_links.automation_allowed` off, SOPHIE-WA-1016): a human-only
@@ -232,6 +239,8 @@ export const PASS_THROUGH_REASONS: readonly string[] = [
   REPLY_REASONS.AUTOMATED_REPLY,
   REPLY_REASONS.BEFORE_WATCH,
   REPLY_REASONS.NOT_POSITIVE,
+  // A person may still type by hand after our echo, in the same burst.
+  REPLY_REASONS.OWN_AUTOMATED_SEND,
   // Allowed again later: a person's next message in the same burst is judged.
   REPLY_REASONS.AUTOMATION_NOT_ALLOWED,
 ];
@@ -452,8 +461,12 @@ export async function detectReplies(
 
     // Only what was mirrored after the watch started is new; anything before it is history.
     const ingested = new Map(rows.map((r) => [r.eventId, r.ingestedAt.getTime()]));
-    const fresh = uncovered.filter((m) => (ingested.get(m.eventId) ?? 0) >= since);
-    const burst = fresh.length > 0 ? fresh : uncovered;
+    // Our own automated sends landing here from another linked account are no person's words (SOPHIE-BOT-LOOP-1023).
+    const echoes = await ourAutomatedEchoesOn(conn.id, conn.channel, reading.burst);
+    const words = uncovered.filter((m) => !echoes.has(m.eventId));
+    const fresh = words.filter((m) => (ingested.get(m.eventId) ?? 0) >= since);
+    const onlyEchoes = words.length === 0;
+    const burst = onlyEchoes ? uncovered : fresh.length > 0 ? fresh : words;
     const [conversation] = await db
       .select({ id: conversations.id, contactPhone: contacts.phoneE164, ghost: contacts.channelHandle })
       .from(conversations)
@@ -471,7 +484,10 @@ export async function detectReplies(
     let status: string = REPLY_STATUS.PENDING;
     let reason: string | null = null;
     let judgment: Judgment | null = null;
-    if (fresh.length === 0) {
+    if (onlyEchoes) {
+      status = REPLY_STATUS.SKIPPED;
+      reason = REPLY_REASONS.OWN_AUTOMATED_SEND;
+    } else if (fresh.length === 0) {
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.BEFORE_WATCH;
     } else if (!automationAllowed && !copilot) {
@@ -497,7 +513,7 @@ export async function detectReplies(
       judgment = await judgeBurst(
         { orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId, channel: conn.channel, where: `connection ${conn.id}` },
         runId,
-        reading.burst.filter((m) => (ingested.get(m.eventId) ?? 0) >= since),
+        reading.burst.filter((m) => (ingested.get(m.eventId) ?? 0) >= since && !echoes.has(m.eventId)),
       );
       const verdict = burstVerdict(judgment);
       if (!verdict.report) {
