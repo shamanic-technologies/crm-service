@@ -55,6 +55,7 @@ const json = (body: unknown, status = 200) =>
 let sent: string[] = [];
 let memberPhones: string[] = [];
 let membersDown = false;
+let salesRepPhone: string | null = null;
 
 function installFetchStub() {
   sent = [];
@@ -80,7 +81,7 @@ function installFetchStub() {
       if (membersDown) return json({ error: "down" }, 503);
       return json({ users: memberPhones.map((phone) => ({ email: null, phone })) });
     }
-    if (url.host === "brand.test" && url.pathname === `/orgs/brands/${BRAND}/sales-rep`) return json({ salesRepPhone: null });
+    if (url.host === "brand.test" && url.pathname === `/orgs/brands/${BRAND}/sales-rep`) return json({ salesRepPhone });
     throw new Error(`unexpected fetch ${url}`);
   });
 }
@@ -131,6 +132,7 @@ describe.skipIf(!RUN)("owner Telegram ping per message with our assistant", () =
     installFetchStub();
     memberPhones = [];
     membersDown = false;
+    salesRepPhone = null;
   });
   afterAll(async () => {
     vi.unstubAllGlobals();
@@ -179,6 +181,15 @@ describe.skipIf(!RUN)("owner Telegram ping per message with our assistant", () =
     }, 30_000);
 
     it("the push route answers first; the assistant is named from the linked account's persona", async () => {
+      // The owner's own line (its number = the sales rep phone) carries a persona too: it names nothing (PERSO-TG-PING-1023).
+      salesRepPhone = "+33 7 70 00 00 01";
+      await db.insert(matrixLinks).values({
+        orgId: STAFF_ORG, brandId: BRAND, channel: "whatsapp", createdByUserId: "u", status: "linked", method: "qr", personaName: "Kevin", automationAllowed: true,
+        remoteLoginId: "33770000001",
+        connectionId: (
+          await db.insert(matrixConnections).values({ orgId: STAFF_ORG, brandId: BRAND, channel: "whatsapp", matrixUserId: "@crm_kevin:hs", counterpartPrefix: "@whatsapp_", createdByUserId: "u" }).returning()
+        )[0].id,
+      });
       await db.insert(matrixLinks).values({
         orgId: STAFF_ORG, brandId: BRAND, channel: "whatsapp", createdByUserId: "u", status: "linked", method: "qr", personaName: "Sophie", automationAllowed: true,
         connectionId: (
@@ -308,6 +319,40 @@ describe.skipIf(!RUN)("owner Telegram ping per message with our assistant", () =
         ["$sp-group", "skipped", "not_conversation"],
         ["$sp-hand", "skipped", "hand_typed"],
         ["$sp-team", "skipped", "staff"],
+      ]);
+    }, 30_000);
+
+    it("a person's own line (its number = the sales rep's or a member's) pings nothing, pro or personal thread (PERSO-TG-PING-1023)", async () => {
+      // The assistant line with a number of its own that is nobody's on the team: pings as before.
+      await db.update(matrixLinks).set({ remoteLoginId: "77776879632" }).where(eq(matrixLinks.connectionId, conn.id));
+      await event("$sp-line-1", GHOST, "Hi Sophie, is it free?");
+      expect(await announceAssistantMatrixMessages(conn)).toBe(1);
+      expect(sent).toHaveLength(1);
+
+      // The same account is the owner's line once its number is the sales rep phone: a friend's message, a
+      // prospect's message and the line's own outbound are each recorded, none sent.
+      salesRepPhone = "+7 777 687 9632";
+      await event("$sp-line-2", GHOST, "notre séjour a été raccourci");
+      await db.insert(whatsappSends).values({
+        orgId: STAFF_ORG, brandId: BRAND, idempotencyKey: "sp-send-line", phone: "+15550101018", text: "Happy to help.", status: "sent",
+        connectionId: conn.id, roomId: ROOM, ghostMxid: GHOST, eventId: "$sp-line-3", sentAt: new Date(),
+      });
+      await event("$sp-line-3", OWN, "Happy to help.");
+      expect(await announceAssistantMatrixMessages(conn)).toBe(0);
+      expect(sent).toHaveLength(1);
+
+      // Or a member's phone (the org's members, client-service).
+      salesRepPhone = null;
+      memberPhones = ["+77776879632"];
+      await event("$sp-line-4", GHOST, "how much for 3 months?");
+      expect(await announceAssistantMatrixMessages(conn)).toBe(0);
+      expect(sent).toHaveLength(1);
+      const rows = await db.select().from(assistantMessagePings).where(eq(assistantMessagePings.connectionId, conn.id));
+      expect(rows.map((r) => [r.messageRef, r.status, r.reason, r.direction]).sort()).toEqual([
+        ["$sp-line-1", "sent", null, "inbound"],
+        ["$sp-line-2", "skipped", "own_line", "inbound"],
+        ["$sp-line-3", "skipped", "own_line", "outbound"],
+        ["$sp-line-4", "skipped", "own_line", "inbound"],
       ]);
     }, 30_000);
 

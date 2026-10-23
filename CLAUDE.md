@@ -1876,6 +1876,12 @@ numbers, sales rep, org members; unreadable = nothing decided, next pass). `assi
 (source, message ref), written BEFORE the send (skips recorded with their reason); never history:
 `matrix_connections.assistant_ping_since`, 24 h lookback. The Copilot is no longer in the conversation-start pings.
 ⚠️ A Copilot WhatsApp turn pushed ALSO to `/internal/copilot/messages` would ping twice (once mirrored, once pushed).
+**A person's own line never pings** (PERSO-TG-PING-1023, owner 2026-10-23 « je n'ai pas besoin de notif TG des messages
+qui arrivent sur mon WA perso et PRO. Seulement Sophie »): a linked account whose own number (`remote_login_id`) is the
+brand's sales rep phone or an org member's phone (`readTeamPeoplePhones`) is that person's WhatsApp, whatever its
+automation flag / persona: every message recorded `own_line`, never sent, and its persona never names the web Copilot.
+Team unreadable = nothing recorded, next pass. Prod: the owner's line (= the staff brand's sales rep phone) sent 44
+pings of friends' chats in 1 day.
 
 ## Owner Telegram ping at each conversation START (`src/lib/conversation-pings.ts`)
 
