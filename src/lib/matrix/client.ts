@@ -137,6 +137,32 @@ export async function sendText(token: string, roomId: string, txnId: string, tex
 }
 
 /**
+ * Show (or stop showing) "typing..." as the account in `roomId` for `timeoutMs`
+ * (WA-BUBBLES-1023). The WhatsApp bridge relays a Matrix typing notification as
+ * WhatsApp's own "composing" presence, so a paced multi-bubble send reads like
+ * someone typing between messages. Ephemeral: nothing is stored or delivered,
+ * so it is the one write besides `sendText`. Best effort: never throws.
+ */
+export async function setTyping(token: string, roomId: string, userId: string, typing: boolean, timeoutMs = 10_000): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
+  try {
+    const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/typing/${encodeURIComponent(userId)}`;
+    const res = await fetch(`${homeserverUrl()}${path}`, {
+      method: "PUT",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(typing ? { typing: true, timeout: timeoutMs } : { typing: false }),
+      signal: controller.signal,
+    });
+    if (!res.ok) console.warn(`[crm-service][matrix] PUT typing returned ${res.status} (ignored)`);
+  } catch (err) {
+    console.warn(`[crm-service][matrix] PUT typing failed (ignored): ${(err as Error).message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Join `roomId` as the account owning `token` (a no-op when already joined).
  * The bridge invites the account to a DM it opens; joining first makes the
  * send independent of whether the bridge's double-puppet join landed yet.

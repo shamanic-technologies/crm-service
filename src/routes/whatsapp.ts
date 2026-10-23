@@ -7,7 +7,7 @@ import { WhatsappReachRequestSchema, WhatsappSendRequestSchema, WhatsappSendsQue
 import { BridgeError } from "../lib/matrix/bridge.js";
 import { runSyncPass } from "../lib/matrix/sync.js";
 import { runScopeBuild } from "../lib/people/build.js";
-import { reachWhatsApp, SendRefusal, sendConnection, sendWhatsApp } from "../lib/whatsapp/send.js";
+import { reachWhatsApp, SendRefusal, sendConnection, sendWhatsApp, sendWhatsAppBubbles } from "../lib/whatsapp/send.js";
 import { normalizeEmail, normalizePhone } from "../lib/people/identity.js";
 
 const router = Router();
@@ -32,7 +32,8 @@ async function refreshAfterSend(orgId: string, brandId: string, sendId: string):
 }
 
 /**
- * POST /orgs/whatsapp/messages — send ONE WhatsApp text from the brand's linked
+ * POST /orgs/whatsapp/messages — send ONE WhatsApp text (`text`), or several
+ * paced ones (`messages`, WA-BUBBLES-1023), from the brand's linked
  * WhatsApp account to a person (lib/whatsapp/send.ts). Refusals answer 422
  * (409 for a key in flight) with a stable `code`.
  */
@@ -54,19 +55,21 @@ router.post("/orgs/whatsapp/messages", apiKeyAuth, requireOrg("whatsapp.send"), 
     });
   }
   try {
-    const result = await sendWhatsApp({
+    const sendReq = {
       orgId: req.orgId!,
       brandId,
       runId: req.runId!,
       campaignId: (req.headers["x-campaign-id"] as string | undefined) ?? null,
       idempotencyKey: body.idempotencyKey,
-      text: body.text,
+      text: body.text ?? body.messages![0],
       email: body.email ?? null,
       phone: body.phone ?? null,
       fromAccount: body.fromAccount ?? null,
       skipIfReplied: body.skipIfReplied ?? false,
       userId: req.userId ?? null,
-    });
+    };
+    // `messages` = several paced bubbles (WA-BUBBLES-1023); `text` = the one-message send, unchanged.
+    const result = body.messages ? await sendWhatsAppBubbles(sendReq, body.messages) : await sendWhatsApp(sendReq);
     res.json(result);
     if (!result.duplicate && process.env.WHATSAPP_SEND_REFRESH !== "off") void refreshAfterSend(req.orgId!, brandId, result.sendId);
     return;

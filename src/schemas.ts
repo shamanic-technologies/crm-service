@@ -3391,11 +3391,21 @@ export const WhatsappSendRequestSchema = registry.register(
       brandId: z.string().uuid().optional().openapi({ description: "The brand whose linked WhatsApp sends. Or the x-brand-id header." }),
       email: z.string().optional().openapi({ description: "The person, by email. Their phone is read from the brand's CRM people when `phone` is absent." }),
       phone: z.string().optional().openapi({ description: "The number to write to, international form (+<country><number>). Wins over the CRM's." }),
-      text: z.string().min(1).max(4096),
+      text: z.string().min(1).max(4096).optional().openapi({ description: "ONE message. Exactly one of `text` or `messages`." }),
+      messages: z
+        .array(z.string().min(1).max(4096))
+        .min(1)
+        .max(5)
+        .optional()
+        .openapi({
+          description:
+            "SEVERAL short messages (1 to 5), delivered as separate WhatsApp messages in this order, a few seconds apart with \"typing...\" shown between them (2 to 6 s scaled to length, plus jitter). Every check is decided once before the first; each message is its own send row (listed by GET /orgs/whatsapp/messages). A retry with the same key never re-sends a message already sent and sends the rest. Exactly one of `text` or `messages`. (WA-BUBBLES-1023)",
+        }),
       idempotencyKey: z.string().min(1).max(200).openapi({ description: "One per person per step. A retry with the same key answers the first outcome and never sends twice." }),
       fromAccount: z.string().optional().openapi({ description: "Send from this linked account (its own number). Default: the account that already has a conversation (with messages) with the person, else the brand's outreach default account (PATCH /orgs/matrix/links/{linkId}), else the oldest linked." }),
       skipIfReplied: z.boolean().optional().openapi({ description: "Refuse with `person_replied` when the person has written to the brand on any channel (use on follow-ups)." }),
     })
+    .refine((b) => (b.text === undefined) !== (b.messages === undefined), { message: "exactly one of `text` or `messages` is required" })
     .openapi("WhatsappSendRequest"),
 );
 
@@ -3414,6 +3424,21 @@ export const WhatsappSendResponseSchema = registry.register(
       eventId: z.string(),
       sentAt: z.string(),
       previousSends: z.number().int().openapi({ description: "WhatsApp messages sent to this number through this route before this one." }),
+      messages: z
+        .array(
+          z.object({
+            index: z.number().int().openapi({ description: "0-based position in the request's `messages`." }),
+            sendId: z.string().uuid(),
+            eventId: z.string(),
+            sentAt: z.string(),
+            duplicate: z.boolean().openapi({ description: "Already sent under this key by an earlier call: not sent again." }),
+          }),
+        )
+        .optional()
+        .openapi({
+          description:
+            "Only when the request carried `messages`: every message, in order, all sent. The top-level `sendId`/`eventId`/`sentAt` are the first message's; top-level `duplicate` is true only when every message had already been sent.",
+        }),
     })
     .openapi("WhatsappSendResponse"),
 );
@@ -3440,7 +3465,7 @@ const WhatsappRefusalSchema = z.object({
 registry.registerPath({
   method: "post",
   path: "/orgs/whatsapp/messages",
-  summary: "Send one WhatsApp message from the brand's linked WhatsApp account",
+  summary: "Send one WhatsApp message (or several paced ones) from the brand's linked WhatsApp account",
   description:
     "Writes `text` to the person on WhatsApp from the brand's linked account. The message comes back through the mirror as outbound in the person's merged thread. Refusals are 422 with a stable `code` (409 `send_in_progress` for a key in flight). No cost declared. Requires x-api-key, x-org-id; brand from body or x-brand-id; x-campaign-id recorded when sent.",
   request: { body: { content: { "application/json": { schema: WhatsappSendRequestSchema } }, required: true } },
