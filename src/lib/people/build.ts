@@ -69,7 +69,7 @@ import { visitorLabel } from "../posthog/records.js";
 import { readAccountUsers } from "./account-users.js";
 import { CONNECTION_TAGS, personConnectionTags, type ConnectionTag, type TagLookups } from "./connection-tags.js";
 import { resolveGroupTags, type GroupTags, type GroupTagsSummary } from "./group-tags.js";
-import { contactWebsites, overrideDomains, personOrganizations, resolveOrganizationLookups, type OrganizationsSummary } from "./organizations.js";
+import { contactWebsites, overrideDomains, personOrganizations, presenceContactId, resolveOrganizationLookups, websiteOfPresence, type OrganizationsSummary } from "./organizations.js";
 import { activeCorrections, applyCorrections, correctionsOf, domainOverrides } from "./corrections.js";
 import {
   correctPointTags,
@@ -546,10 +546,9 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
 
   // PERSON-ORGANIZATIONS-1017: the companies people speak for (work email domains, CRM websites).
   const websites = await contactWebsites([
-    ...new Set(clusters.flatMap((c) => c.presences.filter((p) => p.source === "gohighlevel" && typeof p.detail.contactId === "string").map((p) => p.detail.contactId as string))),
+    ...new Set(clusters.flatMap((c) => c.presences.map(presenceContactId).filter((id): id is string => !!id))),
   ]);
-  const websiteOf = (p: { source: string; detail: Record<string, unknown> }) =>
-    p.source === "gohighlevel" && typeof p.detail.contactId === "string" ? (websites.get(p.detail.contactId) ?? null) : null;
+  const websiteOf = websiteOfPresence(websites);
   const orgLookups = await resolveOrganizationLookups(identity, clusters, websiteOf).catch((err) => {
     const error = (err as Error).message.slice(0, 1000);
     console.error(`[crm-service] organizations failed scope=${scope.id}: ${error}`);

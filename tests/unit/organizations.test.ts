@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { domainOfEmail, domainOfWebsite, personOrganizations, type DomainKind } from "../../src/lib/people/organizations.js";
+import { domainOfEmail, domainOfWebsite, personOrganizations, presenceContactId, websiteOfPresence, type DomainKind } from "../../src/lib/people/organizations.js";
 import { organizationsView } from "../../src/routes/people.js";
 import type { TagLookups, TagScores } from "../../src/lib/people/connection-tags.js";
 
@@ -88,6 +88,33 @@ describe("personOrganizations (PERSON-ORGANIZATIONS-1017)", () => {
     expect(orgs.map((o) => [o.companyId, o.tags.map((t) => t.tag), o.evidence[0].kind])).toEqual([
       ["c-acme", ["professional_not_to_brand"], "email"],
       ["c-globex", ["professional_to_brand"], "website"],
+    ]);
+  });
+});
+
+describe("websiteOfPresence (WA-THREAD-IDENTITY-1023)", () => {
+  const PH = "30e6f401-a464-4e3e-a331-437669329b6e";
+  const WA = "1dc6c9b7-448e-4d60-ac38-2891c85d784c";
+
+  it("names our contact id on any source, nothing that is not one", () => {
+    expect(presenceContactId({ detail: { contactId: PH } })).toBe(PH);
+    expect(presenceContactId({ detail: { contactId: "k1" } })).toBeNull();
+    expect(presenceContactId({ detail: {} })).toBeNull();
+  });
+
+  it("a signup known by phone on WhatsApp + the website they typed on the brand's PostHog form speaks for that company", () => {
+    // Jeremy, 2026-10-22: phone on WhatsApp, website typed on /get-started, no email anywhere. The website
+    // evidence read GoHighLevel only, so his company was named nowhere and the writer pitched blind.
+    const websiteOf = websiteOfPresence(new Map([[PH, "acme.com"]]));
+    const person = {
+      presences: [
+        { source: "matrix", emails: [], detail: { contactId: WA } },
+        { source: "posthog", emails: [], detail: { contactId: PH } },
+      ],
+    };
+    const orgs = personOrganizations(person, lookups(), kinds, companyOf, websiteOf);
+    expect(orgs.map((o) => [o.companyId, o.domain, o.evidence])).toEqual([
+      ["c-acme", "acme.com", [{ kind: "website", value: "acme.com", source: "posthog" }]],
     ]);
   });
 });

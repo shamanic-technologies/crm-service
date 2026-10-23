@@ -52,6 +52,7 @@ import {
   deriveVisit,
   POSTHOG_SOURCE,
   visitId,
+  websiteDomain,
   type PosthogRecordKind,
 } from "./records.js";
 
@@ -169,6 +170,10 @@ async function deriveContacts(conn: PosthogConnection, externalIds?: string[]): 
       firstName: c.firstName,
       lastName: c.lastName,
       rawAttributes: { distinctIds: c.distinctIds, phones: c.phones, phoneOnly: c.phoneOnly, notSignup: c.notSignup, website: c.website },
+      // The website the person typed is their company's (WA-THREAD-IDENTITY-1023): the canonical
+      // columns every source's company evidence reads (people/organizations.ts), never raw only.
+      website: c.website,
+      companyDomain: websiteDomain(c.website),
       sourceCreatedAt: c.sourceCreatedAt,
       sourceConnectionId: conn.id,
       lastRebuiltAt: now,
