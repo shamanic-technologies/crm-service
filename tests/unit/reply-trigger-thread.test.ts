@@ -27,11 +27,14 @@ describe("readThreadForReply", () => {
       kind: "unanswered",
       campaignId: null,
       burst: [{ eventId: "$1", at: new Date(at(0)).toISOString(), text: "hey, do you have references?" }],
+      wroteBefore: false,
     });
     // Answered by hand: nobody waiting. A send with no campaign: the burst after it names no campaign.
     expect(readThreadForReply([...events, msg("$2", OWN, 1, "hi!")], OWN, [])).toEqual({ kind: "answered" });
     const r = readThreadForReply([msg("$2", OWN, 1, "hi!"), msg("$3", GHOST, 2, "thanks")], OWN, [sent("$2", 1, null)]);
-    expect(r).toMatchObject({ kind: "unanswered", campaignId: null });
+    expect(r).toMatchObject({ kind: "unanswered", campaignId: null, wroteBefore: true });
+    // Typed by hand before the burst counts as written too.
+    expect(readThreadForReply([msg("$2", OWN, 1, "hi!"), msg("$3", GHOST, 2, "thanks")], OWN, [])).toMatchObject({ wroteBefore: true });
   });
 
   it("the whole unanswered history is one burst (the watch keeps only what was mirrored after it started)", () => {
@@ -58,6 +61,7 @@ describe("readThreadForReply", () => {
         { eventId: "$b", at: new Date(at(3)).toISOString(), text: "What is it about?" },
         { eventId: "$d", at: new Date(at(4)).toISOString(), text: "Price?" },
       ],
+      wroteBefore: true,
     });
   });
 
@@ -201,6 +205,7 @@ describe("a message WhatsApp could not decrypt (SOPHIE-COPILOT-WA-1018 follow-up
       kind: "unanswered",
       campaignId: null,
       burst: [{ eventId: "$n", at: new Date(at(5)).toISOString(), text: "How many campaigns run on Distribute.you?" }],
+      wroteBefore: false,
     });
     // Answered after it: nobody waiting.
     expect(readThreadForReply([notice, edit, msg("$r", OWN, 6, "3 campaigns.")], OWN, [sent("$r", 6, null)])).toEqual({ kind: "answered" });

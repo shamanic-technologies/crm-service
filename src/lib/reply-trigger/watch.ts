@@ -79,6 +79,7 @@ import { readThreadForReply, type BurstMessage, type RoomSend } from "./thread.j
 import { humanTypedTo } from "../matrix/human-takeover.js";
 import { copilotAnswersOn, deliverDueHandoffs, HANDOFF_STATUS, HANDOFF_STATUSES } from "./copilot.js";
 import { ourAutomatedEchoesOn } from "./own-automated.js";
+import { lazyJudgeRun, outcomeAtDetection } from "./outcome.js";
 
 const SERVICE_NAME = "crm-service";
 const SOURCE = "matrix";
@@ -339,6 +340,26 @@ export async function detectReplies(
   now: number = Date.now(),
   opts: { rooms?: string[] } = {},
 ): Promise<ReplyDetection> {
+  // Every Jev call of the pass runs on ONE judge child run: what a positive reply is declared on (./outcome.ts).
+  const judge = lazyJudgeRun(runId, { orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId });
+  let failed = false;
+  try {
+    return await detectRepliesOn(conn, runId, judge, now, opts);
+  } catch (err) {
+    failed = true;
+    throw err;
+  } finally {
+    await judge.close(failed);
+  }
+}
+
+async function detectRepliesOn(
+  conn: MatrixConnection,
+  runId: () => Promise<string>,
+  judge: ReturnType<typeof lazyJudgeRun>,
+  now: number,
+  opts: { rooms?: string[] },
+): Promise<ReplyDetection> {
   const out: ReplyDetection = { connectionId: conn.id, baseline: false, threadsRead: 0, detected: 0, skipped: [] };
   if (!conn.replyWatchSince || !conn.openReplyWatchSince) {
     const at = new Date(now);
@@ -484,6 +505,7 @@ export async function detectReplies(
     let status: string = REPLY_STATUS.PENDING;
     let reason: string | null = null;
     let judgment: Judgment | null = null;
+    let reported = false;
     if (onlyEchoes) {
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.OWN_AUTOMATED_SEND;
@@ -512,18 +534,27 @@ export async function detectReplies(
     } else {
       judgment = await judgeBurst(
         { orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId, channel: conn.channel, where: `connection ${conn.id}` },
-        runId,
+        judge.runId,
         reading.burst.filter((m) => (ingested.get(m.eventId) ?? 0) >= since && !echoes.has(m.eventId)),
       );
       const verdict = burstVerdict(judgment);
+      reported = verdict.report;
       if (!verdict.report) {
         status = REPLY_STATUS.SKIPPED;
         reason = verdict.reason;
       }
     }
+    const outcome = outcomeAtDetection({
+      judged: judgment?.status === "ok",
+      reported,
+      judgeRunId: judgment ? await judge.opened() : null,
+      wroteBefore: reading.wroteBefore,
+      now,
+    });
     const inserted = await db
       .insert(replyTriggerReports)
       .values({
+        ...outcome,
         orgId: conn.orgId,
         brandId: conn.brandId,
         source: SOURCE,

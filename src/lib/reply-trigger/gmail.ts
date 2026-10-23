@@ -64,6 +64,7 @@ import {
   recordTriggerEvent,
   type DoorIdentity,
 } from "../trigger-door.js";
+import { lazyJudgeRun, outcomeAtDetection } from "./outcome.js";
 import { readEmailThreadForReply, type EmailBurstMessage, type StoredEmail } from "./email-thread.js";
 import {
   AUTOMATED_MIN_CONFIDENCE,
@@ -166,6 +167,25 @@ export async function detectGmailReplies(
   runId: () => Promise<string>,
   now: number = Date.now(),
 ): Promise<GmailReplyDetection> {
+  // Every Jev call of the pass runs on ONE judge child run: what a positive reply is declared on (./outcome.ts).
+  const judge = lazyJudgeRun(runId, { orgId: scope.orgId, userId: scope.createdByUserId, brandId: scope.brandId });
+  let failed = false;
+  try {
+    return await detectGmailRepliesOn(scope, runId, judge, now);
+  } catch (err) {
+    failed = true;
+    throw err;
+  } finally {
+    await judge.close(failed);
+  }
+}
+
+async function detectGmailRepliesOn(
+  scope: PeopleScope,
+  runId: () => Promise<string>,
+  judge: ReturnType<typeof lazyJudgeRun>,
+  now: number,
+): Promise<GmailReplyDetection> {
   const out: GmailReplyDetection = { scopeId: scope.id, baseline: false, threadsRead: 0, detected: 0, skipped: [], notOwner: 0 };
   if (!scope.gmailReplyWatchSince) {
     await db
@@ -226,6 +246,8 @@ export async function detectGmailReplies(
     let status: string = REPLY_STATUS.PENDING;
     let reason: string | null = null;
     let judgment: Judgment | null = null;
+    let judged = false;
+    let reported = false;
     if (fresh.length === 0) {
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.BEFORE_WATCH;
@@ -256,12 +278,14 @@ export async function detectGmailReplies(
         } else {
           judgment = await judgeBurst(
             { orgId: scope.orgId, userId: scope.createdByUserId, brandId: scope.brandId, channel: CHANNEL, where: `gmail scope ${scope.id}` },
-            runId,
+            judge.runId,
             reading.burst
               .filter((m) => Date.parse(m.at) >= since)
               .map((m) => ({ eventId: m.messageId, at: m.at, text: m.subject ? `${m.subject}\n${m.text}` : m.text })),
           );
           const verdict = burstVerdict(judgment);
+          judged = judgment.status === "ok";
+          reported = verdict.report;
           if (!verdict.report) {
             status = REPLY_STATUS.SKIPPED;
             reason = verdict.reason;
@@ -269,9 +293,18 @@ export async function detectGmailReplies(
         }
       }
     }
+    // Only a burst Jev judged (never a recorded sender verdict) carries the judge run.
+    const outcome = outcomeAtDetection({
+      judged,
+      reported,
+      judgeRunId: judged ? await judge.opened() : null,
+      wroteBefore: reading.wroteBefore,
+      now,
+    });
     const inserted = await db
       .insert(replyTriggerReports)
       .values({
+        ...outcome,
         orgId: scope.orgId,
         brandId: scope.brandId,
         source: GMAIL_SOURCE,

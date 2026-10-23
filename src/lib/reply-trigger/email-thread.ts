@@ -33,7 +33,10 @@ export interface EmailBurstMessage {
   threadId: string | null;
 }
 
-export type EmailThreadReading = { kind: "answered" } | { kind: "unanswered"; burst: EmailBurstMessage[] };
+export type EmailThreadReading =
+  | { kind: "answered" }
+  /** `wroteBefore`: the mailbox wrote to the person before the burst (the person answers a mail). */
+  | { kind: "unanswered"; burst: EmailBurstMessage[]; wroteBefore: boolean };
 
 /** Max characters of one mail carried forward (10 of them must fit the door's 20k `item`). */
 export const EMAIL_TEXT_CAP = 1500;
@@ -43,8 +46,10 @@ export function readEmailThreadForReply(messages: StoredEmail[]): EmailThreadRea
     .filter((m) => m.at !== null && !Number.isNaN(m.at.getTime()))
     .sort((a, b) => a.at!.getTime() - b.at!.getTime() || (a.messageKey < b.messageKey ? -1 : a.messageKey > b.messageKey ? 1 : 0));
   let burst: EmailBurstMessage[] = [];
+  let wroteBefore = false;
   for (const m of ordered) {
     if (m.direction === "outbound") {
+      wroteBefore = true;
       burst = [];
       continue;
     }
@@ -61,5 +66,5 @@ export function readEmailThreadForReply(messages: StoredEmail[]): EmailThreadRea
       threadId: m.threadId,
     });
   }
-  return burst.length === 0 ? { kind: "answered" } : { kind: "unanswered", burst };
+  return burst.length === 0 ? { kind: "answered" } : { kind: "unanswered", burst, wroteBefore };
 }

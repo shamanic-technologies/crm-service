@@ -125,6 +125,20 @@ There are exactly THREE such calls, all once-per-artifact, never per row:
 6. calendar matching, one Jev `choice` per calendar attendee no person holds by address and one per
    (Meet record, matched lead), recorded once (see "Google Calendar meetings");
 
+**Outcomes produced (COST-ACCOUNTING-1023-P1, `lib/reply-trigger/outcome.ts`; doctrine: agent-config skill
+`cost-accounting`):** a reply burst Jev judged POSITIVE (WhatsApp / Matrix, the org's Gmail) is `conversation`
+(Positive reply) PRODUCED on the run that judged it: every Jev call of a detection pass runs on ONE child run
+`reply-trigger.judge` (`lazyJudgeRun`), so only the judging spend rides the positive replies. Subject = the person's
+lead (`subjectService: "lead-service"`, id from lead-service `POST /internal/leads/ids/resolve` by email / humanId /
+phone, nothing minted); when the account wrote before the burst it CONSUMES `message_sent` on the same lead. Detection
+only marks the row (`reply_trigger_reports.outcome_status = pending`, `judge_run_id`, `wrote_before`); an in-process
+loop (every 60 s, `OUTCOME_DECLARATIONS=off` stops it) resolves + declares at runs-service `POST /v1/runs/{id}/outcomes`
+(idempotent there). Never on the action's path: not a lead yet / person not built / a sibling down = retried (backoff
+to 1 h), 7 days without a lead = `no_lead`, runs-service 400/404/409 = `refused` (kept, logged). One reply declared
+once fleet-wide (settled with instantly-service 2026-10-23): instantly owns every reply it files onto a cold sequence,
+any mailbox, so a Gmail burst whose person holds an `instantly` presence = `not_ours`. Jev down (reported, not judged),
+the Copilot's line (no Jev), a recorded sender verdict: nothing declared. No other crm run produces a catalogue outcome.
+
 Everything else GoHighLevel sends arrives already structured, so deriving it is
 pure code — no model, no metered call, no catalogue row.
 

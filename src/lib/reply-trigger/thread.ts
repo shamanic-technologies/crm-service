@@ -49,7 +49,13 @@ export type ThreadReading =
    * The person wrote since our last word. `campaignId` = the last campaign that wrote in the thread
    * before the burst through our send route, null when none did (hand-written or person-opened thread).
    */
-  | { kind: "unanswered"; campaignId: string | null; burst: BurstMessage[] };
+  | {
+      kind: "unanswered";
+      campaignId: string | null;
+      burst: BurstMessage[];
+      /** The account wrote in the thread before the burst (one of our sends, or typed by hand): the person answers a message. */
+      wroteBefore: boolean;
+    };
 
 /** Max characters of one message carried forward (the door caps `item` at 20k). */
 export const MESSAGE_TEXT_CAP = 2000;
@@ -84,10 +90,12 @@ export function readThreadForReply(events: MatrixEvent[], ownMxid: string, sends
   let lastCampaignId: string | null = null;
   let campaignOfBurst: string | null = null;
   let burst: BurstMessage[] = [];
+  let wroteBefore = false;
 
   for (const e of entries) {
     if (e.kind === "ours") {
       if (e.campaignId) lastCampaignId = e.campaignId;
+      wroteBefore = true;
       burst = [];
       continue;
     }
@@ -98,6 +106,7 @@ export function readThreadForReply(events: MatrixEvent[], ownMxid: string, sends
       if (target) continue;
       if (!humanText(ev.content)) continue;
       // Typed by hand on the account: one of our messages, it ends the burst like any other.
+      wroteBefore = true;
       burst = [];
       continue;
     }
@@ -109,5 +118,5 @@ export function readThreadForReply(events: MatrixEvent[], ownMxid: string, sends
   }
 
   if (burst.length === 0) return { kind: "answered" };
-  return { kind: "unanswered", campaignId: campaignOfBurst, burst };
+  return { kind: "unanswered", campaignId: campaignOfBurst, burst, wroteBefore };
 }

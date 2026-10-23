@@ -1491,8 +1491,22 @@ export const replyTriggerReports = pgTable(
     campaignEventId: text("campaign_event_id"),
     campaignRecordedAt: timestamp("campaign_recorded_at", { withTimezone: true }),
     campaignOutcome: jsonb("campaign_outcome"),
+    // COST-ACCOUNTING-1023-P1 (lib/outcomes/positive-reply.ts): the run whose Jev call judged the burst (a
+    // `reply-trigger.judge` child run of the pass), whether the account wrote before the burst, and the
+    // `conversation` (Positive reply) declaration at runs-service: null = nothing to declare;
+    // 'pending' | 'declared' | 'refused' | 'no_lead' | 'not_ours'.
+    judgeRunId: text("judge_run_id"),
+    wroteBefore: boolean("wrote_before"),
+    outcomeStatus: text("outcome_status"),
+    outcomeReason: text("outcome_reason"),
+    outcomeLeadId: text("outcome_lead_id"),
+    outcomeAttempts: integer("outcome_attempts").notNull().default(0),
+    outcomeNextAt: timestamp("outcome_next_at", { withTimezone: true }),
+    outcomeLastError: text("outcome_last_error"),
+    outcomeDeclaredAt: timestamp("outcome_declared_at", { withTimezone: true }),
   },
   (table) => [
+    index("reply_trigger_reports_outcome_due_idx").on(table.outcomeNextAt).where(sql`${table.outcomeStatus} = 'pending'`),
     uniqueIndex("reply_trigger_reports_anchor_uq").on(table.orgId, table.brandId, table.source, table.anchorEventId),
     index("reply_trigger_reports_room_idx").on(table.connectionId, table.roomId),
     index("reply_trigger_reports_scope_address_idx").on(table.scopeId, table.address),
