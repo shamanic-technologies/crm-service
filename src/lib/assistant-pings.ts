@@ -12,6 +12,12 @@
  *  - every linked messaging account of that scope with automation ON
  *    (`matrix_links.automation_allowed`): a message in one of its one-to-one
  *    threads. Its name = the account's persona name (SOPHIE-WA-1016).
+ *    EXCEPT a person's own line (PERSO-TG-PING-1023, owner 2026-10-23: « je n'ai
+ *    pas besoin de notif TG des messages qui arrivent sur mon WA perso et PRO.
+ *    Seulement Sophie »): an account whose own number is the brand's sales rep
+ *    phone or an org member's phone is that person's WhatsApp, whatever its
+ *    automation flag or persona; every message on it is recorded `own_line`,
+ *    never sent. Read from data (brand-service, client-service), never a name.
  *
  * Fleet rules, as the conversation-start pings:
  *  - never the owner's own actions: a staff address, a user id ever seen with
@@ -42,7 +48,7 @@ import { editTarget, humanText, phoneFromMxid } from "./matrix/events.js";
 import { isVoiceNote, withVoiceTranscripts } from "./matrix/voice-notes.js";
 import { normalizeEmail } from "./people/identity.js";
 import type { SiblingIdentity } from "./people/siblings.js";
-import { ownTeamMatch, readOwnTeam } from "./reply-trigger/own-team.js";
+import { ownTeamMatch, phoneDigits, readOwnTeam, readTeamPeoplePhones, type OwnTeam } from "./reply-trigger/own-team.js";
 import { createRun, updateRun } from "./runs-client.js";
 import { isStaffEmail, sendOwnerTelegram } from "./owner-telegram.js";
 
@@ -58,6 +64,7 @@ export const ASSISTANT_PING_SKIPS = {
   handTyped: "hand_typed",
   notConversation: "not_conversation",
   noText: "no_text",
+  ownLine: "own_line",
 } as const;
 
 const CHANNEL_LABEL: Record<string, string> = {
@@ -213,10 +220,22 @@ async function threadUrlFor(dest: CopilotDestination, identityKey: string, perso
   return id ? uniboxThreadUrl(staffOrg.externalId, dest.brandId, id) : null;
 }
 
+interface AssistantAccount {
+  personaName: string | null;
+  /** The account's own number as the bridge names its login (WhatsApp: phone digits), else null. */
+  remoteLoginId: string | null;
+}
+
+/** PURE: the account is a person's own line: its own number is one of the brand's people's (sales rep, member). */
+export function isPersonLine(account: Pick<AssistantAccount, "remoteLoginId">, teamPeople: OwnTeam): boolean {
+  const d = /^\+?\d{6,20}$/.test(account.remoteLoginId ?? "") ? phoneDigits(account.remoteLoginId) : null;
+  return !!d && teamPeople.has(d);
+}
+
 /** The assistant accounts of the staff scope: linked, automation on. Keyed on their connection. */
-async function assistantAccounts(dest: CopilotDestination): Promise<Map<string, { personaName: string | null }>> {
+async function assistantAccounts(dest: CopilotDestination): Promise<Map<string, AssistantAccount>> {
   const rows = await db
-    .select({ connectionId: matrixLinks.connectionId, personaName: matrixLinks.personaName })
+    .select({ connectionId: matrixLinks.connectionId, personaName: matrixLinks.personaName, remoteLoginId: matrixLinks.remoteLoginId })
     .from(matrixLinks)
     .where(
       and(
@@ -226,14 +245,16 @@ async function assistantAccounts(dest: CopilotDestination): Promise<Map<string, 
         eq(matrixLinks.automationAllowed, true),
       ),
     );
-  const out = new Map<string, { personaName: string | null }>();
-  for (const r of rows) if (r.connectionId) out.set(r.connectionId, { personaName: r.personaName?.trim() || null });
+  const out = new Map<string, AssistantAccount>();
+  for (const r of rows) if (r.connectionId) out.set(r.connectionId, { personaName: r.personaName?.trim() || null, remoteLoginId: r.remoteLoginId });
   return out;
 }
 
-/** The web Copilot's name: the persona the scope's assistant accounts share, else "AI Copilot". */
-async function copilotName(dest: CopilotDestination): Promise<string> {
-  const names = new Set([...(await assistantAccounts(dest)).values()].map((a) => a.personaName).filter((n): n is string => !!n));
+/** The web Copilot's name: the persona the scope's assistant accounts (a person's own line excluded) share, else "AI Copilot". */
+async function copilotName(dest: CopilotDestination, identity: SiblingIdentity): Promise<string> {
+  const teamPeople = await readTeamPeoplePhones(identity);
+  const accounts = [...(await assistantAccounts(dest)).values()].filter((a) => !isPersonLine(a, teamPeople));
+  const names = new Set(accounts.map((a) => a.personaName).filter((n): n is string => !!n));
   return names.size === 1 ? [...names][0] : COPILOT_SENDER_NAME;
 }
 
@@ -276,7 +297,7 @@ export async function announceCopilotMessages(turn: CopilotPushed, newMessageIds
       attempt("chatting org", () => readOrg(turn.orgId, identity)),
       turn.displayName?.trim() ? Promise.resolve(turn.displayName.trim()) : attempt("chatting user", () => readUserName(turn.userId, identity)),
       threadUrlFor(dest, `email:${email}`, null, identity),
-      attempt("assistant name", () => copilotName(dest)),
+      attempt("assistant name", () => copilotName(dest, identity)),
     ]);
     const ordered = [...claimed].sort((a, b) => Date.parse(a.message.at) - Date.parse(b.message.at));
     for (const { id, message } of ordered) {
@@ -398,6 +419,17 @@ export async function announceAssistantMatrixMessages(conn: MatrixConnection, no
     let ownTeam: Awaited<ReturnType<typeof readOwnTeam>> | null = null;
     let pinged = 0;
     try {
+      // A person's own line pings nothing (PERSO-TG-PING-1023). Unreadable = throws: nothing decided, next pass.
+      if (isPersonLine(account, await readTeamPeoplePhones(await identity()))) {
+        for (const c of candidates) {
+          await claim({
+            source: "matrix", messageRef: c.event_id, channel: conn.channel, connectionId: conn.id, messageAt: new Date(c.origin_server_ts),
+            direction: c.sender === conn.matrixUserId ? "outbound" : "inbound", status: "skipped", reason: ASSISTANT_PING_SKIPS.ownLine,
+          });
+        }
+        if (runId) await updateRun(runId, "completed", { ...ids, runId });
+        return 0;
+      }
       for (const c of candidates) {
         const at = new Date(c.origin_server_ts);
         const base = { source: "matrix" as const, messageRef: c.event_id, channel: conn.channel, connectionId: conn.id, messageAt: at };

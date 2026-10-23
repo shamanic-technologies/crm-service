@@ -73,6 +73,18 @@ export async function readOwnTeam(identity: SiblingIdentity): Promise<OwnTeam> {
     if (d) team.set(d, OWN_TEAM_ROLES.linked_whatsapp_account);
   }
 
+  for (const [d, role] of await readTeamPeoplePhones(identity)) if (!team.has(d) || role === OWN_TEAM_ROLES.sales_rep_phone) team.set(d, role);
+  return team;
+}
+
+/**
+ * The numbers of the brand's PEOPLE (its sales rep, the org's members), without
+ * its linked accounts: a linked account whose own number is one of these is that
+ * person's own line, never an assistant line (PERSO-TG-PING-1023). Throws like
+ * `readOwnTeam` when either owner cannot answer.
+ */
+export async function readTeamPeoplePhones(identity: SiblingIdentity): Promise<OwnTeam> {
+  const team: OwnTeam = new Map();
   const path = `/orgs/brands/${identity.brandId}/sales-rep`;
   const r = await siblingGet("brand", path, identity);
   if (r.status !== 200) {
