@@ -15,6 +15,25 @@ const OTHER_ORG = "d0d0d0d0-1111-4111-8111-000000000003";
 const OTHER_BRAND = "d0d0d0d0-1111-4111-8111-000000000004";
 const LOGOUT = "You were logged out from another device. Relogin to continue using the bridge.";
 
+process.env.BRAND_SERVICE_URL = "http://brand.test";
+process.env.BRAND_SERVICE_API_KEY = "brand-key";
+process.env.CLIENT_SERVICE_URL = "http://client.test";
+process.env.CLIENT_SERVICE_API_KEY = "client-key";
+
+const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+  const url = new URL(String(input instanceof Request ? input.url : input));
+  if (url.pathname.startsWith("/v1/runs")) return json({ id: "run-" + Math.random().toString(16).slice(2) });
+  if (url.host === "brand.test" && url.pathname.endsWith(BRAND_PATH_ID())) return json({ brand: { name: "distribute.you" } });
+  if (url.host === "brand.test") return json({ error: "not found" }, 404);
+  if (url.host === "client.test" && url.pathname.endsWith(ORG)) return json({ name: "Distribute" });
+  if (url.host === "client.test") return json({ error: "not found" }, 404);
+  return json({ error: `unexpected ${url}` }, 500);
+});
+function BRAND_PATH_ID() {
+  return BRAND;
+}
+
 const whoami = vi.fn();
 vi.mock("../../src/lib/matrix/bridge.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../src/lib/matrix/bridge.js")>();
@@ -66,6 +85,10 @@ describe.skipIf(!RUN)("WhatsApp line health (real DB)", () => {
     expect(byPhone["+77776879632"].current.since).toBe(new Date(loggedOutAt * 1000).toISOString());
     expect(byPhone["+33770657585"].current).toMatchObject({ state: "connected", down: false });
     expect(byPhone["+77776879632"].days.at(-1)).toMatchObject({ status: "down" });
+    // Names in plain words; an unresolvable one is null with its reason.
+    expect(byPhone["+77776879632"]).toMatchObject({ brandName: "distribute.you", orgName: "Distribute", namesUnresolvedReason: null });
+    expect(byPhone["+33770657585"]).toMatchObject({ brandName: null, orgName: null });
+    expect(byPhone["+33770657585"].namesUnresolvedReason).toContain("brand-service answered 404");
     // Red first.
     expect(ours(view.lines)[0].phone).toBe("+77776879632");
 
