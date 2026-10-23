@@ -9,6 +9,7 @@ import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { transferBrand } from "../lib/transfer-brand.js";
 import { TransferBrandRequestSchema } from "../schemas.js";
 import { pgErrorOf } from "../lib/pg-error.js";
+import { backfillPositiveReplies } from "../lib/reply-trigger/outcome-backfill.js";
 
 const router = Router();
 
@@ -115,6 +116,21 @@ router.post("/internal/transfer-brand", apiKeyAuth, async (req, res) => {
       });
     }
     return res.status(500).json({ type: "internal", error: (err as Error).message });
+  }
+});
+
+/**
+ * COST-BACKFILL-1023-CRM: hand every past positive reply to the outcome declaration loop on the run that judged
+ * it (lib/reply-trigger/outcome-backfill.ts). `dryRun: true` writes nothing. Idempotent: re-run = 0 candidates.
+ */
+router.post("/internal/outcomes/backfill", apiKeyAuth, async (req, res) => {
+  const parsed = z.object({ dryRun: z.boolean().optional() }).safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ type: "validation", error: "dryRun must be a boolean" });
+  try {
+    res.json(await backfillPositiveReplies({ dryRun: parsed.data.dryRun }));
+  } catch (err) {
+    console.error("[crm-service][reply-outcome-backfill] pass failed:", err);
+    res.status(502).json({ type: "upstream", error: (err as Error).message });
   }
 });
 

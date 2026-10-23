@@ -3807,6 +3807,15 @@ registry.registerPath({
 
 registry.registerPath({
   method: "post",
+  path: "/internal/outcomes/backfill",
+  summary: "Declare the past positive replies on the runs that judged them (COST-BACKFILL-1023-CRM)",
+  description:
+    "Every reply burst Jev judged positive before the forward declaration shipped is matched to the detection run that judged it (runs-service, the org's crm-service run of a judging task that spent, started within seconds of the burst's detection; none or several = `unmatched`, never declared) and handed to the outcome declaration loop with runs-service `occurredAt: run_started_at`. Body `{dryRun?: boolean}`: dry run writes nothing. Idempotent: a re-run finds 0 candidates; runs-service answers a replayed declaration `already_recorded`.",
+  responses: { 200: { description: "Candidates, matched, unmatched (by reason) and each row's judge run" }, 502: { description: "runs-service unreadable (rows already handled stay handled)" } },
+});
+
+registry.registerPath({
+  method: "post",
   path: "/internal/calendar/watch",
   summary: "Run one calendar pass now: mirror google-service's calendar feed, judge attendees and Meet attendance (the loop runs every 5 min)",
   responses: { 200: { description: "What the pass mirrored and judged per scope" }, 502: { description: "The pass failed" } },

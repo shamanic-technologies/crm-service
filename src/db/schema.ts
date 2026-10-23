@@ -1504,6 +1504,9 @@ export const replyTriggerReports = pgTable(
     outcomeNextAt: timestamp("outcome_next_at", { withTimezone: true }),
     outcomeLastError: text("outcome_last_error"),
     outcomeDeclaredAt: timestamp("outcome_declared_at", { withTimezone: true }),
+    // COST-BACKFILL-1023-CRM (lib/reply-trigger/outcome-backfill.ts): runs-service `occurredAt` for a reply judged
+    // before the forward declaration shipped (`run_started_at`); null = declared on time.
+    outcomeOccurredAt: text("outcome_occurred_at"),
   },
   (table) => [
     index("reply_trigger_reports_outcome_due_idx").on(table.outcomeNextAt).where(sql`${table.outcomeStatus} = 'pending'`),

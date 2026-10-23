@@ -223,6 +223,11 @@ export interface OutcomeOccurrence {
 export interface DeclareOutcomesBody {
   produced?: OutcomeOccurrence[];
   consumed?: OutcomeOccurrence[];
+  /**
+   * BACKFILL (COST-BACKFILL-1023-RUNS): when the occurrences count as declared. `run_started_at` = the run's start;
+   * absent = now (on time). runs-service keys consumption resolution, reuse rank and stored days on it.
+   */
+  occurredAt?: string;
 }
 
 export interface DeclareOutcomesAnswer {
@@ -242,4 +247,31 @@ export async function declareRunOutcomes(runId: string, orgId: string, body: Dec
     identity: { orgId },
     body,
   });
+}
+
+/** One run of an org as `GET /v1/runs?include=subtreeCost` lists it. */
+export interface ListedRun {
+  id: string;
+  serviceName: string;
+  taskName: string;
+  startedAt: string;
+  totalCostInUsdCents?: string;
+}
+
+const LIST_RUNS_LIMIT = 500;
+
+/**
+ * An org's runs started in a window, each with the BILLED cost of its whole subtree (runs-service
+ * `GET /v1/runs`, org-scoped by x-org-id). A full page is refused loud: the window must be read whole.
+ */
+export async function listOrgRuns(
+  orgId: string,
+  filter: { serviceName: string; taskName?: string; startedAfter: string; startedBefore: string },
+): Promise<ListedRun[]> {
+  const q = new URLSearchParams({ ...filter, include: "subtreeCost", limit: String(LIST_RUNS_LIMIT) } as Record<string, string>);
+  const answer = await runsRequest<{ runs: ListedRun[] }>(`/v1/runs?${q}`, { identity: { orgId } });
+  if (answer.runs.length >= LIST_RUNS_LIMIT) {
+    throw new Error(`runs-service listed ${answer.runs.length} runs of org ${orgId} in ${filter.startedAfter}..${filter.startedBefore}: window not read whole`);
+  }
+  return answer.runs;
 }
