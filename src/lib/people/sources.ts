@@ -11,9 +11,9 @@
  *  - `failed`        — connected (or unknown) but could not be read: `error`.
  */
 
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { authConnections, contacts, ghlConnections, matrixConnections, posthogConnections, stripeConnections, personMerges, transactionalEmails, whatsappSends } from "../../db/schema.js";
+import { authConnections, contacts, ghlConnections, matrixConnections, posthogConnections, stripeConnections, personMerges, transactionalEmails, whatsappSends, creditEvents } from "../../db/schema.js";
 import { GHL_SOURCE } from "../gohighlevel/records.js";
 import { POSTHOG_SOURCE } from "../posthog/records.js";
 import { STRIPE_SOURCE } from "../stripe/records.js";
@@ -779,6 +779,26 @@ export async function readApiCalls(orgId: string, brandId: string): Promise<Sour
   }
   const presences = apiCallPresences(await readApiCallPresenceRows(orgId, brandId));
   return { ...base, status: "ok", presences, sourceCount: presences.length, error: null };
+}
+
+// ─── billing-service: our clients' account events (staff Unibox only) ──────
+
+/**
+ * billing-service's credit events (lib/credit-events/feed.ts, CREDIT-RAN-OUT-UNIBOX-EVENT-1024): thread events only,
+ * never a presence (an org member is a person through the brand's own tools, e.g. its auth provider). Only the staff
+ * Unibox scope reads them; every other (org, brand) is `not_connected`.
+ */
+export async function readBilling(orgId: string, brandId: string): Promise<SourceRead> {
+  const base = {
+    source: "billing" as const,
+    scope: "brand" as const,
+    sourceCountBasis: "crm-service mirrored billing credit events tied to people (staff Unibox only; thread events, no presences)",
+  };
+  if (!isCopilotDestination(orgId, brandId)) {
+    return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
+  }
+  const [{ n }] = await db.select({ n: sql<number>`count(*)::int` }).from(creditEvents).where(isNotNull(creditEvents.membersResolvedAt));
+  return { ...base, status: "ok", presences: [], sourceCount: n, error: null };
 }
 
 // ─── transactional-email-service: what the platform emailed its clients (staff Unibox only) ─

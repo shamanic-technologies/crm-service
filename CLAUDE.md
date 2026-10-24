@@ -1889,6 +1889,36 @@ skippedNoEmail }`; 503 when the staff scope is unset. Idempotent on `callId`.
   burst (same channel, gaps under 30 min).
 - No cost (platform run), no facts, not in the message search index.
 
+## Credit ran out / restored — the staff Unibox's account events (`src/lib/credit-events/`, CREDIT-RAN-OUT-UNIBOX-EVENT-1024)
+
+Owner 2026-10-24: a client's credit running out (and coming back) is a NORMAL Unibox event of that client's people, like a
+reply or a visit, and a Lead event (« A chaque event de l'Unibox pour un client actuel (non perso) une campagne réactive
+se déclenche »); NO credit-specific trigger (« non »); the dunning emails stay billing's (« ça n'annule pas le transactionnel »).
+
+- **Pull, never push**: billing-service `GET /internal/credit-events?cursor=&limit=` (x-api-key `BILLING_SERVICE_API_KEY`,
+  no identity; one `credit_ran_out` per depletion episode, one `credit_restored` once it closed, total order (at, eventId),
+  events >= 60 s old) every 60 s (`CREDIT_WATCH_INTERVAL_MS`, first pass 60 s after boot, `CREDIT_WATCH=off`) into bronze
+  `credit_events` (insert-only on billing's event id); cursor in `billing_feed_cursors` (moves after its page is stored).
+  `POST /internal/credit-events/watch` = a pass now; `GET /internal/credit-events` = what was mirrored + each report.
+- **Who**: the org's members (client-service `/internal/users?allMembers=true`), normalized, STAFF DROPPED (`isStaffEmail`),
+  resolved once per event (`member_emails`; unreadable = retried next pass). Org named by client-service, else its oldest
+  brand (brand-service `/orgs/brands`), never fabricated.
+- **Staff Unibox scope only** (`COPILOT_UNIBOX_ORG_ID` + `_BRAND_ID`, same structural privacy as Copilot / API): people source
+  `billing` (thread events, NO presence: a member is a person through the brand's own tools, e.g. its Clerk), timeline
+  `kind: event`, channel `account`, text "Credit ran out · <org>" / "Credit restored · <org>", step = the type; every other
+  scope `not_connected`.
+- **Facts**: `credit_ran_out` / `credit_restored`, source `billing`, family `billing_credit` (history, immutable: stated once,
+  never withdrawn), natural key `billing|<eventId>|<address>`, subject = the address (held until a built person holds it).
+  Old (closed) episodes ARE stated: a fact is what happened. lead-service reads them like any act of theirs (it checks no
+  type list).
+- **Lead event = the GENERIC trigger `account_event`** ("Account Event", declared DATA in features-service, kind `reported`,
+  reportedBy crm-service, no pipe heads it): one occurrence per (event, member, offer) through `lib/trigger-door.ts`, `item.kind`
+  = the credit type, key `crm:account_event:<eventId>:<sha16(address)>:<offer>`; `lead_event` takes every member trigger, so
+  it fires the reactive campaigns on "Lead event" (who to act on = the pipe's strategy). Offer = the person's tagged active
+  offers, else EVERY active offer of the staff brand (the fact is about the account). **Never history**: an event dated before
+  `billing_feed_cursors.watch_since` (the first pass) = `skipped before_watch`, older than 24 h when reported = `stale`; so the
+  backlog (open episodes at ship time included) shows and is stated, never fires. Retries 1 → 60 min for 24 h; 400/422 final.
+
 ## Transactional emails — what the platform emailed a client, on their staff Unibox thread (`src/lib/transactional/sent-emails.ts`)
 
 TX-EMAIL-IN-UNIBOX-1024 (owner 2026-10-24: « ça n'annule pas le transactionnel. Mais le transactionnel envoyé doit aussi
@@ -2105,6 +2135,7 @@ once CI is green, then tag the next version by hand at the merge commit
 `TRANSACTIONAL_EMAIL_SERVICE_URL`, `TRANSACTIONAL_EMAIL_SERVICE_API_KEY` (the sent-emails feed; unset = the watch logs a failure each pass),
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_CHAT_ID`, `CLIENT_SERVICE_URL`, `CLIENT_SERVICE_API_KEY` (the owner's conversation pings; unset = logged, nothing sent),
 `CAMPAIGN_SERVICE_URL`, `CAMPAIGN_SERVICE_API_KEY` (the form-trigger reports; unset = detected, not reported),
+`BILLING_SERVICE_URL`, `BILLING_SERVICE_API_KEY` (the credit events feed; unset = not mirrored, logged at boot),
 `MATRIX_WHATSAPP_PROVISIONING_URL`, `MATRIX_WHATSAPP_PROVISIONING_SECRET`
 (+ `MATRIX_TELEGRAM_*` once its bridge runs).
 See `.env.example`. The four Matrix ones are REQUIRED for the sync to run at all —

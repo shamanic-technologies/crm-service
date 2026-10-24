@@ -52,6 +52,7 @@ import {
   contacts,
   contactUploads,
   conversations,
+  creditEvents,
   matrixConnections,
   matrixRawEvents,
   people,
@@ -83,6 +84,7 @@ import {
 import { siblingGetOk } from "./siblings.js";
 import { readTxEmailThread, TX_EMAIL_CHANNEL, TX_EMAIL_SENDER_NAME } from "../transactional/sent-emails.js";
 import { deferApiAnswer } from "./item-fill.js";
+import { ACCOUNT_CHANNEL, creditDateBasis, creditEventText } from "../credit-events/rules.js";
 import { readVoiceTranscripts, voiceNoteText } from "../matrix/voice-notes.js";
 
 export const TIMELINE_SOURCE_STATUSES = ["ok", "empty", "not_connected", "failed"] as const;
@@ -550,6 +552,42 @@ export async function transactionalItems(person: Pick<Person, "orgId" | "brandId
   return { status: items.length ? "ok" : "empty", items, error: null, asked: emails };
 }
 
+// ─── account events (billing-service) ───────────────────────────────────────
+
+/**
+ * What happened on the client's account with us, from billing-service's credit events (lib/credit-events/feed.ts,
+ * CREDIT-RAN-OUT-UNIBOX-EVENT-1024): "Credit ran out" / "Credit restored" on the thread of every member of that org,
+ * matched on their addresses, read on the spot. Staff Unibox scope only.
+ */
+export async function billingItems(person: Pick<Person, "orgId" | "brandId" | "emails">): Promise<SourceResult> {
+  if (!isCopilotDestination(person.orgId, person.brandId)) return notConnected();
+  const emails = (person.emails as string[]).map((e) => e.toLowerCase());
+  if (emails.length === 0) return { status: "empty", items: [], error: null, asked: emails };
+  const rows = await db
+    .select()
+    .from(creditEvents)
+    .where(sql`${creditEvents.memberEmails} ?| ARRAY[${sql.join(emails.map((e) => sql`${e}`), sql`, `)}]::text[]`)
+    .orderBy(creditEvents.at, creditEvents.eventId);
+  const items = rows.map(
+    (e): TimelineItem => ({
+      at: e.at.toISOString(),
+      source: "billing",
+      channel: ACCOUNT_CHANNEL,
+      kind: "event",
+      direction: null,
+      subject: null,
+      text: creditEventText(e.type, e.orgLabel),
+      from: null,
+      to: [],
+      ref: { billingEventId: e.eventId, accountOrgId: e.creditOrgId, episodeId: e.episodeId },
+      textClean: null,
+      outreachFact: null,
+      event: { step: e.type, dateBasis: creditDateBasis(e.type), detail: { accountOrgId: e.creditOrgId, accountName: e.orgLabel, episodeId: e.episodeId } },
+    }),
+  );
+  return { status: items.length ? "ok" : "empty", items, error: null, asked: emails };
+}
+
 // ─── api / mcp calls ────────────────────────────────────────────────────────
 
 /** Brand names seen recently (brand-service), so a thread names "AscendQE", not an id. */
@@ -878,7 +916,7 @@ export async function readTimeline(
   const fromStore = (pick: (t: StoredTimeline) => StoredTimeline["gmail"]) =>
     storedRead.then((t): SourceResult => pick(t)).catch((e) => toFailed(e, emails));
 
-  const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, transactional] = await Promise.all([
+  const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional] = await Promise.all([
     connected("gmail") ? fromStore((t) => t.gmail) : Promise.resolve(notConnected()),
     fromStore((t) => t.instantly),
     connected("matrix") ? matrixItems(of("matrix")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
@@ -890,9 +928,10 @@ export async function readTimeline(
     connected("clerk") ? authItems("clerk", of("clerk")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
     copilotItems(person).catch((e) => toFailed(e, emails)),
     apiCallItems(person, identity, { deferAnswers: opts.paged }).catch((e) => toFailed(e, emails)),
+    billingItems(person).catch((e) => toFailed(e, emails)),
     transactionalItems(person).catch((e) => toFailed(e, emails)),
   ]);
-  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, transactional };
+  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional };
   // The check itself failed: no late-join source may pose as complete (its index items are still served).
   if (lateError) {
     for (const s of LATE_JOIN_SOURCES) {

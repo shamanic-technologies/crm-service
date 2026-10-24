@@ -29,7 +29,7 @@
  *    no country, so it cannot be compared with anything and is not a key.
  */
 
-export const PEOPLE_SOURCES = ["gmail", "instantly", "matrix", "gohighlevel", "posthog", "stripe", "clerk", "copilot", "api", "transactional"] as const;
+export const PEOPLE_SOURCES = ["gmail", "instantly", "matrix", "gohighlevel", "posthog", "stripe", "clerk", "copilot", "api", "billing", "transactional"] as const;
 export type PeopleSource = (typeof PEOPLE_SOURCES)[number];
 
 export function normalizeEmail(raw: string | null | undefined): string | null {
