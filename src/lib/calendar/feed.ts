@@ -24,7 +24,7 @@ import { calendarEvents, calendarFeedCursors, peopleScopes, type PeopleScope } f
 import { readOrgMembers } from "../org-members.js";
 import { runScopeBuild } from "../people/build.js";
 import { siblingGetOk } from "../people/siblings.js";
-import { createRun, updateRun } from "../runs-client.js";
+import { createRun, SUPPORT_RUNS, updateRun } from "../runs-client.js";
 import { judgeScopeMeetings, type ScopeJudgeSummary } from "./matching.js";
 import type { CalendarEvent } from "./meetings.js";
 
@@ -152,8 +152,8 @@ export async function judgeScope(scope: PeopleScope, eventsMoved: boolean): Prom
     orgId: scope.orgId,
     userId: scope.createdByUserId,
     brandIds: [scope.brandId],
-    serviceName: SERVICE_NAME,
-    taskName: "calendar.judge",
+    // Which person an attendee is: a product feature (the meeting is the lead's act), marked at creation (LEDGER-HISTORY-1024).
+    ...SUPPORT_RUNS.calendarMatching,
   });
   const identity = { orgId: scope.orgId, userId: scope.createdByUserId, runId: run.id, brandId: scope.brandId };
   try {

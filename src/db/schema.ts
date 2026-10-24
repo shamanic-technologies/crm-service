@@ -2870,3 +2870,35 @@ export const creditEventReports = pgTable(
 );
 export type CreditEvent = typeof creditEvents.$inferSelect;
 export type CreditEventReport = typeof creditEventReports.$inferSelect;
+
+/**
+ * LEDGER-HISTORY-1024: each WhatsApp message a CAMPAIGN sent, declared at runs-service as `message_sent` on the run
+ * that sent it (lib/whatsapp/message-sent.ts). One row per send run (bubbles of one send = one message).
+ */
+export const messageSentDeclarations = pgTable(
+  "message_sent_declarations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    runId: text("run_id").notNull(),
+    sendId: uuid("send_id").notNull(),
+    campaignId: text("campaign_id").notNull(),
+    email: text("email"),
+    phone: text("phone"),
+    sentAt: timestamp("sent_at", { withTimezone: true }).notNull(),
+    leadId: text("lead_id"),
+    status: text("status").notNull(),
+    reason: text("reason"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    nextAt: timestamp("next_at", { withTimezone: true }),
+    declaredAt: timestamp("declared_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("message_sent_declarations_run_uq").on(table.runId),
+    index("message_sent_declarations_due_idx").on(table.nextAt).where(sql`${table.status} = 'pending'`),
+  ],
+);
+export type MessageSentDeclaration = typeof messageSentDeclarations.$inferSelect;

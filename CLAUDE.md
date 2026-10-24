@@ -153,6 +153,17 @@ first seen (a re-judgment adds none), one occurrence per relation (else `duplica
 run = `refused`. `POST /internal/outcomes/lead-identified` = a pass now. Not declared: tags from the brand's own tools ($0),
 group tags, earlier runs of a re-judged thread (only the latest verdict run is recorded). Other sessions' probes parented
 on crm runs are not crm's spend.
+**`message_sent` + support runs (LEDGER-HISTORY-1024, `lib/whatsapp/message-sent.ts`, `runs-client.ts SUPPORT_RUNS`)**: a
+WhatsApp message a CAMPAIGN sent (`whatsapp_sends.campaign_id` set, status sent) PRODUCES `message_sent` on its send run
+(`whatsapp.send`, subject = lead-service lead), one per run (bubbles = one message), ledger `message_sent_declarations`,
+loop every 60 s (`MESSAGE_SENT_DECLARATIONS=off`), `occurredAt` = `sent_at`: ONE path past and future;
+`POST /internal/outcomes/message-sent` = a pass now. A send with no campaign (Copilot answers, probes) states nothing.
+Spend that produces no outcome by design sits on its OWN child run marked support at creation, never mixed with a
+judging run: Matrix thread reading `matrix.lead-reading`, GoHighLevel stage / label meanings `gohighlevel.label-meanings`,
+column typing `contacts.column-typing`, `calendar.judge` (all `product_feature`), voice notes on the Copilot's line
+`copilot.voice-notes` (`copilot`); other voice notes ride the `reply-trigger.judge` run. Past runs:
+`POST /internal/outcomes/support-marks {runIds, kind, reason, dryRun?}` (runs-service owner door). A run whose Jev
+judged and kept nothing (relevance, reply kinds) stays a run with no output (loss), never support.
 
 Everything else GoHighLevel sends arrives already structured, so deriving it is
 pure code — no model, no metered call, no catalogue row.

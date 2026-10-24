@@ -5,12 +5,13 @@ import { db } from "../db/index.js";
 import { contactUploads } from "../db/schema.js";
 import { apiKeyAuth, SERVICE_NAME } from "../middleware/auth.js";
 import { promoteUpload } from "../lib/promote.js";
-import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
+import { createPlatformRun, markOwnRunsSupport, RunsServiceError, updatePlatformRun } from "../lib/runs-client.js";
 import { transferBrand } from "../lib/transfer-brand.js";
 import { TransferBrandRequestSchema } from "../schemas.js";
 import { pgErrorOf } from "../lib/pg-error.js";
 import { backfillPositiveReplies } from "../lib/reply-trigger/outcome-backfill.js";
 import { runLeadIdentifiedPass } from "../lib/people/lead-identified.js";
+import { runMessageSentPass } from "../lib/whatsapp/message-sent.js";
 
 const router = Router();
 
@@ -142,6 +143,40 @@ router.post("/internal/outcomes/lead-identified", apiKeyAuth, async (_req, res) 
   } catch (err) {
     console.error("[crm-service][lead-identified] manual pass failed:", err);
     res.status(502).json({ type: "upstream", error: (err as Error).message });
+  }
+});
+
+/** LEDGER-HISTORY-1024: one message_sent pass now (record the campaign WhatsApp sends not recorded yet, declare the due ones). */
+router.post("/internal/outcomes/message-sent", apiKeyAuth, async (_req, res) => {
+  try {
+    res.json(await runMessageSentPass());
+  } catch (err) {
+    console.error("[crm-service][message-sent] manual pass failed:", err);
+    res.status(502).json({ type: "upstream", error: (err as Error).message });
+  }
+});
+
+/**
+ * LEDGER-HISTORY-1024: mark crm-service's own PAST runs support (spend that produces no outcome by design), naming the
+ * function, through runs-service's owner door. New runs are marked at creation (runs-client SUPPORT_RUNS). Body
+ * `{runIds, kind, reason, dryRun?}`; dryRun = runs-service's preview. Idempotent there.
+ */
+const SupportMarksBody = z.object({
+  runIds: z.array(z.string().uuid()).min(1).max(5000),
+  kind: z.enum(["payment_fees", "brand_setup", "copilot", "platform_llm", "staff_experiment", "product_feature", "retired_product"]),
+  reason: z.string().min(1).max(2000),
+  dryRun: z.boolean().optional(),
+});
+router.post("/internal/outcomes/support-marks", apiKeyAuth, async (req, res) => {
+  const parsed = SupportMarksBody.safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ type: "validation", error: parsed.error.message });
+  const { dryRun, ...mark } = parsed.data;
+  try {
+    res.json(await markOwnRunsSupport(dryRun ? "preview" : "apply", { ...mark, markedBy: "crm-service (LEDGER-HISTORY-1024)" }));
+  } catch (err) {
+    const status = err instanceof RunsServiceError && err.kind === "http" ? 422 : 502;
+    console.error("[crm-service][support-marks] failed:", err);
+    res.status(status).json({ type: "upstream", error: (err as Error).message });
   }
 });
 

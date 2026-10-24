@@ -67,7 +67,10 @@ const TRANSCRIBED = { status: 200, body: { text: "How many campaigns run on Dist
 let transcriptionAnswer: { status: number; body: unknown } = TRANSCRIBED;
 let mediaCalls: { url: string; auth: string | null }[] = [];
 
+let createdRuns: Array<{ id: string; parent: string | null; body: { taskName?: string; support?: { kind: string } } }> = [];
+
 function installFetchStub() {
+  createdRuns = [];
   campaignCalls = [];
   copilotCalls = [];
   transcriptionCalls = [];
@@ -77,7 +80,11 @@ function installFetchStub() {
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
-      return json({ id: "run-" + Math.random().toString(16).slice(2) });
+      const id = "run-" + Math.random().toString(16).slice(2);
+      if (init?.method === "POST" && url.pathname === "/v1/runs") {
+        createdRuns.push({ id, parent: new Headers(init.headers).get("x-run-id"), body: JSON.parse(String(init.body)) });
+      }
+      return json({ id });
     }
     if (url.host === "brand.test" && url.pathname === `/orgs/brands/${BRAND}/sales-rep`) {
       if (typeof repPhone === "number") return json({ error: "down" }, repPhone);
@@ -605,7 +612,10 @@ describe.skipIf(!RUN)("reply trigger", () => {
       expect(mediaCalls[0].url).toBe("/_matrix/client/v1/media/download/hs.test/media-v1");
       expect(transcriptionCalls[0].headers.get("x-org-id")).toBe(ORG);
       expect(transcriptionCalls[0].headers.get("x-user-id")).toBe(USER);
-      expect(transcriptionCalls[0].headers.get("x-run-id")).toBe("run-1");
+      // LEDGER-HISTORY-1024: on the Copilot's line a voice note serves the Copilot: its own child run of the pass, marked
+      // support (copilot) at creation.
+      const voiceRun = createdRuns.find((r) => r.id === transcriptionCalls[0].headers.get("x-run-id"));
+      expect(voiceRun).toMatchObject({ parent: "run-1", body: { taskName: "copilot.voice-notes", support: { kind: "copilot" } } });
       expect(transcriptionCalls[0].headers.get("x-brand-id")).toBe(BRAND);
       expect(transcriptionCalls[0].body).toEqual({ audio: { base64: Buffer.from("OggS voice").toString("base64"), mimeType: "audio/ogg; codecs=opus" }, durationSeconds: 4 });
 
@@ -613,7 +623,7 @@ describe.skipIf(!RUN)("reply trigger", () => {
       expect(copilotCalls).toHaveLength(1);
       expect(copilotCalls[0].body).toMatchObject({ messageId: "$v1", text: "🎤 Voice note: How many campaigns run on Distribute.you?" });
       const [stored] = await db.select().from(voiceNoteTranscripts).where(eq(voiceNoteTranscripts.eventId, "$v1"));
-      expect(stored).toMatchObject({ status: "completed", text: "How many campaigns run on Distribute.you?", runId: "run-1", chatRunId: "a7c1d2e3-2222-4222-8222-0000000000e1" });
+      expect(stored).toMatchObject({ status: "completed", text: "How many campaigns run on Distribute.you?", runId: voiceRun!.id, chatRunId: "a7c1d2e3-2222-4222-8222-0000000000e1" });
 
       // Read again: never transcribed twice; the next text message carries the voice note in its thread.
       await db.insert(whatsappSends).values({

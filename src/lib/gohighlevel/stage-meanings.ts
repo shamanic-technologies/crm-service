@@ -240,10 +240,12 @@ export async function classifyStages(
  */
 export async function decideStageMeanings(
   conn: GhlConnection,
-  runId: string,
+  runOf: () => Promise<string>,
 ): Promise<number> {
   const undecided = await findUndecidedStages(conn);
   if (undecided.length === 0) return 0;
+  // A support run (the brand's own CRM vocabulary, LEDGER-HISTORY-1024), opened only when a stage is decided.
+  const runId = await runOf();
 
   const tracking: ChatTrackingHeaders = {
     orgId: conn.orgId,

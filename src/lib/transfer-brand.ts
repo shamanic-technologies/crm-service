@@ -68,6 +68,7 @@ import {
   formTriggerReports,
   formOfferMappings,
   leadIdentifiedDeclarations,
+  messageSentDeclarations,
   replyTriggerReports,
   humanLinkStatements,
   humanFactStatements,
@@ -143,6 +144,8 @@ export const TRANSFER_TABLES: PgTable[] = [
   replyTriggerReports,
   // The lead_identified occurrences crm-service declared (COST-ACCOUNTING-1024).
   leadIdentifiedDeclarations,
+  // The campaign WhatsApp messages crm-service declared as message_sent (LEDGER-HISTORY-1024).
+  messageSentDeclarations,
   // What the brand's CRM stated to human-service (judgment merges, do-not-contact
   // marks). A link stated for the old org is stated again for the new one.
   humanLinkStatements,

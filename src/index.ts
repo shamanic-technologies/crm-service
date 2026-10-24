@@ -36,6 +36,7 @@ import { startTxEmailWatch } from "./lib/transactional/sent-emails.js";
 import { startLineWatch } from "./lib/whatsapp/line-health.js";
 import { startOutcomeDeclarations } from "./lib/reply-trigger/outcome.js";
 import { startLeadIdentifiedDeclarations } from "./lib/people/lead-identified.js";
+import { startMessageSentDeclarations } from "./lib/whatsapp/message-sent.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -143,6 +144,8 @@ if (process.env.NODE_ENV !== "test") {
         startOutcomeDeclarations();
         // Declares each lead the registry's Jev identified (a conversation tagged professional_to_brand) as lead_identified.
         startLeadIdentifiedDeclarations();
+        // Declares each WhatsApp message a campaign sent as message_sent on its send run (past and future, one path).
+        startMessageSentDeclarations();
       })
       .catch((err) => {
         console.error("[crm-service] Migration failed:", err);

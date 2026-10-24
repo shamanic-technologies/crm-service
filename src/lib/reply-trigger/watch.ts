@@ -59,7 +59,7 @@ import type { MatrixEvent } from "../matrix/client.js";
 import { judgeChoices } from "../judgments-client.js";
 import { runScopeBuild } from "../people/build.js";
 import { normalizeEmail, type Presence } from "../people/identity.js";
-import { createRun, updateRun } from "../runs-client.js";
+import { createRun, lazyChildRun, SUPPORT_RUNS, updateRun } from "../runs-client.js";
 import {
   CampaignRefusal,
   campaignServiceConfigured,
@@ -342,14 +342,17 @@ export async function detectReplies(
 ): Promise<ReplyDetection> {
   // Every Jev call of the pass runs on ONE judge child run: what a positive reply is declared on (./outcome.ts).
   const judge = lazyJudgeRun(runId, { orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId });
+  // Voice notes heard on the Copilot's own line serve the Copilot: a support run of their own (LEDGER-HISTORY-1024).
+  const copilotVoice = lazyChildRun(runId, { orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId }, SUPPORT_RUNS.copilotVoice);
   let failed = false;
   try {
-    return await detectRepliesOn(conn, runId, judge, now, opts);
+    return await detectRepliesOn(conn, runId, judge, copilotVoice, now, opts);
   } catch (err) {
     failed = true;
     throw err;
   } finally {
     await judge.close(failed);
+    await copilotVoice.close(failed);
   }
 }
 
@@ -357,6 +360,7 @@ async function detectRepliesOn(
   conn: MatrixConnection,
   runId: () => Promise<string>,
   judge: ReturnType<typeof lazyJudgeRun>,
+  copilotVoice: ReturnType<typeof lazyChildRun>,
   now: number,
   opts: { rooms?: string[] },
 ): Promise<ReplyDetection> {
@@ -447,7 +451,9 @@ async function detectRepliesOn(
         (e) => (mirroredAt.get(e.event_id) ?? 0) >= since,
       );
       if (unheard.length > 0) {
-        const who = { orgId: conn.orgId, userId: conn.createdByUserId, runId: await runId(), brandId: conn.brandId };
+        // What the person SAID is read like what they wrote: on the Copilot's line it serves the Copilot (support),
+        // elsewhere it is part of judging the burst, on the judge run (rides the positive replies it judges).
+        const who = { orgId: conn.orgId, userId: conn.createdByUserId, runId: copilot ? await copilotVoice.runId() : await judge.runId(), brandId: conn.brandId };
         for (const e of unheard) await transcribeVoiceNote(conn, roomId, e, who);
         out.voiceNotesTranscribed = (out.voiceNotesTranscribed ?? 0) + unheard.length;
         events = await overlayVoiceTranscripts(raw);
