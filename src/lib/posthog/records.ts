@@ -39,10 +39,14 @@ export interface DerivedPosthogContact {
    */
   phoneOnly: boolean;
   /**
-   * Not a signup: PostHog was never told who they are (no `identify`, no email), the
-   * person is known only by what they typed (a phone, a name, their website) on the
-   * brand's forms (ONBOARDING-IN-UNIBOX-1015). facts.ts / the timeline emit no PostHog
-   * `signup` for them.
+   * Not a signup: no account behind the person. A signup is a REAL account signal only:
+   * the product called `identify` (`is_identified`), or the person carries, as a distinct
+   * id, the user id of one of the brand's connected auth providers (a server-side capture
+   * keyed on the Clerk user id never sets `is_identified`). An email PostHog holds is NOT
+   * one (POSTHOG-EMAIL-NOT-SIGNUP-1024): a reader whose email a product `$set` on their
+   * anonymous person (a newsletter click, a form) stays a visitor WITH that email. Same for
+   * a phone, a name, a website typed on a form (ONBOARDING-IN-UNIBOX-1015). facts.ts / the
+   * timeline emit no PostHog `signup` for them.
    */
   notSignup: boolean;
   /** The website the person typed (`website` property), verbatim. */
@@ -55,7 +59,14 @@ export interface DerivedPosthogContact {
   sourceCreatedAt: Date | null;
 }
 
-export function derivePosthogContact(payload: Record<string, unknown>): DerivedPosthogContact | null {
+/**
+ * `authUserIds`: the user ids of the brand's connected auth providers (auth/sync.ts
+ * authUserIds); a person named by one of them has an account.
+ */
+export function derivePosthogContact(
+  payload: Record<string, unknown>,
+  authUserIds: ReadonlySet<string> = new Set(),
+): DerivedPosthogContact | null {
   const externalId = str(payload.id);
   const email = str(payload.email)?.toLowerCase() ?? null;
   if (!externalId) return null;
@@ -63,16 +74,18 @@ export function derivePosthogContact(payload: Record<string, unknown>): DerivedP
   const lastName = str(payload.last_name);
   const phones = [...new Set(["prop_phone", "prop_phone_number", "prop_phoneNumber"].map((k) => str(payload[k])).filter((v): v is string => !!v))];
   const identified = payload.is_identified === true || payload.is_identified === 1 || payload.is_identified === "true";
+  const distinctIds = Array.isArray(payload.distinct_ids)
+    ? [...new Set(payload.distinct_ids.map((d) => str(d)).filter((d): d is string => !!d))].sort()
+    : [];
+  const hasAccount = identified || distinctIds.some((id) => authUserIds.has(id));
   return {
     externalId,
     primaryEmail: email,
     phoneOnly: !identified && !email && phones.length > 0,
-    notSignup: !identified && !email,
+    notSignup: !hasAccount,
     website: str(payload.prop_website),
     phones,
-    distinctIds: Array.isArray(payload.distinct_ids)
-      ? [...new Set(payload.distinct_ids.map((d) => str(d)).filter((d): d is string => !!d))].sort()
-      : [],
+    distinctIds,
     fullName: str(payload.name) ?? ([firstName, lastName].filter(Boolean).join(" ") || null),
     firstName,
     lastName,

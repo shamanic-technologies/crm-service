@@ -45,6 +45,7 @@ import {
   type PosthogTarget,
 } from "./client.js";
 import { authUserIds } from "../auth/sync.js";
+import { AUTH_PROVIDER_NAMES } from "../auth/providers.js";
 import { normalizePhone } from "../people/identity.js";
 import {
   deriveKeyEvent,
@@ -142,14 +143,31 @@ async function readBronze(
  * upsert never reports it as changed again, so the changed-only derive never retried
  * it (2026-10-17: a paying client's PostHog person, mirrored at signup, had no contact,
  * so their onboarding steps reached no thread). Every derive heals these too.
+ *
+ * Also a contact whose stored signup verdict (records.ts notSignup) no longer matches its
+ * bronze: an account appeared (the brand's auth provider mirrored the user AFTER the person)
+ * or the rule moved (POSTHOG-EMAIL-NOT-SIGNUP-1024: an email alone is no signup). Neither
+ * moves the person's bronze, so nothing else would re-derive them.
  */
 async function personsBehindSilver(conn: PosthogConnection): Promise<string[]> {
+  const authSources = sql.join(AUTH_PROVIDER_NAMES.map((n) => sql`${n}`), sql`, `);
   const rows = (await db.execute(sql`
     SELECT r.external_id FROM posthog_raw_records r
     LEFT JOIN contacts c
       ON c.org_id = r.org_id AND c.brand_id = r.brand_id AND c.source = ${POSTHOG_SOURCE} AND c.external_id = r.external_id
     WHERE r.connection_id = ${conn.id} AND r.kind = 'person'
-      AND (c.id IS NULL OR c.last_rebuilt_at < r.mirrored_at)
+      AND (
+        c.id IS NULL OR c.last_rebuilt_at < r.mirrored_at
+        OR (coalesce(c.raw_attributes->>'notSignup', 'false') = 'true') = (
+          coalesce(r.payload->>'is_identified', '') IN ('1', 'true')
+          OR EXISTS (
+            SELECT 1 FROM contacts a
+            WHERE a.org_id = r.org_id AND a.brand_id = r.brand_id AND a.source IN (${authSources})
+              AND jsonb_typeof(r.payload->'distinct_ids') = 'array'
+              AND (r.payload->'distinct_ids') ? a.external_id
+          )
+        )
+      )
   `)) as unknown as { external_id: string }[];
   return rows.map((r) => r.external_id);
 }
@@ -159,8 +177,10 @@ async function deriveContacts(conn: PosthogConnection, externalIds?: string[]): 
   let derived = 0;
   const ids = externalIds ? [...new Set([...externalIds, ...(await personsBehindSilver(conn))])] : undefined;
   if (ids && ids.length === 0) return 0;
+  // A person named by an auth provider's user id has an account (records.ts notSignup).
+  const authIds = new Set(await authUserIds(conn.orgId, conn.brandId));
   for (const payload of await readBronze(conn, "person", ids)) {
-    const c = derivePosthogContact(payload);
+    const c = derivePosthogContact(payload, authIds);
     if (!c) continue;
     const fields = {
       primaryEmail: c.primaryEmail,

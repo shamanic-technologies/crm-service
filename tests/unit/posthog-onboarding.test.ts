@@ -51,11 +51,26 @@ describe("ONBOARDING-IN-UNIBOX-1015: what a visitor typed", () => {
     expect(visitorLabel(null)).toBeNull();
   });
 
-  it("a person known only by what they typed is no signup; an identified one or one with an email is", () => {
+  it("a person known only by what they typed is no signup; an identified one is", () => {
     expect(derivePosthogContact({ id: "p", prop_website: "acme.io", is_identified: 0 })).toMatchObject({ notSignup: true, website: "acme.io" });
     expect(derivePosthogContact({ id: "p", name: "Ann", is_identified: false })).toMatchObject({ notSignup: true, fullName: "Ann" });
-    expect(derivePosthogContact({ id: "p", email: "a@b.com", is_identified: 0 })).toMatchObject({ notSignup: false });
     expect(derivePosthogContact({ id: "p", is_identified: 1 })).toMatchObject({ notSignup: false, website: null });
+  });
+
+  it("POSTHOG-EMAIL-NOT-SIGNUP-1024: an email `$set` on an anonymous person keeps the email and is no signup", () => {
+    // A newsletter reader whose email the product set on their anonymous person: a visitor WITH that email.
+    expect(derivePosthogContact({ id: "p", email: " Ramy@Inogates.com ", is_identified: 0, distinct_ids: ["anon-1"] })).toMatchObject({
+      primaryEmail: "ramy@inogates.com",
+      notSignup: true,
+    });
+    // An identified person keeps their signup, email or not.
+    expect(derivePosthogContact({ id: "p", email: "a@b.com", is_identified: 1 })).toMatchObject({ notSignup: false });
+    expect(derivePosthogContact({ id: "p", email: "a@b.com", is_identified: "true" })).toMatchObject({ notSignup: false });
+    // A person named by one of the brand's auth user ids has an account (server-side capture, never identified).
+    const auth = new Set(["user_bob"]);
+    expect(derivePosthogContact({ id: "p", email: "bob@x.com", is_identified: 0, distinct_ids: ["anon-2", "user_bob"] }, auth)).toMatchObject({ notSignup: false });
+    expect(derivePosthogContact({ id: "p", is_identified: 0, distinct_ids: ["user_bob"] }, auth)).toMatchObject({ notSignup: false });
+    expect(derivePosthogContact({ id: "p", email: "bob@x.com", is_identified: 0, distinct_ids: ["user_other"] }, auth)).toMatchObject({ notSignup: true });
   });
 
   it("a website-only PostHog person is a person named 'Visitor from <domain>'; one known by nothing stays nobody", () => {

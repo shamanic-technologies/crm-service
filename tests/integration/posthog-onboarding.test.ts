@@ -69,6 +69,8 @@ const EVENTS = [
   },
 ];
 let hogql: string[] = [];
+/** The person PostHog serves; each test sets its own. */
+let person: Record<string, unknown> = VISITOR;
 
 function installFetchStub() {
   hogql = [];
@@ -83,8 +85,8 @@ function installFetchStub() {
       hogql.push(q);
       const rows = (cols: string[], data: Record<string, unknown>[]) =>
         json({ columns: cols, results: data.map((d) => cols.map((c) => d[c] ?? null)) });
-      if (q.includes("SELECT DISTINCT toString(person_id) AS id")) return rows(["id"], [{ id: VISITOR.id }]);
-      if (q.includes("FROM persons AS p")) return rows(Object.keys(VISITOR), [VISITOR]);
+      if (q.includes("SELECT DISTINCT toString(person_id) AS id")) return rows(["id"], [{ id: person.id }]);
+      if (q.includes("FROM persons AS p")) return rows(Object.keys(person), [person]);
       if (q.includes("event = '$pageview'")) return rows(["session_id"], []);
       if (q.includes("NOT LIKE '$%'")) return rows(Object.keys(EVENTS[0]), EVENTS);
       throw new Error(`unexpected HogQL ${q}`);
@@ -105,6 +107,7 @@ function app() {
 const asOrg = (r: request.Test) => r.set("x-api-key", API_KEY).set("x-org-id", ORG).set("x-user-id", USER);
 
 async function wipe() {
+  await db.execute(sql`DELETE FROM people_facts WHERE brand_id = ${BRAND}`);
   await db.execute(sql`DELETE FROM people WHERE brand_id = ${BRAND}`);
   await db.execute(sql`DELETE FROM people_scopes WHERE brand_id = ${BRAND}`);
   await db.execute(sql`DELETE FROM posthog_activities WHERE brand_id = ${BRAND}`);
@@ -114,6 +117,7 @@ async function wipe() {
 
 describe.skipIf(!RUN)("a product's signup walk on the person (ONBOARDING-IN-UNIBOX-1015)", () => {
   beforeEach(async () => {
+    person = VISITOR;
     installFetchStub();
     await wipe();
   });
@@ -181,5 +185,54 @@ describe.skipIf(!RUN)("a product's signup walk on the person (ONBOARDING-IN-UNIB
       ["event", "Get started website submitted · website: acme.io", { website: "acme.io" }],
       ["event", "Get started setup chosen · mode: ai", { mode: "ai" }],
     ]);
+  });
+  it("POSTHOG-EMAIL-NOT-SIGNUP-1024: an email `$set` on an anonymous person is a visitor WITH that email, no signup, until the product identifies them", async () => {
+    // A newsletter reader: the product set their email on their anonymous person, no identify.
+    person = {
+      id: "ph-reader",
+      email: "Ramy@Inogates.com",
+      name: null,
+      first_name: null,
+      last_name: null,
+      created_at: "2026-10-15T09:00:00Z",
+      prop_website: null,
+      is_identified: 0,
+      distinct_ids: ["anon-reader-1"],
+    };
+    const [conn] = await db
+      .insert(posthogConnections)
+      .values({
+        orgId: ORG,
+        brandId: BRAND,
+        projectId: "1",
+        region: "eu",
+        status: "active",
+        createdByUserId: USER,
+        lastSyncedAt: new Date("2026-10-15T08:00:00Z"),
+        syncedThrough: new Date("2026-10-15T08:00:00Z"),
+      })
+      .returning();
+    await mirrorRecentPersons(conn, new Date("2026-10-15T08:55:00Z"));
+    const [c] = await db.select().from(contacts).where(eq(contacts.brandId, BRAND));
+    expect(c).toMatchObject({ source: "posthog", externalId: "ph-reader", primaryEmail: "ramy@inogates.com" });
+    expect(c.rawAttributes).toMatchObject({ notSignup: true });
+
+    const { scope } = await ensureScope(ORG, BRAND, USER);
+    expect((await runScopeBuild(scope)).ok).toBe(true);
+    const signups = async () =>
+      (await db.execute(sql`SELECT count(*)::int AS n FROM people_facts WHERE brand_id = ${BRAND} AND live AND type = 'signup'`)) as unknown as { n: number }[];
+    expect((await signups())[0].n).toBe(0);
+    const [reader] = await db.select().from(people).where(eq(people.brandId, BRAND));
+    const tl = await asOrg(request(app()).get(`/orgs/people/timeline?brandId=${BRAND}&personId=${reader.personId}`));
+    expect(tl.status).toBe(200);
+    expect(tl.body.items.some((i: { event: { step: string } | null }) => i.event?.step === "signup")).toBe(false);
+
+    // The product identifies them (an account was created): now a signup.
+    person = { ...person, is_identified: 1, distinct_ids: ["anon-reader-1", "user_ramy"] };
+    await mirrorRecentPersons(conn, new Date("2026-10-15T08:56:00Z"));
+    const [after] = await db.select().from(contacts).where(eq(contacts.brandId, BRAND));
+    expect(after.rawAttributes).toMatchObject({ notSignup: false });
+    expect((await runScopeBuild(scope)).ok).toBe(true);
+    expect((await signups())[0].n).toBe(1);
   });
 });
