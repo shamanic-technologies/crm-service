@@ -48,6 +48,9 @@ import type { PersonRelation } from "./relations.js";
 import { voiceNoteText } from "../matrix/voice-notes.js";
 import { meetingFactContext, readOrgEvents } from "../calendar/matching.js";
 import { meetingCandidateFacts } from "../calendar/meetings.js";
+import { isCopilotDestination } from "../copilot/messages.js";
+import { creditDateBasis } from "../credit-events/rules.js";
+import type { CreditEventType } from "../credit-events/rules.js";
 
 export const FACT_TYPES = [
   "added_to_crm",
@@ -84,6 +87,10 @@ export const FACT_TYPES = [
   // PERSON-RELATIONS-1017: one per person x capacity (personal / professional at a company / company
   // unknown), with ONLY its contact points' emails, phones, keys and tags. Snapshot, like the two above.
   "relation",
+  // CREDIT-RAN-OUT-UNIBOX-EVENT-1024: the client's credit with us ran out / came back (billing-service's depletion
+  // episodes), stated on every member of that org, staff Unibox scope only (lib/credit-events/).
+  "credit_ran_out",
+  "credit_restored",
   "person_merged",
   "person_split",
   "withdrawn",
@@ -91,7 +98,7 @@ export const FACT_TYPES = [
 export type FactType = (typeof FACT_TYPES)[number];
 
 // `distribute_platform`: retired (see RETIRED_FAMILIES); kept because the feed still serves the facts it stated.
-export const FACT_SOURCES = ["gohighlevel", "gmail", "matrix", "stripe", "posthog", "clerk", "csv", "crm", "distribute_platform", "google_calendar"] as const;
+export const FACT_SOURCES = ["gohighlevel", "gmail", "matrix", "stripe", "posthog", "clerk", "csv", "crm", "distribute_platform", "google_calendar", "billing"] as const;
 export type FactSource = (typeof FACT_SOURCES)[number];
 
 /**
@@ -119,6 +126,8 @@ const FAMILIES = {
   // (lib/calendar/meetings.ts). Snapshot: a booking whose attendee is no longer judged the person, or folded
   // into a later booking (a cancel + rebook), is withdrawn.
   calendar_meeting: { source: "google_calendar", snapshot: true, immutable: false },
+  // CREDIT-RAN-OUT-UNIBOX-EVENT-1024: one per (billing event, member address); history, stated once, never withdrawn.
+  billing_credit: { source: "billing", snapshot: false, immutable: true },
 } as const;
 export type FactFamily = keyof typeof FAMILIES;
 
@@ -712,6 +721,63 @@ async function matrixGroupCandidates(orgId: string, brandId: string): Promise<Ca
   return out;
 }
 
+/**
+ * The client's account events (billing-service credit events, lib/credit-events/feed.ts): one fact per member address
+ * the event was tied to, staff Unibox scope only (every other scope: none). Keyed on billing's event id + the address.
+ */
+export function creditCandidateFacts(
+  events: { eventId: string; type: string; creditOrgId: string; episodeId: string; at: Date; orgLabel: string | null; memberEmails: string[] | null }[],
+): CandidateFact[] {
+  const out: CandidateFact[] = [];
+  for (const e of events) {
+    for (const raw of e.memberEmails ?? []) {
+      const email = normalizeEmail(raw);
+      if (!email) continue;
+      out.push({
+        naturalKey: `billing|${e.eventId}|${email}`,
+        family: "billing_credit",
+        type: e.type as CreditEventType,
+        source: "billing",
+        sourceRef: e.eventId,
+        sourceContactId: null,
+        crmContactId: null,
+        occurredAt: iso(e.at),
+        dateBasis: creditDateBasis(e.type),
+        payload: { accountOrgId: e.creditOrgId, accountName: e.orgLabel, episodeId: e.episodeId, billingEventId: e.eventId },
+        subject: { presence: null, keys: [emailKey(email)], standalone: false, emails: [email], phones: [], fullName: null },
+      });
+    }
+  }
+  return out;
+}
+
+async function creditCandidates(orgId: string, brandId: string): Promise<CandidateFact[]> {
+  if (!isCopilotDestination(orgId, brandId)) return [];
+  const events = await rows<{
+    event_id: string;
+    type: string;
+    credit_org_id: string;
+    episode_id: string;
+    at: string | Date;
+    org_label: string | null;
+    member_emails: string[] | null;
+  }>(sql`
+    SELECT event_id, type, credit_org_id, episode_id, at, org_label, member_emails FROM credit_events
+    WHERE members_resolved_at IS NOT NULL AND jsonb_array_length(member_emails) > 0
+  `);
+  return creditCandidateFacts(
+    events.map((e) => ({
+      eventId: e.event_id,
+      type: e.type,
+      creditOrgId: e.credit_org_id,
+      episodeId: e.episode_id,
+      at: new Date(e.at),
+      orgLabel: e.org_label,
+      memberEmails: e.member_emails,
+    })),
+  );
+}
+
 /** Gmail messages from the scope's message store; `other` (a third party in the thread) is not the person. */
 /**
  * Meetings in the org's connected Google Calendars with a person of THIS brand (GOOGLE-CALENDAR-MEETING-FACTS-1021):
@@ -1187,7 +1253,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
     const personRows = await tx.select().from(people).where(eq(people.scopeId, scope.id));
     const index = new PersonIndex(personRows);
 
-    const [ghl, matrix, matrixGroups, gmail, posthog, stripe, clerk, csv, connected, calendar] = await Promise.all([
+    const [ghl, matrix, matrixGroups, gmail, posthog, stripe, clerk, csv, connected, calendar, credit] = await Promise.all([
       ghlCandidates(orgId, brandId),
       matrixCandidates(orgId, brandId),
       matrixGroupCandidates(orgId, brandId),
@@ -1198,6 +1264,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       csvCandidates(orgId, brandId),
       connectedSources(orgId, brandId),
       calendarCandidates(orgId, brandId, personRows),
+      creditCandidates(orgId, brandId),
     ]);
     // An auth provider connected = it alone states who signed up (it knows invited
     // teammates and staff; PostHog only knows who was identified). PostHog keeps
@@ -1218,7 +1285,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
     const builtKeys = new Set(personRows.flatMap((r) => r.identityKeys as string[]));
     const registry = [...registryCandidates(personRows), ...standaloneRegistryCandidates(csv, builtKeys, brandId)];
     const csvKeys = new Set(csv.map((c) => pickPersonKey(c.subject.keys)));
-    const all = [...ghl, ...matrix, ...matrixGroups, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv, ...calendar, ...registry].filter(
+    const all = [...ghl, ...matrix, ...matrixGroups, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv, ...calendar, ...credit, ...registry].filter(
       (c) => !(authStatesSignups && c.family === "posthog_person"),
     );
     const candidates = new Map<string, CandidateFact>();

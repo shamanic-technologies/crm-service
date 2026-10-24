@@ -2780,3 +2780,63 @@ export const leadIdentifiedDeclarations = pgTable(
   ],
 );
 export type LeadIdentifiedDeclaration = typeof leadIdentifiedDeclarations.$inferSelect;
+
+/**
+ * CREDIT-RAN-OUT-UNIBOX-EVENT-1024: the cursor of a billing-service feed read (one row per feed). `watch_since` = the
+ * first pass: an event dated before it is history, shown on the thread and stated as a fact, never reported as a
+ * Lead event.
+ */
+export const billingFeedCursors = pgTable("billing_feed_cursors", {
+  feed: text("feed").primaryKey(),
+  cursor: text("cursor"),
+  caughtUpAt: timestamp("caught_up_at", { withTimezone: true }),
+  watchSince: timestamp("watch_since", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * Bronze: billing-service's credit events (`GET /internal/credit-events`), one row per billing event id, insert-only.
+ * `member_emails` = the org's people the event is about (client-service members, staff dropped), resolved once;
+ * null while client-service could not be read (retried). Filed under no scope: the staff Unibox reads it.
+ */
+export const creditEvents = pgTable(
+  "credit_events",
+  {
+    eventId: text("event_id").primaryKey(),
+    // 'credit_ran_out' | 'credit_restored'
+    type: text("type").notNull(),
+    creditOrgId: uuid("credit_org_id").notNull(),
+    episodeId: uuid("episode_id").notNull(),
+    at: timestamp("at", { withTimezone: true }).notNull(),
+    orgLabel: text("org_label"),
+    memberEmails: jsonb("member_emails").$type<string[]>(),
+    membersResolvedAt: timestamp("members_resolved_at", { withTimezone: true }),
+    membersError: text("members_error"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("credit_events_unresolved_idx").on(table.at).where(sql`${table.membersResolvedAt} IS NULL`)],
+);
+
+/** One Lead event report per (credit event, member address): campaign-service's trigger door, never history. */
+export const creditEventReports = pgTable(
+  "credit_event_reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    eventId: text("event_id").notNull(),
+    email: text("email").notNull(),
+    // 'pending' | 'reported' | 'skipped' | 'failed'
+    status: text("status").notNull(),
+    reason: text("reason"),
+    attempts: integer("attempts").notNull().default(0),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    offerIds: jsonb("offer_ids").$type<string[]>(),
+    campaignEvents: jsonb("campaign_events").$type<{ offerId: string; eventId: string; replayed: boolean }[]>(),
+    runId: text("run_id"),
+    reportedAt: timestamp("reported_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("credit_event_reports_event_email_uq").on(table.eventId, table.email)],
+);
+export type CreditEvent = typeof creditEvents.$inferSelect;
+export type CreditEventReport = typeof creditEventReports.$inferSelect;
