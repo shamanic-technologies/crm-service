@@ -71,6 +71,14 @@ describe("PostHog derivation", () => {
     });
   });
 
+  it("POSTHOG-SCANNER-VISIT-1025: a visit whose every pageview filled the screen is a machine's; unknown is a person", () => {
+    const row = { session_id: "s2", person_id: "p1", started_at: "2026-10-24T14:21:37Z", entry_path: "/blog/x", pageviews: 1, paths: ["/blog/x"] };
+    expect(deriveVisit({ ...row, viewport_is_screen: 1, screen: "1920.0x1080.0" })!.detail.machine).toEqual({ fingerprint: "viewport_equals_screen", screen: "1920.0x1080.0" });
+    expect(deriveVisit({ ...row, viewport_is_screen: 0, screen: "1920.0x1080.0" })!.detail.machine).toBeNull();
+    // A bronze row read before the fingerprint was asked: no proof, a person.
+    expect(deriveVisit(row)!.detail.machine).toBeNull();
+  });
+
   it("a key event keeps its own name, verbatim", () => {
     expect(
       deriveKeyEvent({

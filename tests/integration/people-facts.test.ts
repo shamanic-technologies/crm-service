@@ -460,6 +460,24 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
     expect(await maxSeq()).toBe(before);
   });
 
+  it("POSTHOG-SCANNER-VISIT-1025: a visit a machine made on the person's link is no fact; one stated before is withdrawn", async () => {
+    const s = await seed();
+    await emitScopeFacts(s.scope);
+    const before = await allFacts();
+    const visit = before.find((f) => f.type === "website_visit")!;
+    await db
+      .update(posthogActivities)
+      .set({ detail: sql`${posthogActivities.detail} || '{"machine": {"fingerprint": "viewport_equals_screen", "screen": "1920x1080"}}'::jsonb` })
+      .where(eq(posthogActivities.externalId, "s1:ph-alice"));
+    const summary = await emitScopeFacts(s.scope);
+    expect(summary).toMatchObject({ machine: 1, machineWithdrawn: 1, corrected: 0, emitted: 0 });
+    const added = (await readFacts({ since: Number(before[before.length - 1].seq), limit: 100 })).facts;
+    expect(added).toHaveLength(1);
+    expect(added[0]).toMatchObject({ type: "withdrawn", withdrawnOf: visit.factId, payload: { reason: "machine_visit", withdrawnType: "website_visit" } });
+    // Never stated again.
+    expect(await emitScopeFacts(s.scope)).toMatchObject({ machine: 1, machineWithdrawn: 0, emitted: 0 });
+  });
+
   it("a changed vendor record is withdrawn and re-stated; a vanished snapshot record is withdrawn", async () => {
     const s = await seed();
     await emitScopeFacts(s.scope);

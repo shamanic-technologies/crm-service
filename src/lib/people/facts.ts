@@ -172,6 +172,12 @@ export interface CandidateFact {
    * is withdrawn (`subject_changed`).
    */
   unattributed?: boolean;
+  /**
+   * POSTHOG-SCANNER-VISIT-1025: the record is a MACHINE's act tied to the person's link (a mail scanner opening
+   * a newsletter link: a positive fingerprint, posthog/records.ts `visitMachine`), never theirs: never emitted;
+   * a live fact stated for it before is withdrawn (`machine_visit`).
+   */
+  machine?: boolean;
 }
 
 export interface FactPerson {
@@ -885,7 +891,7 @@ async function posthogCandidates(orgId: string, brandId: string): Promise<Candid
     name: string;
     url: string | null;
     pageviews: number | null;
-    detail: { sessionId?: string; referrer?: string | null };
+    detail: { sessionId?: string; referrer?: string | null; machine?: { fingerprint: string } | null };
   }>(sql`
     SELECT c.id AS contact_id, a.external_id, c.external_id AS person_id, c.full_name, a.occurred_at, a.ended_at,
            a.name, a.url, a.pageviews, a.detail
@@ -912,6 +918,7 @@ async function posthogCandidates(orgId: string, brandId: string): Promise<Candid
         referrer: v.detail?.referrer ?? null,
       },
       subject: presenceSubject("posthog", v.person_id, v.full_name),
+      ...(v.detail?.machine ? { machine: true } : {}),
     });
   }
   return out;
@@ -1192,6 +1199,10 @@ export interface FactEmissionSummary {
   held: number;
   /** Records about nobody (the brand's own posts in a group); live facts filed for them are withdrawn. */
   unattributed: number;
+  /** Visits a machine made on the person's link (POSTHOG-SCANNER-VISIT-1025); live facts stated for them are withdrawn. */
+  machine: number;
+  /** Of them, live facts withdrawn (`machine_visit`). */
+  machineWithdrawn: number;
   duplicateKeys: number;
   gmailOtherSkipped: number;
   merged: number;
@@ -1391,15 +1402,26 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
         | "source_retired"
         | "signup_stated_by_auth_provider"
         | "human_identified"
-        | "subject_changed";
+        | "subject_changed"
+        | "machine_visit";
     }[] = [];
     const fresh: (typeof peopleFacts.$inferInsert)[] = [];
     let unchanged = 0;
     let held = 0;
     const bySource: Record<string, number> = {};
     let unattributed = 0;
+    let machine = 0;
+    let machineWithdrawn = 0;
     for (const c of candidates.values()) {
       const live = liveByKey.get(c.naturalKey);
+      if (c.machine) {
+        if (live) {
+          withdrawals.push({ fact: live, reason: "machine_visit" });
+          machineWithdrawn++;
+        }
+        machine++;
+        continue;
+      }
       if (c.unattributed) {
         if (live) withdrawals.push({ fact: live, reason: "subject_changed" });
         unattributed++;
@@ -1583,8 +1605,10 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       candidates: candidates.size,
       emitted: fresh.length,
       unchanged,
-      corrected: withdrawals.length - withdrawnGone - reminted - retired - humanIdentified,
+      corrected: withdrawals.length - withdrawnGone - reminted - retired - humanIdentified - machineWithdrawn,
+      machineWithdrawn,
       unattributed,
+      machine,
       withdrawnGone,
       retired,
       reminted,

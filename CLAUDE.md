@@ -1746,6 +1746,12 @@ re-derives silver with no vendor call. API reads are free → no cost declared.
   (`visit` = one session aggregated over ALL its pageviews, `event` = custom
   non-`$` event). Window = `synced_through - 1h`; a capped stream resumes from
   its last row.
+  **A machine's visit is no act of theirs** (POSTHOG-SCANNER-VISIT-1025): mail scanners open every newsletter link
+  (`dy_sub` identifies the subscriber), so each visit read as "they visited" → Lead event. `visit.detail.machine` =
+  POSITIVE fingerprint only: EVERY pageview desktop with viewport == screen in both dims (headless; measured 7,423 vs
+  47 on newsletter links, 0 vs 1,247 signed-in). Unknown / absent = a person. A machine visit: no `website_visit` fact
+  (a live one withdrawn `machine_visit`), no activity span; still on the thread with `machine`. Backfill =
+  `POST /internal/posthog/sync {connectionId, rereadSince}` then a people sync.
   The `website` property a person typed is canonical silver (`contacts.website` + `company_domain`, WA-THREAD-IDENTITY-1023):
   it is company evidence like a CRM contact's website (`organizations.ts` `websiteOfPresence` reads EVERY source's contact,
   it read GoHighLevel only, so a signup known by phone + typed website was served with no company). Migration 0057 carried

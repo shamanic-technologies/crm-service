@@ -564,7 +564,8 @@ export async function readPosthog(orgId: string, brandId: string): Promise<Sourc
            count(a.id) FILTER (WHERE a.kind = 'visit')::int AS visits,
            count(a.id) FILTER (WHERE a.kind = 'event')::int AS events
     FROM contacts c
-    LEFT JOIN posthog_activities a ON a.contact_id = c.id
+    -- POSTHOG-SCANNER-VISIT-1025: a visit a machine made on their link (a mail scanner) is no activity of theirs.
+    LEFT JOIN posthog_activities a ON a.contact_id = c.id AND coalesce(jsonb_typeof(a.detail->'machine'), 'null') = 'null'
     WHERE c.org_id = ${orgId} AND c.brand_id = ${brandId} AND c.source = ${POSTHOG_SOURCE}
     GROUP BY c.id
     ORDER BY c.external_id, c.id

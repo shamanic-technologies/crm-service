@@ -218,6 +218,25 @@ export async function listPersonsByDistinctIds(target: PosthogTarget, distinctId
 }
 
 /**
+ * POSTHOG-SCANNER-VISIT-1025: the POSITIVE fingerprint of an automated browser on a visit. A desktop browser
+ * a person drives shows its page in a window: the viewport is smaller than the screen (tabs, address bar).
+ * A headless browser (an email security scanner opening every newsletter link, our own Playwright probes)
+ * renders with the viewport EQUAL to the screen in both dimensions. Measured on project 171095 (7 days):
+ * newsletter-link pageviews 7,423 equal vs 47 not; signed-in dashboard pageviews 0 equal vs 1,247 not; over
+ * 30 days the only signed-in desktop sessions matching were our own test accounts and probes.
+ * `viewport_is_screen` = 1 only when EVERY pageview of the session is a desktop one matching it; a pageview
+ * missing either size, or a phone / tablet (in-app browsers fill the screen), reads 0: unknown = a person.
+ * `screen` = the size it matched, for the record.
+ */
+export const MACHINE_VIEWPORT_SQL = `
+             min(ifNull(
+               toString(properties.$device_type) = 'Desktop'
+               AND toFloat(properties.$screen_width) > 0 AND toFloat(properties.$screen_height) > 0
+               AND toFloat(properties.$viewport_width) = toFloat(properties.$screen_width)
+               AND toFloat(properties.$viewport_height) = toFloat(properties.$screen_height), 0)) AS viewport_is_screen,
+             any(concat(toString(properties.$screen_width), 'x', toString(properties.$screen_height))) AS screen`;
+
+/**
  * Visits (sessions with at least one pageview) of identified people that were
  * ACTIVE since `since`. A session is aggregated over ALL its pageviews, not only
  * those inside the window, so a session straddling the window boundary is never
@@ -233,7 +252,8 @@ export function listVisits(target: PosthogTarget, since: Date, scope: PersonScop
              argMin(toString(properties.$pathname), timestamp) AS entry_path,
              count() AS pageviews,
              groupUniqArray(20)(toString(properties.$pathname)) AS paths,
-             argMin(toString(properties.$referrer), timestamp) AS referrer
+             argMin(toString(properties.$referrer), timestamp) AS referrer,
+             ${MACHINE_VIEWPORT_SQL}
       FROM events
       WHERE event = '$pageview' AND ${personScopeSql(scope)} AND notEmpty(toString($session_id))
         AND timestamp >= ${ts(since)} - INTERVAL 1 DAY

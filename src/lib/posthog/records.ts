@@ -105,6 +105,16 @@ export interface DerivedActivity {
   detail: Record<string, unknown>;
 }
 
+/**
+ * POSTHOG-SCANNER-VISIT-1025: the machine a visit is POSITIVELY tied to (client.ts `MACHINE_VIEWPORT_SQL`), or
+ * null. Null covers "a person" AND "unknown" (a bronze row read before the fingerprint was asked): never a guess.
+ */
+export function visitMachine(payload: Record<string, unknown>): { fingerprint: "viewport_equals_screen"; screen: string | null } | null {
+  const v = payload.viewport_is_screen;
+  if (!(v === 1 || v === true || v === "1" || v === "true")) return null;
+  return { fingerprint: "viewport_equals_screen", screen: str(payload.screen) };
+}
+
 export function deriveVisit(payload: Record<string, unknown>): DerivedActivity | null {
   const personId = str(payload.person_id);
   const sessionId = str(payload.session_id);
@@ -124,6 +134,7 @@ export function deriveVisit(payload: Record<string, unknown>): DerivedActivity |
       sessionId,
       paths: Array.isArray(payload.paths) ? payload.paths.filter((p) => str(p)) : [],
       referrer: str(payload.referrer),
+      machine: visitMachine(payload),
     },
   };
 }
