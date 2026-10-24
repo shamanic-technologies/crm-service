@@ -3830,6 +3830,25 @@ registry.registerPath({
   responses: { 200: { description: "What the pass mirrored and judged per scope" }, 502: { description: "The pass failed" } },
 });
 
+registry.registerPath({
+  method: "post",
+  path: "/internal/credit-events/watch",
+  summary:
+    "Read billing-service's credit events now (the loop runs every minute): \"Credit ran out\" / \"Credit restored\" on the staff Unibox " +
+    "thread of each member of the client org (source `billing`), a fact on the people feed, and a Lead event (`account_event`) for new ones",
+  responses: {
+    200: { description: "`{feed: {pages, read, stored, caughtUp}, people: {resolved, failed, reports}, delivered}`, or `{skipped}`" },
+    502: { description: "The feed could not be read" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/credit-events",
+  summary: "The mirrored credit events (newest first, `limit` <= 1000): the people each is about and their Lead event report",
+  responses: { 200: { description: "`{events: [{eventId, type, accountOrgId, accountName, episodeId, at, memberEmails, reports}]}`" } },
+});
+
 export const ReplyTriggerReportSchema = z.object({
   id: z.string().uuid(),
   source: z.string().describe("`matrix` (WhatsApp, LinkedIn) | `gmail` (the org's connected mailbox)."),
