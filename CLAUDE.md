@@ -17,6 +17,7 @@ feed the same registry, both layered bronze/silver/gold:
 | `copilot` | PUSHED | each distribute.you Copilot chat turn (user message + answer), pushed by chat-service, filed ONLY under the staff Unibox scope | NEVER |
 | `api` | PUSHED | each call a client made to our API / MCP server with their own key (request + answer), pushed by api-service, filed ONLY under the staff Unibox scope | NEVER |
 | `google_calendar` | MIRROR | the org's connected Google Calendar (google-service reads it): meetings, attendees, Meet participants; each external attendee a `contacts` row | NEVER |
+| `transactional` | READ | every email the platform SENT a client (transactional-email-service sent-emails feed), shown ONLY on the staff Unibox thread | NEVER |
 
 As a CSV lead-provider it is a sibling of `apollo-service` / `apify-service`.
 
@@ -1888,6 +1889,22 @@ skippedNoEmail }`; 503 when the staff scope is unset. Idempotent on `callId`.
   burst (same channel, gaps under 30 min).
 - No cost (platform run), no facts, not in the message search index.
 
+## Transactional emails — what the platform emailed a client, on their staff Unibox thread (`src/lib/transactional/sent-emails.ts`)
+
+TX-EMAIL-IN-UNIBOX-1024 (owner 2026-10-24: « ça n'annule pas le transactionnel. Mais le transactionnel envoyé doit aussi
+être ajouté à l'Unibox »): every email transactional-email-service SENT (dunning, receipts, budget, onboarding, campaign
+created / stopped, reply forwards...) shows on the recipient's thread as an outbound email from us, so nobody writes twice.
+- **Read, never pushed**: loop every 60 s (first 60 s after boot, `TRANSACTIONAL_EMAIL_WATCH=off`) on
+  `GET /internal/sent-emails?after=&limit=` (`x-api-key` only, env `TRANSACTIONAL_EMAIL_SERVICE_URL` + `_API_KEY`). Bronze
+  `transactional_emails`, one row per producer id, insert-only (a re-read page stores nothing). Cursor row
+  `transactional_sent_emails` in `calendar_feed_cursors`; it never moves past a page holding an email younger than 15 min
+  (`TX_EMAIL_SETTLE_MS`): the producer commits slightly out of order, the tail is re-read. A malformed row fails the pass loud.
+- **Filed like the Copilot**: served ONLY under the staff Unibox scope (`COPILOT_UNIBOX_*`), matched on `recipient_email`;
+  the feed's `orgId` is the BILLED org (`billed_org_id`, provenance, never a scope). People source `transactional`:
+  timeline items (`ref {emailId, eventType, messageSource, billedOrgId}`; `text` = text part, else the HTML's words,
+  computed at write) + latest-message preview (`sentBy: automation`). NO presence (a recipient only we wrote to is nobody
+  new), NO fact, not in the search index. No template is special. `POST /internal/transactional-emails/watch` = a pass now.
+
 ## Owner Telegram ping for EVERY message with our assistant (`src/lib/assistant-pings.ts`)
 
 SOPHIE-TG-PING-1018 (owner 2026-10-18: « Quand il y a une communication entre Sophie et un user, dans un sens ou
@@ -2085,6 +2102,7 @@ once CI is green, then tag the next version by hand at the merge commit
 `BRAND_SERVICE_URL`, `BRAND_SERVICE_API_KEY`, `FEATURES_SERVICE_URL`, `FEATURES_SERVICE_API_KEY`, `MATRIX_APPSERVICE_TOKEN`,
 `HUMAN_SERVICE_URL`, `HUMAN_SERVICE_API_KEY` (same-human identity; unset = `humanIdentity.status=not_configured`, merges stay local),
 `COPILOT_UNIBOX_ORG_ID`, `COPILOT_UNIBOX_BRAND_ID` (the staff Unibox scope Copilot turns are filed under; unset = 503),
+`TRANSACTIONAL_EMAIL_SERVICE_URL`, `TRANSACTIONAL_EMAIL_SERVICE_API_KEY` (the sent-emails feed; unset = the watch logs a failure each pass),
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_CHAT_ID`, `CLIENT_SERVICE_URL`, `CLIENT_SERVICE_API_KEY` (the owner's conversation pings; unset = logged, nothing sent),
 `CAMPAIGN_SERVICE_URL`, `CAMPAIGN_SERVICE_API_KEY` (the form-trigger reports; unset = detected, not reported),
 `MATRIX_WHATSAPP_PROVISIONING_URL`, `MATRIX_WHATSAPP_PROVISIONING_SECRET`

@@ -24,11 +24,13 @@ import phoneTriggerRoutes from "./routes/phone-triggers.js";
 import whatsappLineRoutes from "./routes/whatsapp-lines.js";
 import teamMembershipRoutes from "./routes/team-membership.js";
 import calendarRoutes from "./routes/calendar.js";
+import transactionalRoutes from "./routes/transactional.js";
 import { startFreshnessWatch } from "./lib/people/freshness.js";
 import { startFormWatch } from "./lib/form-trigger/watch.js";
 import { startPhoneWatch } from "./lib/phone-trigger/watch.js";
 import { startMatrixLiveWatch } from "./lib/matrix/sync.js";
 import { startCalendarWatch } from "./lib/calendar/feed.js";
+import { startTxEmailWatch } from "./lib/transactional/sent-emails.js";
 import { startLineWatch } from "./lib/whatsapp/line-health.js";
 import { startOutcomeDeclarations } from "./lib/reply-trigger/outcome.js";
 import { startLeadIdentifiedDeclarations } from "./lib/people/lead-identified.js";
@@ -86,6 +88,7 @@ app.use(formTriggerRoutes);
 app.use(phoneTriggerRoutes);
 app.use(whatsappLineRoutes);
 app.use(calendarRoutes);
+app.use(transactionalRoutes);
 app.use(teamMembershipRoutes);
 
 app.use((_req, res) => {
@@ -127,6 +130,8 @@ if (process.env.NODE_ENV !== "test") {
         startMatrixLiveWatch();
         // Mirrors google-service's calendar feed and states meetings with the brand's people as facts.
         startCalendarWatch();
+        // Mirrors transactional-email-service's sent emails onto each client's staff Unibox thread.
+        startTxEmailWatch();
         // Records every linked WhatsApp line's state (bridge /whoami) as spans + a daily series for Monitoring.
         startLineWatch();
         // Declares each reply judged positive as a Positive reply on its judge run at runs-service (cost ledger).
