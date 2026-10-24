@@ -2118,6 +2118,10 @@ file is `describe.skipIf(!RUN)`. To run them, create a scratch DB, export the
 
 ## Release: there is no `staging` branch here
 
+⚠️ **A migration number taken by a sibling while your PR was open: renumber yours AFTER theirs** (file, journal `idx` AND a
+larger `when`). drizzle runs only migrations whose `when` is newer than the last one applied in prod, so an older one is
+skipped silently (TX-EMAIL-IN-UNIBOX-1024: 0061 renumbered to 0063 once #200 shipped 0062).
+
 crm-service ships straight to `main`: open a PR with `--base main`, merge it
 once CI is green, then tag the next version by hand at the merge commit
 (`gh release create vX.Y.0 --target <mergeCommit sha>`). `release.sh hotfix` /
