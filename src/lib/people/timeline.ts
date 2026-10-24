@@ -22,6 +22,9 @@
  *                server (channel `mcp`) with their own key, pushed by api-service,
  *                staff Unibox scope only (lib/api-calls/calls.ts): each call is
  *                what they asked (inbound) and what we answered (outbound)
+ *  - transactional every email the platform SENT the person (dunning, receipts, onboarding...),
+ *                read off transactional-email-service's sent-emails feed, staff Unibox scope
+ *                only (lib/transactional/sent-emails.ts): outbound, subject + body, at send time
  *
  * Every source record that brought the person in also adds ONE entry event,
  * dated by the source (`entryItems`): GoHighLevel `added_to_crm` (contact
@@ -79,6 +82,7 @@ import {
   sessionsOf,
 } from "../api-calls/calls.js";
 import { siblingGetOk } from "./siblings.js";
+import { readTxEmailThread, TX_EMAIL_CHANNEL, TX_EMAIL_SENDER_NAME } from "../transactional/sent-emails.js";
 import { deferApiAnswer } from "./item-fill.js";
 import { ACCOUNT_CHANNEL, creditDateBasis, creditEventText } from "../credit-events/rules.js";
 import { readVoiceTranscripts, voiceNoteText } from "../matrix/voice-notes.js";
@@ -516,6 +520,38 @@ export async function copilotItems(person: Pick<Person, "orgId" | "brandId" | "e
   return { status: items.length ? "ok" : "empty", items, error: null, asked: emails };
 }
 
+// ─── transactional emails ───────────────────────────────────────────────────
+
+/**
+ * Every transactional email the platform sent the person (TX-EMAIL-IN-UNIBOX-1024), matched on their
+ * addresses, read on the spot: an outbound email FROM US with its subject and words at its send time.
+ * `ref.messageSource` is the producer's word on the body (`stored` = as sent, `replayed` = re-rendered
+ * from its template, `unavailable` = template gone, no subject / body). Staff Unibox scope only.
+ */
+export async function transactionalItems(person: Pick<Person, "orgId" | "brandId" | "emails">): Promise<SourceResult> {
+  if (!isCopilotDestination(person.orgId, person.brandId)) return notConnected();
+  const emails = person.emails as string[];
+  const rows = await readTxEmailThread(person.orgId, person.brandId, emails);
+  const items = rows.map(
+    (e): TimelineItem => ({
+      at: e.sentAt.toISOString(),
+      source: "transactional",
+      channel: TX_EMAIL_CHANNEL,
+      kind: "message",
+      direction: "outbound",
+      subject: e.subject,
+      text: e.text,
+      from: e.fromAddress ?? TX_EMAIL_SENDER_NAME,
+      to: [e.recipientEmail],
+      ref: { emailId: e.id, eventType: e.eventType, messageSource: e.messageSource, billedOrgId: e.billedOrgId },
+      textClean: null,
+      outreachFact: null,
+      event: null,
+    }),
+  );
+  return { status: items.length ? "ok" : "empty", items, error: null, asked: emails };
+}
+
 // ─── account events (billing-service) ───────────────────────────────────────
 
 /**
@@ -880,7 +916,7 @@ export async function readTimeline(
   const fromStore = (pick: (t: StoredTimeline) => StoredTimeline["gmail"]) =>
     storedRead.then((t): SourceResult => pick(t)).catch((e) => toFailed(e, emails));
 
-  const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing] = await Promise.all([
+  const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional] = await Promise.all([
     connected("gmail") ? fromStore((t) => t.gmail) : Promise.resolve(notConnected()),
     fromStore((t) => t.instantly),
     connected("matrix") ? matrixItems(of("matrix")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
@@ -893,8 +929,9 @@ export async function readTimeline(
     copilotItems(person).catch((e) => toFailed(e, emails)),
     apiCallItems(person, identity, { deferAnswers: opts.paged }).catch((e) => toFailed(e, emails)),
     billingItems(person).catch((e) => toFailed(e, emails)),
+    transactionalItems(person).catch((e) => toFailed(e, emails)),
   ]);
-  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing };
+  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional };
   // The check itself failed: no late-join source may pose as complete (its index items are still served).
   if (lateError) {
     for (const s of LATE_JOIN_SOURCES) {

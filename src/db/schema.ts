@@ -2598,6 +2598,35 @@ export const calendarFeedCursors = pgTable("calendar_feed_cursors", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
+/**
+ * Bronze: every transactional email distribute.you SENT (transactional-email-service's sent-emails
+ * feed, TX-EMAIL-IN-UNIBOX-1024), one row per producer email id, never rewritten. Served only under
+ * the staff Unibox scope, matched on `recipient_email` (lib/transactional/sent-emails.ts).
+ * `billed_org_id` = the org the send was billed to (provenance, never a filing scope). `text` = the
+ * words the thread shows (text part, else the HTML's words), computed once at write.
+ */
+export const transactionalEmails = pgTable(
+  "transactional_emails",
+  {
+    id: uuid("id").primaryKey(),
+    eventType: text("event_type").notNull(),
+    recipientEmail: text("recipient_email").notNull(),
+    billedOrgId: uuid("billed_org_id"),
+    brandIds: jsonb("brand_ids"),
+    fromAddress: text("from_address"),
+    subject: text("subject"),
+    text: text("text"),
+    textBody: text("text_body"),
+    htmlBody: text("html_body"),
+    // 'stored' | 'replayed' | 'unavailable' (the producer's own word on how faithful the body is)
+    messageSource: text("message_source").notNull(),
+    sentAt: timestamp("sent_at", { withTimezone: true }).notNull(),
+    mirroredAt: timestamp("mirrored_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("transactional_emails_recipient_idx").on(table.recipientEmail, table.sentAt)],
+);
+export type TransactionalEmail = typeof transactionalEmails.$inferSelect;
+
 /** Bronze: google-service's calendar event, verbatim (latest served version), keyed on its own row id. */
 export const calendarEvents = pgTable(
   "calendar_events",

@@ -435,6 +435,13 @@
       "when": 1792660000000,
       "tag": "0062_credit_events",
       "breakpoints": true
+    },
+    {
+      "idx": 63,
+      "version": "7",
+      "when": 1792670000000,
+      "tag": "0063_transactional_emails",
+      "breakpoints": true
     }
   ]
 }

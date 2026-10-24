@@ -11,7 +11,8 @@
  *                       and every timeline read), read over the relation's addresses, like the timeline
  *   - matrix            our own mirror: the relation's DM conversations, and the words the person
  *                       wrote in a group (same items as the timeline's `matrixItems`)
- *   - copilot, api      the staff Unibox scope only, matched on the relation's addresses
+ *   - copilot, api, transactional   the staff Unibox scope only, matched on the relation's addresses
+ *                       (transactional = every email the platform sent them, TX-EMAIL-IN-UNIBOX-1024)
  *
  * Events (CRM steps, visits, payments, signups) are not messages and never answer. No sibling is
  * called: a store that lags a few minutes is accepted by the caller. The thread's own total order
@@ -27,9 +28,10 @@
  */
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { apiCalls, copilotMessages, people, peopleMessageUnits, peopleScopes, personIdAliases, type Person } from "../../db/schema.js";
+import { apiCalls, copilotMessages, people, transactionalEmails, peopleMessageUnits, peopleScopes, personIdAliases, type Person } from "../../db/schema.js";
 import { API_SENDER_NAME, describeResponse } from "../api-calls/calls.js";
 import { COPILOT_CHANNEL, COPILOT_SENDER_NAME, isCopilotDestination } from "../copilot/messages.js";
+import { TX_EMAIL_CHANNEL, TX_EMAIL_SENDER_NAME } from "../transactional/sent-emails.js";
 import { readVoiceTranscripts, voiceNoteText } from "../matrix/voice-notes.js";
 import type { BuildSummary } from "./build.js";
 import { presenceStableKey } from "./facts.js";
@@ -61,14 +63,15 @@ export interface LatestMessageGap {
  * original = the body as stored, quoted history and signature included when the source sent them
  * (cold email, Gmail not cleaned); snippet = Gmail's snippet (the body was not fetched); as_written =
  * a chat message (WhatsApp, Telegram, Discord, Copilot), or a voice note's transcript; summary = our
- * one-line description of an API / MCP call or of its answer.
+ * one-line description of an API / MCP call or of its answer. A transactional email is `original` (its
+ * text part, else the words of its HTML).
  */
 export const TEXT_BASES = ["cleaned", "original", "snippet", "as_written", "summary"] as const;
 export type TextBasis = (typeof TEXT_BASES)[number];
 
 export interface LatestMessage {
   at: string | null;
-  source: "gmail" | "instantly" | "matrix" | "copilot" | "api";
+  source: "gmail" | "instantly" | "matrix" | "copilot" | "api" | "transactional";
   /** email | whatsapp | telegram | discord | chat | api | mcp */
   channel: string;
   /** inbound = the person wrote; outbound = the brand did. */
@@ -462,6 +465,50 @@ async function latestApiCall(orgId: string, brandId: string, emails: string[]): 
   return out;
 }
 
+/** The latest transactional email per address (staff Unibox scope only): an email WE sent, by a machine. */
+async function latestTransactional(emails: string[]): Promise<Map<string, Candidate>> {
+  const out = new Map<string, Candidate>();
+  for (const part of chunks(emails, 1000)) {
+    const t = transactionalEmails;
+    const rows = await db
+      .selectDistinctOn([t.recipientEmail], {
+        id: t.id,
+        recipientEmail: t.recipientEmail,
+        eventType: t.eventType,
+        messageSource: t.messageSource,
+        fromAddress: t.fromAddress,
+        subject: t.subject,
+        text: t.text,
+        sentAt: t.sentAt,
+      })
+      .from(t)
+      .where(inArray(t.recipientEmail, part))
+      .orderBy(t.recipientEmail, sql`${t.sentAt} DESC`, sql`${t.id} DESC`);
+    for (const e of rows) {
+      const clipped = clipText(e.text);
+      out.set(e.recipientEmail, {
+        at: e.sentAt.getTime(),
+        key: `transactional|${e.id}`,
+        message: {
+          at: e.sentAt.toISOString(),
+          source: "transactional",
+          channel: TX_EMAIL_CHANNEL,
+          direction: "outbound",
+          sentBy: "automation",
+          subject: e.subject,
+          text: clipped.text,
+          textBasis: clipped.text === null ? null : "original",
+          textCleanStatus: null,
+          textTruncated: clipped.truncated,
+          from: e.fromAddress ?? TX_EMAIL_SENDER_NAME,
+          ref: { emailId: e.id, eventType: e.eventType, messageSource: e.messageSource },
+        },
+      });
+    }
+  }
+  return out;
+}
+
 const emptyCounts = (): Record<LatestMessageStatus, number> => ({ message: 0, no_message: 0, unreadable: 0, unknown: 0 });
 
 /** The latest message of each relation's thread (one answer per DISTINCT key, in the order asked). */
@@ -537,7 +584,7 @@ export async function readLatestMessages(orgId: string, brandId: string, relatio
     }
   }
 
-  const [stored, units, dms, groups, copilot, api] = await Promise.all([
+  const [stored, units, dms, groups, copilot, api, transactional] = await Promise.all([
     addresses.length ? latestStoredPerAddress(scope.id, addresses, gmailConnected) : Promise.resolve(new Map<string, StoreRow>()),
     addresses.length
       ? Promise.all(
@@ -553,6 +600,7 @@ export async function readLatestMessages(orgId: string, brandId: string, relatio
     groupPairs.size ? latestInGroups([...groupPairs.values()]) : Promise.resolve(new Map<string, MatrixRow>()),
     staffScope && addresses.length ? latestCopilot(orgId, brandId, addresses) : Promise.resolve(new Map<string, Candidate>()),
     staffScope && addresses.length ? latestApiCall(orgId, brandId, addresses) : Promise.resolve(new Map<string, Candidate>()),
+    staffScope && addresses.length ? latestTransactional(addresses) : Promise.resolve(new Map<string, Candidate>()),
   ]);
 
   const matrixRows = [...dms.values(), ...groups.values()];
@@ -575,6 +623,8 @@ export async function readLatestMessages(orgId: string, brandId: string, relatio
       if (c) candidates.push(c);
       const a = api.get(address);
       if (a) candidates.push(a);
+      const tx = transactional.get(address);
+      if (tx) candidates.push(tx);
       // Gaps: a stored thread of the address that failed its last read, or one never read yet.
       const mine = unitsOf.get(address) ?? [];
       for (const u of mine) {

@@ -3849,6 +3849,18 @@ registry.registerPath({
   responses: { 200: { description: "`{events: [{eventId, type, accountOrgId, accountName, episodeId, at, memberEmails, reports}]}`" } },
 });
 
+registry.registerPath({
+  method: "post",
+  path: "/internal/transactional-emails/watch",
+  summary:
+    "Read transactional-email-service's sent-emails feed now (the loop runs every minute): every email the platform sent a client, " +
+    "shown on that person's staff Unibox thread (source `transactional`, outbound, subject + body at send time)",
+  responses: {
+    200: { description: "`{pages, read, stored, caughtUp, cursor}` (stored = new emails), or `{skipped: \"pass_running\"}`" },
+    502: { description: "The feed could not be read" },
+  },
+});
+
 export const ReplyTriggerReportSchema = z.object({
   id: z.string().uuid(),
   source: z.string().describe("`matrix` (WhatsApp, LinkedIn) | `gmail` (the org's connected mailbox)."),
@@ -3972,7 +3984,7 @@ export const LatestMessagesRequestSchema = z
 
 const LatestMessageSchema = z.object({
   at: z.string().nullable().openapi({ description: "ISO time the message was sent; null only when the source gave none (and the relation holds no dated message)." }),
-  source: z.enum(["gmail", "instantly", "matrix", "copilot", "api"]),
+  source: z.enum(["gmail", "instantly", "matrix", "copilot", "api", "transactional"]),
   channel: z.string().openapi({ description: "email | whatsapp | telegram | discord | chat | api | mcp", example: "email" }),
   direction: z.enum(["inbound", "outbound", "other"]).openapi({ description: "inbound = the person wrote; outbound = the brand did." }),
   sentBy: z.enum(["person", "automation"]).nullable().openapi({

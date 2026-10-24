@@ -13,7 +13,7 @@
 
 import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { authConnections, contacts, ghlConnections, matrixConnections, posthogConnections, stripeConnections, personMerges, whatsappSends, creditEvents } from "../../db/schema.js";
+import { authConnections, contacts, ghlConnections, matrixConnections, posthogConnections, stripeConnections, personMerges, transactionalEmails, whatsappSends, creditEvents } from "../../db/schema.js";
 import { GHL_SOURCE } from "../gohighlevel/records.js";
 import { POSTHOG_SOURCE } from "../posthog/records.js";
 import { STRIPE_SOURCE } from "../stripe/records.js";
@@ -798,6 +798,26 @@ export async function readBilling(orgId: string, brandId: string): Promise<Sourc
     return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
   }
   const [{ n }] = await db.select({ n: sql<number>`count(*)::int` }).from(creditEvents).where(isNotNull(creditEvents.membersResolvedAt));
+  return { ...base, status: "ok", presences: [], sourceCount: n, error: null };
+}
+
+// ─── transactional-email-service: what the platform emailed its clients (staff Unibox only) ─
+
+/**
+ * The transactional emails distribute.you sent (lib/transactional/sent-emails.ts, TX-EMAIL-IN-UNIBOX-1024):
+ * thread items only, never a presence (a recipient only WE wrote to brings nobody in). Only the staff
+ * Unibox scope reads them; every other (org, brand) is `not_connected`.
+ */
+export async function readTransactional(orgId: string, brandId: string): Promise<SourceRead> {
+  const base = {
+    source: "transactional" as const,
+    scope: "brand" as const,
+    sourceCountBasis: "crm-service mirrored transactional emails (staff Unibox only; thread items, no presences)",
+  };
+  if (!isCopilotDestination(orgId, brandId)) {
+    return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
+  }
+  const [{ n }] = await db.select({ n: sql<number>`count(*)::int` }).from(transactionalEmails);
   return { ...base, status: "ok", presences: [], sourceCount: n, error: null };
 }
 
