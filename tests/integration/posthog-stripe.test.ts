@@ -56,6 +56,8 @@ const PERSONS = [
     first_name: null,
     last_name: null,
     created_at: "2026-09-01T08:00:00Z",
+    // Identified by the product: an email alone is no signup (POSTHOG-EMAIL-NOT-SIGNUP-1024).
+    is_identified: 1,
   },
   {
     id: "ph-dave",
@@ -64,6 +66,8 @@ const PERSONS = [
     first_name: "Dave",
     last_name: null,
     created_at: "2026-09-03T08:00:00Z",
+    // Identified by the product: an email alone is no signup (POSTHOG-EMAIL-NOT-SIGNUP-1024).
+    is_identified: 1,
   },
 ];
 const VISITS = [
@@ -183,7 +187,7 @@ function hogqlAnswer(query: string) {
   if (query.includes("count() AS n FROM persons")) return rows(["n"], [{ n: PERSONS.length }]);
   if (query.includes("FROM persons AS p"))
     return rows(
-      ["id", "email", "name", "first_name", "last_name", "created_at"],
+      ["id", "email", "name", "first_name", "last_name", "created_at", "is_identified"],
       query.includes("toString(p.id) >") ? [] : PERSONS,
     );
   throw new Error(`unexpected HogQL ${query}`);
