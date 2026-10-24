@@ -111,6 +111,14 @@ async function fastMirror(now: number): Promise<PhoneWatchResult["mirrored"]> {
 }
 
 type Row = Record<string, unknown>;
+
+/**
+ * MANUAL-CONTACT-IS-A-PERSON-1024 (owner 2026-10-24: a Lead event = a new event of THEIR action toward us): a number
+ * the CLIENT typed on a contact added by hand (the brand's `manual` list) is our statement, never the person giving
+ * it. Neither detected nor recorded, so the day the person gives it themselves (a form, a signup) it is reported.
+ * Before, every manual add after the brand's first one fired `whatsapp_number_given`.
+ */
+const notAddedByHand = sql`NOT EXISTS (SELECT 1 FROM contact_uploads mu WHERE mu.id = c.source_upload_id AND mu.kind = 'manual')`;
 const rows = async <T>(q: ReturnType<typeof sql>) => (await db.execute(q)) as unknown as T[];
 
 /**
@@ -150,6 +158,7 @@ async function baselineNewArtifacts(now: number): Promise<PhoneWatchResult["base
         FROM contacts c
         WHERE c.org_id = ${a.org_id} AND c.brand_id = ${a.brand_id} AND c.phone_e164 IS NOT NULL
           AND coalesce(c.source_upload_id, c.source_connection_id) = ${a.id}::uuid
+          AND ${notAddedByHand}
         ORDER BY c.phone_e164, c.id
         ON CONFLICT (org_id, brand_id, phone) DO NOTHING
         RETURNING id
@@ -189,6 +198,7 @@ export async function detectNewPhones(now: number = Date.now()): Promise<Pick<Ph
       AND (c.channel IS NULL OR EXISTS (
         SELECT 1 FROM conversations cv WHERE cv.contact_id = c.id AND cv.inbound_count > 0
       ))
+      AND ${notAddedByHand}
     ORDER BY c.last_rebuilt_at DESC, c.id
     LIMIT ${DETECT_BATCH}
   `);

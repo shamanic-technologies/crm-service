@@ -2425,8 +2425,9 @@ const PeopleListResponseSchema = registry.register(
 const TimelineItemSchema = z
   .object({
     at: z.string().nullable().openapi({ description: "When it was sent / happened. Null = the source gave no date; undated items sort last." }),
-    source: z.enum([...PEOPLE_SOURCES, "csv"]).openapi({
-      description: "A people source, or `csv` for the `added_to_crm` event of a contact imported from an uploaded file (CSV is merge evidence, never a source of people).",
+    source: PeopleSourceSchema.openapi({
+      description:
+        "A people source. `csv` = the `added_to_crm` event of a contact imported from an uploaded file (channel `file`) or added by hand (channel `manual`); a contact added by hand is a person (source `csv`), a file row is merge evidence only.",
     }),
     channel: z.string().openapi({ example: "email" }),
     kind: z.enum(["message", "event"]),

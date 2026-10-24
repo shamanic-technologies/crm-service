@@ -6,6 +6,7 @@ import { eq, sql } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
 import {
   contacts,
+  contactRowsRaw,
   contactUploads,
   conversations,
   ghlConnections,
@@ -1381,6 +1382,115 @@ describe.skipIf(!RUN)("person layer", () => {
       expect((await merge({ brandId: BRAND, personIds: [emailId] })).status).toBe(400);
       expect((await undo("bbbbbbbb-1111-4111-8111-00000000dead")).status).toBe(404);
       expect((await listMergesReq()).body.merges).toEqual([]);
+    });
+  });
+
+  describe("contacts added by hand (MANUAL-CONTACT-IS-A-PERSON-1024)", () => {
+    const H = (r: request.Test) => r.set("x-api-key", API_KEY).set("x-org-id", ORG).set("x-user-id", USER);
+    async function buildAfterKick() {
+      const { scope } = await ensureScope(ORG, BRAND, USER);
+      for (let i = 0; i < 100; i++) {
+        const r = await runScopeBuild(scope);
+        expect(r.ok).toBe(true);
+        if (!r.skipped) return;
+        await new Promise((ok) => setTimeout(ok, 20));
+      }
+      throw new Error("the kicked build never finished");
+    }
+
+    /** Dana added by hand (email + phone + company), a file row nobody else holds, and a WhatsApp writer (phone only). */
+    async function seedManual() {
+      await seedLocalSources();
+      const [manual] = await db
+        .insert(contactUploads)
+        .values({ orgId: ORG, brandId: BRAND, filename: "Contacts added one by one", contentHash: `manual:${BRAND}`, columnHeaders: [], runId: "run-m", kind: "manual", status: "promoted", uploadedAt: new Date("2026-10-20T08:00:00Z") })
+        .returning();
+      const [raw] = await db
+        .insert(contactRowsRaw)
+        .values({ orgId: ORG, brandId: BRAND, uploadId: manual.id, rowNumber: 2, payload: { email: "dana@staff-test.distribute.you" }, fetchedAt: new Date("2026-10-24T12:53:05Z") })
+        .returning();
+      const [dana] = await db
+        .insert(contacts)
+        .values({
+          orgId: ORG, brandId: BRAND, source: "csv", primaryEmail: "dana@staff-test.distribute.you", phoneE164: "+33699990000",
+          fullName: "Dana Testlahoud", companyName: "Staff Test Co", companyDomain: "staff-test.distribute.you", rawAttributes: {},
+          sourceUploadId: manual.id, sourceRowId: raw.id,
+        })
+        .returning();
+      const [file] = await db
+        .insert(contactUploads)
+        .values({ orgId: ORG, brandId: BRAND, filename: "prospects.csv", contentHash: "h-file-only", columnHeaders: ["email"], runId: "run-f", status: "promoted" })
+        .returning();
+      await db.insert(contacts).values({ orgId: ORG, brandId: BRAND, source: "csv", primaryEmail: "erin@staff-test.distribute.you", fullName: "Erin Fileonly", rawAttributes: {}, sourceUploadId: file.id });
+      const [mx] = await db.select().from(matrixConnections);
+      const [visitor] = await db
+        .insert(contacts)
+        .values({ orgId: ORG, brandId: BRAND, source: "matrix", channel: "whatsapp", channelHandle: "@whatsapp_33688880000:hs", phoneE164: "+33688880000", rawAttributes: {}, sourceConnectionId: mx.id })
+        .returning();
+      await db.insert(conversations).values({
+        orgId: ORG, brandId: BRAND, connectionId: mx.id, contactId: visitor.id, channel: "whatsapp", roomId: "!visitor",
+        firstMessageAt: new Date("2026-10-24T09:28:00Z"), lastMessageAt: new Date("2026-10-24T09:29:00Z"),
+        messageCount: 1, inboundCount: 1, outboundCount: 0, lastEventId: "$v1",
+      });
+      return { dana, manual };
+    }
+
+    it("is a person of the brand: listed with its tag, found by name, phone and company; a FILE row is not", async () => {
+      const { dana, manual } = await seedManual();
+      const summary = await buildNow();
+
+      const rows = await db.select().from(people);
+      const person = rows.find((p) => p.personKey === "email:dana@staff-test.distribute.you");
+      expect(person).toMatchObject({ sources: ["csv"], displayName: "Dana Testlahoud", company: "Staff Test Co" });
+      expect(person!.identityKeys).toEqual(["email:dana@staff-test.distribute.you", "phone:+33699990000"]);
+      expect(person!.lastActivityAt?.toISOString()).toBe("2026-10-24T12:53:05.000Z");
+      // A file row nobody else holds stays merge evidence: nobody.
+      expect(rows.some((p) => (p.emails as string[]).includes("erin@staff-test.distribute.you"))).toBe(false);
+      expect(summary.sources.find((s) => s.source === "csv")).toMatchObject({ status: "ok", presences: 1, sourceCount: 1 });
+
+      const search = (q: string) => H(request(app()).get(`/orgs/people?brandId=${BRAND}&q=${encodeURIComponent(q)}`));
+      for (const q of ["testlahoud", "dana@staff-test", "699 990", "staff test co"]) {
+        const res = await search(q);
+        expect(res.status).toBe(200);
+        expect(res.body.people.map((p: { personKey: string }) => p.personKey)).toEqual(["email:dana@staff-test.distribute.you"]);
+      }
+      const listed = (await search("testlahoud")).body.people[0];
+      expect(listed.connectionTags.map((t: { tag: string }) => t.tag)).toEqual(["professional_to_brand"]);
+      expect(listed.sources).toEqual(["csv"]);
+
+      // Its thread: the add, dated by the client's statement, never by the list's creation.
+      const thread = await H(request(app()).get(`/orgs/people/timeline?brandId=${BRAND}&personId=${person!.personId}`));
+      expect(thread.status).toBe(200);
+      expect(thread.body.items).toEqual([
+        expect.objectContaining({
+          at: "2026-10-24T12:53:05.000Z",
+          source: "csv",
+          channel: "manual",
+          kind: "event",
+          ref: { contactId: dana.id, uploadId: manual.id },
+          event: { step: "added_to_crm", dateBasis: "added_at", detail: { origin: "manual", uploadId: manual.id, filename: "Contacts added one by one" } },
+        }),
+      ]);
+      expect(thread.body.sources.find((s: { source: string }) => s.source === "csv")).toMatchObject({ status: "ok", items: 1 });
+    });
+
+    it("merges with another person through the stated merge: one person holding the email, the phone and the other's thread", async () => {
+      await seedManual();
+      await buildNow();
+      const before = await db.select().from(people);
+      const danaId = before.find((p) => p.personKey === "email:dana@staff-test.distribute.you")!.personId!;
+      const visitorId = before.find((p) => p.personKey === "phone:+33688880000")!.personId!;
+
+      const res = await H(request(app()).post("/orgs/people/merges")).send({ brandId: BRAND, personIds: [visitorId, danaId], reason: "the visitor is the contact added by hand" });
+      expect(res.status).toBe(201);
+      await buildAfterKick();
+
+      const after = await db.select().from(people).where(sql`${people.identityKeys} @> '["phone:+33688880000"]'::jsonb`);
+      expect(after).toHaveLength(1);
+      expect(after[0]).toMatchObject({ personKey: "email:dana@staff-test.distribute.you", sources: ["matrix", "csv"] });
+      expect(after[0].emails).toEqual(["dana@staff-test.distribute.you"]);
+      expect([...(after[0].phones as string[])].sort()).toEqual(["+33688880000", "+33699990000"]);
+      expect([danaId, visitorId]).toContain(after[0].personId);
     });
   });
 

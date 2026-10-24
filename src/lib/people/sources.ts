@@ -821,6 +821,64 @@ export async function readTransactional(orgId: string, brandId: string): Promise
   return { ...base, status: "ok", presences: [], sourceCount: n, error: null };
 }
 
+// ─── crm-service silver: contacts the client added one by one ──────────────
+
+/**
+ * MANUAL-CONTACT-IS-A-PERSON-1024 (owner 2026-10-24): a contact the client added by hand (`POST /orgs/contacts`, the
+ * brand's ONE `contact_uploads` row of kind `manual`, lib/contacts/manual.ts) is a person of the brand: the client
+ * said "this person matters to my business". Before, every CSV contact was merge evidence only, so a person added
+ * by hand appeared nowhere (no search hit, no Unibox row, nothing to merge an anonymous visitor into).
+ * A contact of an uploaded FILE stays evidence (a list of people to reach, not people the brand deals with).
+ * The add is OUR action: its date is the activity span (when the client stated it), never an act of theirs.
+ * `not_connected` = the brand never added anyone by hand.
+ */
+export async function readManualContacts(orgId: string, brandId: string): Promise<SourceRead> {
+  const base = {
+    source: "csv" as const,
+    scope: "brand" as const,
+    sourceCountBasis: "crm-service contacts the client added one by one (uploaded files are merge evidence, not people)",
+  };
+  const rows = (await db.execute(sql`
+    SELECT u.id AS upload_id, c.id, c.full_name, c.first_name, c.last_name, c.primary_email, c.phone_e164,
+           c.company_name, c.linkedin_url, coalesce(r.fetched_at, u.uploaded_at) AS added_at
+    FROM contact_uploads u
+    LEFT JOIN contacts c ON c.source_upload_id = u.id AND c.source = 'csv'
+    LEFT JOIN contact_rows_raw r ON r.id = c.source_row_id
+    WHERE u.org_id = ${orgId} AND u.brand_id = ${brandId} AND u.kind = 'manual'
+    ORDER BY c.id
+  `)) as unknown as {
+    upload_id: string;
+    id: string | null;
+    full_name: string | null;
+    first_name: string | null;
+    last_name: string | null;
+    primary_email: string | null;
+    phone_e164: string | null;
+    company_name: string | null;
+    linkedin_url: string | null;
+    added_at: string | Date | null;
+  }[];
+  if (rows.length === 0) return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
+  const presences: Presence[] = rows
+    .filter((r): r is typeof r & { id: string } => r.id !== null)
+    .map((r) => ({
+      source: "csv",
+      sourceRef: r.id,
+      displayName: r.full_name?.trim() || [r.first_name, r.last_name].filter((v) => v?.trim()).join(" ").trim() || null,
+      company: r.company_name?.trim() || null,
+      emails: r.primary_email ? [r.primary_email] : [],
+      phones: r.phone_e164 ? [r.phone_e164] : [],
+      firstActivityAt: iso(r.added_at),
+      lastActivityAt: iso(r.added_at),
+      messageCount: null,
+      inboundCount: null,
+      outboundCount: null,
+      // The company domain the client typed is organization evidence through `contactWebsites` (organizations.ts).
+      detail: { contactId: r.id, uploadId: r.upload_id, origin: "manual", linkedinUrl: r.linkedin_url },
+    }));
+  return { ...base, status: "ok", presences, sourceCount: presences.length, error: null };
+}
+
 // ─── merge evidence ─────────────────────────────────────────────────────────
 
 /**
