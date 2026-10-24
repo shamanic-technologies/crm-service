@@ -8,6 +8,7 @@ import {
 } from "../../src/lib/reply-trigger/outcome.js";
 import { readEmailThreadForReply } from "../../src/lib/reply-trigger/email-thread.js";
 import { pickJudgeRun } from "../../src/lib/reply-trigger/outcome-backfill.js";
+import { batchBody, batchesOf } from "../../src/lib/people/lead-identified.js";
 
 const LEAD = "e9f0a1b2-5555-4555-8555-0000000000d1";
 
@@ -88,3 +89,34 @@ describe("Past positive replies, the run that judged them (COST-BACKFILL-1023-CR
   });
 });
 
+
+describe("lead_identified batches (COST-ACCOUNTING-1024)", () => {
+  const row = (i: number, runId: string, relationKey: string, at: string) => ({ id: `id${i}`, runId, relationKey, judgedAt: new Date(at) });
+
+  it("one entry per run, its subjects once, counted at its earliest judgment", () => {
+    expect(
+      batchBody([row(1, "r1", "rel:b", "2026-10-02T00:00:00Z"), row(2, "r1", "rel:a", "2026-10-01T00:00:00Z"), row(3, "r1", "rel:a", "2026-10-03T00:00:00Z")]),
+    ).toEqual([
+      {
+        runId: "r1",
+        produced: [
+          { outcomeKey: "lead_identified", subjectService: "crm-service", subjectId: "rel:a" },
+          { outcomeKey: "lead_identified", subjectService: "crm-service", subjectId: "rel:b" },
+        ],
+        occurredAt: "2026-10-01T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("never more than 500 runs or 1000 occurrences in one call, a run never split", () => {
+    const many = Array.from({ length: 1200 }, (_, i) => row(i, `r${i % 600}`, `rel:${i}`, "2026-10-01T00:00:00Z"));
+    const batches = batchesOf(many);
+    for (const b of batches) {
+      expect(new Set(b.map((r) => r.runId)).size).toBeLessThanOrEqual(500);
+      expect(b.length).toBeLessThanOrEqual(1000);
+    }
+    expect(batches.flat()).toHaveLength(1200);
+    const runOf = new Map<string, number>();
+    batches.forEach((b, i) => b.forEach((r) => expect(runOf.get(r.runId) ?? (runOf.set(r.runId, i), i)).toBe(i)));
+  });
+});

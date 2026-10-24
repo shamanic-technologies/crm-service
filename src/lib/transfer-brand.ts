@@ -67,6 +67,7 @@ import {
   personMerges,
   formTriggerReports,
   formOfferMappings,
+  leadIdentifiedDeclarations,
   replyTriggerReports,
   humanLinkStatements,
   humanFactStatements,
@@ -140,6 +141,8 @@ export const TRANSFER_TABLES: PgTable[] = [
   formOfferMappings,
   // Answers in campaign-opened threads reported as `positive_reply_received`.
   replyTriggerReports,
+  // The lead_identified occurrences crm-service declared (COST-ACCOUNTING-1024).
+  leadIdentifiedDeclarations,
   // What the brand's CRM stated to human-service (judgment merges, do-not-contact
   // marks). A link stated for the old org is stated again for the new one.
   humanLinkStatements,

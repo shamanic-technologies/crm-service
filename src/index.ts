@@ -31,6 +31,7 @@ import { startMatrixLiveWatch } from "./lib/matrix/sync.js";
 import { startCalendarWatch } from "./lib/calendar/feed.js";
 import { startLineWatch } from "./lib/whatsapp/line-health.js";
 import { startOutcomeDeclarations } from "./lib/reply-trigger/outcome.js";
+import { startLeadIdentifiedDeclarations } from "./lib/people/lead-identified.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -130,6 +131,8 @@ if (process.env.NODE_ENV !== "test") {
         startLineWatch();
         // Declares each reply judged positive as a Positive reply on its judge run at runs-service (cost ledger).
         startOutcomeDeclarations();
+        // Declares each lead the registry's Jev identified (a conversation tagged professional_to_brand) as lead_identified.
+        startLeadIdentifiedDeclarations();
       })
       .catch((err) => {
         console.error("[crm-service] Migration failed:", err);

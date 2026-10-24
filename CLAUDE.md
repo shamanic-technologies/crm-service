@@ -137,13 +137,21 @@ loop (every 60 s, `OUTCOME_DECLARATIONS=off` stops it) resolves + declares at ru
 to 1 h), 7 days without a lead = `no_lead`, runs-service 400/404/409 = `refused` (kept, logged). One reply declared
 once fleet-wide (settled with instantly-service 2026-10-23): instantly owns every reply it files onto a cold sequence,
 any mailbox, so a Gmail burst whose person holds an `instantly` presence = `not_ours`. Jev down (reported, not judged),
-the Copilot's line (no Jev), a recorded sender verdict: nothing declared. No other crm run produces a catalogue outcome.
+the Copilot's line (no Jev), a recorded sender verdict: nothing declared.
 **Past replies (COST-BACKFILL-1023-CRM, `outcome-backfill.ts`, `POST /internal/outcomes/backfill {dryRun?}`)**: a burst
 judged positive before the judge run existed is matched to the ONE detection run of its org (`matrix.live|matrix.sync` /
 `reply-trigger.detect-gmail`, subtree cost > 0) started in [detected_at − 2 s, + 15 s] (runs-service `GET /v1/runs`; the pass
 opened its run lazily on that burst's Jev call), else `unmatched`; `wrote_before` from our mirror; the same loop declares it
-with `occurredAt: run_started_at` (`outcome_occurred_at`). Everything else crm spends (registry Jev, thread reading,
-transcription, other sessions' probes parented on crm runs) is a SUPPORT function: undeclared on purpose.
+with `occurredAt: run_started_at` (`outcome_occurred_at`).
+**`lead_identified` (COST-ACCOUNTING-1024, `lib/people/lead-identified.ts`, owner 2026-10-24)**: the registry's Jev tagging a
+conversation `professional_to_brand` IS production: the verdict's run (`conversation_verdicts.run_id`: people.build or the
+Matrix gate, whole spend) PRODUCES `lead_identified`, subject = OUR relation (`subjectService: "crm-service"`, relation key).
+Never `lead_found` (the serve's, lead-service consumes ours). Ledger `lead_identified_declarations`: one row per conversation
+first seen (a re-judgment adds none), one occurrence per relation (else `duplicate_subject`); loop every 5 min (+90 s boot,
+`LEAD_IDENTIFIED_DECLARATIONS=off`), runs-service batch door, `occurredAt` = `judged_at`: ONE path for past and future; a 422
+run = `refused`. `POST /internal/outcomes/lead-identified` = a pass now. Not declared: tags from the brand's own tools ($0),
+group tags, earlier runs of a re-judged thread (only the latest verdict run is recorded). Other sessions' probes parented
+on crm runs are not crm's spend.
 
 Everything else GoHighLevel sends arrives already structured, so deriving it is
 pure code — no model, no metered call, no catalogue row.

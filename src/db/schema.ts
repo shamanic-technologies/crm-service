@@ -2747,3 +2747,36 @@ export const whatsappLineDays = pgTable(
   (table) => [uniqueIndex("whatsapp_line_days_uq").on(table.orgId, table.brandId, table.phone, table.day)],
 );
 export type WhatsappLineDay = typeof whatsappLineDays.$inferSelect;
+
+/**
+ * COST-ACCOUNTING-1024 (owner 2026-10-24, lib/people/lead-identified.ts): crm-service PRODUCES `lead_identified` when
+ * its Jev judgment tags a conversation `professional_to_brand` (this human x company is a lead of the brand). One row
+ * per judged CONVERSATION, first seen once (a re-judgment never adds one); the subject is the crm relation holding it
+ * (human x company), declared once per relation. Status: pending | declared | duplicate_subject | refused.
+ */
+export const leadIdentifiedDeclarations = pgTable(
+  "lead_identified_declarations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    conversationKey: text("conversation_key").notNull(),
+    relationKey: text("relation_key").notNull(),
+    // The run whose Jev call judged the conversation (`conversation_verdicts.run_id`) and when.
+    runId: text("run_id").notNull(),
+    judgedAt: timestamp("judged_at", { withTimezone: true }).notNull(),
+    status: text("status").notNull(),
+    reason: text("reason"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    nextAt: timestamp("next_at", { withTimezone: true }),
+    declaredAt: timestamp("declared_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("lead_identified_declarations_conversation_uq").on(table.orgId, table.brandId, table.conversationKey),
+    index("lead_identified_declarations_relation_idx").on(table.orgId, table.brandId, table.relationKey),
+    index("lead_identified_declarations_due_idx").on(table.nextAt).where(sql`${table.status} = 'pending'`),
+  ],
+);
+export type LeadIdentifiedDeclaration = typeof leadIdentifiedDeclarations.$inferSelect;

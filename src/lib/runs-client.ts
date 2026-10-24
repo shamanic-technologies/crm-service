@@ -275,3 +275,48 @@ export async function listOrgRuns(
   }
   return answer.runs;
 }
+
+export interface BatchRunOutcomes {
+  runId: string;
+  produced?: OutcomeOccurrence[];
+  consumed?: OutcomeOccurrence[];
+  /** `run_started_at` or an ISO instant between the run's start and now (runs-service backfill semantics). */
+  occurredAt?: string;
+}
+
+export interface BatchOutcomesAnswer {
+  recordedCount: number;
+  alreadyRecordedCount: number;
+  runs: Array<{ runId: string; recordedCount: number; alreadyRecordedCount: number }>;
+}
+
+/** runs-service's per-run refusal of a batch (422 `invalid_runs`): nothing of the batch was written. */
+export interface InvalidRun {
+  runId: string;
+  reason: string;
+  message?: string;
+}
+
+/**
+ * Declare the outcomes of up to 500 runs / 1000 occurrences in one call (runs-service
+ * `POST /v1/platform-runs/outcomes/batch`, all or nothing, idempotent). A 422 names the invalid
+ * runs (`invalidRunsOf`), nothing written.
+ */
+export async function declareOutcomesBatch(runs: BatchRunOutcomes[]): Promise<BatchOutcomesAnswer> {
+  return runsRequest<BatchOutcomesAnswer>("/v1/platform-runs/outcomes/batch", {
+    method: "POST",
+    serviceNameHeader: "crm-service",
+    body: { runs },
+  });
+}
+
+/** PURE: the invalid runs a 422 `invalid_runs` answer names, or null when the error is something else. */
+export function invalidRunsOf(err: unknown): InvalidRun[] | null {
+  if (!(err instanceof RunsServiceError) || err.kind !== "http" || err.status !== 422 || !err.body) return null;
+  try {
+    const parsed = JSON.parse(err.body) as { error?: string; details?: { invalid?: InvalidRun[] } };
+    return parsed.error === "invalid_runs" && Array.isArray(parsed.details?.invalid) ? parsed.details!.invalid! : null;
+  } catch {
+    return null;
+  }
+}
