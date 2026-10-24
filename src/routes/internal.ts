@@ -12,6 +12,7 @@ import { pgErrorOf } from "../lib/pg-error.js";
 import { backfillPositiveReplies } from "../lib/reply-trigger/outcome-backfill.js";
 import { runLeadIdentifiedPass } from "../lib/people/lead-identified.js";
 import { runMessageSentPass } from "../lib/whatsapp/message-sent.js";
+import { runFormSubmittedPass } from "../lib/gohighlevel/form-submitted.js";
 
 const router = Router();
 
@@ -152,6 +153,16 @@ router.post("/internal/outcomes/message-sent", apiKeyAuth, async (_req, res) => 
     res.json(await runMessageSentPass());
   } catch (err) {
     console.error("[crm-service][message-sent] manual pass failed:", err);
+    res.status(502).json({ type: "upstream", error: (err as Error).message });
+  }
+});
+
+/** CRM-FORM-SUBMITTED-LEDGER-1025: one form_submitted pass now (record the CRM form submissions not recorded yet, declare the due ones). */
+router.post("/internal/outcomes/form-submitted", apiKeyAuth, async (_req, res) => {
+  try {
+    res.json(await runFormSubmittedPass());
+  } catch (err) {
+    console.error("[crm-service][form-submitted] manual pass failed:", err);
     res.status(502).json({ type: "upstream", error: (err as Error).message });
   }
 });

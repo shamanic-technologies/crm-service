@@ -158,6 +158,14 @@ WhatsApp message a CAMPAIGN sent (`whatsapp_sends.campaign_id` set, status sent)
 (`whatsapp.send`, subject = lead-service lead), one per run (bubbles = one message), ledger `message_sent_declarations`,
 loop every 60 s (`MESSAGE_SENT_DECLARATIONS=off`), `occurredAt` = `sent_at`: ONE path past and future;
 `POST /internal/outcomes/message-sent` = a pass now. A send with no campaign (Copilot answers, probes) states nothing.
+**`form_submitted` (CRM-FORM-SUBMITTED-LEDGER-1025, `lib/gohighlevel/form-submitted.ts`)**: a CRM form submission we hold
+(`ghl_form_submissions`, dated) is OUR fact, so crm-service PRODUCES its `form_submitted` (workflow-service's reactive runs
+consume it; undeclared = unknown provenance, ledger never reconciles). Subject = the lead-service lead (resolve by the
+submission's own email / phone, else its mirrored contact's), on a spend-free run of its own per submission
+(`gohighlevel.form-submitted`, opened once the lead is known, stored BEFORE declaring: a retry names the same run),
+`occurredAt` = `submitted_at` (before the run's start: allowed on a spend-free run). Calendar booking forms `skipped`. Not a
+lead / no key = asked again (backoff to 1 h), never given up, never guessed. Ledger `form_submitted_declarations`, loop every
+5 min (`FORM_SUBMITTED_DECLARATIONS=off`), ONE path past and future; `POST /internal/outcomes/form-submitted` = a pass now.
 Spend that produces no outcome by design sits on its OWN child run marked support at creation, never mixed with a
 judging run: Matrix thread reading `matrix.lead-reading`, GoHighLevel stage / label meanings `gohighlevel.label-meanings`,
 column typing `contacts.column-typing`, `calendar.judge` (all `product_feature`), voice notes on the Copilot's line

@@ -194,6 +194,9 @@ async function seedBrand(org: string, brand: string, tag: string) {
     INSERT INTO message_sent_declarations (org_id, brand_id, run_id, send_id, campaign_id, sent_at, status)
     VALUES (${org}, ${brand}, gen_random_uuid()::text, gen_random_uuid(), gen_random_uuid()::text, now(), 'declared')`);
   await db.execute(sql`
+    INSERT INTO form_submitted_declarations (org_id, brand_id, source, submission_external_id, submitted_at, status)
+    VALUES (${org}, ${brand}, 'gohighlevel', gen_random_uuid()::text, now(), 'declared')`);
+  await db.execute(sql`
     INSERT INTO whatsapp_sends (org_id, brand_id, idempotency_key, email, phone, text, status)
     VALUES (${org}, ${brand}, gen_random_uuid()::text, 'a@b.co', '+33600000001', 'hi', 'sent')`);
 }
