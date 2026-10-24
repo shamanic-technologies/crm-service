@@ -10,6 +10,7 @@ import { transferBrand } from "../lib/transfer-brand.js";
 import { TransferBrandRequestSchema } from "../schemas.js";
 import { pgErrorOf } from "../lib/pg-error.js";
 import { backfillPositiveReplies } from "../lib/reply-trigger/outcome-backfill.js";
+import { runLeadIdentifiedPass } from "../lib/people/lead-identified.js";
 
 const router = Router();
 
@@ -130,6 +131,16 @@ router.post("/internal/outcomes/backfill", apiKeyAuth, async (req, res) => {
     res.json(await backfillPositiveReplies({ dryRun: parsed.data.dryRun }));
   } catch (err) {
     console.error("[crm-service][reply-outcome-backfill] pass failed:", err);
+    res.status(502).json({ type: "upstream", error: (err as Error).message });
+  }
+});
+
+/** COST-ACCOUNTING-1024: one lead_identified pass now (record new identifications, declare the due ones). */
+router.post("/internal/outcomes/lead-identified", apiKeyAuth, async (_req, res) => {
+  try {
+    res.json(await runLeadIdentifiedPass());
+  } catch (err) {
+    console.error("[crm-service][lead-identified] manual pass failed:", err);
     res.status(502).json({ type: "upstream", error: (err as Error).message });
   }
 });

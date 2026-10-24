@@ -3807,6 +3807,15 @@ registry.registerPath({
 
 registry.registerPath({
   method: "post",
+  path: "/internal/outcomes/lead-identified",
+  summary: "Declare the leads the registry identified as lead_identified (COST-ACCOUNTING-1024)",
+  description:
+    "One pass of the in-process loop (every 5 min): every crm relation (human x company) tagged professional_to_brand by a judged conversation, never recorded, is recorded (first conversation of a relation = pending, others = duplicate_subject), then every pending one is declared at runs-service as `lead_identified` produced (subject crm-service, the relation key) on the run whose Jev call judged it, with occurredAt = the judgment time. The same path covers the past and the future. Idempotent.",
+  responses: { 200: { description: "recorded, duplicates, due, declared, alreadyRecorded, refused, failed" }, 502: { description: "The pass failed" } },
+});
+
+registry.registerPath({
+  method: "post",
   path: "/internal/outcomes/backfill",
   summary: "Declare the past positive replies on the runs that judged them (COST-BACKFILL-1023-CRM)",
   description:
