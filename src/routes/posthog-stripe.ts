@@ -409,16 +409,21 @@ router.delete(
 
 // ─── /internal sync + rebuild (cron, staff) ──────────────────────────────────
 
-const internalBody = z.object({ connectionId: uuid.optional() });
+const internalBody = z.object({
+  connectionId: uuid.optional(),
+  // POSTHOG-SCANNER-VISIT-1025: re-read activity from this instant on (a fingerprint added to visits reaches
+  // the rows mirrored before it). Ignored by sources that do not take it.
+  rereadSince: z.string().datetime().optional(),
+});
 
 export function internalTrigger(
   taskName: string,
   log: string,
-  work: (connectionId?: string) => Promise<{ results: unknown[]; failures: unknown[] }>,
+  work: (connectionId?: string, rereadSince?: Date) => Promise<{ results: unknown[]; failures: unknown[] }>,
 ) {
   return async (req: AuthenticatedRequest, res: Response) => {
     const parsed = internalBody.safeParse(req.body ?? {});
-    if (!parsed.success) return res.status(400).json({ type: "validation", error: "connectionId must be a uuid" });
+    if (!parsed.success) return res.status(400).json({ type: "validation", error: "connectionId must be a uuid, rereadSince an ISO datetime" });
     let platformRunId: string;
     try {
       platformRunId = (await createPlatformRun({ serviceName: SERVICE_NAME, taskName })).id;
@@ -428,7 +433,7 @@ export function internalTrigger(
     res.status(202).json({ status: "accepted", platformRunId });
     setImmediate(async () => {
       try {
-        const result = await work(parsed.data.connectionId);
+        const result = await work(parsed.data.connectionId, parsed.data.rereadSince ? new Date(parsed.data.rereadSince) : undefined);
         console.log(`[crm-service][${log}] pass: ${result.results.length} ok, ${result.failures.length} failed`);
         await updatePlatformRun(platformRunId, result.failures.length ? "failed" : "completed", SERVICE_NAME);
       } catch (err) {

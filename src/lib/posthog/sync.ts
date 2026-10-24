@@ -279,7 +279,7 @@ export function targetOf(conn: Pick<PosthogConnection, "region" | "projectId">, 
   return { region: conn.region as PosthogRegion, projectId: conn.projectId, apiKey };
 }
 
-export async function syncPosthogConnection(conn: PosthogConnection): Promise<PosthogSyncResult> {
+export async function syncPosthogConnection(conn: PosthogConnection, rereadSince?: Date): Promise<PosthogSyncResult> {
   const startedAt = new Date();
   const run = await createRun({
     orgId: conn.orgId,
@@ -296,9 +296,11 @@ export async function syncPosthogConnection(conn: PosthogConnection): Promise<Po
       runId: run.id,
     });
     const target = targetOf(conn, apiKey);
-    const since = conn.syncedThrough
+    const windowed = conn.syncedThrough
       ? new Date(conn.syncedThrough.getTime() - POSTHOG_LATE_INGESTION_MS)
       : FIRST_PASS_SINCE;
+    // A re-read asked from an earlier instant (POSTHOG-SCANNER-VISIT-1025 backfill) widens the window, never narrows it.
+    const since = rereadSince && rereadSince < windowed ? rereadSince : windowed;
 
     const before = new Set(
       (
@@ -402,7 +404,7 @@ export async function syncPosthogConnection(conn: PosthogConnection): Promise<Po
 }
 
 /** Every active connection (or one). Failures are recorded AND returned, never swallowed. */
-export async function runPosthogSyncPass(connectionId?: string) {
+export async function runPosthogSyncPass(connectionId?: string, rereadSince?: Date) {
   const where = connectionId
     ? eq(posthogConnections.id, connectionId)
     : inArray(posthogConnections.status, ["active", "error"]);
@@ -412,7 +414,7 @@ export async function runPosthogSyncPass(connectionId?: string) {
   for (const conn of connections) {
     if (conn.status === "paused") continue;
     try {
-      results.push(await syncPosthogConnection(conn));
+      results.push(await syncPosthogConnection(conn, rereadSince));
     } catch (err) {
       console.error(`[crm-service][posthog] sync failed for connection ${conn.id}:`, err);
       failures.push({ connectionId: conn.id, error: (err as Error).message });
