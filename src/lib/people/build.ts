@@ -49,6 +49,7 @@ import {
   readApiCalls,
   readBilling,
   readTransactional,
+  readManualContacts,
   isGroupOnly,
   withoutOwnAddresses,
   type EvidenceRead,
@@ -111,6 +112,8 @@ export const standingWalkMin = () => Number(process.env.PEOPLE_STANDING_WALK_MIN
 const NAME_PRECEDENCE: (PeopleSource | Evidence["kind"])[] = [
   "gohighlevel",
   "gohighlevel_contact",
+  // What the client typed for a contact added by hand (MANUAL-CONTACT-IS-A-PERSON-1024).
+  "csv",
   "lead_pairing",
   "google_contact",
   "stripe",
@@ -377,7 +380,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     return { status: "failed" as const, error: (err as Error).message };
   });
 
-  const [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, rawClerk, rawCopilot, rawApi, rawBilling, rawTransactional, own] = await Promise.all([
+  const [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, rawClerk, rawCopilot, rawApi, rawBilling, rawTransactional, rawManual, own] = await Promise.all([
     readGmail(identity),
     readInstantly(identity),
     readMatrix(scope.orgId, scope.brandId),
@@ -389,9 +392,10 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     readApiCalls(scope.orgId, scope.brandId),
     readBilling(scope.orgId, scope.brandId),
     readTransactional(scope.orgId, scope.brandId),
+    readManualContacts(scope.orgId, scope.brandId),
     readOwnAddresses(identity),
   ]);
-  const filtered = [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, rawClerk, rawCopilot, rawApi, rawBilling, rawTransactional].map((r) => withoutOwnAddresses(r, own));
+  const filtered = [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, rawClerk, rawCopilot, rawApi, rawBilling, rawTransactional, rawManual].map((r) => withoutOwnAddresses(r, own));
   const reads: SourceRead[] = filtered.map((f) => f.read);
   const [gmail, , , gohighlevel, , stripe] = reads;
 

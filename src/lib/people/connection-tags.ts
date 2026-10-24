@@ -83,7 +83,8 @@ export interface PersonConnectionTag {
 }
 
 /** Sources that are the brand's own tools: their records are the brand's business. */
-export const BRAND_TOOL_SOURCES = new Set(["instantly", "gohighlevel", "posthog", "stripe", "clerk", "copilot", "api"]);
+// `csv` = a contact the client added one by one (MANUAL-CONTACT-IS-A-PERSON-1024): the brand's own list.
+export const BRAND_TOOL_SOURCES = new Set(["instantly", "gohighlevel", "posthog", "stripe", "clerk", "copilot", "api", "csv"]);
 /** Merge evidence that is a record of the brand's business. */
 export const BRAND_TOOL_EVIDENCE = new Set(["gohighlevel_contact", "csv_contact", "stripe_customer", "lead_pairing"]);
 

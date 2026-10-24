@@ -29,7 +29,12 @@
  *    no country, so it cannot be compared with anything and is not a key.
  */
 
-export const PEOPLE_SOURCES = ["gmail", "instantly", "matrix", "gohighlevel", "posthog", "stripe", "clerk", "copilot", "api", "billing", "transactional"] as const;
+/**
+ * `csv` = the contacts a client added ONE BY ONE (the brand's `manual` list, MANUAL-CONTACT-IS-A-PERSON-1024): the
+ * client stating "this person matters to my business". A contact of an uploaded FILE is no presence (merge evidence
+ * and its `added_to_crm` date only): a file is a list of people to reach, they enter once they act or we write.
+ */
+export const PEOPLE_SOURCES = ["gmail", "instantly", "matrix", "gohighlevel", "posthog", "stripe", "clerk", "copilot", "api", "billing", "transactional", "csv"] as const;
 export type PeopleSource = (typeof PEOPLE_SOURCES)[number];
 
 export function normalizeEmail(raw: string | null | undefined): string | null {

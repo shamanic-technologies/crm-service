@@ -411,7 +411,7 @@ companyDomain?, jobTitle?, linkedinUrl?, note?}` (x-user-id) → 201 `{contactId
 known|unknown|not_found, contact}` (200 = already held). Needs an email, a LinkedIn, or a name + company
 (`not_enough_to_find`). Free: no lookup, no model.
 - Each brand holds ONE `contact_uploads` row of `kind = 'manual'` ("Contacts added one by one"): the person IS a CSV
-  contact (`sendable_contacts`, serve, file toggle, facts, people evidence all unchanged). Bronze append-only: every
+  contact (`sendable_contacts`, serve, file toggle, facts unchanged) AND a person of the brand (people source `csv`). Bronze append-only: every
   add is a new raw row; silver = one contact per cluster of rows sharing an email / LinkedIn (`deriveManualRecords`,
   anchor = first row, id stable, later values win, notes all kept), re-derived in place (`rederiveManual`).
 - A person already in a FILE of the brand (same email / LinkedIn) is taken over: their file contact is copied into
@@ -940,9 +940,11 @@ never writes to them (no write path to any outside tool, by design).
 | `instantly` | every lead our cold email WROTE to (at least one real send), answered or not (owner 2026-10-09); replied/clicked read only off its `engaged` rows | instantly-service `GET /orgs/written-to-leads?brand_id=` (cursor-paged) |
 | `matrix` | every Matrix conversation of the brand | own silver |
 | `gohighlevel` | every mirrored GoHighLevel contact | own silver |
+| `csv` | every contact the client ADDED BY HAND (the brand's `manual` list, MANUAL-CONTACT-IS-A-PERSON-1024: "this person matters to my business"); tag `professional_to_brand`, activity = the add date (`contact_rows_raw.fetched_at`), thread entry `added_to_crm` channel `manual` | own silver (`readManualContacts`) |
 
-CSV contacts are NOT people (nobody talked to them yet); a CSV row holding an
-email and a phone is still merge evidence. Every CSV row with an email or a phone
+Contacts of an uploaded FILE are NOT people (a list to reach, nobody talked to them yet); a CSV row holding an
+email and a phone is still merge evidence. A contact added by hand IS one (`csv` above; its `company_domain` is
+organization evidence through `contactWebsites`). Every CSV row with an email or a phone
 IS stated to human-service (stated last, HUMAN-ID-COVERAGE-1017), so its
 standalone `added_to_crm` fact carries its humanId (`PersonIndex.setHumans`
 reads `human_keys`; a fact emitted before is re-stated `human_identified`). A record of the brand's
@@ -1372,7 +1374,9 @@ kind `reported`, reportedBy crm-service, fromStep `lead_found`), within ~1 min. 
 - **Never history**: every source ARTIFACT (promoted CSV upload, connection synced once) is baselined at the first pass
   that sees it loaded (`phone_watch_artifacts`): every number it holds then = `skipped / before_watch`. So connecting a CRM
   or importing a file never fires on its backlog; an artifact still on its first sync waits. Skips = history
-  (`before_watch`) and `invalid_number` only. NO who filter (WA-GIVEN-PURE-FACT-1017, owner 2026-10-17): staff, the
+  (`before_watch`) and `invalid_number` only. A number the CLIENT typed on a contact added by hand (`manual` list) is
+  never detected nor recorded (our statement, not their act: MANUAL-CONTACT-IS-A-PERSON-1024; before, every manual add
+  after the brand's first fired), so the person giving it later is reported. NO who filter (WA-GIVEN-PURE-FACT-1017, owner 2026-10-17): staff, the
   brand's own team AND a number learned because the person wrote on a bridged chat (WhatsApp / LinkedIn) ARE reported;
   the answering pipe's strategy skips them (`POST /orgs/people/team-membership`, the person's timeline). A Matrix
   contact counts once it holds a one-to-one conversation with an inbound message (a silent group member gave nothing).

@@ -273,6 +273,28 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     expect(campaignCalls).toHaveLength(0);
   });
 
+  it("MANUAL-CONTACT-IS-A-PERSON-1024: a number the client typed on a contact added by hand is never 'given'; the person giving it later is", async () => {
+    const [manual] = await db
+      .insert(contactUploads)
+      .values({ orgId: ORG, brandId: BRAND, filename: "Contacts added one by one", contentHash: `manual:${BRAND}`, columnHeaders: [], runId: "r", status: "promoted", kind: "manual" })
+      .returning();
+    await db.insert(contacts).values({ orgId: ORG, brandId: BRAND, source: "csv", fullName: "First Added", phoneE164: "+447911123010", rawAttributes: {}, sourceUploadId: manual.id });
+    await runPhoneWatchPass(T0);
+    // A second add, once the list is watched: the client's statement, not the person giving it.
+    await db.insert(contacts).values({ orgId: ORG, brandId: BRAND, source: "csv", fullName: "Second Added", primaryEmail: "user_hand@example.com", phoneE164: "+447911123011", rawAttributes: {}, sourceUploadId: manual.id });
+    await runPhoneWatchPass(min(1));
+    await runPhoneWatchPass(min(2));
+    expect(campaignCalls).toHaveLength(0);
+    const phones = (await reports()).map((r) => r.phone);
+    expect(phones).not.toContain("+447911123010");
+    expect(phones).not.toContain("+447911123011");
+    // The person types the same number on the brand's product: THEIR act, reported.
+    clerkUsers = [clerkUser("user_hand", "+447911123011", min(3))];
+    await runPhoneWatchPass(min(4));
+    expect(campaignCalls).toHaveLength(1);
+    expect(campaignCalls[0]).toMatchObject({ triggerId: PHONE_GIVEN_TRIGGER, item: { phone: "+447911123011", source: "clerk" } });
+  });
+
   it("campaign-service unreachable is retried with backoff; a 422 is final", async () => {
     await runPhoneWatchPass(T0);
     campaignStatus = 503;

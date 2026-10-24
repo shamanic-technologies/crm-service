@@ -51,6 +51,7 @@ import { describeKeyEvent } from "../posthog/records.js";
 import {
   contacts,
   contactUploads,
+  contactRowsRaw,
   conversations,
   creditEvents,
   matrixConnections,
@@ -93,8 +94,8 @@ export type TimelineSourceStatus = (typeof TIMELINE_SOURCE_STATUSES)[number];
 export interface TimelineItem {
   /** ISO time the message was sent / the event happened; null when the source gave none. */
   at: string | null;
-  /** `csv` only on the entry event of a contact imported from an uploaded file. */
-  source: PeopleSource | "csv";
+  /** `csv` = the entry event of a contact imported from an uploaded file or added by hand. */
+  source: PeopleSource;
   /** email | whatsapp | telegram | discord | crm | web | payment */
   channel: string;
   kind: "message" | "event";
@@ -375,9 +376,10 @@ export async function entryItems(source: keyof typeof ENTRY, presences: Presence
 }
 
 /**
- * The person imported from the brand's uploaded files: one `added_to_crm` per
- * CSV contact holding one of their addresses or phones, dated by the upload.
- * CSV contacts make nobody a person; they only say when the client imported one.
+ * The person imported from the brand's uploaded files, or added by hand: one `added_to_crm` per
+ * CSV contact holding one of their addresses or phones, dated by the upload (a contact added by
+ * hand: by the client's first statement of them, `added_at`). A FILE contact makes nobody a person;
+ * a contact added by hand is one (source `csv`, MANUAL-CONTACT-IS-A-PERSON-1024).
  */
 export async function csvEntryItems(person: Person): Promise<TimelineItem[]> {
   const emails = person.emails as string[];
@@ -389,9 +391,12 @@ export async function csvEntryItems(person: Person): Promise<TimelineItem[]> {
       uploadId: contactUploads.id,
       filename: contactUploads.filename,
       uploadedAt: contactUploads.uploadedAt,
+      kind: contactUploads.kind,
+      addedAt: contactRowsRaw.fetchedAt,
     })
     .from(contacts)
     .innerJoin(contactUploads, eq(contactUploads.id, contacts.sourceUploadId))
+    .leftJoin(contactRowsRaw, eq(contactRowsRaw.id, contacts.sourceRowId))
     .where(
       and(
         eq(contacts.orgId, person.orgId),
@@ -402,11 +407,17 @@ export async function csvEntryItems(person: Person): Promise<TimelineItem[]> {
       ),
     );
   return rows.map((r) =>
-    entryEvent("csv", "file", r.uploadedAt, { contactId: r.id, uploadId: r.uploadId }, "added_to_crm", "uploaded_at", {
-      origin: "csv_import",
-      uploadId: r.uploadId,
-      filename: r.filename,
-    }),
+    r.kind === "manual"
+      ? entryEvent("csv", "manual", r.addedAt ?? r.uploadedAt, { contactId: r.id, uploadId: r.uploadId }, "added_to_crm", "added_at", {
+          origin: "manual",
+          uploadId: r.uploadId,
+          filename: r.filename,
+        })
+      : entryEvent("csv", "file", r.uploadedAt, { contactId: r.id, uploadId: r.uploadId }, "added_to_crm", "uploaded_at", {
+          origin: "csv_import",
+          uploadId: r.uploadId,
+          filename: r.filename,
+        }),
   );
 }
 
@@ -910,13 +921,15 @@ export async function readTimeline(
     },
     opts,
   );
-  // CSV is no people source (it has no status row); its import dates ride in the thread. Read beside the sources.
-  const csvRead = csvEntryItems(person);
-  csvRead.catch(() => undefined);
+  // Every CSV contact holding one of the person's keys (a file row or one added by hand): its `added_to_crm` date.
+  const csvRead = csvEntryItems(person).then(
+    (items): SourceResult => ({ status: items.length ? "ok" : "empty", items, error: null, asked: emails }),
+    (e) => toFailed(e, emails),
+  );
   const fromStore = (pick: (t: StoredTimeline) => StoredTimeline["gmail"]) =>
     storedRead.then((t): SourceResult => pick(t)).catch((e) => toFailed(e, emails));
 
-  const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional] = await Promise.all([
+  const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional, csv] = await Promise.all([
     connected("gmail") ? fromStore((t) => t.gmail) : Promise.resolve(notConnected()),
     fromStore((t) => t.instantly),
     connected("matrix") ? matrixItems(of("matrix")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
@@ -930,8 +943,9 @@ export async function readTimeline(
     apiCallItems(person, identity, { deferAnswers: opts.paged }).catch((e) => toFailed(e, emails)),
     billingItems(person).catch((e) => toFailed(e, emails)),
     transactionalItems(person).catch((e) => toFailed(e, emails)),
+    csvRead,
   ]);
-  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional };
+  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional, csv };
   // The check itself failed: no late-join source may pose as complete (its index items are still served).
   if (lateError) {
     for (const s of LATE_JOIN_SOURCES) {
@@ -939,7 +953,6 @@ export async function readTimeline(
       bySource[s] = { ...bySource[s], status: "failed", error: bySource[s].error ? `${bySource[s].error}; ${lateError}` : lateError };
     }
   }
-  const csv = await csvRead;
 
   // Background pass: lead-service campaign discovery (+ any thread the deadline left unread).
   storedRead
@@ -952,7 +965,7 @@ export async function readTimeline(
     })
     .catch(() => undefined);
 
-  const items = [...PEOPLE_SOURCES.flatMap((s) => bySource[s].items), ...csv].sort((a, b) => {
+  const items = PEOPLE_SOURCES.flatMap((s) => bySource[s].items).sort((a, b) => {
     if (a.at === null && b.at === null) return 0;
     if (a.at === null) return 1; // undated last
     if (b.at === null) return -1;

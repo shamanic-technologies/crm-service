@@ -305,13 +305,16 @@ export function websiteOfPresence(websites: Map<string, string>): (p: { source: 
   };
 }
 
-/** The website each contact states, by our contact id (any source: GoHighLevel, PostHog...). */
+/**
+ * The website each contact states, by our contact id (any source: GoHighLevel, PostHog...), else the company domain
+ * it states (a contact added one by one, a typed CSV column: MANUAL-CONTACT-IS-A-PERSON-1024).
+ */
 export async function contactWebsites(contactIds: string[]): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   for (let i = 0; i < contactIds.length; i += 1000) {
     const rows = (await db.execute(sql`
-      SELECT id, website FROM contacts
-      WHERE website IS NOT NULL AND id IN (${sql.join(contactIds.slice(i, i + 1000).map((id) => sql`${id}::uuid`), sql`, `)})
+      SELECT id, coalesce(website, company_domain) AS website FROM contacts
+      WHERE coalesce(website, company_domain) IS NOT NULL AND id IN (${sql.join(contactIds.slice(i, i + 1000).map((id) => sql`${id}::uuid`), sql`, `)})
     `)) as unknown as { id: string; website: string }[];
     for (const r of rows) out.set(r.id, r.website);
   }
