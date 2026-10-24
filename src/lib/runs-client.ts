@@ -140,7 +140,23 @@ export interface CreateRunParams {
   serviceName: string;
   taskName: string;
   parentRunId?: string;
+  /**
+   * LEDGER-HISTORY-1024: this run serves a SUPPORT function (spend that produces no outcome by design), marked at
+   * creation at runs-service: its cost and its non-declaring subtree's never ride an outcome. Never on a run that
+   * declares a produced outcome (runs-service 409 `run_marked_support`).
+   */
+  support?: { kind: SupportFunction; reason: string };
 }
+
+/** runs-service's support functions (doctrine: agent-config skill `cost-accounting`). */
+export type SupportFunction =
+  | "payment_fees"
+  | "brand_setup"
+  | "copilot"
+  | "platform_llm"
+  | "staff_experiment"
+  | "product_feature"
+  | "retired_product";
 
 /**
  * Create an org-scoped run. parentRunId is sent as x-run-id → becomes
@@ -170,9 +186,54 @@ export async function createRun(params: CreateRunParams): Promise<Run> {
       ...(brandIds ? { brandIds } : {}),
       serviceName: params.serviceName,
       taskName: params.taskName,
+      ...(params.support ? { support: params.support } : {}),
     },
   });
 }
+
+/**
+ * A child run opened on first use (`runId()`), closed by the caller (`close`). Used to keep one kind of spend on a run
+ * of its own: the reply judging (what positive replies are declared on), or a support function marked at creation.
+ */
+export function lazyChildRun(
+  parent: () => Promise<string>,
+  ids: { orgId: string; userId: string; brandId: string },
+  task: { serviceName: string; taskName: string; support?: CreateRunParams["support"] },
+) {
+  let created: Promise<string> | null = null;
+  return {
+    runId: () =>
+      (created ??= parent().then((parentRunId) =>
+        createRun({ orgId: ids.orgId, userId: ids.userId, brandIds: [ids.brandId], ...task, parentRunId }).then((r) => r.id),
+      )),
+    /** The run id once opened (null when nothing asked for it). */
+    async opened(): Promise<string | null> {
+      return created ? created.catch(() => null) : null;
+    },
+    async close(failed: boolean): Promise<void> {
+      if (!created) return;
+      const id = await created.catch(() => null);
+      if (!id) return;
+      await updateRun(id, failed ? "failed" : "completed", { orgId: ids.orgId, userId: ids.userId }).catch((e) =>
+        console.error(`[crm-service] failed to close ${task.taskName} run ${id}:`, e),
+      );
+    },
+  };
+}
+
+/** The support functions crm-service's own spend serves, each on a child run marked at creation (LEDGER-HISTORY-1024). */
+export const SUPPORT_RUNS = {
+  /** The Matrix thread reading (status, next step, summary on the Unibox lead card): a product feature. */
+  leadReading: { serviceName: "crm-service", taskName: "matrix.lead-reading", support: { kind: "product_feature", reason: "Unibox lead card: reading a mirrored thread into status, next step and summary" } },
+  /** A brand's own CRM vocabulary (GoHighLevel stage meanings, client / disqualified labels): a product feature. */
+  crmLabels: { serviceName: "crm-service", taskName: "gohighlevel.label-meanings", support: { kind: "product_feature", reason: "Reading the brand's own CRM stage and tag meanings" } },
+  /** Typing the columns of a CRM file the client uploaded: a product feature. */
+  columnTyping: { serviceName: "crm-service", taskName: "contacts.column-typing", support: { kind: "product_feature", reason: "Typing the columns of an uploaded CRM file" } },
+  /** Which person a calendar attendee / Meet participant is: a product feature (the meeting is the lead's act, not ours). */
+  calendarMatching: { serviceName: "crm-service", taskName: "calendar.judge", support: { kind: "product_feature", reason: "Matching calendar attendees and Meet participants to the brand's people" } },
+  /** Voice notes received on the Copilot's own line: the Copilot. */
+  copilotVoice: { serviceName: "crm-service", taskName: "copilot.voice-notes", support: { kind: "copilot", reason: "Transcribing voice notes the Copilot reads" } },
+} as const satisfies Record<string, { serviceName: string; taskName: string; support: NonNullable<CreateRunParams["support"]> }>;
 
 export async function updateRun(
   runId: string,
@@ -319,4 +380,32 @@ export function invalidRunsOf(err: unknown): InvalidRun[] | null {
   } catch {
     return null;
   }
+}
+
+/** The support-mark selection answer (runs-service owner door, preview and apply). */
+export interface SupportMarkAnswer {
+  matchedRunCount: number;
+  toMarkCount: number;
+  alreadyMarkedCount: number;
+  declaresOutcomesCount: number;
+  onOutcomeNowCount: number | null;
+  spend: { grossCents: string; netCents: string };
+  tooMany: boolean;
+  [k: string]: unknown;
+}
+
+/**
+ * Mark crm-service's OWN past runs support, naming the function (runs-service owner door
+ * `/v1/platform-runs/support-marks/{preview|apply}`, all or nothing, idempotent: a marked run keeps its first function;
+ * a run that declared an outcome is never marked). New runs are marked at creation instead (`support` on createRun).
+ */
+export async function markOwnRunsSupport(
+  step: "preview" | "apply",
+  body: { runIds: string[]; kind: SupportFunction; reason: string; markedBy: string },
+): Promise<SupportMarkAnswer> {
+  return runsRequest<SupportMarkAnswer>(`/v1/platform-runs/support-marks/${step}`, {
+    method: "POST",
+    serviceNameHeader: "crm-service",
+    body,
+  });
 }

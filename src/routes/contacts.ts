@@ -40,7 +40,7 @@ import {
   type PeopleFilter,
   type Reach,
 } from "../lib/serve.js";
-import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
+import { createPlatformRun, createRun, SUPPORT_RUNS, updatePlatformRun, updateRun } from "../lib/runs-client.js";
 import { AmbiguousPersonError, stillFitsCsv, stillFitsPeople } from "../lib/still-fits.js";
 import { SERVICE_NAME } from "../middleware/auth.js";
 import { addManualContact, normalizeManualInput } from "../lib/contacts/manual.js";
@@ -170,12 +170,26 @@ router.post(
       // override re-upload.
       const profiles = buildColumnProfiles(headers, rows);
       try {
-        mapping = await classifyColumns(profiles, {
+        // Typing the columns is a product feature: its own child run, marked support at creation (LEDGER-HISTORY-1024).
+        const typing = await createRun({
           orgId: req.orgId!,
           userId: req.userId!,
-          runId: req.runId!,
           brandIds: req.brandIds,
+          parentRunId: req.runId!,
+          ...SUPPORT_RUNS.columnTyping,
         });
+        try {
+          mapping = await classifyColumns(profiles, {
+            orgId: req.orgId!,
+            userId: req.userId!,
+            runId: typing.id,
+            brandIds: req.brandIds,
+          });
+          await updateRun(typing.id, "completed", { orgId: req.orgId!, userId: req.userId! }).catch(() => undefined);
+        } catch (err) {
+          await updateRun(typing.id, "failed", { orgId: req.orgId!, userId: req.userId! }).catch(() => undefined);
+          throw err;
+        }
         mappingProvenance = "llm";
       } catch (err) {
         console.error(

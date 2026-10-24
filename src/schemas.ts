@@ -3816,6 +3816,24 @@ registry.registerPath({
 
 registry.registerPath({
   method: "post",
+  path: "/internal/outcomes/message-sent",
+  summary: "Declare every WhatsApp message a campaign sent as message_sent on its send run (LEDGER-HISTORY-1024)",
+  description:
+    "One pass of the in-process loop (every minute): every WhatsApp send that went out carrying the campaign that sent it, never recorded, is recorded (one per send run: bubbles of one send are one message), its lead named by lead-service, then declared at runs-service as `message_sent` produced (subject lead-service, the lead id) on the send run, with occurredAt = the send time. The same path covers the past and the future. Not a lead yet = retried, no_lead after 7 days. Idempotent.",
+  responses: { 200: { description: "recorded, due, declared, alreadyRecorded, waiting, noLead, refused, failed" }, 502: { description: "The pass failed" } },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/outcomes/support-marks",
+  summary: "Mark crm-service's own past runs support, naming the function (LEDGER-HISTORY-1024)",
+  description:
+    "Passes `{runIds (<= 5000), kind, reason}` to runs-service's owner door (`dryRun: true` = its preview): spend that produces no outcome by design (the Unibox thread reading, the brand's CRM vocabulary, column typing, calendar matching = product_feature; the Copilot's voice notes = copilot; another session's probe parented on a crm run = staff_experiment). New runs are marked at creation. Idempotent; a run that declared an outcome is never marked.",
+  responses: { 200: { description: "runs-service's selection answer" }, 400: { description: "Invalid body" }, 422: { description: "runs-service refused (its words)" }, 502: { description: "runs-service unreachable" } },
+});
+
+registry.registerPath({
+  method: "post",
   path: "/internal/outcomes/backfill",
   summary: "Declare the past positive replies on the runs that judged them (COST-BACKFILL-1023-CRM)",
   description:

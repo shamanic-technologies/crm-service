@@ -32,7 +32,7 @@ import {
   type MatrixConnection,
   type NewMatrixRawEvent,
 } from "../../db/schema.js";
-import { createRun, updateRun } from "../runs-client.js";
+import { createRun, lazyChildRun, SUPPORT_RUNS, updateRun } from "../runs-client.js";
 import { SERVICE_NAME } from "../../middleware/auth.js";
 import { platformAccessToken, sync, type MatrixEvent } from "./client.js";
 import {
@@ -558,7 +558,7 @@ async function rebuildGroup(caller: MatrixConnection, roomId: string): Promise<v
 async function computeLead(
   conn: MatrixConnection,
   conversationId: string,
-  runId: string,
+  readingRunId: () => Promise<string>,
 ): Promise<"computed" | "unchanged"> {
   const [conversation] = await db
     .select()
@@ -597,6 +597,7 @@ async function computeLead(
     THREAD_WINDOW,
   );
 
+  const runId = await readingRunId();
   const reading = await readThread(
     {
       channel: conversation.channel,
@@ -685,10 +686,21 @@ async function syncConnectionLocked(conn: MatrixConnection): Promise<ConnectionS
     const gate = await gateLeadReading(conn, rebuiltIds, run.id);
     let leadsComputed = 0;
     let leadsSkippedUnchanged = 0;
-    for (const conversationId of gate.cleared) {
-      const outcome = await computeLead(conn, conversationId, run.id);
-      if (outcome === "computed") leadsComputed += 1;
-      else leadsSkippedUnchanged += 1;
+    // The thread reading is a product feature (the Unibox lead card): its own child run, marked support at creation
+    // (LEDGER-HISTORY-1024), so it never mixes with the relevance judging above (what lead_identified is declared on).
+    const reading = lazyChildRun(async () => run.id, { orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId }, SUPPORT_RUNS.leadReading);
+    let readingFailed = false;
+    try {
+      for (const conversationId of gate.cleared) {
+        const outcome = await computeLead(conn, conversationId, reading.runId);
+        if (outcome === "computed") leadsComputed += 1;
+        else leadsSkippedUnchanged += 1;
+      }
+    } catch (err) {
+      readingFailed = true;
+      throw err;
+    } finally {
+      await reading.close(readingFailed);
     }
 
     // The owner's Telegram ping per message with our assistant (SOPHIE-TG-PING-1018): never awaited, never throws.
@@ -896,10 +908,21 @@ export async function rebuildFromBronze(conn: MatrixConnection): Promise<Connect
     const gate = await gateLeadReading(conn, rebuiltIds, run.id);
     let leadsComputed = 0;
     let leadsSkippedUnchanged = 0;
-    for (const conversationId of gate.cleared) {
-      const outcome = await computeLead(conn, conversationId, run.id);
-      if (outcome === "computed") leadsComputed += 1;
-      else leadsSkippedUnchanged += 1;
+    // The thread reading is a product feature (the Unibox lead card): its own child run, marked support at creation
+    // (LEDGER-HISTORY-1024), so it never mixes with the relevance judging above (what lead_identified is declared on).
+    const reading = lazyChildRun(async () => run.id, { orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId }, SUPPORT_RUNS.leadReading);
+    let readingFailed = false;
+    try {
+      for (const conversationId of gate.cleared) {
+        const outcome = await computeLead(conn, conversationId, reading.runId);
+        if (outcome === "computed") leadsComputed += 1;
+        else leadsSkippedUnchanged += 1;
+      }
+    } catch (err) {
+      readingFailed = true;
+      throw err;
+    } finally {
+      await reading.close(readingFailed);
     }
 
     await updateRun(run.id, "completed", {

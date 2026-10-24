@@ -160,9 +160,11 @@ export async function classifyLabels(
  * No model call at all when every label is decided (every sync after the first,
  * unless the customer adds a stage or a tag).
  */
-export async function decideLabelVerdicts(conn: GhlConnection, runId: string): Promise<number> {
+export async function decideLabelVerdicts(conn: GhlConnection, runOf: () => Promise<string>): Promise<number> {
   const undecided = await findUndecidedLabels(conn);
   if (undecided.length === 0) return 0;
+  // A support run (the brand's own CRM vocabulary, LEDGER-HISTORY-1024), opened only when a label is decided.
+  const runId = await runOf();
 
   const tracking: ChatTrackingHeaders = { orgId: conn.orgId, userId: conn.createdByUserId, runId, brandIds: [conn.brandId] };
   const pipelineRows = await db

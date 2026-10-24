@@ -449,6 +449,13 @@
       "when": 1792680000000,
       "tag": "0064_transactional_billed_org_text",
       "breakpoints": true
+    },
+    {
+      "idx": 65,
+      "version": "7",
+      "when": 1792690000000,
+      "tag": "0065_message_sent_declarations",
+      "breakpoints": true
     }
   ]
 }

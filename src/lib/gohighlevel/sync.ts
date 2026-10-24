@@ -32,7 +32,7 @@ import {
   type GhlConnection,
   type NewGhlRawRecord,
 } from "../../db/schema.js";
-import { createRun, updateRun } from "../runs-client.js";
+import { createRun, lazyChildRun, SUPPORT_RUNS, updateRun } from "../runs-client.js";
 import { SERVICE_NAME } from "../../middleware/auth.js";
 import {
   listCalendarAppointments,
@@ -60,6 +60,25 @@ import {
 } from "./records.js";
 import { decideLabelVerdicts } from "./label-verdicts.js";
 import { decideStageMeanings } from "./stage-meanings.js";
+
+/**
+ * The brand's own CRM vocabulary (stage meanings, client / disqualified labels): Jev calls on ONE child run of the
+ * pass, marked support (product_feature) at creation and opened only when a label is decided (LEDGER-HISTORY-1024).
+ */
+async function decideCrmLabels(conn: GhlConnection, parentRunId: string) {
+  const labels = lazyChildRun(async () => parentRunId, { orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId }, SUPPORT_RUNS.crmLabels);
+  let failed = false;
+  try {
+    const stageMeaningsDecided = await decideStageMeanings(conn, labels.runId);
+    const labelVerdictsDecided = await decideLabelVerdicts(conn, labels.runId);
+    return { stageMeaningsDecided, labelVerdictsDecided };
+  } catch (err) {
+    failed = true;
+    throw err;
+  } finally {
+    await labels.close(failed);
+  }
+}
 
 export interface ConnectionSyncResult {
   connectionId: string;
@@ -753,8 +772,7 @@ export async function syncConnection(conn: GhlConnection): Promise<ConnectionSyn
       form: mirrored.form.changed,
       form_submission: mirrored.form_submission.changed,
     });
-    const stageMeaningsDecided = await decideStageMeanings(conn, run.id);
-    const labelVerdictsDecided = await decideLabelVerdicts(conn, run.id);
+    const { stageMeaningsDecided, labelVerdictsDecided } = await decideCrmLabels(conn, run.id);
 
     await db
       .update(ghlConnections)
@@ -869,8 +887,7 @@ export async function rebuildFromBronze(
 
   try {
     const derived = await deriveSilver(conn);
-    const stageMeaningsDecided = await decideStageMeanings(conn, run.id);
-    const labelVerdictsDecided = await decideLabelVerdicts(conn, run.id);
+    const { stageMeaningsDecided, labelVerdictsDecided } = await decideCrmLabels(conn, run.id);
     await updateRun(run.id, "completed", identity);
     return { ...derived, stageMeaningsDecided, labelVerdictsDecided };
   } catch (err) {

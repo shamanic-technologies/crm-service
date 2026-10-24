@@ -21,7 +21,7 @@
 import { and, asc, eq, lte, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { people, replyTriggerReports, type ReplyTriggerReport } from "../../db/schema.js";
-import { createRun, declareRunOutcomes, updateRun, RunsServiceError, type DeclareOutcomesBody } from "../runs-client.js";
+import { declareRunOutcomes, lazyChildRun, RunsServiceError, type DeclareOutcomesBody } from "../runs-client.js";
 import { siblingQuery } from "../people/siblings.js";
 import type { Presence } from "../people/identity.js";
 
@@ -98,27 +98,7 @@ export function outcomeBackoffMs(attempts: number): number {
  * Its spend is the judging only, and it is what the positive replies are declared on.
  */
 export function lazyJudgeRun(parent: () => Promise<string>, ids: { orgId: string; userId: string; brandId: string }) {
-  let created: Promise<string> | null = null;
-  return {
-    runId: () =>
-      (created ??= parent().then((parentRunId) =>
-        createRun({ orgId: ids.orgId, userId: ids.userId, brandIds: [ids.brandId], serviceName: SERVICE_NAME, taskName: JUDGE_TASK, parentRunId }).then(
-          (r) => r.id,
-        ),
-      )),
-    /** The run id once opened (null when no burst was judged). */
-    async opened(): Promise<string | null> {
-      return created ? created.catch(() => null) : null;
-    },
-    async close(failed: boolean): Promise<void> {
-      if (!created) return;
-      const id = await created.catch(() => null);
-      if (!id) return;
-      await updateRun(id, failed ? "failed" : "completed", { orgId: ids.orgId, userId: ids.userId }).catch((e) =>
-        console.error(`${LOG} failed to close judge run ${id}:`, e),
-      );
-    },
-  };
+  return lazyChildRun(parent, ids, { serviceName: SERVICE_NAME, taskName: JUDGE_TASK });
 }
 
 interface PersonKeys {
