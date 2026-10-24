@@ -142,7 +142,7 @@ describe.skipIf(!RUN)("Transactional emails on the staff Unibox thread", () => {
   afterAll(wipe);
 
   it("one feed email = exactly one outbound message on the thread; re-reading the same page records nothing twice", async () => {
-    pages = { "": { emails: [E1, E2], nextCursor: "c1" } };
+    pages = { "": { emails: [E1, { ...E2, orgId: "org_38y0ZSEtw1lz0KtH9Kwy53jBu67" }], nextCursor: "c1" } };
     const first = await runTxEmailPass(Date.parse("2026-10-24T12:00:00Z"));
     expect(first).toMatchObject({ read: 2, stored: 2, caughtUp: true, cursor: "c1" });
     expect(feedCalls).toEqual([null, "c1"]);
@@ -176,7 +176,7 @@ describe.skipIf(!RUN)("Transactional emails on the staff Unibox thread", () => {
       ],
       ["2026-10-02T09:00:00.000Z", "email", "message", "outbound", "Kevin from distribute.you <kevin@distribute.you>", [CLIENT], "Your receipt", "Thanks & welcome!\nPaid: $100"],
     ]);
-    expect(tx[1].ref).toMatchObject({ emailId: E2.id, eventType: "payment_receipt", messageSource: "replayed", billedOrgId: BILLED_ORG });
+    expect(tx[1].ref).toMatchObject({ emailId: E2.id, eventType: "payment_receipt", messageSource: "replayed", billedOrgId: "org_38y0ZSEtw1lz0KtH9Kwy53jBu67" });
     expect(tl.body.sources.find((s: { source: string }) => s.source === "transactional")).toMatchObject({ status: "ok", items: 2 });
 
     // The thread's latest message is the Copilot question (10-03), the receipt before it is not.

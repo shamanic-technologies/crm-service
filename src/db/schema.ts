@@ -2611,7 +2611,8 @@ export const transactionalEmails = pgTable(
     id: uuid("id").primaryKey(),
     eventType: text("event_type").notNull(),
     recipientEmail: text("recipient_email").notNull(),
-    billedOrgId: uuid("billed_org_id"),
+    // Verbatim: an internal uuid, or on old sends a Clerk `org_…` id / "legacy" (the producer's own value).
+    billedOrgId: text("billed_org_id"),
     brandIds: jsonb("brand_ids"),
     fromAddress: text("from_address"),
     subject: text("subject"),
