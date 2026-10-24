@@ -2902,3 +2902,35 @@ export const messageSentDeclarations = pgTable(
   ],
 );
 export type MessageSentDeclaration = typeof messageSentDeclarations.$inferSelect;
+
+/**
+ * CRM-FORM-SUBMITTED-LEDGER-1025: one row per CRM form submission crm-service holds, declared at runs-service as
+ * `form_submitted` PRODUCED (subject = the person's lead-service lead) on a spend-free run of its own, dated at the
+ * submission. Keyed on the vendor's submission id (silver ids are re-minted by a reconnect). `run_id` is set once,
+ * before the first declaration, so a retry or a replay names the same run (runs-service: `already_recorded`).
+ */
+export const formSubmittedDeclarations = pgTable(
+  "form_submitted_declarations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    source: text("source").notNull(),
+    submissionExternalId: text("submission_external_id").notNull(),
+    submittedAt: timestamp("submitted_at", { withTimezone: true }).notNull(),
+    runId: text("run_id"),
+    leadId: text("lead_id"),
+    status: text("status").notNull(),
+    reason: text("reason"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    nextAt: timestamp("next_at", { withTimezone: true }),
+    declaredAt: timestamp("declared_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("form_submitted_declarations_submission_uq").on(table.orgId, table.brandId, table.source, table.submissionExternalId),
+    index("form_submitted_declarations_due_idx").on(table.nextAt).where(sql`${table.status} = 'pending'`),
+  ],
+);
+export type FormSubmittedDeclaration = typeof formSubmittedDeclarations.$inferSelect;

@@ -37,6 +37,7 @@ import { startLineWatch } from "./lib/whatsapp/line-health.js";
 import { startOutcomeDeclarations } from "./lib/reply-trigger/outcome.js";
 import { startLeadIdentifiedDeclarations } from "./lib/people/lead-identified.js";
 import { startMessageSentDeclarations } from "./lib/whatsapp/message-sent.js";
+import { startFormSubmittedDeclarations } from "./lib/gohighlevel/form-submitted.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -146,6 +147,8 @@ if (process.env.NODE_ENV !== "test") {
         startLeadIdentifiedDeclarations();
         // Declares each WhatsApp message a campaign sent as message_sent on its send run (past and future, one path).
         startMessageSentDeclarations();
+        // Declares each CRM form submission crm-service holds as form_submitted on its lead (past and future, one path).
+        startFormSubmittedDeclarations();
       })
       .catch((err) => {
         console.error("[crm-service] Migration failed:", err);

@@ -3826,6 +3826,15 @@ registry.registerPath({
 
 registry.registerPath({
   method: "post",
+  path: "/internal/outcomes/form-submitted",
+  summary: "Declare every CRM form submission crm-service holds as form_submitted on its lead (CRM-FORM-SUBMITTED-LEDGER-1025)",
+  description:
+    "One pass of the in-process loop (every 5 min): every dated CRM form submission (GoHighLevel), never recorded, is recorded; a calendar's own booking form is skipped (it is the booking); each other one's lead is named by lead-service from the identity the submission carries (else its mirrored contact's), a spend-free run of its own is opened once (`gohighlevel.form-submitted`), and runs-service records `form_submitted` produced (subject lead-service, the lead id) on it with occurredAt = the submission time. The same path covers the past and the future. Not a lead (yet) = asked again (backoff to 1 h), never guessed. Idempotent: a replay names the same run (already_recorded).",
+  responses: { 200: { description: "recorded, due, declared, alreadyRecorded, waiting, skipped, refused, failed" }, 502: { description: "The pass failed" } },
+});
+
+registry.registerPath({
+  method: "post",
   path: "/internal/outcomes/support-marks",
   summary: "Mark crm-service's own past runs support, naming the function (LEDGER-HISTORY-1024)",
   description:
