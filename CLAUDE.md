@@ -1810,8 +1810,11 @@ A PostHog person is KNOWN (mirrored, a person of the Unibox) as soon as it carri
 `identify`, an email, a phone, a name (`name`/`first_name`/`last_name`) or the `website` they
 typed (`client.ts` `IDENTIFIED`); none of these = an anonymous visit, never mirrored. Named by
 their name, else "Visitor from <domain>" (`build.ts` `personDisplayName`, any real name of
-any source wins). One known only by what they typed (no identify, no email) is no signup
-(`raw_attributes.notSignup`: no `signup` fact, no timeline signup). Each CUSTOM event (`$`-events
+any source wins). A signup = an ACCOUNT signal only: `is_identified`, or a distinct id that is one
+of the brand's auth-provider user ids; an email PostHog holds is NOT one (a newsletter click
+`$set`ting it on an anonymous person = a visitor WITH that email, POSTHOG-EMAIL-NOT-SIGNUP-1024).
+Else `raw_attributes.notSignup`: no `signup` fact, no timeline signup; a stale verdict (account
+mirrored later) is re-derived by `personsBehindSilver`. Each CUSTOM event (`$`-events
 never) carries the brand's own properties (`ownEventProperties`: `$`/`__` keys dropped, 50 keys,
 strings cut at 1000) in `detail.properties`; the timeline item's `text` reads it
 (`describeKeyEvent`: "Get started step done · step: company · name: Acme"). Generic, no event
