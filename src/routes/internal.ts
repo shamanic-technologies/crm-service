@@ -172,18 +172,34 @@ router.post("/internal/outcomes/form-submitted", apiKeyAuth, async (_req, res) =
  * function, through runs-service's owner door. New runs are marked at creation (runs-client SUPPORT_RUNS). Body
  * `{runIds, kind, reason, dryRun?}`; dryRun = runs-service's preview. Idempotent there.
  */
-const SupportMarksBody = z.object({
-  runIds: z.array(z.string().uuid()).min(1).max(5000),
-  kind: z.enum(["payment_fees", "brand_setup", "copilot", "platform_llm", "staff_experiment", "product_feature", "retired_product"]),
-  reason: z.string().min(1).max(2000),
-  dryRun: z.boolean().optional(),
-});
+const SupportMarksBody = z
+  .object({
+    /** Runs to mark, or a selection over crm-service's own runs (runs-service: the two are exclusive). */
+    runIds: z.array(z.string().uuid()).min(1).max(5000).optional(),
+    taskNames: z.array(z.string().min(1)).min(1).max(200).optional(),
+    topLevelOnly: z.boolean().optional(),
+    withSpendOnly: z.boolean().optional(),
+    startedAfter: z.string().datetime({ offset: true }).optional(),
+    startedBefore: z.string().datetime({ offset: true }).optional(),
+    /** Selection only: leave out runs whose cost rides an ancestor's outcome today. */
+    offOutcomeOnly: z.boolean().optional(),
+    /** Selection only: leave out runs whose cost already stops on an ancestor's support mark (never relabel that decision). */
+    offAncestorMarkOnly: z.boolean().optional(),
+    kind: z.enum(["payment_fees", "brand_setup", "copilot", "platform_llm", "staff_experiment", "product_feature", "retired_product"]),
+    reason: z.string().min(1).max(2000),
+    /** Who decided (session, ticket); default the first backfill's tag. */
+    markedBy: z.string().min(1).max(200).optional(),
+    dryRun: z.boolean().optional(),
+  })
+  .refine((b) => (b.runIds ? !b.taskNames && b.topLevelOnly === undefined && b.withSpendOnly === undefined && !b.startedAfter && !b.startedBefore && b.offOutcomeOnly === undefined && b.offAncestorMarkOnly === undefined : !!b.taskNames), {
+    message: "runIds, or a selection by taskNames (with topLevelOnly / withSpendOnly / window / offOutcomeOnly / offAncestorMarkOnly): exclusive",
+  });
 router.post("/internal/outcomes/support-marks", apiKeyAuth, async (req, res) => {
   const parsed = SupportMarksBody.safeParse(req.body ?? {});
   if (!parsed.success) return res.status(400).json({ type: "validation", error: parsed.error.message });
-  const { dryRun, ...mark } = parsed.data;
+  const { dryRun, markedBy, ...mark } = parsed.data;
   try {
-    res.json(await markOwnRunsSupport(dryRun ? "preview" : "apply", { ...mark, markedBy: "crm-service (LEDGER-HISTORY-1024)" }));
+    res.json(await markOwnRunsSupport(dryRun ? "preview" : "apply", { ...mark, markedBy: markedBy ?? "crm-service (LEDGER-HISTORY-1024)" }));
   } catch (err) {
     const status = err instanceof RunsServiceError && err.kind === "http" ? 422 : 502;
     console.error("[crm-service][support-marks] failed:", err);

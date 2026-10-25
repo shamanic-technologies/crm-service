@@ -32,13 +32,12 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { peopleMessageUnits, peopleScopes, type PeopleScope } from "../../db/schema.js";
-import { createRun, updateRun } from "../runs-client.js";
+import { createRun, SUPPORT_RUNS, updateRun } from "../runs-client.js";
 import { refreshUnits, UNIT_REFRESH_MS, type Unit } from "./search.js";
 import { siblingGet, type SiblingIdentity } from "./siblings.js";
 import type { BuildSummary } from "./build.js";
 import { deliverDueGmailReplies, detectGmailRepliesWithRun } from "../reply-trigger/gmail.js";
 
-const SERVICE_NAME = "crm-service";
 
 export const FRESHNESS_INTERVAL_MS = Number(process.env.PEOPLE_FRESHNESS_INTERVAL_MS) || 60_000;
 /** A moved thread is read again this long after we learned of the move. */
@@ -243,13 +242,12 @@ export async function watchScope(scope: PeopleScope): Promise<FreshnessScopeResu
     }));
   if (due.length === 0) return result;
 
-  // Re-reading is the work: its own org run, like a build.
+  // Re-reading is the work: its own org run, marked support at creation (a product feature: no outcome, LEDGER-RESIDUAL-1025).
   const run = await createRun({
     orgId: scope.orgId,
     userId: scope.createdByUserId,
     brandIds: [scope.brandId],
-    serviceName: SERVICE_NAME,
-    taskName: "people.freshness",
+    ...SUPPORT_RUNS.mailboxRefresh,
   });
   try {
     const r = await refreshUnits(scope.id, due, { ...pollIdentity, runId: run.id });

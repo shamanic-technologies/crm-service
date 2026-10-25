@@ -169,9 +169,14 @@ lead / no key = asked again (backoff to 1 h), never given up, never guessed. Led
 Spend that produces no outcome by design sits on its OWN child run marked support at creation, never mixed with a
 judging run: Matrix thread reading `matrix.lead-reading`, GoHighLevel stage / label meanings `gohighlevel.label-meanings`,
 column typing `contacts.column-typing`, `calendar.judge` (all `product_feature`), voice notes on the Copilot's line
-`copilot.voice-notes` (`copilot`); other voice notes ride the `reply-trigger.judge` run. Past runs:
-`POST /internal/outcomes/support-marks {runIds, kind, reason, dryRun?}` (runs-service owner door). A run whose Jev
-judged and kept nothing (relevance, reply kinds) stays a run with no output (loss), never support.
+`copilot.voice-notes` (`copilot`); other voice notes ride the `reply-trigger.judge` run. Mail re-reads (google-service
+cleans each body with Jev under our run, LEDGER-RESIDUAL-1025): the freshness watch run `people.freshness`, a build's
+message index step `people.message-index`, a `people.timeline` read with NO caller run (`requireOrgAndUser(task,
+{supportWhenTopLevel})`: under a caller's x-run-id it rides that run). Past runs: `POST /internal/outcomes/support-marks
+{kind, reason, runIds | taskNames + topLevelOnly / offOutcomeOnly / offAncestorMarkOnly, dryRun?}` (owner door; the
+two modes are exclusive there). A run whose Jev judged and kept nothing (relevance, reply kinds) stays a run with no
+output (loss), never support. ⚠️ runs-service pools that loss on the COST ROW's run task (`chat-service/judgments`),
+never on our build's, so it reads `undeclared` there (2026-10-25: ~$5.6, people.build / matrix.sync); theirs to fix.
 
 Everything else GoHighLevel sends arrives already structured, so deriving it is
 pure code — no model, no metered call, no catalogue row.

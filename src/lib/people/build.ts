@@ -14,7 +14,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { contacts, leadStandingObservations, people, peopleScopes, type PeopleScope } from "../../db/schema.js";
 import { SERVICE_NAME } from "../../middleware/auth.js";
-import { createRun, updateRun } from "../runs-client.js";
+import { createRun, SUPPORT_RUNS, updateRun } from "../runs-client.js";
 import {
   clusterPeople,
   keysOf,
@@ -756,12 +756,21 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
 
   // The people are live; now bring the message search index up to date with them.
   // Its failure does not undo the build: it is recorded beside it and retried next pass.
+  // On a child run marked support (a product feature: re-reading threads produces no outcome, LEDGER-RESIDUAL-1025), so the
+  // build run holds only the registry's judgments, what its lead_identified occurrences cost.
+  let indexRunId: string | null = null;
   try {
-    const indexed = await indexScopeMessages(scope, rows, identity, gmail.status === "ok");
+    indexRunId = (await createRun({ orgId: scope.orgId, userId: scope.createdByUserId, brandIds: [scope.brandId], ...SUPPORT_RUNS.messageIndex, parentRunId: runId })).id;
+    const indexed = await indexScopeMessages(scope, rows, { ...identity, runId: indexRunId }, gmail.status === "ok");
     summary.messageIndex = { status: "ok", ...indexed };
   } catch (err) {
     console.error(`[crm-service] people message index failed scope=${scope.id}:`, err);
     summary.messageIndex = { status: "failed", error: (err as Error).message };
+  }
+  if (indexRunId) {
+    await updateRun(indexRunId, summary.messageIndex.status === "ok" ? "completed" : "failed", { orgId: scope.orgId, userId: scope.createdByUserId }).catch((e) =>
+      console.error(`[crm-service] failed to close message index run ${indexRunId}:`, e),
+    );
   }
 
   // Then append to the fact feed what this build changed (lead-service reads it).

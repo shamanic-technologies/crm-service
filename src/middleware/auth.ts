@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { createRun, updateRun, RunsServiceError, IdentityHeaders } from "../lib/runs-client.js";
+import { createRun, updateRun, RunsServiceError, IdentityHeaders, type CreateRunParams } from "../lib/runs-client.js";
 
 export const SERVICE_NAME = "crm-service";
 
@@ -90,8 +90,10 @@ async function attachRun(
   req: AuthenticatedRequest,
   res: Response,
   taskName: string,
+  opts: RunOptions = {},
 ): Promise<boolean> {
   try {
+    const support = !req.parentRunId ? opts.supportWhenTopLevel : undefined;
     const run = await createRun({
       orgId: req.orgId!,
       userId: req.userId,
@@ -99,6 +101,7 @@ async function attachRun(
       serviceName: SERVICE_NAME,
       taskName,
       parentRunId: req.parentRunId,
+      ...(support ? { support } : {}),
     });
     req.runId = run.id;
   } catch (err) {
@@ -119,6 +122,14 @@ async function attachRun(
   return true;
 }
 
+/**
+ * LEDGER-RESIDUAL-1025: a route whose work produces no outcome by design marks its run support at creation, but only when
+ * no caller run is named (x-run-id): read under a caller's run, the work rides what that run produces.
+ */
+export interface RunOptions {
+  supportWhenTopLevel?: CreateRunParams["support"];
+}
+
 /** requireOrgId + run tracking. taskName labels this service's run. */
 export function requireOrg(taskName: string) {
   return async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
@@ -136,7 +147,7 @@ export function requireOrg(taskName: string) {
 }
 
 /** requireOrgId AND x-user-id + run tracking (routes that call chat-service). */
-export function requireOrgAndUser(taskName: string) {
+export function requireOrgAndUser(taskName: string, opts: RunOptions = {}) {
   return async (req: AuthenticatedRequest, res: Response, next: NextFunction) => {
     const orgId = req.headers["x-org-id"] as string | undefined;
     const userId = req.headers["x-user-id"] as string | undefined;
@@ -151,6 +162,6 @@ export function requireOrgAndUser(taskName: string) {
     req.parentRunId = (req.headers["x-run-id"] as string | undefined) ?? undefined;
     req.brandIds = resolveBrandIds(req);
 
-    if (await attachRun(req, res, taskName)) next();
+    if (await attachRun(req, res, taskName, opts)) next();
   };
 }

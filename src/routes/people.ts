@@ -15,7 +15,7 @@ import {
   SERVICE_NAME,
   type AuthenticatedRequest,
 } from "../middleware/auth.js";
-import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
+import { createPlatformRun, SUPPORT_RUNS, updatePlatformRun } from "../lib/runs-client.js";
 import { ensureScope, runPeopleBuildPass, runScopeBuild, type BuildSummary } from "../lib/people/build.js";
 import { PEOPLE_SOURCES, type Presence } from "../lib/people/identity.js";
 import type { PossibleLead } from "../lib/people/sources.js";
@@ -496,7 +496,7 @@ const timelineQuerySchema = z
 router.get(
   "/orgs/people/timeline",
   apiKeyAuth,
-  requireOrgAndUser("people.timeline"),
+  requireOrgAndUser(SUPPORT_RUNS.timelineRead.taskName, { supportWhenTopLevel: SUPPORT_RUNS.timelineRead.support }),
   async (req: AuthenticatedRequest, res, next) => {
     const parsed = timelineQuerySchema.safeParse(req.query);
     if (!parsed.success) {
