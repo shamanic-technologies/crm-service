@@ -186,14 +186,29 @@ export const visitorLabel = (website: string | null | undefined): string | null 
 };
 
 /**
+ * Properties PostHog's own SDK puts on every event WITHOUT a `$` (the project's write
+ * token, the sender's distinct id): PostHog's bookkeeping, never what the person entered.
+ */
+const POSTHOG_OWN_KEYS: ReadonlySet<string> = new Set(["token", "distinct_id"]);
+
+/**
+ * PURE: what a custom event carried that the BRAND set (ONBOARDING-EVENTS-TO-LEADS-1025):
+ * its stored properties minus PostHog's own keys and the empty ones. Generic, no event or
+ * property name of any brand.
+ */
+export function brandEventProperties(properties: Record<string, unknown> | null | undefined): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(properties ?? {}).filter(([k, v]) => !POSTHOG_OWN_KEYS.has(k) && v !== null && v !== undefined && v !== ""),
+  );
+}
+
+/**
  * PURE: a key event as one readable line, generic for any brand's events: its name in
  * words, then what it carried ("Get started step done · step: company · name: Acme").
  */
 export function describeKeyEvent(name: string, properties: Record<string, unknown> | null | undefined): string {
   const words = name.replace(/[_.:-]+/g, " ").replace(/\s+/g, " ").trim();
   const title = words ? words[0].toUpperCase() + words.slice(1) : name;
-  const parts = Object.entries(properties ?? {})
-    .filter(([, v]) => v !== null && v !== undefined && v !== "")
-    .map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : String(v)}`);
+  const parts = Object.entries(brandEventProperties(properties)).map(([k, v]) => `${k}: ${typeof v === "object" ? JSON.stringify(v) : String(v)}`);
   return [title, ...parts].join(" · ");
 }

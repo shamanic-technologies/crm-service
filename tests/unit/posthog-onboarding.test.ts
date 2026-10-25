@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { ownEventProperties, EVENT_PROPERTY_MAX_CHARS } from "../../src/lib/posthog/client.js";
-import { derivePosthogContact, deriveKeyEvent, describeKeyEvent, visitorLabel, websiteDomain } from "../../src/lib/posthog/records.js";
+import { brandEventProperties, derivePosthogContact, deriveKeyEvent, describeKeyEvent, visitorLabel, websiteDomain } from "../../src/lib/posthog/records.js";
 import { isUnnamedPosthogOnly, personDisplayName } from "../../src/lib/people/build.js";
 import { clusterPeople, type Presence } from "../../src/lib/people/identity.js";
 
@@ -39,6 +39,11 @@ describe("ONBOARDING-IN-UNIBOX-1015: what a visitor typed", () => {
       'Get started step done · step: company · name: Acme · plan: {"a":1}',
     );
     expect(describeKeyEvent("signup_completed", {})).toBe("Signup completed");
+    // ONBOARDING-EVENTS-TO-LEADS-1025: PostHog's own non-$ keys (project token, distinct id) are not what the person entered.
+    expect(describeKeyEvent("get_started_website_submitted", { token: "phc_x", distinct_id: "d", website: "inogates.com" })).toBe(
+      "Get started website submitted · website: inogates.com",
+    );
+    expect(brandEventProperties({ token: "phc_x", distinct_id: "d", gs_arm: "leads", none: null, blank: "" })).toEqual({ gs_arm: "leads" });
   });
 
   it("a website names the visitor by its bare domain", () => {

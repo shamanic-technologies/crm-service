@@ -1618,7 +1618,11 @@ lead-service serves the overall tag, then go.
   `via` = its `source`, `sourceRef` = its `sourceId`, same date + basis, so the
   two cannot disagree), `deal_status_changed` (every history row); Matrix and
   Gmail `message_in/out` (Gmail `other` = a third party, skipped); PostHog
-  `signup` (person created) + `website_visit`; Stripe `payment | refund`
+  `signup` (person created) + `website_visit` + `product_event` (ONBOARDING-EVENTS-TO-LEADS-1025: one per custom
+  event the brand's product fired, payload `{event, text, properties, sessionId, path, url}`, `properties` = the
+  brand's own minus PostHog's `token`/`distinct_id` (`brandEventProperties`), dated `event_timestamp`; an event of a
+  session whose visit is a machine's is `machine` like the visit; lead-service reads it as THEIR act and shows it to
+  Jev, it is no catalogue step and fires no outcome); Stripe `payment | refund`
   (minor units verbatim) + `subscription_changed` (one per status observed);
   CSV `added_to_crm` (once per email, dated `uploaded_at`); crm
   `person_merged | person_split | withdrawn`. GoHighLevel `sale.amountMinor` =

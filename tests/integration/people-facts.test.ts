@@ -478,6 +478,56 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
     expect(await emitScopeFacts(s.scope)).toMatchObject({ machine: 1, machineWithdrawn: 0, emitted: 0 });
   });
 
+  it("ONBOARDING-EVENTS-TO-LEADS-1025: each custom event the product fired is a product_event fact; one in a machine's session is none", async () => {
+    const s = await seed();
+    const [phc] = await db.select().from(posthogConnections).where(eq(posthogConnections.orgId, ORG));
+    const event = (externalId: string, sessionId: string, at: string, name: string, properties: Record<string, unknown>) => ({
+      orgId: ORG, brandId: BRAND, connectionId: phc.id, kind: "event", externalId, externalPersonId: "ph-alice", contactId: s.posthogContact,
+      occurredAt: new Date(at), endedAt: null, name, url: "https://brand.com/get-started", pageviews: null,
+      detail: { sessionId, path: "/get-started", properties },
+    });
+    await db.insert(posthogActivities).values([
+      event("ev-1", "s1", "2026-07-30T08:05:00Z", "get_started_website_submitted", { website: "acme.com", token: "phc_x", distinct_id: "d1", empty: null }),
+      // Session s2 is a scanner's (its visit carries the positive fingerprint): its event is no act of theirs.
+      event("ev-2", "s2", "2026-07-31T08:05:00Z", "newsletter_link_identified", {}),
+      {
+        orgId: ORG, brandId: BRAND, connectionId: phc.id, kind: "visit", externalId: "s2:ph-alice", externalPersonId: "ph-alice", contactId: s.posthogContact,
+        occurredAt: new Date("2026-07-31T08:00:00Z"), endedAt: null, name: "/", url: "https://brand.com/", pageviews: 1,
+        detail: { sessionId: "s2", paths: ["/"], referrer: null, machine: { fingerprint: "viewport_equals_screen", screen: "1920x1080" } },
+      },
+    ]);
+    const summary = await emitScopeFacts(s.scope);
+    expect(summary).toMatchObject({ machine: 2 });
+    const facts = (await allFacts()).filter((f) => f.type === "product_event");
+    expect(facts).toHaveLength(1);
+    expect(facts[0]).toMatchObject({
+      source: "posthog",
+      sourceRef: "ev-1",
+      sourceContactId: "ph-alice",
+      crmContactId: s.posthogContact,
+      personKey: "email:alice@x.com",
+      occurredAt: "2026-07-30T08:05:00.000Z",
+      dateBasis: "event_timestamp",
+      payload: {
+        event: "get_started_website_submitted",
+        text: "Get started website submitted · website: acme.com",
+        properties: { website: "acme.com" },
+        sessionId: "s1",
+        path: "/get-started",
+        url: "https://brand.com/get-started",
+      },
+    });
+    // A session later read as a machine's takes its events with it.
+    await db
+      .update(posthogActivities)
+      .set({ detail: sql`${posthogActivities.detail} || '{"machine": {"fingerprint": "viewport_equals_screen", "screen": "1920x1080"}}'::jsonb` })
+      .where(eq(posthogActivities.externalId, "s1:ph-alice"));
+    const before = await maxSeq();
+    expect(await emitScopeFacts(s.scope)).toMatchObject({ machine: 4, machineWithdrawn: 2, emitted: 0 });
+    const added = (await readFacts({ since: before, limit: 100 })).facts;
+    expect(added.map((f) => (f.payload as { withdrawnType?: string }).withdrawnType).sort()).toEqual(["product_event", "website_visit"]);
+  });
+
   it("a changed vendor record is withdrawn and re-stated; a vanished snapshot record is withdrawn", async () => {
     const s = await seed();
     await emitScopeFacts(s.scope);
