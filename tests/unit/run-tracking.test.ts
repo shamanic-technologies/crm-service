@@ -163,3 +163,40 @@ describe("run creation on a brand-less org request", () => {
     expect(res.body.error).toMatch(/run tracking unavailable/);
   });
 });
+
+describe("support at creation when no caller run is named (LEDGER-RESIDUAL-1025)", () => {
+  const support = { kind: "product_feature" as const, reason: "Unibox thread read" };
+
+  it("a top-level request marks its run support", async () => {
+    const res = await request(appUnder(requireOrgAndUser("people.timeline", { supportWhenTopLevel: support })))
+      .get("/orgs/thing")
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", ORG)
+      .set("x-user-id", USER);
+    expect(res.status).toBe(200);
+    expect(created).toHaveLength(1);
+    expect(created[0].body.support).toEqual(support);
+  });
+
+  it("a request under a caller run rides that run: no support on the wire", async () => {
+    const res = await request(appUnder(requireOrgAndUser("people.timeline", { supportWhenTopLevel: support })))
+      .get("/orgs/thing")
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", ORG)
+      .set("x-user-id", USER)
+      .set("x-run-id", "bbbbbbbb-1111-4111-8111-000000000009");
+    expect(res.status).toBe(200);
+    expect(created).toHaveLength(1);
+    expect(created[0].body.support).toBeUndefined();
+    expect(created[0].headers["x-run-id"]).toBe("bbbbbbbb-1111-4111-8111-000000000009");
+  });
+
+  it("a route without the option never sends support", async () => {
+    await request(appUnder(requireOrgAndUser("people.list")))
+      .get("/orgs/thing")
+      .set("x-api-key", API_KEY)
+      .set("x-org-id", ORG)
+      .set("x-user-id", USER);
+    expect(created[0].body.support).toBeUndefined();
+  });
+});

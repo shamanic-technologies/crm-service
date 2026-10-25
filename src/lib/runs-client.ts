@@ -233,6 +233,14 @@ export const SUPPORT_RUNS = {
   calendarMatching: { serviceName: "crm-service", taskName: "calendar.judge", support: { kind: "product_feature", reason: "Matching calendar attendees and Meet participants to the brand's people" } },
   /** Voice notes received on the Copilot's own line: the Copilot. */
   copilotVoice: { serviceName: "crm-service", taskName: "copilot.voice-notes", support: { kind: "copilot", reason: "Transcribing voice notes the Copilot reads" } },
+  /**
+   * LEDGER-RESIDUAL-1025: re-reading the brand's mail threads into the Unibox store and search index (google-service cleans
+   * each message body with Jev on the way). The freshness watch's whole run, and the message index step of a people build.
+   */
+  mailboxRefresh: { serviceName: "crm-service", taskName: "people.freshness", support: { kind: "product_feature", reason: "Unibox store: re-reading the brand's mail threads that moved" } },
+  messageIndex: { serviceName: "crm-service", taskName: "people.message-index", support: { kind: "product_feature", reason: "Unibox search index: re-reading the brand's mail and cold-email threads after a people build" } },
+  /** A person's thread opened in the Unibox with no caller run (the dashboard): a product feature. Read under a caller's run, it rides that run. */
+  timelineRead: { serviceName: "crm-service", taskName: "people.timeline", support: { kind: "product_feature", reason: "Unibox thread read: a person's timeline opened with no caller run" } },
 } as const satisfies Record<string, { serviceName: string; taskName: string; support: NonNullable<CreateRunParams["support"]> }>;
 
 export async function updateRun(
@@ -401,7 +409,20 @@ export interface SupportMarkAnswer {
  */
 export async function markOwnRunsSupport(
   step: "preview" | "apply",
-  body: { runIds: string[]; kind: SupportFunction; reason: string; markedBy: string },
+  body: {
+    kind: SupportFunction;
+    reason: string;
+    markedBy: string;
+    /** Runs to mark, or a selection over the caller's own runs (exclusive at runs-service). */
+    runIds?: string[];
+    taskNames?: string[];
+    topLevelOnly?: boolean;
+    withSpendOnly?: boolean;
+    startedAfter?: string;
+    startedBefore?: string;
+    offOutcomeOnly?: boolean;
+    offAncestorMarkOnly?: boolean;
+  },
 ): Promise<SupportMarkAnswer> {
   return runsRequest<SupportMarkAnswer>(`/v1/platform-runs/support-marks/${step}`, {
     method: "POST",
