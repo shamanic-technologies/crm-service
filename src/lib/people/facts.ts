@@ -39,7 +39,7 @@ import { humanKeys, people, peopleFacts, personIdAliases, type PeopleFact, type 
 import { eventsQuery, type FunnelEventSource } from "../gohighlevel/funnel-events.js";
 import { labelEventsQuery, type LabelEventRow } from "../gohighlevel/label-verdicts.js";
 import { GHL_SOURCE } from "../gohighlevel/records.js";
-import { POSTHOG_SOURCE } from "../posthog/records.js";
+import { POSTHOG_SOURCE, brandEventProperties, describeKeyEvent } from "../posthog/records.js";
 import { STRIPE_SOURCE } from "../stripe/records.js";
 import { emailKey, keysOf, normalizeEmail, pickPersonKey, type Presence } from "./identity.js";
 import type { PersonConnectionTag } from "./connection-tags.js";
@@ -72,6 +72,9 @@ export const FACT_TYPES = [
   "refund",
   "subscription_changed",
   "website_visit",
+  // ONBOARDING-EVENTS-TO-LEADS-1025: a named event the brand's own product fired for the person (a PostHog custom
+  // event: a step of their signup walk, a setting they chose), dated, with what it carried. Their act, never a step.
+  "product_event",
   "signup",
   "message_in",
   "message_out",
@@ -115,6 +118,7 @@ const FAMILIES = {
   gmail_message: { source: "gmail", snapshot: false, immutable: false },
   posthog_person: { source: "posthog", snapshot: true, immutable: false },
   posthog_visit: { source: "posthog", snapshot: true, immutable: false },
+  posthog_event: { source: "posthog", snapshot: true, immutable: false },
   stripe_money: { source: "stripe", snapshot: true, immutable: false },
   stripe_subscription: { source: "stripe", snapshot: false, immutable: false },
   clerk_user: { source: "clerk", snapshot: true, immutable: false },
@@ -919,6 +923,54 @@ async function posthogCandidates(orgId: string, brandId: string): Promise<Candid
       },
       subject: presenceSubject("posthog", v.person_id, v.full_name),
       ...(v.detail?.machine ? { machine: true } : {}),
+    });
+  }
+  // ONBOARDING-EVENTS-TO-LEADS-1025: every custom event the brand's product fired (`$` events never reach silver), one
+  // `product_event` each, its name and what the brand's own properties say. An event of a session a MACHINE made
+  // (the visit of the same session and person carries the positive fingerprint) is no act of theirs, like the visit.
+  const events = await rows<{
+    contact_id: string;
+    external_id: string;
+    person_id: string;
+    full_name: string | null;
+    occurred_at: string | Date;
+    name: string;
+    url: string | null;
+    detail: { sessionId?: string | null; path?: string | null; properties?: Record<string, unknown> } | null;
+    machine: boolean;
+  }>(sql`
+    SELECT c.id AS contact_id, a.external_id, c.external_id AS person_id, c.full_name, a.occurred_at, a.name, a.url, a.detail,
+      EXISTS (
+        SELECT 1 FROM posthog_activities v
+        WHERE v.contact_id = a.contact_id AND v.kind = 'visit'
+          AND v.detail->>'sessionId' = a.detail->>'sessionId'
+          AND jsonb_typeof(v.detail->'machine') = 'object'
+      ) AS machine
+    FROM posthog_activities a JOIN contacts c ON c.id = a.contact_id
+    WHERE a.org_id = ${orgId} AND a.brand_id = ${brandId} AND a.kind = 'event'
+  `);
+  for (const e of events) {
+    const properties = brandEventProperties(e.detail?.properties);
+    out.push({
+      naturalKey: `posthog|event|${e.external_id}`,
+      family: "posthog_event",
+      type: "product_event",
+      source: "posthog",
+      sourceRef: e.external_id,
+      sourceContactId: e.person_id,
+      crmContactId: e.contact_id,
+      occurredAt: iso(e.occurred_at),
+      dateBasis: "event_timestamp",
+      payload: {
+        event: e.name,
+        text: describeKeyEvent(e.name, properties),
+        properties,
+        sessionId: e.detail?.sessionId ?? null,
+        path: e.detail?.path ?? null,
+        url: e.url,
+      },
+      subject: presenceSubject("posthog", e.person_id, e.full_name),
+      ...(e.machine ? { machine: true } : {}),
     });
   }
   return out;
