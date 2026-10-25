@@ -175,8 +175,9 @@ message index step `people.message-index`, a `people.timeline` read with NO call
 {supportWhenTopLevel})`: under a caller's x-run-id it rides that run). Past runs: `POST /internal/outcomes/support-marks
 {kind, reason, runIds | taskNames + topLevelOnly / offOutcomeOnly / offAncestorMarkOnly, dryRun?}` (owner door; the
 two modes are exclusive there). A run whose Jev judged and kept nothing (relevance, reply kinds) stays a run with no
-output (loss), never support. ⚠️ runs-service pools that loss on the COST ROW's run task (`chat-service/judgments`),
-never on our build's, so it reads `undeclared` there (2026-10-25: ~$5.6, people.build / matrix.sync); theirs to fix.
+output (loss), never support: runs-service allocation v6 pools it on the run its walk ends on (our `people.build` /
+`matrix.sync` root, not the chat-service child), and an org-day with no new lead reads unpooled loss once that task has
+ever produced (2026-10-25, it read `undeclared` before: ~$5.6).
 
 Everything else GoHighLevel sends arrives already structured, so deriving it is
 pure code — no model, no metered call, no catalogue row.
