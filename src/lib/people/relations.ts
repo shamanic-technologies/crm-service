@@ -227,6 +227,8 @@ export interface PointOrgSummary {
 export async function resolvePointCompanies(
   identity: SiblingIdentity,
   persons: { readings: ContactPointReading[]; known: PointCompany[] }[],
+  /** The run the company judgments ride (LEDGER-CRM-UNDECLARED-1027: identity work, a support child of the build). */
+  judgeRunId: () => Promise<string>,
 ): Promise<{ answers: Map<string, PointCompany[] | null>; summary: PointOrgSummary }> {
   const todo: { reading: ContactPointReading; known: PointCompany[]; convKeys: string[] }[] = [];
   for (const { readings, known } of persons) {
@@ -267,14 +269,15 @@ export async function resolvePointCompanies(
     }
     return true;
   });
-  const tracking: ChatTrackingHeaders = { orgId: identity.orgId, userId: identity.userId, runId: identity.runId, brandIds: [identity.brandId] };
+  const tracking: ChatTrackingHeaders | null =
+    toJudge.length > 0 ? { orgId: identity.orgId, userId: identity.userId, runId: await judgeRunId(), brandIds: [identity.brandId] } : null;
   const errors: string[] = [];
   await mapLimit(toJudge, 4, async (t) => {
     try {
       const question = pointOrgQuestion(t.known);
       const criteria = question.criteria;
       const content = contents.get(t.reading.id)!;
-      const result = await judgeChoices({ contactPoint: content.content, knownCompanies: t.known.map((k) => k.domain) }, { point: question }, tracking);
+      const result = await judgeChoices({ contactPoint: content.content, knownCompanies: t.known.map((k) => k.domain) }, { point: question }, tracking!);
       const a = result.answers.point;
       if (!a || !(a.choice in criteria) || typeof a.confidence !== "number") throw new Error(`no company answer for ${t.reading.id}`);
       const values = {
@@ -289,7 +292,7 @@ export async function resolvePointCompanies(
         criteriaVersion: POINT_ORG_CRITERIA_VERSION,
         input: content.content,
         model: result.model,
-        runId: identity.runId,
+        runId: tracking!.runId,
         judgedAt: new Date(),
       };
       const { orgId: _o, brandId: _b, contactPoint: _c, ...set } = values;

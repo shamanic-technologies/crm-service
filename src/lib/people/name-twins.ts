@@ -265,7 +265,12 @@ async function latestMessages(scopeId: string, emails: string[]): Promise<TwinMe
  * Judge every new pair of the brand's people sharing a full name (bounded per build). Returns the summary;
  * never throws (a failure is recorded in it and retried next build).
  */
-export async function judgeNameTwins(scope: PeopleScope, identity: SiblingIdentity): Promise<NameTwinSummary> {
+export async function judgeNameTwins(
+  scope: PeopleScope,
+  identity: SiblingIdentity,
+  /** The run the same-human judgments ride (LEDGER-CRM-UNDECLARED-1027: identity work, a support child of the build). */
+  judgeRunId: () => Promise<string>,
+): Promise<NameTwinSummary> {
   const summary: NameTwinSummary = { status: "ok", candidates: 0, commonNamesSkipped: 0, judged: 0, reused: 0, pending: 0, same: 0, error: null };
   try {
     const { pairs, commonNamesSkipped } = nameTwinPairs(await previousPeople(scope));
@@ -291,7 +296,7 @@ export async function judgeNameTwins(scope: PeopleScope, identity: SiblingIdenti
     const batch = todo.slice(0, MAX_PER_BUILD);
     summary.pending = todo.length - batch.length;
     const brand = await siblingGetOk<{ brand: { name: string } }>("brand", `/internal/brands/${encodeURIComponent(scope.brandId)}`, identity);
-    const tracking: ChatTrackingHeaders = { orgId: identity.orgId, userId: identity.userId, runId: identity.runId, brandIds: [identity.brandId] };
+    const tracking: ChatTrackingHeaders = { orgId: identity.orgId, userId: identity.userId, runId: await judgeRunId(), brandIds: [identity.brandId] };
     let firstError: string | null = null;
     await mapLimit(batch, CONCURRENCY, async (pair) => {
       try {
@@ -315,7 +320,7 @@ export async function judgeNameTwins(scope: PeopleScope, identity: SiblingIdenti
           verdict,
           probabilitySame: answer.probabilities.same_human,
           model: result.model,
-          runId: identity.runId,
+          runId: tracking.runId,
           judgedAt: new Date(),
         };
         // A rejected pair is never re-judged (filtered above), so the update never touches a user's statement.

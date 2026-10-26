@@ -8,7 +8,8 @@
  * - Subject = OUR human x company relation (`subjectService: "crm-service"`, `subjectId` = the relation key served on
  *   `people.relations`), held here, never a lead-service id.
  * - Run = `conversation_verdicts.run_id`: the run every Jev call of that judgment rode (people.build or the Matrix
- *   sync gate). Its whole spend (relevance, tags, the build's other registry judgments) rides the leads it identified;
+ *   sync gate). Its whole spend (relevance, tags, automated senders, groups) rides the leads it identified (identity
+ *   resolution rides a `people.identity` support child, LEDGER-CRM-UNDECLARED-1027);
  *   a run that identified nobody produced none (rule: normal loss rides the kept units).
  * - One occurrence per CONVERSATION, first seen once: a later re-judgment of the same thread adds none (its run then
  *   produced none). One per RELATION: a second conversation of an already-identified relation is `duplicate_subject`.
