@@ -85,7 +85,7 @@ export interface DomainVerdictsSummary {
 /** Each domain's kind: recorded ones reused, the rest judged now (100 per Jev call). */
 export async function resolveDomainKinds(
   domains: string[],
-  tracking: ChatTrackingHeaders,
+  trackingOf: () => Promise<ChatTrackingHeaders>,
 ): Promise<{ kinds: Map<string, { kind: DomainKind; confidence: number }>; summary: DomainVerdictsSummary }> {
   const kinds = new Map<string, { kind: DomainKind; confidence: number }>();
   for (let i = 0; i < domains.length; i += 1000) {
@@ -98,6 +98,8 @@ export async function resolveDomainKinds(
   for (let i = 0; i < todo.length; i += DOMAINS_PER_CALL) batches.push(todo.slice(i, i + DOMAINS_PER_CALL));
   const errors: string[] = [];
   let judged = 0;
+  // The run is asked only when a domain is judged (most builds judge none).
+  const tracking = batches.length > 0 ? await trackingOf() : null;
   await mapLimit(batches, CONCURRENCY, async (batch) => {
     try {
       const questions: Record<string, ChoiceQuestion> = {};
@@ -114,7 +116,7 @@ export async function resolveDomainKinds(
           "(the address says nothing about where the person works) or one organization's own domain (the person " +
           "belongs to that organization).",
       };
-      const result = await judgeQuestions(state, questions, tracking);
+      const result = await judgeQuestions(state, questions, tracking!);
       const rows = batch.map((d, k) => {
         const a = result.answers[`d${k}`];
         if (!a || a.type !== "choice" || !(DOMAIN_KINDS as readonly string[]).includes(a.choice) || typeof a.confidence !== "number") {
@@ -126,7 +128,7 @@ export async function resolveDomainKinds(
           confidence: a.confidence,
           probabilities: a.probabilities,
           model: result.model,
-          runId: tracking.runId,
+          runId: tracking!.runId,
           judgedAt: new Date(),
         };
       });
@@ -338,6 +340,8 @@ export async function resolveOrganizationLookups(
   identity: SiblingIdentity,
   persons: PersonLikeForTags[],
   websiteOf: (p: PresenceLike) => string | null,
+  /** The run the domain judgments ride (LEDGER-CRM-UNDECLARED-1027: identity work, a support child of the build). */
+  judgeRunId: () => Promise<string>,
 ): Promise<{
   kinds: Map<string, { kind: DomainKind; confidence: number }>;
   companyOf: Map<string, string>;
@@ -351,8 +355,8 @@ export async function resolveOrganizationLookups(
       if (d) domains.add(d);
     }
   }
-  const tracking: ChatTrackingHeaders = { orgId: identity.orgId, userId: identity.userId, runId: identity.runId, brandIds: [identity.brandId] };
-  const { kinds, summary: domainKinds } = await resolveDomainKinds([...domains].sort(), tracking);
+  const trackingOf = async (): Promise<ChatTrackingHeaders> => ({ orgId: identity.orgId, userId: identity.userId, runId: await judgeRunId(), brandIds: [identity.brandId] });
+  const { kinds, summary: domainKinds } = await resolveDomainKinds([...domains].sort(), trackingOf);
   const orgDomains = [...domains].filter((d) => {
     const k = kinds.get(d);
     return k?.kind === "organization" && k.confidence >= ORGANIZATION_MIN_CONFIDENCE;

@@ -170,7 +170,8 @@ lead / no key = asked again (backoff to 1 h), never given up, never guessed. Led
 5 min (`FORM_SUBMITTED_DECLARATIONS=off`), ONE path past and future; `POST /internal/outcomes/form-submitted` = a pass now.
 Spend that produces no outcome by design sits on its OWN child run marked support at creation, never mixed with a
 judging run: Matrix thread reading `matrix.lead-reading`, GoHighLevel stage / label meanings `gohighlevel.label-meanings`,
-column typing `contacts.column-typing`, `calendar.judge` (all `product_feature`), voice notes on the Copilot's line
+column typing `contacts.column-typing`, `calendar.judge`, identity resolution `people.identity` (a mail domain's kind, a
+contact point's company, same-name twins: every person of the registry, never one lead; the build run keeps the lead judgments, LEDGER-CRM-UNDECLARED-1027) (all `product_feature`), voice notes on the Copilot's line
 `copilot.voice-notes` (`copilot`); other voice notes ride the `reply-trigger.judge` run. Mail re-reads (google-service
 cleans each body with Jev under our run, LEDGER-RESIDUAL-1025): the freshness watch run `people.freshness`, a build's
 message index step `people.message-index`, a `people.timeline` read with NO caller run (`requireOrgAndUser(task,
@@ -180,6 +181,9 @@ two modes are exclusive there). A run whose Jev judged and kept nothing (relevan
 output (loss), never support: runs-service allocation v6 pools it on the run its walk ends on (our `people.build` /
 `matrix.sync` root, not the chat-service child), and an org-day with no new lead reads unpooled loss once that task has
 ever produced (2026-10-25, it read `undeclared` before: ~$5.6).
+Before an org's FIRST declared lead_identified the same idle spend reads `undeclared` (no production line yet): past
+registry runs judged before it (2026-10-10..23, every verdict re-judged since, so the lead they first identified is
+unrecorded) are marked `unattributed_production` through the owner door (LEDGER-CRM-UNDECLARED-1027).
 
 Everything else GoHighLevel sends arrives already structured, so deriving it is
 pure code — no model, no metered call, no catalogue row.

@@ -156,7 +156,11 @@ export type SupportFunction =
   | "platform_llm"
   | "staff_experiment"
   | "product_feature"
-  | "retired_product";
+  | "retired_product"
+  /** Owner door only: real production whose subject was never recorded (an unabsorbed period cost on its own line). */
+  | "unattributed_production"
+  /** Owner door only: work that redid what was already produced (abnormal loss, in no unit cost). */
+  | "repeat_production";
 
 /**
  * Create an org-scoped run. parentRunId is sent as x-run-id → becomes
@@ -239,6 +243,13 @@ export const SUPPORT_RUNS = {
    */
   mailboxRefresh: { serviceName: "crm-service", taskName: "people.freshness", support: { kind: "product_feature", reason: "Unibox store: re-reading the brand's mail threads that moved" } },
   messageIndex: { serviceName: "crm-service", taskName: "people.message-index", support: { kind: "product_feature", reason: "Unibox search index: re-reading the brand's mail and cold-email threads after a people build" } },
+  /**
+   * LEDGER-CRM-UNDECLARED-1027: who a contact is, for EVERY person of the registry (CRM / Stripe / signups included, never only
+   * leads): a mail domain's kind (public mailbox or one organization, fleet-wide, once), which company a professional contact point
+   * speaks for, and two people sharing a full name being one human. The lead judgment itself (a conversation tagged `professional_to_brand`) stays on the build run: it produces
+   * lead_identified.
+   */
+  identityResolution: { serviceName: "crm-service", taskName: "people.identity", support: { kind: "product_feature", reason: "People registry: which organization a mail domain or a contact point belongs to, and whether two people sharing a name are one human" } },
   /** A person's thread opened in the Unibox with no caller run (the dashboard): a product feature. Read under a caller's run, it rides that run. */
   timelineRead: { serviceName: "crm-service", taskName: "people.timeline", support: { kind: "product_feature", reason: "Unibox thread read: a person's timeline opened with no caller run" } },
 } as const satisfies Record<string, { serviceName: string; taskName: string; support: NonNullable<CreateRunParams["support"]> }>;

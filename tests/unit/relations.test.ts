@@ -164,7 +164,7 @@ describe("a professional point without a company speaks for the person's known w
 
   it("a PERSONAL WhatsApp is never asked and never joins a professional relation (Adam)", async () => {
     const adam = readPoints(ADAM, lookups, kinds, companyOf, () => null).filter((r) => r.source !== "gmail" && r.id !== "clerk:user_gm" && r.id !== "stripe:cus_1");
-    const res = await resolvePointCompanies({ orgId: "o", brandId: "b", userId: "u", runId: "r" } as never, [{ readings: adam, known: knownCompanies(adam) }]);
+    const res = await resolvePointCompanies({ orgId: "o", brandId: "b", userId: "u", runId: "r" } as never, [{ readings: adam, known: knownCompanies(adam) }], async () => "r");
     expect(res.summary.candidates).toBe(0);
     const rels = personRelations(PID, adam, new Map([["matrix:k-wa", [{ companyId: CIFACOM, domain: "cifacom.com", basis: "jev" }]]]), []);
     expect(keysOf(rels).personal).toEqual(["matrix:k-wa"]);

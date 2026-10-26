@@ -14,7 +14,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { contacts, leadStandingObservations, people, peopleScopes, type PeopleScope } from "../../db/schema.js";
 import { SERVICE_NAME } from "../../middleware/auth.js";
-import { createRun, SUPPORT_RUNS, updateRun } from "../runs-client.js";
+import { createRun, lazyChildRun, SUPPORT_RUNS, updateRun } from "../runs-client.js";
 import {
   clusterPeople,
   keysOf,
@@ -370,6 +370,26 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     runId,
     brandId: scope.brandId,
   };
+  // LEDGER-CRM-UNDECLARED-1027: identity resolution (domain kinds, same-name twins, a contact point's company) serves every person of the registry,
+  // never one lead: its Jev calls ride a child run marked support, opened only when one is made. The build run keeps the
+  // lead judgments (relevance, tags), what its lead_identified occurrences cost.
+  const identityRun = lazyChildRun(async () => runId, { orgId: scope.orgId, userId: scope.createdByUserId, brandId: scope.brandId }, SUPPORT_RUNS.identityResolution);
+  let failed = true;
+  try {
+    const summary = await buildScopePeopleOn(scope, runId, identity, identityRun.runId);
+    failed = false;
+    return summary;
+  } finally {
+    await identityRun.close(failed);
+  }
+}
+
+async function buildScopePeopleOn(
+  scope: PeopleScope,
+  runId: string,
+  identity: SiblingIdentity,
+  identityRunId: () => Promise<string>,
+): Promise<BuildSummary> {
 
   // Before reading Matrix: put on each mirrored WhatsApp contact the phone the
   // bridge says its ghost IS, for every phone the CRM knows (lib/whatsapp/
@@ -401,7 +421,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
 
   // SAME-HUMAN-TWO-LEADS-1022: two people of the last build sharing a full name are asked to Jev once (one
   // human with two addresses?); a `same` answer is read as evidence just below, so this build already merges them.
-  const nameTwins = await judgeNameTwins(scope, identity);
+  const nameTwins = await judgeNameTwins(scope, identity, identityRunId);
   const evidenceReads: EvidenceRead[] = [
     await readCsvEvidence(scope.orgId, scope.brandId),
     await readWhatsappSendEvidence(scope.orgId, scope.brandId),
@@ -557,7 +577,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
     ...new Set(clusters.flatMap((c) => c.presences.map(presenceContactId).filter((id): id is string => !!id))),
   ]);
   const websiteOf = websiteOfPresence(websites);
-  const orgLookups = await resolveOrganizationLookups(identity, clusters, websiteOf).catch((err) => {
+  const orgLookups = await resolveOrganizationLookups(identity, clusters, websiteOf, identityRunId).catch((err) => {
     const error = (err as Error).message.slice(0, 1000);
     console.error(`[crm-service] organizations failed scope=${scope.id}: ${error}`);
     return null;
@@ -594,6 +614,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
   const pointCompanies = await resolvePointCompanies(
     identity,
     [...readingsOf.values()].map((readings) => ({ readings, known: knownCompanies(readings) })),
+    identityRunId,
   ).catch((err) => {
     const error = (err as Error).message.slice(0, 1000);
     console.error(`[crm-service] contact point companies failed scope=${scope.id}: ${error}`);
@@ -757,7 +778,7 @@ export async function buildScopePeople(scope: PeopleScope, runId: string): Promi
   // The people are live; now bring the message search index up to date with them.
   // Its failure does not undo the build: it is recorded beside it and retried next pass.
   // On a child run marked support (a product feature: re-reading threads produces no outcome, LEDGER-RESIDUAL-1025), so the
-  // build run holds only the registry's judgments, what its lead_identified occurrences cost.
+  // build run holds only the lead judgments, what its lead_identified occurrences cost.
   let indexRunId: string | null = null;
   try {
     indexRunId = (await createRun({ orgId: scope.orgId, userId: scope.createdByUserId, brandIds: [scope.brandId], ...SUPPORT_RUNS.messageIndex, parentRunId: runId })).id;

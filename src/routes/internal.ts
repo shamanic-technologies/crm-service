@@ -185,7 +185,12 @@ const SupportMarksBody = z
     offOutcomeOnly: z.boolean().optional(),
     /** Selection only: leave out runs whose cost already stops on an ancestor's support mark (never relabel that decision). */
     offAncestorMarkOnly: z.boolean().optional(),
-    kind: z.enum(["payment_fees", "brand_setup", "copilot", "platform_llm", "staff_experiment", "product_feature", "retired_product"]),
+    /**
+     * `unattributed_production` = real production whose subject was never recorded (LEDGER-CRM-UNDECLARED-1027: registry
+     * judgments before the org's first declared lead_identified, their verdict re-judged since); `repeat_production` = work
+     * that redid what was already produced (abnormal). Both runs-service owner-door kinds, never support.
+     */
+    kind: z.enum(["payment_fees", "brand_setup", "copilot", "platform_llm", "staff_experiment", "product_feature", "retired_product", "unattributed_production", "repeat_production"]),
     reason: z.string().min(1).max(2000),
     /** Who decided (session, ticket); default the first backfill's tag. */
     markedBy: z.string().min(1).max(200).optional(),
