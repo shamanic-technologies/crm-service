@@ -11,8 +11,12 @@
  *     even with a friend); else personal when any personal tag; else `professional_not_to_brand`; no tag =
  *     not judged yet (in no relation).
  *   - COMPANY (professional points): evidence (its own email domain, its CRM website, people/organizations.ts)
- *     > Jev reading the point's OWN content with the person's known companies as the options, else unknown
- *     (`contact_point_org_verdicts`, judged once, re-asked when the point moves or the options change)
+ *     > Jev reading the point's OWN content with the person's known companies as the options: a professional
+ *     point speaks for the person's known work unless its content shows ANOTHER company (WA-SPLIT-RELATION-1026:
+ *     a WhatsApp / Telegram / LinkedIn thread rarely names its company, so "nothing names it" filed every such
+ *     chat under the company-less relation, blind to the company row's leads and follow-ups); several known
+ *     companies and nothing tells which = the point joins each of them (`contact_point_org_verdicts`, judged
+ *     once, re-asked when the point moves or the options change)
  *     > the user's correction (people/corrections.ts, `contactPoint` on organization_add / _remove; a person-
  *     level organization_add claims every professional point of unknown company).
  * A RELATION = the person's points with the same reading: `rel:<personId>:personal`, `rel:<personId>:org:<id>`
@@ -63,7 +67,13 @@ export interface ContactPointReading {
   capacity: Capacity | null;
   tags: PersonConnectionTag[];
   companies: PointCompany[];
+  /** The point's most recently active presence (its record as Jev reads it). */
   presence: Presence;
+  /**
+   * EVERY presence of the point: one WhatsApp contact can hold several threads (a LID chat and a phone chat,
+   * same `channelHandle`). Keeping only the last one read hid MARTIAN's 2026-10-22 thread (WA-SPLIT-RELATION-1026).
+   */
+  presences: Presence[];
 }
 
 export interface PersonRelation {
@@ -109,8 +119,45 @@ export function evidenceCompanies(
 
 // ─── Jev: which known company does a point without evidence belong to ───────
 
-export const POINT_ORG_CRITERIA_VERSION = 1;
-export const UNKNOWN = "unknown";
+export const POINT_ORG_CRITERIA_VERSION = 2;
+/** The content shows a company the person is not known at: the point stays in the company-less relation. */
+export const ANOTHER_COMPANY = "another_company";
+/** Several known companies and nothing tells which: the point speaks for each. */
+export const ANY_KNOWN = "any_known";
+
+/**
+ * PURE: the question Jev answers for one professional point without a company of its own. The default is
+ * the person's known work; only content showing another company keeps the point off it. MECE options:
+ * one known company / any of them (offered only with two or more) / another company.
+ */
+export function pointOrgQuestion(known: PointCompany[]): ChoiceQuestion {
+  const criteria: Record<string, string> = {};
+  for (const k of known) criteria[k.companyId] = `the person speaks for their work at ${k.domain}`;
+  if (known.length > 1) {
+    criteria[ANY_KNOWN] = "the person speaks for their own work, and nothing in it tells which of these companies";
+  }
+  criteria[ANOTHER_COMPANY] =
+    "the person's own words or record show they speak for a company not in this list (another employer, a side business), never the business that wrote the outbound messages";
+  return {
+    type: "choice",
+    instructions:
+      "This contact point (an address, a number, a chat thread, an account) belongs to a person already judged to use it " +
+      "in a professional capacity. Their other contact points place them at the companies listed. The same person " +
+      "writing from a phone or a chat app about the same work rarely names their company: a sign-up, a payment, pricing, " +
+      "a meeting, questions about the offer are that same work. So the point speaks for their known company UNLESS its " +
+      "own content (a signature, a company name, what the work is about) shows a different company. Outbound messages " +
+      "are written by the business the person reached: that business's own name in them is never the person's company.",
+    criteria,
+  };
+}
+
+/** PURE: the companies a stored or fresh answer gives the point (null = none: another company, or unsure). */
+export function pointOrgAnswer(choice: string, confidence: number, known: PointCompany[]): PointCompany[] | null {
+  if (confidence < ORGANIZATION_MIN_CONFIDENCE) return null;
+  if (choice === ANY_KNOWN) return known.length > 1 ? known.map((k) => ({ companyId: k.companyId, domain: k.domain, basis: "jev" })) : null;
+  const k = known.find((x) => x.companyId === choice);
+  return k ? [{ companyId: k.companyId, domain: k.domain, basis: "jev" }] : null;
+}
 
 export interface PointToJudge {
   id: string;
@@ -120,8 +167,8 @@ export interface PointToJudge {
 }
 
 /** The point's own content Jev reads: its thread (as recorded for the tag judgment) or its record. */
-async function pointContents(identity: SiblingIdentity, points: { reading: ContactPointReading; convKey: string | null }[]): Promise<Map<string, PointToJudge>> {
-  const keys = points.map((p) => p.convKey).filter((k): k is string => !!k);
+async function pointContents(identity: SiblingIdentity, points: { reading: ContactPointReading; convKeys: string[] }[]): Promise<Map<string, PointToJudge>> {
+  const keys = [...new Set(points.flatMap((p) => p.convKeys))];
   const conv = new Map<string, { input: unknown; judgedThrough: string }>();
   for (let i = 0; i < keys.length; i += 500) {
     const rows = await db
@@ -137,7 +184,7 @@ async function pointContents(identity: SiblingIdentity, points: { reading: Conta
     for (const r of rows) conv.set(r.key, { input: r.input, judgedThrough: r.judgedThrough });
   }
   const out = new Map<string, PointToJudge>();
-  for (const { reading, convKey } of points) {
+  for (const { reading, convKeys } of points) {
     const p = reading.presence;
     const record = {
       source: p.source,
@@ -146,12 +193,15 @@ async function pointContents(identity: SiblingIdentity, points: { reading: Conta
       emails: p.emails,
       phones: p.phones,
     };
-    const c = convKey ? conv.get(convKey) : undefined;
-    if (c) {
-      const messages = ((c.input as { messages?: { at: string | null; direction: string; subject?: string | null; text: string }[] })?.messages ?? []).map(
-        (m) => ({ at: m.at, direction: m.direction, subject: m.subject ? clip(m.subject) : null, text: clip(m.text) }),
-      );
-      out.set(reading.id, { id: reading.id, judgedThrough: `conv:${c.judgedThrough}`, content: { record, messages: threadWindow(messages) } });
+    const threads = convKeys.map((k) => conv.get(k)).filter((c): c is { input: unknown; judgedThrough: string } => !!c);
+    if (threads.length) {
+      // Every thread of the point, one timeline (a single thread reads exactly as before).
+      const messages = threads
+        .flatMap((c) => (c.input as { messages?: { at: string | null; direction: string; subject?: string | null; text: string }[] })?.messages ?? [])
+        .map((m) => ({ at: m.at, direction: m.direction, subject: m.subject ? clip(m.subject) : null, text: clip(m.text) }))
+        .sort((a, b) => ((a.at ?? "") < (b.at ?? "") ? -1 : (a.at ?? "") > (b.at ?? "") ? 1 : 0));
+      const through = threads.map((c) => c.judgedThrough).sort().join(",");
+      out.set(reading.id, { id: reading.id, judgedThrough: `conv:${through}`, content: { record, messages: threadWindow(messages) } });
     } else {
       const digest = createHash("sha256").update(JSON.stringify(record)).digest("hex").slice(0, 16);
       out.set(reading.id, { id: reading.id, judgedThrough: `rec:${digest}`, content: { record } });
@@ -170,29 +220,23 @@ export interface PointOrgSummary {
 
 /**
  * For every professional point of a person with no company of its own while the person holds known
- * companies: Jev says which one it speaks for, or unknown. Recorded; re-asked only when the point moves
+ * companies: Jev says which one(s) it speaks for (the known work by default), or another company. Recorded;
+ * re-asked only when the point moves
  * or the options change. Fail-soft: a failure leaves the point unknown this build.
  */
 export async function resolvePointCompanies(
   identity: SiblingIdentity,
   persons: { readings: ContactPointReading[]; known: PointCompany[] }[],
-): Promise<{ answers: Map<string, PointCompany | null>; summary: PointOrgSummary }> {
-  const todo: { reading: ContactPointReading; known: PointCompany[]; convKey: string | null }[] = [];
+): Promise<{ answers: Map<string, PointCompany[] | null>; summary: PointOrgSummary }> {
+  const todo: { reading: ContactPointReading; known: PointCompany[]; convKeys: string[] }[] = [];
   for (const { readings, known } of persons) {
     if (known.length === 0) continue;
     for (const r of readings) {
       if (r.capacity !== "professional" || r.companies.length > 0) continue;
-      const p = r.presence;
-      const convKey =
-        p.source === "gmail" && p.emails[0]
-          ? `gmail:${p.emails[0]}`
-          : p.source === "matrix" && typeof p.detail.conversationId === "string"
-            ? `matrix:${p.detail.conversationId}`
-            : null;
-      todo.push({ reading: r, known, convKey });
+      todo.push({ reading: r, known, convKeys: pointConversationKeys(r) });
     }
   }
-  const answers = new Map<string, PointCompany | null>();
+  const answers = new Map<string, PointCompany[] | null>();
   const summary: PointOrgSummary = { status: "ok", candidates: todo.length, reused: 0, judged: 0, error: null };
   if (todo.length === 0) return { answers, summary };
 
@@ -213,16 +257,11 @@ export async function resolvePointCompanies(
       );
     for (const r of rows) stored.set(r.contactPoint, r);
   }
-  const answerOf = (choice: string, confidence: number, known: PointCompany[]): PointCompany | null => {
-    if (choice === UNKNOWN || confidence < ORGANIZATION_MIN_CONFIDENCE) return null;
-    const k = known.find((x) => x.companyId === choice);
-    return k ? { companyId: k.companyId, domain: k.domain, basis: "jev" } : null;
-  };
   const toJudge = todo.filter((t) => {
     const s = stored.get(t.reading.id);
     const through = contents.get(t.reading.id)!.judgedThrough;
     if (s && s.judgedThrough === through && s.optionsHash === optionsHash(t.known) && s.criteriaVersion === POINT_ORG_CRITERIA_VERSION) {
-      answers.set(t.reading.id, answerOf(s.choice, s.confidence, t.known));
+      answers.set(t.reading.id, pointOrgAnswer(s.choice, s.confidence, t.known));
       summary.reused++;
       return false;
     }
@@ -232,19 +271,8 @@ export async function resolvePointCompanies(
   const errors: string[] = [];
   await mapLimit(toJudge, 4, async (t) => {
     try {
-      const criteria: Record<string, string> = {};
-      t.known.forEach((k) => {
-        criteria[k.companyId] = `the person uses this contact point for their work at ${k.domain}`;
-      });
-      criteria[UNKNOWN] = "nothing in it says which of these companies, or it is about another one";
-      const question: ChoiceQuestion = {
-        type: "choice",
-        instructions:
-          "A person reached a business through several contact points (addresses, numbers, threads, accounts). Read THIS " +
-          "contact point's own content (its record and messages: a signature, a company name, what the work is about): " +
-          "for which of the person's companies does it speak?",
-        criteria,
-      };
+      const question = pointOrgQuestion(t.known);
+      const criteria = question.criteria;
       const content = contents.get(t.reading.id)!;
       const result = await judgeChoices({ contactPoint: content.content, knownCompanies: t.known.map((k) => k.domain) }, { point: question }, tracking);
       const a = result.answers.point;
@@ -269,7 +297,7 @@ export async function resolvePointCompanies(
         .insert(contactPointOrgVerdicts)
         .values(values)
         .onConflictDoUpdate({ target: [contactPointOrgVerdicts.orgId, contactPointOrgVerdicts.brandId, contactPointOrgVerdicts.contactPoint], set });
-      answers.set(t.reading.id, answerOf(a.choice, a.confidence, t.known));
+      answers.set(t.reading.id, pointOrgAnswer(a.choice, a.confidence, t.known));
       summary.judged++;
     } catch (err) {
       if (errors.length < 3) errors.push((err as Error).message.slice(0, 300));
@@ -283,6 +311,16 @@ export async function resolvePointCompanies(
 }
 
 // ─── readings and relations (pure) ───────────────────────────────────────────
+
+/** PURE: the recorded conversation keys of every thread of a point (as the tag judgment keyed them). */
+export function pointConversationKeys(r: ContactPointReading): string[] {
+  const out = new Set<string>();
+  for (const p of r.presences) {
+    if (p.source === "gmail" && p.emails[0]) out.add(`gmail:${p.emails[0]}`);
+    else if (p.source === "matrix" && typeof p.detail.conversationId === "string") out.add(`matrix:${p.detail.conversationId}`);
+  }
+  return [...out];
+}
 
 /** PURE: every point's capacity, tags and evidence companies. */
 export function readPoints(
@@ -303,7 +341,28 @@ export function readPoints(
     const capacity = capacityOf(tags.map((t) => t.tag));
     // Evidence is read on every point: a correction can make a point professional later.
     const companies = evidenceCompanies(p, kinds, companyOf, websiteOf);
-    byId.set(id, { id, source: p.source, capacity, tags, companies, presence: p });
+    const held = byId.get(id);
+    if (!held) {
+      byId.set(id, { id, source: p.source, capacity, tags, companies, presence: p, presences: [p] });
+      continue;
+    }
+    // Another thread of the same point: one reading over all of them (tags and companies unioned).
+    held.presences.push(p);
+    if ((p.lastActivityAt ?? "") > (held.presence.lastActivityAt ?? "")) held.presence = p;
+    for (const t of tags) {
+      const h = held.tags.find((x) => x.tag === t.tag);
+      if (!h) held.tags.push({ ...t, userIds: [...t.userIds], basis: [...t.basis] });
+      else {
+        for (const u of t.userIds) if (!h.userIds.includes(u)) h.userIds.push(u);
+        for (const b of t.basis) if (!h.basis.some((x) => x.kind === b.kind && x.ref === b.ref)) h.basis.push(b);
+      }
+    }
+    for (const c of companies) if (!held.companies.some((x) => x.companyId === c.companyId)) held.companies.push(c);
+  }
+  for (const r of byId.values()) {
+    if (r.presences.length < 2) continue;
+    r.tags = CONNECTION_TAGS.filter((t) => r.tags.some((x) => x.tag === t)).map((t) => r.tags.find((x) => x.tag === t)!);
+    r.capacity = capacityOf(r.tags.map((t) => t.tag));
   }
   return [...byId.values()];
 }
@@ -355,14 +414,14 @@ export const knownCompanies = (readings: ContactPointReading[]): PointCompany[] 
 export function personRelations(
   personId: string,
   readings: ContactPointReading[],
-  jev: Map<string, PointCompany | null>,
+  jev: Map<string, PointCompany[] | null>,
   corrections: PeopleCorrection[],
 ): PersonRelation[] {
   const companiesOf = new Map<string, PointCompany[]>();
   for (const r of readings) {
     if (r.capacity !== "professional") continue;
     const j = jev.get(r.id);
-    companiesOf.set(r.id, r.companies.length ? [...r.companies] : j ? [j] : []);
+    companiesOf.set(r.id, r.companies.length ? [...r.companies] : j ? [...j] : []);
   }
   for (const c of corrections) {
     const t = c.target as { companyId?: string; domain?: string; contactPoint?: string };
@@ -395,9 +454,11 @@ export function personRelations(
         tagMap: new Map(),
       } as PersonRelation & { tagMap: Map<ConnectionTag, PersonConnectionTag> });
     rel.contactPoints.push({ id: r.id, source: r.source, companyBasis: company?.basis ?? null });
-    for (const e of r.presence.emails) if (!rel.emails.includes(e)) rel.emails.push(e);
-    for (const p of r.presence.phones) if (!rel.phones.includes(p)) rel.phones.push(p);
-    for (const k of r.presence.keys ?? []) if (!rel.keys.includes(k)) rel.keys.push(k);
+    for (const pr of r.presences) {
+      for (const e of pr.emails) if (!rel.emails.includes(e)) rel.emails.push(e);
+      for (const p of pr.phones) if (!rel.phones.includes(p)) rel.phones.push(p);
+      for (const k of pr.keys ?? []) if (!rel.keys.includes(k)) rel.keys.push(k);
+    }
     for (const t of r.tags) {
       const held = rel.tagMap.get(t.tag);
       if (!held) rel.tagMap.set(t.tag, { ...t, userIds: [...t.userIds], basis: [...t.basis] });

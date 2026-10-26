@@ -62,9 +62,11 @@ Owner 2026-10-17: a Unibox row is a human x organization, never the whole human 
 shows in their professional row), generalized, no special case. Each CONTACT POINT (`presenceStableKey`: an address,
 a number, a thread, a CRM / Stripe / Clerk / PostHog record) is read on its own: capacity from its own tags
 (`professional_to_brand` wins; else personal if any personal tag; else `professional_not_to_brand`; untagged = in
-no relation), company = evidence (its own domain / CRM website) > Jev reading the point's OWN content (recorded
-thread input or its record) among the person's known companies, else unknown (`contact_point_org_verdicts`, re-asked
-when the point or the options move) > the user's correction (`contactPoint` on tag / organization corrections; a
+no relation), company = evidence (its own domain / CRM website) > Jev reading the point's OWN content (EVERY recorded
+thread of the point merged, or its record): DEFAULT = the person's known company, `any_known` (2+ known, can't tell) =
+each, `another_company` only when THEIR words show one (our outbound naming our brand never counts) (v2,
+WA-SPLIT-RELATION-1026: "unknown when nothing names it" filed every WhatsApp chat on `:pro`, blind to the company
+row) (`contact_point_org_verdicts`, re-asked when the point or the options move) > the user's correction (`contactPoint` on tag / organization corrections; a
 person-level `organization_add` claims every professional point of unknown company). `people.relations` =
 `rel:<personId>:personal | :org:<companyId> | :pro`, each with ONLY its points' emails / phones / keys / tags; fact
 `relation` (snapshot, source crm) on the feed; `GET /orgs/people/timeline?relationKey=` reads only its points.

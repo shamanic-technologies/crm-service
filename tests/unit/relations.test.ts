@@ -1,5 +1,18 @@
 import { describe, it, expect } from "vitest";
-import { capacityOf, correctPointTags, knownCompanies, personRelations, readPoints, type PointCompany } from "../../src/lib/people/relations.js";
+import {
+  ANOTHER_COMPANY,
+  ANY_KNOWN,
+  capacityOf,
+  correctPointTags,
+  knownCompanies,
+  personRelations,
+  pointOrgAnswer,
+  pointOrgQuestion,
+  readPoints,
+  pointConversationKeys,
+  resolvePointCompanies,
+  type PointCompany,
+} from "../../src/lib/people/relations.js";
 import type { TagLookups, TagScores } from "../../src/lib/people/connection-tags.js";
 import type { DomainKind } from "../../src/lib/people/organizations.js";
 import type { Presence } from "../../src/lib/people/identity.js";
@@ -68,7 +81,7 @@ describe("personRelations (PERSON-RELATIONS-1017)", () => {
 
   it("Jev reads Cifacom in a gmail.com point: that point joins the @Cifacom relation", () => {
     expect(knownCompanies(readings).map((k) => k.companyId)).toEqual([CIFACOM]);
-    const jev = new Map<string, PointCompany | null>([["gmail:adam2d3d@gmail.com", { companyId: CIFACOM, domain: "cifacom.com", basis: "jev" }]]);
+    const jev = new Map<string, PointCompany[] | null>([["gmail:adam2d3d@gmail.com", [{ companyId: CIFACOM, domain: "cifacom.com", basis: "jev" }]]]);
     const rels = personRelations(PID, readings, jev, []);
     expect(keysOf(rels)[`org:${CIFACOM}`]).toEqual(["clerk:user_cifa", "gmail:adam2d3d@gmail.com"]);
     expect(keysOf(rels).pro).toEqual(["clerk:user_gm", "stripe:cus_1"]);
@@ -89,5 +102,97 @@ describe("personRelations (PERSON-RELATIONS-1017)", () => {
     const rels = personRelations(PID, corrected, new Map(), []);
     expect(keysOf(rels).personal).toBeUndefined();
     expect(keysOf(rels).pro).toContain("matrix:k-wa");
+  });
+});
+
+// WA-SPLIT-RELATION-1026 (prod 2026-10-26): Noah Lucia, noah@daybookhealthcare.com + a WhatsApp chat about the offer
+// that never names Daybook. Jev was asked "which company does it name?" and said unknown: the chat sat on a
+// company-less relation, the Daybook row (his lead, his follow-ups) never saw it.
+describe("a professional point without a company speaks for the person's known work (WA-SPLIT-RELATION-1026)", () => {
+  const DAYBOOK = "b86c4ccb-4b49-4aaa-9101-6d35f377204e";
+  const OTHER = "aaaaaaaa-2222-4222-8222-000000000002";
+  const daybook: PointCompany = { companyId: DAYBOOK, domain: "daybookhealthcare.com", basis: "evidence" };
+  const other: PointCompany = { companyId: OTHER, domain: "other.io", basis: "evidence" };
+  const NOAH = [
+    presence("instantly", "noah@daybookhealthcare.com", { emails: ["noah@daybookhealthcare.com"] }),
+    presence("matrix", "k-wa", { phones: ["+15854852133"], detail: { kind: "dm", conversationId: "noah-wa", contactId: "k-wa", groups: [] } }),
+  ];
+  const noahLookups: TagLookups = {
+    ...lookups,
+    conversations: new Map([["matrix:noah-wa", { tags: ["professional_to_brand"], scores: scores({ professional_to_brand: 0.95 }), userIds: [] }]]),
+  };
+  const noahKinds = new Map<string, { kind: DomainKind; confidence: number }>([["daybookhealthcare.com", { kind: "organization", confidence: 0.95 }]]);
+  // Instantly carries no tag of its own in this fixture: tag it professional by correction.
+  const noahReadings = correctPointTags(
+    readPoints(NOAH, noahLookups, noahKinds, new Map([["daybookhealthcare.com", DAYBOOK]]), () => null),
+    [corr("tag_add", { tag: "professional_to_brand", contactPoint: "instantly:noah@daybookhealthcare.com" })],
+    "brand-1",
+  );
+
+  it("the question defaults to the known company; 'another company' needs content showing one; 'any of them' only with two or more", () => {
+    const one = pointOrgQuestion([daybook]);
+    expect(Object.keys(one.criteria)).toEqual([DAYBOOK, ANOTHER_COMPANY]);
+    expect(one.instructions).toMatch(/UNLESS/);
+    // The option that licensed "unknown" for a chat naming no company is gone.
+    expect(JSON.stringify(one)).not.toMatch(/nothing in it says which/);
+    expect(Object.keys(pointOrgQuestion([daybook, other]).criteria)).toEqual([DAYBOOK, OTHER, ANY_KNOWN, ANOTHER_COMPANY]);
+  });
+
+  it("answers: one company, every known one, or none (another company, unsure, a legacy 'unknown')", () => {
+    expect(pointOrgAnswer(DAYBOOK, 0.9, [daybook])).toEqual([{ companyId: DAYBOOK, domain: "daybookhealthcare.com", basis: "jev" }]);
+    expect(pointOrgAnswer(ANY_KNOWN, 0.9, [daybook, other])!.map((c) => c.companyId)).toEqual([DAYBOOK, OTHER]);
+    expect(pointOrgAnswer(ANY_KNOWN, 0.9, [daybook])).toBeNull();
+    expect(pointOrgAnswer(ANOTHER_COMPANY, 0.9, [daybook])).toBeNull();
+    expect(pointOrgAnswer(DAYBOOK, 0.2, [daybook])).toBeNull();
+    expect(pointOrgAnswer("unknown", 1, [daybook])).toBeNull();
+  });
+
+  it("Noah: the WhatsApp chat joins the Daybook relation, no company-less sibling left", () => {
+    expect(knownCompanies(noahReadings).map((k) => k.companyId)).toEqual([DAYBOOK]);
+    const jev = new Map([["matrix:k-wa", pointOrgAnswer(DAYBOOK, 0.9, [daybook])]]);
+    const rels = personRelations(PID, noahReadings, jev, []);
+    expect(keysOf(rels)).toEqual({ [`org:${DAYBOOK}`]: ["instantly:noah@daybookhealthcare.com", "matrix:k-wa"] });
+    expect(rels[0].phones).toEqual(["+15854852133"]);
+  });
+
+  it("two known companies and nothing tells which: the chat reaches both rows", () => {
+    const jev = new Map([["matrix:k-wa", pointOrgAnswer(ANY_KNOWN, 0.8, [daybook, other])]]);
+    const rels = personRelations(PID, noahReadings, jev, []);
+    expect(keysOf(rels)[`org:${OTHER}`]).toEqual(["matrix:k-wa"]);
+    expect(keysOf(rels)[`org:${DAYBOOK}`]).toContain("matrix:k-wa");
+  });
+
+  it("a PERSONAL WhatsApp is never asked and never joins a professional relation (Adam)", async () => {
+    const adam = readPoints(ADAM, lookups, kinds, companyOf, () => null).filter((r) => r.source !== "gmail" && r.id !== "clerk:user_gm" && r.id !== "stripe:cus_1");
+    const res = await resolvePointCompanies({ orgId: "o", brandId: "b", userId: "u", runId: "r" } as never, [{ readings: adam, known: knownCompanies(adam) }]);
+    expect(res.summary.candidates).toBe(0);
+    const rels = personRelations(PID, adam, new Map([["matrix:k-wa", [{ companyId: CIFACOM, domain: "cifacom.com", basis: "jev" }]]]), []);
+    expect(keysOf(rels).personal).toEqual(["matrix:k-wa"]);
+    expect(keysOf(rels)[`org:${CIFACOM}`]).toEqual(["clerk:user_cifa"]);
+  });
+});
+
+// WA-SPLIT-RELATION-1026: MARTIAN's WhatsApp contact holds two threads (2026-10-12 LID chat, 2026-10-22 phone chat),
+// one point. The reading kept only the last presence read, so Jev judged the stale 3-message thread.
+describe("one contact point, several threads: one reading over all of them", () => {
+  const wa = (conv: string, last: string, extra: Partial<Presence> = {}) =>
+    presence("matrix", `pres-${conv}`, { phones: ["+19032259297"], lastActivityAt: last, detail: { kind: "dm", conversationId: conv, channelHandle: "@whatsapp_lid-1:x", groups: [] }, ...extra });
+  const x: TagLookups = {
+    ...lookups,
+    conversations: new Map([
+      ["matrix:new", { tags: ["professional_to_brand"], scores: scores({ professional_to_brand: 0.9 }), userIds: [] }],
+      ["matrix:old", { tags: ["professional_to_brand"], scores: scores({ professional_to_brand: 0.7 }), userIds: [] }],
+    ]),
+  };
+  it("both threads are read, the record is the latest one, whatever the order they arrive in", () => {
+    const [r] = readPoints([wa("new", "2026-10-22T22:20:50Z"), wa("old", "2026-10-12T15:39:07Z", { emails: ["info@gowhite.xyz"] })], x, kinds, companyOf, () => null);
+    expect(r.id).toBe("matrix:@whatsapp_lid-1:x");
+    expect(r.presences).toHaveLength(2);
+    expect(r.presence.detail.conversationId).toBe("new");
+    expect(pointConversationKeys(r).sort()).toEqual(["matrix:new", "matrix:old"]);
+    expect(r.capacity).toBe("professional");
+    // The relation carries every thread's addresses, not only the last read.
+    const rels = personRelations(PID, [r], new Map(), []);
+    expect(rels[0].emails).toEqual(["info@gowhite.xyz"]);
   });
 });
