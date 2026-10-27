@@ -1414,7 +1414,9 @@ kind `reported`, reportedBy crm-service, fromStep `lead_found`), within ~1 min. 
   (first / last name as the source states them: PostHog `first_name`/`last_name`/`name`, Clerk's own; a greeting says "Hi Marie").
   Retries 1→60 min for 24h; 400/422 final. Read: `GET /orgs/phone-triggers?brandId=[&includeHistory=true]`; a pass now:
   `POST /internal/phone-triggers/watch`. Owner doors: `POST /internal/phone-triggers/reports/redeliver {reportIds}` (an
-  unsent report past the 24 h window, sent now, same key) and `.../withhold {reportIds, note}` (`skipped / withheld`, never sent).
+  unsent report past the 24 h window, sent now, same key; `replayCampaignOff: true` also re-sends one campaign-service
+  answered `campaign_off`, as a NEW occurrence keyed `...:replay:<first event id>`: Off is final there) and `.../withhold
+  {reportIds, note}` (`skipped / withheld`, never sent); reply reports: `POST /internal/reply-triggers/reports/withhold`.
 - **Stuck reports are red on Monitoring** (`lib/trigger-health.ts`, `GET /internal/ops/trigger-reports?days=`): every trigger
   table (form, phone, reply, credit), a row not sent 15 min after detection = stuck, with reason + last error, + `byDay`
   sent / skipped / not sent. Sends nothing.

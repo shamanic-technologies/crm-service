@@ -49,6 +49,7 @@ let clerkUsers: Record<string, unknown>[] = [];
 let posthogPersons: Record<string, unknown>[] = [];
 const OFFER_B = "fefefefe-1111-4111-8111-0000000000b1";
 let brandOffers: Record<string, unknown>[] = [];
+let campaignOutcome: Record<string, unknown> = { outcome: "skipped", skipReason: "no_campaign" };
 
 function installFetchStub() {
   campaignCalls = [];
@@ -77,7 +78,7 @@ function installFetchStub() {
     if (url.host === "campaign.test" && url.pathname === "/internal/trigger-events") {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       campaignCalls.push(body);
-      return json({ event: { id: `ev-${campaignCalls.length}`, outcome: "skipped", skipReason: "no_campaign" }, replayed: false }, campaignStatus);
+      return json({ event: { id: `ev-${campaignCalls.length}`, ...campaignOutcome }, replayed: false }, campaignStatus);
     }
     throw new Error(`unexpected fetch ${url}`);
   });
@@ -126,6 +127,7 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     clerkUsers = [];
     posthogPersons = [];
     campaignStatus = 201;
+    campaignOutcome = { outcome: "skipped", skipReason: "no_campaign" };
     brandOffers = [{ offerId: OFFER, name: "A", description: null, status: "active" }];
     const [a] = await db
       .insert(authConnections)
@@ -375,5 +377,26 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     // Once sent, never twice.
     expect((await redeliverReports([late.id], later + 60_000)).refused).toEqual([{ reportId: late.id, error: "not_unsent: reported" }]);
     expect(campaignCalls).toHaveLength(1);
+  });
+
+  it("WA-GREETING-OFFER-1027 replay: a report its campaign answered campaign_off is re-sent once as a new occurrence, only on request", async () => {
+    await runPhoneWatchPass(T0);
+    campaignOutcome = { outcome: "skipped", skipReason: "campaign_off" };
+    clerkUsers = [clerkUser("user_off", "+447911123013", min(1))];
+    await runPhoneWatchPass(min(2));
+    let [row] = (await reports()).filter((r) => r.phone === "+447911123013");
+    expect(row).toMatchObject({ status: "reported", campaignEventId: "ev-1" });
+    // Without the flag: already reported, refused.
+    expect((await redeliverReports([row.id], min(3))).refused).toEqual([{ reportId: row.id, error: "not_unsent: reported" }]);
+    campaignOutcome = { outcome: "ran" };
+    const replay = await redeliverReports([row.id], min(4), { replayCampaignOff: true });
+    expect(replay.acted).toEqual([{ reportId: row.id, status: "reported", reason: null }]);
+    expect(campaignCalls).toHaveLength(2);
+    expect(campaignCalls[1].idempotencyKey).toBe(`crm:phone_given:${BRAND}:+447911123013:replay:ev-1`);
+    [row] = (await reports()).filter((r) => r.phone === "+447911123013");
+    expect(row).toMatchObject({ status: "reported", campaignEventId: "ev-2" });
+    // It ran: a second replay is refused.
+    expect((await redeliverReports([row.id], min(5), { replayCampaignOff: true })).refused).toHaveLength(1);
+    expect(campaignCalls).toHaveLength(2);
   });
 });

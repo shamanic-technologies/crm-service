@@ -136,6 +136,8 @@ export const MAX_REPORT_MESSAGES = 10;
 
 export const REPLY_STATUS = { PENDING: "pending", REPORTED: "reported", SKIPPED: "skipped", FAILED: "failed" } as const;
 export const REPLY_REASONS = {
+  /** The owner said never send this one (an owner door, WA-GREETING-OFFER-1027): final. */
+  WITHHELD: "withheld",
   /** The other side is the brand's own team (a linked account or its sales rep phone): never a prospect. */
   OWN_TEAM: "own_team",
   /** Jev: no person wrote it (away message, greeting, auto-reply). */
@@ -663,6 +665,34 @@ export async function settle(r: ReplyTriggerReport, now: number, set: Partial<Re
     .update(replyTriggerReports)
     .set({ ...set, attempts: r.attempts + 1, lastAttemptAt: new Date(now) })
     .where(eq(replyTriggerReports.id, r.id));
+}
+
+/**
+ * OWNER DOOR (WA-GREETING-OFFER-1027): these reply reports, not sent yet (failed / pending), are never sent:
+ * `skipped / withheld`, the note kept in last_error (a current client's mail the owner answers himself).
+ */
+export async function withholdReplyReports(
+  reportIds: string[],
+  note: string,
+  now: number = Date.now(),
+): Promise<{ acted: { reportId: string }[]; refused: { reportId: string; error: string }[] }> {
+  const found = reportIds.length ? await db.select().from(replyTriggerReports).where(inArray(replyTriggerReports.id, reportIds)) : [];
+  const unsent = (r: ReplyTriggerReport) => r.status === REPLY_STATUS.FAILED || r.status === REPLY_STATUS.PENDING;
+  const acted: { reportId: string }[] = [];
+  const refused: { reportId: string; error: string }[] = [];
+  for (const id of reportIds) {
+    const r = found.find((f) => f.id === id);
+    if (!r) refused.push({ reportId: id, error: "report_not_found" });
+    else if (!unsent(r)) refused.push({ reportId: id, error: `not_unsent: ${r.status}${r.reason ? `/${r.reason}` : ""}` });
+    else {
+      await db
+        .update(replyTriggerReports)
+        .set({ status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.WITHHELD, lastError: `withheld: ${note}`.slice(0, 1000), lastAttemptAt: new Date(now) })
+        .where(and(eq(replyTriggerReports.id, r.id), inArray(replyTriggerReports.status, [REPLY_STATUS.FAILED, REPLY_STATUS.PENDING])));
+      acted.push({ reportId: r.id });
+    }
+  }
+  return { acted, refused };
 }
 
 /**

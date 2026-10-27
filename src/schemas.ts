@@ -3766,7 +3766,7 @@ registry.registerPath({
   description:
     "WA-GREETING-OFFER-1027. Only a report not sent yet (failed / pending, never a final campaign refusal) is acted on; the " +
     "same rules as the loop apply (an impossible number is skipped, the offer resolved as usual, the same idempotency key).",
-  request: { body: { content: { "application/json": { schema: z.object({ reportIds: z.array(z.string().uuid()).min(1).max(200) }) } } } },
+  request: { body: { content: { "application/json": { schema: z.object({ reportIds: z.array(z.string().uuid()).min(1).max(200), replayCampaignOff: z.boolean().optional().describe("Also re-send, as a NEW occurrence keyed on the first event, a report campaign-service answered skipped / campaign_off (its campaign was Off)") }) } } } },
   responses: { 200: { description: "`{acted: [{reportId, status, reason}], refused: [{reportId, error}]}`" }, 400: { description: "Invalid body" }, 502: { description: "campaign-service not configured" } },
 });
 
@@ -3774,6 +3774,14 @@ registry.registerPath({
   method: "post",
   path: "/internal/phone-triggers/reports/withhold",
   summary: "OWNER DOOR: never send these unsent phone-given reports (skipped / withheld)",
+  request: { body: { content: { "application/json": { schema: z.object({ reportIds: z.array(z.string().uuid()).min(1).max(200), note: z.string().min(1).max(500) }) } } } },
+  responses: { 200: { description: "`{acted, refused}`" }, 400: { description: "Invalid body" } },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/reply-triggers/reports/withhold",
+  summary: "OWNER DOOR: never send these unsent reply reports (skipped / withheld)",
   request: { body: { content: { "application/json": { schema: z.object({ reportIds: z.array(z.string().uuid()).min(1).max(200), note: z.string().min(1).max(500) }) } } } },
   responses: { 200: { description: "`{acted, refused}`" }, 400: { description: "Invalid body" } },
 });

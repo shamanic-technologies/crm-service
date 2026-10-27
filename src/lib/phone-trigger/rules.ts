@@ -56,6 +56,12 @@ export interface PhoneOccurrence {
   contactId: string | null;
   sourceContactId: string | null;
   detectedAt: Date;
+  /**
+   * An owner REPLAY (WA-GREETING-OFFER-1027): campaign-service's event this report first landed on, answered
+   * `skipped / campaign_off` (its campaign was Off; that verdict is final there). The replay is a NEW
+   * occurrence keyed on that event, so a retry of the replay is still idempotent.
+   */
+  replayOf?: string | null;
 }
 
 /**
@@ -72,7 +78,9 @@ export function phoneOccurrenceBody(o: PhoneOccurrence): Record<string, unknown>
     triggerId: PHONE_GIVEN_TRIGGER,
     brandId: o.brandId,
     offerId: o.offerId,
-    idempotencyKey: phoneIdempotencyKey(o.brandId, o.phone),
+    idempotencyKey: o.replayOf
+      ? `${phoneIdempotencyKey(o.brandId, o.phone)}:replay:${o.replayOf}`
+      : phoneIdempotencyKey(o.brandId, o.phone),
     occurredAt: o.detectedAt.toISOString(),
     person,
     item: {
