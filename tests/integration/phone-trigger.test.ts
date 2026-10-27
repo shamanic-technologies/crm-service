@@ -336,6 +336,10 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     let phone = health.triggers.find((t) => t.trigger === "whatsapp_number_given")!;
     expect(phone.stuckReports.map((r) => r.reportId)).toContain(row.id);
     expect(phone.status).toBe("red");
+    expect(phone.stuckReports.find((r) => r.reportId === row.id)).toMatchObject({
+      brandId: BRAND,
+      person: expect.objectContaining({ email: "user_two_offers@example.com", phone: "+447911123010" }),
+    });
 
     // The owner states every form = OFFER_B (PUT /orgs/gohighlevel/form-offers, no formId).
     await db.insert(formOfferMappings).values({ orgId: ORG, brandId: BRAND, formId: "*", offerId: OFFER_B, statedByUserId: USER });

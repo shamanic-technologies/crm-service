@@ -3796,7 +3796,7 @@ registry.registerPath({
     "off) older than 15 min is STUCK: `status: red`, with its reason and last error. `byDay` = per UTC day of detection: sent, " +
     "skipped by rule, not sent. Nothing is emailed: red on the Monitoring hub is the alert. Staff-only behind the gateway.",
   request: { query: z.object({ days: z.coerce.number().int().min(1).max(90).optional().describe("Window in days, default 30") }) },
-  responses: { 200: { description: "`{generatedAt, days, stuckAfterMinutes, status, triggers: [{trigger, table, status, stuck, stuckByReason, stuckReports, byDay}]}`" }, 400: { description: "Invalid days" } },
+  responses: { 200: { description: "`{generatedAt, days, stuckAfterMinutes, status, triggers: [{trigger, table, status, stuck, stuckByReason, stuckReports: [{reportId, orgId, brandId, brandName, person: {name, email, phone}, status, reason, lastError, attempts, detectedAt}], byDay}]}`" }, 400: { description: "Invalid days" } },
 });
 
 registry.registerPath({

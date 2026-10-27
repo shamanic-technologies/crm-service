@@ -1419,7 +1419,7 @@ kind `reported`, reportedBy crm-service, fromStep `lead_found`), within ~1 min. 
   {reportIds, note}` (`skipped / withheld`, never sent); reply reports: `POST /internal/reply-triggers/reports/withhold`.
 - **Stuck reports are red on Monitoring** (`lib/trigger-health.ts`, `GET /internal/ops/trigger-reports?days=`): every trigger
   table (form, phone, reply, credit), a row not sent 15 min after detection = stuck, with reason + last error, + `byDay`
-  sent / skipped / not sent. Sends nothing.
+  sent / skipped / not sent; each stuck report names WHO (`person {name, email, phone}`) and `brandName`. Sends nothing.
 - **Team membership read** (`lib/people/team-membership.ts`, WA-GIVEN-PURE-FACT-1017): `POST /orgs/people/team-membership
   {brandId?, email?, phone?}` → `{staff, ownTeam, matches [{kind, via, description}]}` (staff = `isStaffEmail`; own team =
   linked WhatsApp numbers, sales rep phone, org members by phone or address). A fact for the PIPE's strategy (who to skip
