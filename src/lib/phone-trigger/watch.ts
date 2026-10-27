@@ -284,7 +284,7 @@ export async function deliverDue(now: number = Date.now()): Promise<PhoneWatchRe
 }
 
 /** Deliver these reports now, one ORG run per (org, brand). The caller picked them. */
-async function deliverReports(due: PhoneGivenReport[], now: number): Promise<PhoneWatchResult["delivered"]> {
+async function deliverReports(due: PhoneGivenReport[], now: number, replay = false): Promise<PhoneWatchResult["delivered"]> {
   const delivered: PhoneWatchResult["delivered"] = [];
   const groups = new Map<string, PhoneGivenReport[]>();
   for (const r of due) groups.set(`${r.orgId}|${r.brandId}`, [...(groups.get(`${r.orgId}|${r.brandId}`) ?? []), r]);
@@ -307,7 +307,7 @@ async function deliverReports(due: PhoneGivenReport[], now: number): Promise<Pho
       // for every form wins, then its only active offer; several and none stated = offer_unknown.
       const offer = await resolveOffer(identity, null);
       for (const r of reports) {
-        const outcome = await deliverOne(r, identity, offer, now);
+        const outcome = await deliverOne(r, identity, offer, now, replay && repliedOff(r) ? r.campaignEventId : null);
         if (outcome.status === PHONE_STATUS.FAILED) failed = true;
         delivered.push({ reportId: r.id, ...outcome });
       }
@@ -325,6 +325,7 @@ async function deliverOne(
   identity: { orgId: string; userId: string; runId: string; brandId: string },
   offer: OfferAnswer,
   now: number,
+  replayOf: string | null = null,
 ): Promise<{ status: string; reason: string | null }> {
   if (!dialablePhone([r.phone])) {
     await settle(r, now, { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.INVALID_NUMBER, runId: identity.runId });
@@ -351,6 +352,7 @@ async function deliverOne(
         contactId: r.contactId,
         sourceContactId: r.sourceContactId,
         detectedAt: r.detectedAt,
+        replayOf,
       }),
     );
     const reportedAt = new Date();
@@ -390,26 +392,42 @@ export interface OwnerDoorResult {
   refused: { reportId: string; error: string }[];
 }
 
-async function loadReports(reportIds: string[]): Promise<{ found: PhoneGivenReport[]; refused: OwnerDoorResult["refused"] }> {
+/** A report campaign-service took but answered `skipped / campaign_off`: nothing ran, its campaign was Off. */
+export function repliedOff(r: Pick<PhoneGivenReport, "status" | "campaignEventId" | "campaignOutcome">): boolean {
+  const o = (r.campaignOutcome ?? {}) as Record<string, unknown>;
+  return r.status === PHONE_STATUS.REPORTED && !!r.campaignEventId && o.outcome === "skipped" && o.skipReason === "campaign_off";
+}
+
+async function loadReports(
+  reportIds: string[],
+  replayCampaignOff = false,
+): Promise<{ found: PhoneGivenReport[]; refused: OwnerDoorResult["refused"] }> {
   const found = reportIds.length ? await db.select().from(phoneGivenReports).where(inArray(phoneGivenReports.id, reportIds)) : [];
+  const ok = (r: PhoneGivenReport) => unsent(r) || (replayCampaignOff && repliedOff(r));
   const refused: OwnerDoorResult["refused"] = [];
   for (const id of reportIds) {
     const r = found.find((f) => f.id === id);
     if (!r) refused.push({ reportId: id, error: "report_not_found" });
-    else if (!unsent(r)) refused.push({ reportId: id, error: `not_unsent: ${r.status}${r.reason ? `/${r.reason}` : ""}` });
+    else if (!ok(r)) refused.push({ reportId: id, error: `not_unsent: ${r.status}${r.reason ? `/${r.reason}` : ""}` });
   }
-  return { found: found.filter(unsent), refused };
+  return { found: found.filter(ok), refused };
 }
 
 /**
  * OWNER DOOR (WA-GREETING-OFFER-1027): deliver these unsent reports NOW, past the 24 h retry
  * window (a report the loop gave up on, e.g. 5 days of offer_unknown). Same rules as the loop:
  * an impossible number is skipped, the offer resolved as usual, the same idempotency key.
+ * `replayCampaignOff`: also a report campaign-service answered `skipped / campaign_off` (the campaign was Off,
+ * final there), sent again as a NEW occurrence keyed on that first event, once the owner turned it back on.
  */
-export async function redeliverReports(reportIds: string[], now: number = Date.now()): Promise<OwnerDoorResult> {
+export async function redeliverReports(
+  reportIds: string[],
+  now: number = Date.now(),
+  opts: { replayCampaignOff?: boolean } = {},
+): Promise<OwnerDoorResult> {
   if (!campaignServiceConfigured()) throw new Error("campaign-service is not configured");
-  const { found, refused } = await loadReports(reportIds);
-  return { acted: await deliverReports(found, now), refused };
+  const { found, refused } = await loadReports(reportIds, opts.replayCampaignOff === true);
+  return { acted: await deliverReports(found, now, opts.replayCampaignOff === true), refused };
 }
 
 /** OWNER DOOR: these unsent reports are never sent (`skipped / withheld`, the note kept in last_error). */
