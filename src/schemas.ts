@@ -3760,6 +3760,38 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "post",
+  path: "/internal/phone-triggers/reports/redeliver",
+  summary: "OWNER DOOR: deliver these unsent phone-given reports now, past the 24 h retry window",
+  description:
+    "WA-GREETING-OFFER-1027. Only a report not sent yet (failed / pending, never a final campaign refusal) is acted on; the " +
+    "same rules as the loop apply (an impossible number is skipped, the offer resolved as usual, the same idempotency key).",
+  request: { body: { content: { "application/json": { schema: z.object({ reportIds: z.array(z.string().uuid()).min(1).max(200) }) } } } },
+  responses: { 200: { description: "`{acted: [{reportId, status, reason}], refused: [{reportId, error}]}`" }, 400: { description: "Invalid body" }, 502: { description: "campaign-service not configured" } },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/phone-triggers/reports/withhold",
+  summary: "OWNER DOOR: never send these unsent phone-given reports (skipped / withheld)",
+  request: { body: { content: { "application/json": { schema: z.object({ reportIds: z.array(z.string().uuid()).min(1).max(200), note: z.string().min(1).max(500) }) } } } },
+  responses: { 200: { description: "`{acted, refused}`" }, 400: { description: "Invalid body" } },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/ops/trigger-reports",
+  summary: "Trigger reports stuck unsent, per trigger, + a daily series (dashboard v2 Monitoring)",
+  description:
+    "WA-GREETING-OFFER-1027. Every occurrence crm-service reports to campaign-service's trigger door (form_submitted, " +
+    "whatsapp_number_given, positive_reply_received, account_event) is a dated row. A row not sent (failed, pending, handing " +
+    "off) older than 15 min is STUCK: `status: red`, with its reason and last error. `byDay` = per UTC day of detection: sent, " +
+    "skipped by rule, not sent. Nothing is emailed: red on the Monitoring hub is the alert. Staff-only behind the gateway.",
+  request: { query: z.object({ days: z.coerce.number().int().min(1).max(90).optional().describe("Window in days, default 30") }) },
+  responses: { 200: { description: "`{generatedAt, days, stuckAfterMinutes, status, triggers: [{trigger, table, status, stuck, stuckByReason, stuckReports, byDay}]}`" }, 400: { description: "Invalid days" } },
+});
+
+registry.registerPath({
   method: "get",
   path: "/orgs/calendar/meetings",
   summary: "Meetings in the org's connected Google Calendar, who each attendee is among the brand's people, and the facts stated",

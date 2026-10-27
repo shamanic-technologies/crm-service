@@ -20,8 +20,8 @@
  *     group member gave nothing). No WHO filter (staff, own team, already wrote): the
  *     answering pipe's strategy decides (WA-GIVEN-PURE-FACT-1017).
  *  3. DELIVER every pending / failed-and-due report: one ORG run per (org, brand),
- *     an impossible number dropped (`invalid_number`), the offer = the brand's only active
- *     offer, idempotency key `crm:phone_given:<brand>:<number>` (a retry returns
+ *     an impossible number dropped (`invalid_number`), the offer = the one the brand stated
+ *     for every form (`form_offer_mappings` '*'), else its only active offer, idempotency key `crm:phone_given:<brand>:<number>` (a retry returns
  *     campaign-service's first event). Retries 1 → 60 min for 24h; 400 / 422 final.
  *  A detection kicks the brand's people build (unawaited) so the person is known to
  *  lead-service; campaign-service holds a `person_not_known` event and retries it.
@@ -40,7 +40,7 @@ import { mirrorRecentPersons } from "../posthog/sync.js";
 import { mirrorRecentlyUpdatedUsers } from "../auth/sync.js";
 import { runScopeBuild } from "../people/build.js";
 import { createRun, updateRun } from "../runs-client.js";
-import { readBrandOffers, pickOffer } from "../form-trigger/offer.js";
+import { resolveOffer, type OfferAnswer } from "../form-trigger/offer.js";
 import {
   CampaignRefusal,
   campaignServiceConfigured,
@@ -280,9 +280,14 @@ async function settle(
 /** 3. Report every due number: one ORG run per (org, brand). */
 export async function deliverDue(now: number = Date.now()): Promise<PhoneWatchResult["delivered"]> {
   if (!campaignServiceConfigured()) return [];
+  return deliverReports(await dueReports(now), now);
+}
+
+/** Deliver these reports now, one ORG run per (org, brand). The caller picked them. */
+async function deliverReports(due: PhoneGivenReport[], now: number): Promise<PhoneWatchResult["delivered"]> {
   const delivered: PhoneWatchResult["delivered"] = [];
   const groups = new Map<string, PhoneGivenReport[]>();
-  for (const r of await dueReports(now)) groups.set(`${r.orgId}|${r.brandId}`, [...(groups.get(`${r.orgId}|${r.brandId}`) ?? []), r]);
+  for (const r of due) groups.set(`${r.orgId}|${r.brandId}`, [...(groups.get(`${r.orgId}|${r.brandId}`) ?? []), r]);
   for (const reports of groups.values()) {
     const { orgId, brandId } = reports[0];
     const userId = await brandActor(orgId, brandId);
@@ -298,8 +303,9 @@ export async function deliverDue(now: number = Date.now()): Promise<PhoneWatchRe
     let failed = false;
     try {
       // Read once per brand; a brand-service outage leaves every report for the next pass.
-      const offers = await readBrandOffers(identity);
-      const offer = pickOffer(null, [], offers);
+      // Same answer as a form submission (WA-GREETING-OFFER-1027): the offer the brand STATED
+      // for every form wins, then its only active offer; several and none stated = offer_unknown.
+      const offer = await resolveOffer(identity, null);
       for (const r of reports) {
         const outcome = await deliverOne(r, identity, offer, now);
         if (outcome.status === PHONE_STATUS.FAILED) failed = true;
@@ -317,7 +323,7 @@ export async function deliverDue(now: number = Date.now()): Promise<PhoneWatchRe
 async function deliverOne(
   r: PhoneGivenReport,
   identity: { orgId: string; userId: string; runId: string; brandId: string },
-  offer: ReturnType<typeof pickOffer>,
+  offer: OfferAnswer,
   now: number,
 ): Promise<{ status: string; reason: string | null }> {
   if (!dialablePhone([r.phone])) {
@@ -372,6 +378,52 @@ async function deliverOne(
     await settle(r, now, { status: PHONE_STATUS.FAILED, reason, lastError: (err as Error).message, offerId: offer.offerId, runId: identity.runId });
     return { status: PHONE_STATUS.FAILED, reason };
   }
+}
+
+/** Statuses an owner door may act on: a report not sent yet (never one reported, skipped or finally refused). */
+function unsent(r: PhoneGivenReport): boolean {
+  return (r.status === PHONE_STATUS.FAILED || r.status === PHONE_STATUS.PENDING) && r.reason !== PHONE_REASONS.CAMPAIGN_REFUSED;
+}
+
+export interface OwnerDoorResult {
+  acted: { reportId: string; status: string; reason: string | null }[];
+  refused: { reportId: string; error: string }[];
+}
+
+async function loadReports(reportIds: string[]): Promise<{ found: PhoneGivenReport[]; refused: OwnerDoorResult["refused"] }> {
+  const found = reportIds.length ? await db.select().from(phoneGivenReports).where(inArray(phoneGivenReports.id, reportIds)) : [];
+  const refused: OwnerDoorResult["refused"] = [];
+  for (const id of reportIds) {
+    const r = found.find((f) => f.id === id);
+    if (!r) refused.push({ reportId: id, error: "report_not_found" });
+    else if (!unsent(r)) refused.push({ reportId: id, error: `not_unsent: ${r.status}${r.reason ? `/${r.reason}` : ""}` });
+  }
+  return { found: found.filter(unsent), refused };
+}
+
+/**
+ * OWNER DOOR (WA-GREETING-OFFER-1027): deliver these unsent reports NOW, past the 24 h retry
+ * window (a report the loop gave up on, e.g. 5 days of offer_unknown). Same rules as the loop:
+ * an impossible number is skipped, the offer resolved as usual, the same idempotency key.
+ */
+export async function redeliverReports(reportIds: string[], now: number = Date.now()): Promise<OwnerDoorResult> {
+  if (!campaignServiceConfigured()) throw new Error("campaign-service is not configured");
+  const { found, refused } = await loadReports(reportIds);
+  return { acted: await deliverReports(found, now), refused };
+}
+
+/** OWNER DOOR: these unsent reports are never sent (`skipped / withheld`, the note kept in last_error). */
+export async function withholdReports(reportIds: string[], note: string, now: number = Date.now()): Promise<OwnerDoorResult> {
+  const { found, refused } = await loadReports(reportIds);
+  const acted: OwnerDoorResult["acted"] = [];
+  for (const r of found) {
+    await db
+      .update(phoneGivenReports)
+      .set({ status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.WITHHELD, lastError: `withheld: ${note}`.slice(0, 1000), lastAttemptAt: new Date(now) })
+      .where(and(eq(phoneGivenReports.id, r.id), inArray(phoneGivenReports.status, [PHONE_STATUS.FAILED, PHONE_STATUS.PENDING])));
+    acted.push({ reportId: r.id, status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.WITHHELD });
+  }
+  return { acted, refused };
 }
 
 /** lead-service learns of a person through our fact feed: build the brand's people now (unawaited). */

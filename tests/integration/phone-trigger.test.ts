@@ -7,6 +7,7 @@ import {
   contacts,
   contactUploads,
   conversations,
+  formOfferMappings,
   ghlConnections,
   matrixConnections,
   phoneGivenReports,
@@ -14,7 +15,8 @@ import {
   posthogConnections,
   posthogRawRecords,
 } from "../../src/db/schema.js";
-import { runPhoneWatchPass } from "../../src/lib/phone-trigger/watch.js";
+import { redeliverReports, runPhoneWatchPass, withholdReports } from "../../src/lib/phone-trigger/watch.js";
+import { readTriggerHealth } from "../../src/lib/trigger-health.js";
 import { PHONE_GIVEN_TRIGGER } from "../../src/lib/phone-trigger/rules.js";
 
 /**
@@ -45,6 +47,8 @@ let campaignCalls: Record<string, unknown>[] = [];
 let campaignStatus = 201;
 let clerkUsers: Record<string, unknown>[] = [];
 let posthogPersons: Record<string, unknown>[] = [];
+const OFFER_B = "fefefefe-1111-4111-8111-0000000000b1";
+let brandOffers: Record<string, unknown>[] = [];
 
 function installFetchStub() {
   campaignCalls = [];
@@ -66,7 +70,7 @@ function installFetchStub() {
       return json({ columns: [], results: [] }); // visits / events of a new person
     }
     if (url.host === "brand.test" && url.pathname.endsWith("/offers")) {
-      return json({ offers: [{ offerId: OFFER, name: "A", description: null, status: "active" }] });
+      return json({ offers: brandOffers });
     }
     if (url.host === "brand.test" && url.pathname.endsWith("/sales-rep")) return json({ salesRepPhone: SALES_REP });
     if (url.host === "client.test" && url.pathname === "/internal/users") return json({ users: [], total: 0 });
@@ -88,6 +92,7 @@ async function reports() {
 
 async function wipe() {
   await db.delete(phoneGivenReports).where(eq(phoneGivenReports.brandId, BRAND));
+  await db.delete(formOfferMappings).where(eq(formOfferMappings.brandId, BRAND));
   await db.delete(phoneWatchArtifacts).where(eq(phoneWatchArtifacts.brandId, BRAND));
   await db.delete(contacts).where(eq(contacts.brandId, BRAND));
   await db.delete(authRawRecords).where(eq(authRawRecords.brandId, BRAND));
@@ -121,6 +126,7 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     clerkUsers = [];
     posthogPersons = [];
     campaignStatus = 201;
+    brandOffers = [{ offerId: OFFER, name: "A", description: null, status: "active" }];
     const [a] = await db
       .insert(authConnections)
       .values({ orgId: ORG, brandId: BRAND, provider: "clerk", createdByUserId: USER, status: "active", lastSyncedAt: new Date(T0 - 3_600_000) })
@@ -310,5 +316,64 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     expect(row).toMatchObject({ status: "reported", attempts: 2 });
     expect(campaignCalls).toHaveLength(2);
     expect(campaignCalls[1].idempotencyKey).toBe(campaignCalls[0].idempotencyKey);
+  });
+
+  it("WA-GREETING-OFFER-1027: 2 active offers = offer_unknown (never a guess); once the brand STATES its offer the report goes out on it", async () => {
+    brandOffers = [
+      { offerId: OFFER, name: "Product-led", description: null, status: "active" },
+      { offerId: OFFER_B, name: "Sales-led", description: null, status: "active" },
+    ];
+    await runPhoneWatchPass(T0);
+    clerkUsers = [clerkUser("user_two_offers", "+447911123010", min(1))];
+    await runPhoneWatchPass(min(2));
+    let [row] = (await reports()).filter((r) => r.phone === "+447911123010");
+    expect(row).toMatchObject({ status: "failed", reason: "offer_unknown" });
+    expect(campaignCalls).toHaveLength(0);
+    // Stuck past 15 min: red on the Monitoring read.
+    let health = await readTriggerHealth(30, min(20));
+    let phone = health.triggers.find((t) => t.trigger === "whatsapp_number_given")!;
+    expect(phone.stuckReports.map((r) => r.reportId)).toContain(row.id);
+    expect(phone.status).toBe("red");
+
+    // The owner states every form = OFFER_B (PUT /orgs/gohighlevel/form-offers, no formId).
+    await db.insert(formOfferMappings).values({ orgId: ORG, brandId: BRAND, formId: "*", offerId: OFFER_B, statedByUserId: USER });
+    await runPhoneWatchPass(min(30));
+    [row] = (await reports()).filter((r) => r.phone === "+447911123010");
+    expect(row).toMatchObject({ status: "reported", offerId: OFFER_B });
+    expect(campaignCalls).toHaveLength(1);
+    expect(campaignCalls[0]).toMatchObject({ offerId: OFFER_B, idempotencyKey: `crm:phone_given:${BRAND}:+447911123010` });
+    health = await readTriggerHealth(30, min(31));
+    phone = health.triggers.find((t) => t.trigger === "whatsapp_number_given")!;
+    expect(phone.stuckReports.map((r) => r.reportId)).not.toContain(row.id);
+  });
+
+  it("WA-GREETING-OFFER-1027 owner doors: a report given up on (past 24 h) is redelivered once; a withheld one is never sent", async () => {
+    brandOffers = [
+      { offerId: OFFER, name: "Product-led", description: null, status: "active" },
+      { offerId: OFFER_B, name: "Sales-led", description: null, status: "active" },
+    ];
+    await runPhoneWatchPass(T0);
+    clerkUsers = [clerkUser("user_late", "+447911123011", min(1)), clerkUser("user_client", "+447911123012", min(1))];
+    await runPhoneWatchPass(min(2));
+    const rows = await reports();
+    const late = rows.find((r) => r.phone === "+447911123011")!;
+    const client = rows.find((r) => r.phone === "+447911123012")!;
+    expect(late).toMatchObject({ status: "failed", reason: "offer_unknown" });
+    await db.insert(formOfferMappings).values({ orgId: ORG, brandId: BRAND, formId: "*", offerId: OFFER, statedByUserId: USER });
+    const later = T0 + 3 * 86_400_000;
+    clerkUsers = [];
+    await runPhoneWatchPass(later); // past the 24 h window: the loop no longer retries
+    expect(campaignCalls).toHaveLength(0);
+
+    const withheld = await withholdReports([client.id], "a current client, owner said no", later);
+    expect(withheld.acted).toEqual([{ reportId: client.id, status: "skipped", reason: "withheld" }]);
+    const redelivered = await redeliverReports([late.id, client.id], later);
+    expect(redelivered.acted).toEqual([{ reportId: late.id, status: "reported", reason: null }]);
+    expect(redelivered.refused).toEqual([{ reportId: client.id, error: "not_unsent: skipped/withheld" }]);
+    expect(campaignCalls).toHaveLength(1);
+    expect(campaignCalls[0]).toMatchObject({ offerId: OFFER, person: { phone: "+447911123011" } });
+    // Once sent, never twice.
+    expect((await redeliverReports([late.id], later + 60_000)).refused).toEqual([{ reportId: late.id, error: "not_unsent: reported" }]);
+    expect(campaignCalls).toHaveLength(1);
   });
 });
