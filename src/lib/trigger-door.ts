@@ -174,6 +174,20 @@ export async function recordTriggerEvent(identity: DoorIdentity, body: Record<st
  * when the campaign states none; throws when campaign-service cannot answer
  * (404 = not a campaign of this org: a `CampaignRefusal`).
  */
+/**
+ * The latest trigger events of an offer as campaign-service holds them NOW (newest first, up to 200). An event's
+ * final verdict (ran, skipped and why) is decided after the door answered: a replay reads it here. Fails loud.
+ */
+export async function readOfferEvents(identity: DoorIdentity, offerId: string): Promise<Record<string, unknown>[]> {
+  const res = await call(
+    "GET",
+    `/internal/offers/${encodeURIComponent(offerId)}/trigger-events?brandId=${encodeURIComponent(identity.brandId)}&limit=200`,
+    identity,
+  );
+  if (!res.ok) throw new Error(`campaign-service GET /internal/offers/${offerId}/trigger-events returned ${res.status}: ${res.text.slice(0, 300)}`);
+  return (res.json.events ?? []) as Record<string, unknown>[];
+}
+
 export async function readCampaignOffer(identity: DoorIdentity, campaignId: string): Promise<string | null> {
   const res = await call("GET", `/campaigns/${encodeURIComponent(campaignId)}`, identity);
   if (res.status >= 400 && res.status < 500) {

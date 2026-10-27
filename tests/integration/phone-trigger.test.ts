@@ -50,6 +50,8 @@ let posthogPersons: Record<string, unknown>[] = [];
 const OFFER_B = "fefefefe-1111-4111-8111-0000000000b1";
 let brandOffers: Record<string, unknown>[] = [];
 let campaignOutcome: Record<string, unknown> = { outcome: "skipped", skipReason: "no_campaign" };
+/** campaign-service's events as it holds them NOW (its verdict can move after the door answered). */
+let eventsById = new Map<string, Record<string, unknown>>();
 
 function installFetchStub() {
   campaignCalls = [];
@@ -78,7 +80,12 @@ function installFetchStub() {
     if (url.host === "campaign.test" && url.pathname === "/internal/trigger-events") {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       campaignCalls.push(body);
-      return json({ event: { id: `ev-${campaignCalls.length}`, ...campaignOutcome }, replayed: false }, campaignStatus);
+      const event = { id: `ev-${campaignCalls.length}`, ...campaignOutcome };
+      if (campaignStatus < 300) eventsById.set(event.id, event);
+      return json({ event, replayed: false }, campaignStatus);
+    }
+    if (url.host === "campaign.test" && /^\/internal\/offers\/[^/]+\/trigger-events$/.test(url.pathname)) {
+      return json({ events: [...eventsById.values()].reverse() });
     }
     throw new Error(`unexpected fetch ${url}`);
   });
@@ -128,6 +135,7 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     posthogPersons = [];
     campaignStatus = 201;
     campaignOutcome = { outcome: "skipped", skipReason: "no_campaign" };
+    eventsById = new Map();
     brandOffers = [{ offerId: OFFER, name: "A", description: null, status: "active" }];
     const [a] = await db
       .insert(authConnections)
@@ -383,31 +391,37 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     expect(campaignCalls).toHaveLength(1);
   });
 
-  it("WA-GREETING-OFFER-1027 replay: a report its campaign answered campaign_off is re-sent once as a new occurrence, only on request", async () => {
+  it("WA-GREETING-OFFER-1027 replay: a report campaign-service LATER skipped campaign_off is re-sent once as a new occurrence, only on request", async () => {
     await runPhoneWatchPass(T0);
-    campaignOutcome = { outcome: "skipped", skipReason: "campaign_off" };
+    campaignOutcome = { status: "pending" }; // the door's first answer: the verdict comes after
     clerkUsers = [clerkUser("user_off", "+447911123013", min(1))];
     await runPhoneWatchPass(min(2));
     let [row] = (await reports()).filter((r) => r.phone === "+447911123013");
     expect(row).toMatchObject({ status: "reported", campaignEventId: "ev-1" });
     // Without the flag: already reported, refused.
     expect((await redeliverReports([row.id], min(3))).refused).toEqual([{ reportId: row.id, error: "not_unsent: reported" }]);
-    campaignOutcome = { outcome: "ran" };
-    const replay = await redeliverReports([row.id], min(4), { replayCampaignOff: true });
+    // Still pending at campaign-service: nothing re-sent.
+    expect((await redeliverReports([row.id], min(3), { replayCampaignOff: true })).acted).toEqual([
+      { reportId: row.id, status: "reported", reason: "not_replayable: pending" },
+    ]);
+    expect(campaignCalls).toHaveLength(1);
+    // campaign-service then closed it: its campaign was Off.
+    eventsById.set("ev-1", { id: "ev-1", status: "done", outcome: "skipped", skipReason: "campaign_off" });
+    campaignOutcome = { status: "done", outcome: "skipped", skipReason: "lead_service_unavailable" };
+    let replay = await redeliverReports([row.id], min(4), { replayCampaignOff: true });
     expect(replay.acted).toEqual([{ reportId: row.id, status: "reported", reason: null }]);
     expect(campaignCalls).toHaveLength(2);
     expect(campaignCalls[1].idempotencyKey).toBe(`crm:phone_given:${BRAND}:+447911123013:replay:ev-1`);
     [row] = (await reports()).filter((r) => r.phone === "+447911123013");
     expect(row).toMatchObject({ status: "reported", campaignEventId: "ev-2" });
-    // lead-service timing out on the replay says nothing about the person: replayable again, keyed on the new event.
-    campaignOutcome = { outcome: "skipped", skipReason: "lead_service_unavailable" };
-    await db.update(phoneGivenReports).set({ campaignOutcome: { id: "ev-2", ...campaignOutcome } }).where(eq(phoneGivenReports.id, row.id));
-    campaignOutcome = { outcome: "ran" };
-    expect((await redeliverReports([row.id], min(4) + 1, { replayCampaignOff: true })).acted).toHaveLength(1);
+    // That replay hit a lead-service timeout (nothing about the person): replayable again, keyed on ev-2.
+    campaignOutcome = { status: "done", outcome: "ran" };
+    replay = await redeliverReports([row.id], min(5), { replayCampaignOff: true });
+    expect(replay.acted).toEqual([{ reportId: row.id, status: "reported", reason: null }]);
     expect(campaignCalls[2].idempotencyKey).toBe(`crm:phone_given:${BRAND}:+447911123013:replay:ev-2`);
-    campaignCalls.splice(2, 1);
-    // It ran: a second replay is refused.
-    expect((await redeliverReports([row.id], min(5), { replayCampaignOff: true })).refused).toHaveLength(1);
-    expect(campaignCalls).toHaveLength(2);
+    // It ran: never re-sent again.
+    replay = await redeliverReports([row.id], min(6), { replayCampaignOff: true });
+    expect(replay.acted).toEqual([{ reportId: row.id, status: "reported", reason: "not_replayable: ran" }]);
+    expect(campaignCalls).toHaveLength(3);
   });
 });
