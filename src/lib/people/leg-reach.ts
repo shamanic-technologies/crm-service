@@ -6,8 +6,11 @@
  * Population: the brand's people (one person once across sources, the fact's
  * CURRENT owner, `owner_person_key`) who reached FROM on any source we mirror,
  * MINUS:
- *   - the people our campaigns contacted (`CONTACTED`: an Instantly presence =
- *     at least one real cold email, or lead-service holds them as our lead);
+ *   - the people our campaigns SERVED (`readServedEmails`: lead-service's
+ *     `contacted` bucket under any offer of the brand, the same rule as the
+ *     Outcomes tag, OUTCOMES-CONTACTED-1027). NOT "lead-service holds them":
+ *     it holds every signup of a brand whose auth provider is connected, which
+ *     emptied every distribute.you leg starting at signup;
  *   - the people the people layer holds as nobody (`automated` senders, and
  *     `not_business` personal-channel threads).
  * A fact owner that left the people index since is kept (nothing says we
@@ -43,14 +46,18 @@
  * a leg whose FROM or TO has no CONNECTED recording source answers a named
  * reason, never 0.
  *
- * Read-only on our own gold: never opens a scope, never builds, no vendor call,
- * no model, no cost.
+ * Read-only on our own gold plus lead-service's served list (cached per brand,
+ * `servedCache`; unreadable = the read fails, never a population with our
+ * campaigns' people left in): never opens a scope, never builds, no vendor
+ * call, no model, no cost.
  */
 import { and, desc, eq, sql, type SQL } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { peopleScopes } from "../../db/schema.js";
 import { AUTH_PROVIDER_NAMES } from "../auth/providers.js";
-import { CONTACTED, NOT_CALENDAR_BOOKING_FORM, PAYMENT_STANDS } from "./outcomes.js";
+import { createRun, updateRun } from "../runs-client.js";
+import { NOT_CALENDAR_BOOKING_FORM, PAYMENT_STANDS, readServedEmails, servedPeople } from "./outcomes.js";
+import { SwrCache } from "./swr.js";
 
 export const LEG_STEPS = [
   "lead_found",
@@ -112,6 +119,8 @@ interface ScopeRow {
   status: string;
   lastBuiltAt: Date | null;
   sourceReads: unknown;
+  /** Who opened the scope: the user an org run of the brand is opened for. */
+  createdByUserId: string;
   /** The org's Google Calendar is mirrored (google-service owns the connection; not a people source). */
   calendarConnected: boolean;
 }
@@ -158,6 +167,7 @@ const SCOPE_COLUMNS = {
   status: peopleScopes.status,
   lastBuiltAt: peopleScopes.lastBuiltAt,
   sourceReads: peopleScopes.sourceReads,
+  createdByUserId: peopleScopes.createdByUserId,
   calendarConnected: sql<boolean>`EXISTS (SELECT 1 FROM calendar_events ce WHERE ce.org_id = ${peopleScopes.orgId})`,
 };
 
@@ -317,7 +327,8 @@ export async function readLegReach(brandId: string, orgId: string | null, from: 
   if (reasons.length > 0 || !scope) {
     return { ...base, available: false, reason: reasons[0].code, reasons };
   }
-  const counts = await countLeg(scope.orgId, brandId, from, to);
+  const served = await cachedServedEmails(scope.orgId, brandId, scope.createdByUserId);
+  const counts = await countLeg(scope.orgId, brandId, from, to, served);
   return { ...base, available: true, reason: null, reasons: [], ...counts };
 }
 
@@ -359,7 +370,38 @@ function leadFoundEvidence(orgId: string, brandId: string, to: LegStep): SQL {
   `;
 }
 
-async function countLeg(orgId: string, brandId: string, from: LegStep, to: LegStep) {
+/** lead-service could not say whom our campaigns served: the route answers 502. */
+export class ServedUnavailable extends Error {}
+
+const servedFreshMs = () => Number(process.env.LEG_REACH_SERVED_FRESH_MS) || 300_000;
+const servedMaxStaleMs = () => Number(process.env.LEG_REACH_SERVED_MAX_STALE_MS) || 3_600_000;
+const servedCache = new SwrCache<string[]>("leg reach served", servedFreshMs, servedMaxStaleMs);
+
+/** The brand's served addresses (lead-service), cached per (org, brand), read on an org run of the scope. */
+function cachedServedEmails(orgId: string, brandId: string, userId: string): Promise<string[]> {
+  return servedCache.get(`${orgId}|${brandId}`, async () => {
+    try {
+      const run = await createRun({ orgId, userId, brandIds: [brandId], serviceName: "crm-service", taskName: "people.leg-reach.served" });
+      try {
+        const emails = await readServedEmails({ orgId, userId, runId: run.id, brandId });
+        await updateRun(run.id, "completed", { orgId, userId });
+        return emails;
+      } catch (err) {
+        await updateRun(run.id, "failed", { orgId, userId }).catch(() => undefined);
+        throw err;
+      }
+    } catch (err) {
+      throw new ServedUnavailable((err as Error).message);
+    }
+  });
+}
+
+/** Tests: forget the cached served lists. */
+export function clearLegReachCache(): void {
+  servedCache.clear();
+}
+
+async function countLeg(orgId: string, brandId: string, from: LegStep, to: LegStep, served: string[]) {
   const allTypes = [...new Set([...STEP_FACTS[from], ...STEP_FACTS[to]])];
   // One row per (person, end, source, UTC day | null) of the live evidence.
   const evidence = from === "lead_found" ? leadFoundEvidence(orgId, brandId, to) : sql`
@@ -373,13 +415,14 @@ async function countLeg(orgId: string, brandId: string, from: LegStep, to: LegSt
   `;
   const base = sql`
     WITH e AS (${evidence}),
+    srv AS MATERIALIZED (${servedPeople(orgId, brandId, served)}),
     fromers AS (
       SELECT e.pk, min(e.occurred_at) AS from_at
       FROM e WHERE e.end_ = 'from' GROUP BY e.pk
     ),
     tagged AS (
       SELECT fr.pk, fr.from_at,
-             COALESCE(${CONTACTED}, false) AS contacted,
+             EXISTS (SELECT 1 FROM srv WHERE srv.person_key = fr.pk) AS contacted,
              COALESCE(p.automated, false) AS automated,
              COALESCE(p.not_business, false) AS not_business,
              COALESCE(p.group_only, false) AS group_only
