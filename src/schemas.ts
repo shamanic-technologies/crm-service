@@ -2658,7 +2658,24 @@ export const OutcomesResponseSchema = registry.register(
         sources: z
           .array(z.object({ source: z.string(), people: z.number().int() }))
           .openapi({ description: "Distinct people per source stating the step (posthog, clerk, stripe, gohighlevel, and campaigns = the people our campaigns brought there, lead-service's bucket). Overlaps: one person on two sources counts in both." }),
-        contactedByUs: z.number().int().openapi({ description: "Of `people`, those our campaigns contacted (our cold email wrote to them, or lead-service holds them as our lead)." }),
+        contactedByUs: z.number().int().openapi({
+          description:
+            "Of `people`, those our campaigns brought to this step: lead-service holds them in the step's bucket under one of the brand's offers (a campaign of ours served them and is credited the step), what the dashboard's Contacted by us tab counts, one person once. A person lead-service merely holds (its brand-wide bucket), or one we wrote to only after they reached the step, is not counted.",
+        }),
+        months: z
+          .array(
+            z.object({
+              month: z.string().openapi({ description: "UTC month, YYYY-MM." }),
+              people: z.number().int().openapi({ description: "People whose earliest dated statement of the step falls in this month (one person once)." }),
+              contactedByUs: z.number().int().openapi({ description: "Of `people` this month, those contacted by us (same rule as the step's contactedByUs)." }),
+              cumulativePeople: z.number().int().openapi({ description: "Running total of `people` since the first month, this month included. Last month's + undated.people = the step's people." }),
+              cumulativeContactedByUs: z.number().int().openapi({ description: "Running total of `contactedByUs`. Last month's + undated.contactedByUs = the step's contactedByUs." }),
+            }),
+          )
+          .openapi({ description: "Every month from the brand's first dated reach (any step, so all steps share one axis) to the current month, empty months as zeros. [] when the brand holds no dated reach. sum(months.people) + undated.people = people." }),
+        undated: z
+          .object({ people: z.number().int(), contactedByUs: z.number().int() })
+          .openapi({ description: "Reaches no source dates (campaigns-only: lead-service states no bucket date), kept apart so the series reconciles with `people`." }),
       }),
     ).openapi({ description: "Always all six steps, in funnel order, zeros included." }),
   }),
@@ -2682,7 +2699,7 @@ export const OutcomePeopleResponseSchema = registry.register(
         phones: z.array(z.string()),
         reachedAt: z.string().nullable().openapi({ description: "Earliest dated statement of the step; null when no source dated it." }),
         sources: z.array(z.object({ source: z.string(), reachedAt: z.string().nullable() })),
-        contactedByUs: z.boolean(),
+        contactedByUs: z.boolean().openapi({ description: "In lead-service's bucket of this step under one of the brand's offers: our campaigns brought them here (same rule as the step's contactedByUs)." }),
         state: z.string().nullable(),
         stateSource: z.string().nullable(),
       }),

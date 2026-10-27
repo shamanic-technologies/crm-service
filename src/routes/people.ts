@@ -30,11 +30,11 @@ import { listTwinVerdicts, rejectTwinVerdict, twinVerdictView } from "../lib/peo
 import { listMerges, mergeApplied, mergeView, stateMerge, undoMerge } from "../lib/people/merges.js";
 import {
   CampaignReachUnavailable,
-  cachedCampaignReach,
+  cachedOutcomeInputs,
   cachedOutcomeCounts,
   OUTCOME_STEPS,
   readOutcomePeople,
-  type CampaignReach,
+  type OutcomeInputs,
   type OutcomeStep,
 } from "../lib/people/outcomes.js";
 import { LEG_STEPS, listLegReachBrands, parseLegStep, readLegReach } from "../lib/people/leg-reach.js";
@@ -613,12 +613,12 @@ function campaignOutcomesUnavailable(res: Response, err: Error) {
 
 /**
  * The people OUR campaigns brought to these steps (lead-service's buckets, cached
- * per brand: outcomes.ts `cachedCampaignReach`). Unreadable → null after answering 502.
+ * per brand: outcomes.ts `cachedOutcomeInputs`). Unreadable → null after answering 502.
  */
-async function campaignReachOr502(req: AuthenticatedRequest, res: Response, brandId: string, steps: readonly OutcomeStep[]): Promise<CampaignReach[] | null> {
+async function campaignReachOr502(req: AuthenticatedRequest, res: Response, brandId: string, steps: readonly OutcomeStep[]): Promise<OutcomeInputs | null> {
   try {
-    const all = await cachedCampaignReach({ orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId });
-    return all.filter((c) => steps.includes(c.step));
+    const all = await cachedOutcomeInputs({ orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId });
+    return { reach: all.reach.filter((c) => steps.includes(c.step)), contacted: all.contacted.filter((c) => steps.includes(c.step)) };
   } catch (err) {
     campaignOutcomesUnavailable(res, err as Error);
     return null;
