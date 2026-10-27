@@ -361,6 +361,32 @@ export function humanText(content: Record<string, unknown> | undefined): string 
   return body.trim();
 }
 
+/**
+ * A WhatsApp CALL the bridge mirrored, or null (COPILOT-WA-REPEAT-1027).
+ *
+ * mautrix-whatsapp turns an incoming call offer into an `m.text` sent by the
+ * CALLER ("Incoming call. Use the WhatsApp app to answer.", "Incoming video
+ * call..."), marked `com.beeper.action_message {type: "call", call_type?}`
+ * (`convertCallStart`, `call_start_notices: true` in its config). It states the
+ * offer only: answered / missed / declined and the duration are dropped by the
+ * bridge (CallAccept / CallTerminate ignored). A call placed FROM the linked
+ * phone is never seen at all: WhatsApp sends no call stanza to the caller's
+ * own linked devices (prod 2026-10-27 14:20, the owner's call to a lead: no
+ * stanza in the bridge log, no event). Decided on structure, never on the body.
+ */
+export function callNotice(content: Record<string, unknown> | undefined): { media: "voice" | "video" } | null {
+  const action = content?.["com.beeper.action_message"] as { type?: unknown; call_type?: unknown } | undefined;
+  if (action?.type !== "call") return null;
+  const hint = `${typeof action.call_type === "string" ? action.call_type : ""} ${typeof content?.body === "string" ? content.body : ""}`;
+  return { media: /video/i.test(hint) ? "video" : "voice" };
+}
+
+/** PURE: a call in plain words, from the brand's side. */
+export function describeCall(call: { media: "voice" | "video" }, direction: "inbound" | "outbound"): string {
+  const who = direction === "inbound" ? "They called us" : "We called them";
+  return `${who} on WhatsApp (${call.media} call). Whether it was answered or missed is not known.`;
+}
+
 /** The event an edit (`m.replace`) rewrites, or null when the event is not an edit. */
 export function editTarget(e: MatrixEvent): string | null {
   const rel = e.content?.["m.relates_to"] as { rel_type?: unknown; event_id?: unknown } | undefined;
