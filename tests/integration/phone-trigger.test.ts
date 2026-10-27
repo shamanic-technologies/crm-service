@@ -399,6 +399,13 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     expect(campaignCalls[1].idempotencyKey).toBe(`crm:phone_given:${BRAND}:+447911123013:replay:ev-1`);
     [row] = (await reports()).filter((r) => r.phone === "+447911123013");
     expect(row).toMatchObject({ status: "reported", campaignEventId: "ev-2" });
+    // lead-service timing out on the replay says nothing about the person: replayable again, keyed on the new event.
+    campaignOutcome = { outcome: "skipped", skipReason: "lead_service_unavailable" };
+    await db.update(phoneGivenReports).set({ campaignOutcome: { id: "ev-2", ...campaignOutcome } }).where(eq(phoneGivenReports.id, row.id));
+    campaignOutcome = { outcome: "ran" };
+    expect((await redeliverReports([row.id], min(4) + 1, { replayCampaignOff: true })).acted).toHaveLength(1);
+    expect(campaignCalls[2].idempotencyKey).toBe(`crm:phone_given:${BRAND}:+447911123013:replay:ev-2`);
+    campaignCalls.splice(2, 1);
     // It ran: a second replay is refused.
     expect((await redeliverReports([row.id], min(5), { replayCampaignOff: true })).refused).toHaveLength(1);
     expect(campaignCalls).toHaveLength(2);
