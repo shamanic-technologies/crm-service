@@ -46,6 +46,7 @@ import {
   campaignServiceConfigured,
   dialablePhone,
   FINAL_REFUSAL_STATUSES,
+  readOfferEvents,
   recordTriggerEvent,
 } from "../trigger-door.js";
 import {
@@ -306,7 +307,27 @@ async function deliverReports(due: PhoneGivenReport[], now: number, replay = fal
       // Same answer as a form submission (WA-GREETING-OFFER-1027): the offer the brand STATED
       // for every form wins, then its only active offer; several and none stated = offer_unknown.
       const offer = await resolveOffer(identity, null);
-      for (const r of reports) {
+      // A replay first reads each reported row's event as campaign-service holds it NOW (the door's first
+      // answer is usually `pending`; the skip that makes it replayable is decided after).
+      const current = new Map<string, Record<string, unknown>>();
+      if (replay) {
+        for (const offerId of new Set(reports.filter((r) => r.status === PHONE_STATUS.REPORTED && r.offerId).map((r) => r.offerId!))) {
+          for (const ev of await readOfferEvents(identity, offerId)) if (typeof ev.id === "string") current.set(ev.id, ev);
+        }
+      }
+      for (let r of reports) {
+        if (replay && r.status === PHONE_STATUS.REPORTED) {
+          const ev = r.campaignEventId ? current.get(r.campaignEventId) : undefined;
+          if (ev) {
+            await db.update(phoneGivenReports).set({ campaignOutcome: ev }).where(eq(phoneGivenReports.id, r.id));
+            r = { ...r, campaignOutcome: ev };
+          }
+          if (!repliedOff(r)) {
+            const o = (r.campaignOutcome ?? {}) as Record<string, unknown>;
+            delivered.push({ reportId: r.id, status: r.status, reason: `not_replayable: ${String(o.outcome ?? o.status ?? "unknown")}${o.skipReason ? `/${String(o.skipReason)}` : ""}` });
+            continue;
+          }
+        }
         const outcome = await deliverOne(r, identity, offer, now, replay && repliedOff(r) ? r.campaignEventId : null);
         if (outcome.status === PHONE_STATUS.FAILED) failed = true;
         delivered.push({ reportId: r.id, ...outcome });
@@ -415,7 +436,8 @@ async function loadReports(
   replayCampaignOff = false,
 ): Promise<{ found: PhoneGivenReport[]; refused: OwnerDoorResult["refused"] }> {
   const found = reportIds.length ? await db.select().from(phoneGivenReports).where(inArray(phoneGivenReports.id, reportIds)) : [];
-  const ok = (r: PhoneGivenReport) => unsent(r) || (replayCampaignOff && repliedOff(r));
+  // A replay also takes a reported row: its event's CURRENT verdict is read before anything is sent.
+  const ok = (r: PhoneGivenReport) => unsent(r) || (replayCampaignOff && r.status === PHONE_STATUS.REPORTED && !!r.campaignEventId);
   const refused: OwnerDoorResult["refused"] = [];
   for (const id of reportIds) {
     const r = found.find((f) => f.id === id);
