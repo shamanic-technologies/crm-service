@@ -1510,9 +1510,15 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   person who writes first is seen within a minute). Any outbound mail (typed in Gmail, sent by the responder through
   google-service) ends the burst; `other` (third-party) mails are nobody's word. Rows: `source gmail`, `scope_id` +
   `address`, no connection / room; `people_scopes.gmail_reply_watch_since` = never history; key
-  `crm:gmail:reply:<brandId>:<gmail message id>`. **A cold-email reply is the EMAIL PATH's**: a mail addressed to one
-  of our sending mailboxes (instantly-service `/internal/accounts`) is recorded `cold_email_path`, never reported
-  here (instantly-service fires it from that mailbox): the mailbox the person wrote TO decides the owner. Own
+  `crm:gmail:reply:<brandId>:<gmail message id>`. **A reply the EMAIL PATH acts on is its** (EMAIL-REPLY-ORPHAN-1027,
+  `email-path.ts`): every burst (past own team) is asked to instantly-service `POST /orgs/reply-ownership` (its own rule:
+  it holds a sequence to file the mail on); `lead_sequence | sending_mailbox_sequence | org_mailbox_sequence` = recorded
+  `handed_off / cold_email_path` with `email_path_answer`, never reported here; `our_own_mail` / `none` = our rules decide
+  (a staff test still fires). Unreadable = nothing recorded this pass. Before, "addressed to a sending mailbox" alone
+  decided it: pabitra (2026-10-27) wrote in a thread the owner opened by hand, no sequence there, dropped by both. A
+  legacy `skipped / cold_email_path` row (no answer) is RED on Monitoring until `POST /internal/reply-triggers/gmail/
+  recheck-cold-email-skips {reportIds?, dryRun?}` (owner door, `gmail-recheck.ts`; real run needs picked ids) re-decides
+  it with the same rules and delivers a positive one at once. Own
   addresses (sending mailboxes, brand domain) AND every org MEMBER, any address = `own_team`; `sender_verdicts` automated >= 0.75 or Jev on the burst =
   `automated_reply`. **Gmail is per ORG**: reported under every brand whose people know the person OUTSIDE the mailbox
   (any non-gmail presence), else the ONE brand with the highest `conversation_verdicts` brand probability, else the

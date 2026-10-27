@@ -3,6 +3,8 @@ import { eq, inArray } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
 import { people, peopleMessageTexts, peopleScopes, replyTriggerReports, senderVerdicts, type PeopleScope } from "../../src/db/schema.js";
 import { deliverDueGmailReplies, detectGmailReplies } from "../../src/lib/reply-trigger/gmail.js";
+import { recheckLegacyColdEmailSkips } from "../../src/lib/reply-trigger/gmail-recheck.js";
+import { readTriggerHealth } from "../../src/lib/trigger-health.js";
 
 /**
  * The Gmail reply trigger end to end against a real database: a person writes to
@@ -40,10 +42,14 @@ let members: { email: string | null; phone: string | null }[] = [];
 let campaignCalls: { headers: Headers; body: Record<string, unknown> }[] = [];
 let jevChoice = "interested";
 let jevCalls = 0;
+// instantly-service's answer per mail (POST /orgs/reply-ownership): who acts on it. Default: nobody there.
+let ownership: { owner: "email_path" | "none"; reason: string } | "down" = { owner: "none", reason: "no_sequence" };
+let ownershipAsks: { from: string; to: string[]; at: string }[] = [];
 
 function installFetchStub() {
   campaignCalls = [];
   jevCalls = 0;
+  ownershipAsks = [];
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
@@ -51,6 +57,14 @@ function installFetchStub() {
     }
     if (url.host === "instantly.test" && url.pathname === "/internal/accounts") {
       return json({ accounts: [{ email: SENDING_MAILBOX, mailboxLogin: null }] });
+    }
+    if (url.host === "instantly.test" && url.pathname === "/orgs/reply-ownership") {
+      expect(new Headers(init?.headers).get("x-org-id")).toBe(ORG);
+      const body = JSON.parse(String(init?.body)) as { messages: { from: string; to: string[]; at: string }[] };
+      ownershipAsks.push(...body.messages);
+      if (ownership === "down") return json({ error: "db down" }, 500);
+      const answer = ownership;
+      return json({ messages: body.messages.map((m) => ({ from: m.from, ...answer })) });
     }
     if (url.host === "brand.test" && /^\/internal\/brands\/[^/]+$/.test(url.pathname)) {
       return json({ brand: { domain: "brand-gmail.example" } });
@@ -124,6 +138,7 @@ describe.skipIf(!RUN)("Gmail reply trigger", () => {
   beforeEach(async () => {
     await cleanup();
     jevChoice = "interested";
+    ownership = { owner: "none", reason: "no_sequence" };
     members = [{ email: "Owner.Personal@gmail-like.example", phone: null }];
     installFetchStub();
     scope = await newScope(BRAND, ["gmail", "instantly"]);
@@ -239,14 +254,109 @@ describe.skipIf(!RUN)("Gmail reply trigger", () => {
     expect((await detectGmailReplies(scope, run1)).detected).toBe(1);
   });
 
-  it("a cold-email reply (addressed to one of our sending mailboxes) is the email path's: never reported here", async () => {
+  it("a reply the email path acts on (it holds the person's sequence) is handed off: never reported here, no double", async () => {
+    ownership = { owner: "email_path", reason: "lead_sequence" };
     scope = await startWatch(scope);
     await mail(scope.id, "c1", min(1), "Thanks for reaching out, tell me more", [SENDING_MAILBOX]);
     const d = await detectGmailReplies(scope, run1);
-    expect(d.detected).toBe(0);
-    expect(d.skipped).toEqual([{ reason: "cold_email_path", address: PERSON }]);
+    expect(d).toMatchObject({ detected: 0, handedOff: 1, skipped: [] });
+    expect(ownershipAsks).toEqual([{ from: PERSON, to: [SENDING_MAILBOX], at: min(1).toISOString() }]);
     expect(jevCalls).toBe(0);
     await deliverDueGmailReplies();
+    expect(campaignCalls).toHaveLength(0);
+    const [row] = await reports();
+    expect(row).toMatchObject({ status: "handed_off", reason: "cold_email_path" });
+    expect(row.emailPathAnswer).toMatchObject({ owner: "email_path", messages: [{ messageId: "c1", owner: "email_path", reason: "lead_sequence" }] });
+
+    // Monitoring: a hand-off is SENT (handed off), listed with what the email path answered, never red.
+    const health = (await readTriggerHealth(2)).triggers.find((t) => t.trigger === "positive_reply_received")!;
+    expect(health.status).toBe("ok");
+    expect(health.handOffs.find((h) => h.reportId === row.id)).toMatchObject({ to: SENDING_MAILBOX, answer: { owner: "email_path" } });
+  });
+
+  it("a reply to a sending mailbox in a thread the email path holds NO sequence for (opened by hand) is reported once (EMAIL-REPLY-ORPHAN-1027)", async () => {
+    scope = await startWatch(scope);
+    await mail(scope.id, "o1", min(0), "Hi, saw your work, want to talk?", [PERSON]);
+    await mail(scope.id, "p1", min(1), "Yes, interested, how does it work?", [SENDING_MAILBOX]);
+    const d = await detectGmailReplies(scope, run1);
+    expect(d).toMatchObject({ detected: 1, handedOff: 0 });
+    expect(jevCalls).toBe(1);
+    await deliverDueGmailReplies();
+    await deliverDueGmailReplies();
+    expect(campaignCalls).toHaveLength(1);
+    expect(campaignCalls[0].body).toMatchObject({ idempotencyKey: `crm:gmail:reply:${BRAND}:p1`, person: { email: PERSON } });
+    const [row] = await reports();
+    expect(row.emailPathAnswer).toMatchObject({ owner: "none", messages: [{ messageId: "p1", reason: "no_sequence" }] });
+  });
+
+  it("our own mail per the email path (a staff sender) is not an act there: our own rules decide, a staff test still fires", async () => {
+    ownership = { owner: "email_path", reason: "our_own_mail" };
+    scope = await startWatch(scope);
+    await mail(scope.id, "s1", min(1), "Interested, send me the details", [SENDING_MAILBOX]);
+    expect((await detectGmailReplies(scope, run1)).detected).toBe(1);
+    await deliverDueGmailReplies();
+    expect(campaignCalls).toHaveLength(1);
+  });
+
+  it("the email path unreadable: nothing recorded this pass, decided on the next", async () => {
+    ownership = "down";
+    scope = await startWatch(scope);
+    await mail(scope.id, "c1", min(1), "Interested", [SENDING_MAILBOX]);
+    const d = await detectGmailReplies(scope, run1);
+    expect(d).toMatchObject({ detected: 0, emailPathUnreadable: 1, skipped: [] });
+    expect(await reports()).toHaveLength(0);
+    expect(jevCalls).toBe(0);
+    ownership = { owner: "none", reason: "no_sequence" };
+    expect((await detectGmailReplies(scope, run1)).detected).toBe(1);
+  });
+
+  it("a legacy cold-email skip is red on Monitoring, and the re-check door delivers it once when nobody acts on it", async () => {
+    scope = await startWatch(scope);
+    await mail(scope.id, "p1", min(1), "Yes, interested, how does it work?", [SENDING_MAILBOX]);
+    // The pre-fix decision: skipped on the recipient alone, no answer from the email path.
+    const [legacy] = await db.insert(replyTriggerReports).values({
+      orgId: ORG, brandId: BRAND, source: "gmail", channel: "email", scopeId: scope.id, address: PERSON, anchorEventId: "p1",
+      messages: [{ messageId: "p1", at: min(1).toISOString(), subject: "Your offer", text: "Yes, interested, how does it work?", to: [SENDING_MAILBOX], threadId: "thread-1" }],
+      firstMessageAt: min(1), lastMessageAt: min(1), detectedAt: min(2), status: "skipped", reason: "cold_email_path",
+    }).returning();
+    const red = (await readTriggerHealth(2)).triggers.find((t) => t.trigger === "positive_reply_received")!;
+    expect(red.status).toBe("red");
+    expect(red.stuckReports.map((r) => r.reportId)).toContain(legacy.id);
+
+    // Detection never re-decides a recorded burst.
+    expect((await detectGmailReplies(scope, run1)).detected).toBe(0);
+
+    const dry = await recheckLegacyColdEmailSkips({ dryRun: true });
+    expect(dry.rows).toMatchObject([{ reportId: legacy.id, outcome: "would_decide", emailPath: { owner: "none" } }]);
+    expect(jevCalls).toBe(0);
+    expect((await reports())[0]).toMatchObject({ status: "skipped", reason: "cold_email_path" });
+    await expect(recheckLegacyColdEmailSkips({ dryRun: false })).rejects.toThrow(/reportIds/);
+
+    const real = await recheckLegacyColdEmailSkips({ dryRun: false, reportIds: [legacy.id] });
+    expect(real.rows).toMatchObject([{ reportId: legacy.id, outcome: "decided", status: "pending", delivery: { status: "reported" } }]);
+    expect(campaignCalls).toHaveLength(1);
+    expect(campaignCalls[0].body).toMatchObject({ idempotencyKey: `crm:gmail:reply:${BRAND}:p1` });
+    // Once only: the row is no longer legacy, the loop finds nothing more to send.
+    expect((await recheckLegacyColdEmailSkips({ dryRun: false, reportIds: [legacy.id] })).rows).toMatchObject([{ outcome: "not_legacy" }]);
+    await deliverDueGmailReplies();
+    expect(campaignCalls).toHaveLength(1);
+    expect((await readTriggerHealth(2)).triggers.find((t) => t.trigger === "positive_reply_received")!.status).toBe("ok");
+  });
+
+  it("the re-check: the email path acts on it = handed off; the brand answered since = nobody waits", async () => {
+    scope = await startWatch(scope);
+    await mail(scope.id, "p1", min(1), "Interested", [SENDING_MAILBOX]);
+    const legacy = async (anchor: string) =>
+      (await db.insert(replyTriggerReports).values({
+        orgId: ORG, brandId: BRAND, source: "gmail", channel: "email", scopeId: scope.id, address: PERSON, anchorEventId: anchor,
+        messages: [], firstMessageAt: min(1), lastMessageAt: min(1), detectedAt: min(2), status: "skipped", reason: "cold_email_path",
+      }).returning())[0];
+    const a = await legacy("p1");
+    const b = await legacy("p-old"); // no longer in the unanswered burst
+    ownership = { owner: "email_path", reason: "sending_mailbox_sequence" };
+    const out = await recheckLegacyColdEmailSkips({ dryRun: false, reportIds: [a.id, b.id] });
+    expect(out.rows.find((r) => r.reportId === a.id)).toMatchObject({ outcome: "handed_off", status: "handed_off" });
+    expect(out.rows.find((r) => r.reportId === b.id)).toMatchObject({ outcome: "answered_since", reason: "answered_since" });
     expect(campaignCalls).toHaveLength(0);
   });
 

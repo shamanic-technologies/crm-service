@@ -2,6 +2,8 @@
  * Trigger reports for the dashboard v2 Monitoring hub (lib/trigger-health.ts, WA-GREETING-OFFER-1027):
  *  - GET /internal/ops/trigger-reports?days=30   per trigger: reports stuck unsent (red) + a daily series.
  *  - POST /internal/reply-triggers/reports/withhold {reportIds, note}   OWNER DOOR: never send these reply reports.
+ *  - POST /internal/reply-triggers/gmail/recheck-cold-email-skips {reportIds?, dryRun?}   OWNER DOOR: re-decide legacy
+ *    Gmail skips handed to the email path on the recipient alone (EMAIL-REPLY-ORPHAN-1027).
  * Staff-only behind the api-service gateway; no org scope (fleet-wide).
  */
 import { Router } from "express";
@@ -9,6 +11,7 @@ import { z } from "zod";
 import { apiKeyAuth } from "../middleware/auth.js";
 import { readTriggerHealth } from "../lib/trigger-health.js";
 import { withholdReplyReports } from "../lib/reply-trigger/watch.js";
+import { recheckLegacyColdEmailSkips } from "../lib/reply-trigger/gmail-recheck.js";
 
 const router = Router();
 const daysSchema = z.coerce.number().int().min(1).max(90);
@@ -23,6 +26,19 @@ router.post("/internal/reply-triggers/reports/withhold", apiKeyAuth, async (req,
   const body = z.object({ reportIds: z.array(z.string().uuid()).min(1).max(200), note: z.string().min(1).max(500) }).strict().safeParse(req.body);
   if (!body.success) return res.status(400).json({ type: "validation", error: body.error.message });
   res.json(await withholdReplyReports(body.data.reportIds, body.data.note));
+});
+
+router.post("/internal/reply-triggers/gmail/recheck-cold-email-skips", apiKeyAuth, async (req, res) => {
+  const body = z.object({ reportIds: z.array(z.string().uuid()).min(1).max(200).optional(), dryRun: z.boolean().optional() }).strict().safeParse(req.body ?? {});
+  if (!body.success) return res.status(400).json({ type: "validation", error: body.error.message });
+  const dryRun = body.data.dryRun ?? true;
+  if (!dryRun && !body.data.reportIds) return res.status(400).json({ type: "validation", error: "a real re-check needs reportIds" });
+  try {
+    res.json(await recheckLegacyColdEmailSkips({ reportIds: body.data.reportIds, dryRun }));
+  } catch (err) {
+    console.error("[crm-service][reply-trigger] re-check failed:", err);
+    res.status(502).json({ error: (err as Error).message });
+  }
 });
 
 export default router;

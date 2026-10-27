@@ -5,6 +5,10 @@
  * STUCK: nobody got the message it was meant to start. 5 days of `offer_unknown` on "WhatsApp number given"
  * (2026-10-22 → 10-27, 7 numbers, 0 greetings) went unseen: this read is what turns it red.
  *
+ * A reply handed to the email path is SENT (`handed_off`, with what the email path answered: `handOffs`). A LEGACY
+ * `skipped / cold_email_path` Gmail row (decided on the recipient alone, no answer from the email path, before
+ * EMAIL-REPLY-ORPHAN-1027) is a DROPPED reply until re-checked: stuck, red, never a quiet skip.
+ *
  * Read-only, fleet-wide, from the report rows themselves (each is dated: the daily series is recomputed from
  * them, nothing else to store). Sends nothing: red on the Monitoring hub is the alert (owner rule).
  */
@@ -46,17 +50,37 @@ export interface TriggerHealth {
       attempts: number;
       detectedAt: string;
     }[];
-    byDay: { day: string; sent: number; skipped: number; notSent: number }[];
+    byDay: { day: string; sent: number; skipped: number; notSent: number; handedOff: number }[];
+    /** Replies handed to another service that acts on them (the email path), newest first, with its answer. */
+    handOffs: {
+      reportId: string;
+      brandId: string | null;
+      person: { name: string | null; email: string | null; phone: string | null };
+      detectedAt: string;
+      to: string;
+      answer: unknown;
+    }[];
   }[];
 }
 
-/** `who` = the SQL naming the person on each table (name, email, phone). */
-const SOURCES = [
+/**
+ * `who` = the SQL naming the person on each table (name, email, phone). `dropped` = a skip that in fact dropped a
+ * person's message (stuck at any age); `handOff` = a hand-off to the service that acts on it (counted as sent).
+ */
+const SOURCES: { trigger: string; table: string; at: string; scoped: boolean; who: string; dropped?: string; handOff?: string }[] = [
   { trigger: "form_submitted", table: "form_trigger_reports", at: "detected_at", scoped: true, who: "full_name AS p_name, email AS p_email, phone AS p_phone" },
   { trigger: "whatsapp_number_given", table: "phone_given_reports", at: "detected_at", scoped: true, who: "full_name AS p_name, email AS p_email, phone AS p_phone" },
-  { trigger: "positive_reply_received", table: "reply_trigger_reports", at: "detected_at", scoped: true, who: "full_name AS p_name, COALESCE(email, address) AS p_email, phone AS p_phone" },
+  {
+    trigger: "positive_reply_received",
+    table: "reply_trigger_reports",
+    at: "detected_at",
+    scoped: true,
+    who: "full_name AS p_name, COALESCE(email, address) AS p_email, phone AS p_phone",
+    dropped: "source = 'gmail' AND status = 'skipped' AND reason = 'cold_email_path' AND email_path_answer IS NULL",
+    handOff: "source = 'gmail' AND status = 'handed_off' AND reason = 'cold_email_path'",
+  },
   { trigger: "account_event", table: "credit_event_reports", at: "created_at", scoped: false, who: "NULL::text AS p_name, email AS p_email, NULL::text AS p_phone" },
-] as const;
+];
 
 const BRAND_NAME_TTL_MS = 60 * 60_000;
 const brandNameCache = new Map<string, { name: string | null; at: number }>();
@@ -98,19 +122,28 @@ export async function readTriggerHealth(days: number, now: number = Date.now()):
     const t = sql.raw(s.table);
     const at = sql.raw(s.at);
     const scope = s.scoped ? sql.raw("org_id::text AS org_id, brand_id::text AS brand_id") : sql.raw("NULL::text AS org_id, NULL::text AS brand_id");
-    const stuckWhere = sql`status NOT IN (${list([...SENT, ...SKIPPED])}) AND ${at} < ${stuckBefore}::timestamptz`;
+    const unsent = sql`(status NOT IN (${list([...SENT, ...SKIPPED])}) AND ${at} < ${stuckBefore}::timestamptz)`;
+    const stuckWhere = s.dropped ? sql`(${unsent} OR (${sql.raw(s.dropped)}))` : unsent;
+    const handOffWhere = s.handOff ? sql.raw(s.handOff) : sql.raw("false");
     const byReason = await rows<{ reason: string | null; count: number; oldest: Date; latest: Date }>(sql`
       SELECT reason, count(*)::int AS count, min(${at}) AS oldest, max(${at}) AS latest
       FROM ${t} WHERE ${stuckWhere} GROUP BY reason ORDER BY count(*) DESC, reason`);
     const stuckList = await rows<{ id: string; org_id: string | null; brand_id: string | null; p_name: string | null; p_email: string | null; p_phone: string | null; status: string; reason: string | null; last_error: string | null; attempts: number; at: Date }>(sql`
       SELECT id::text AS id, ${scope}, ${sql.raw(s.who)}, status, reason, last_error, attempts, ${at} AS at
       FROM ${t} WHERE ${stuckWhere} ORDER BY ${at} DESC, id LIMIT ${STUCK_LIST_LIMIT}`);
-    const daily = await rows<{ day: string; sent: number; skipped: number; not_sent: number }>(sql`
+    const daily = await rows<{ day: string; sent: number; skipped: number; not_sent: number; handed_off: number }>(sql`
       SELECT to_char(date_trunc('day', ${at} AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
         count(*) FILTER (WHERE status IN (${list(SENT)}))::int AS sent,
-        count(*) FILTER (WHERE status IN (${list(SKIPPED)}))::int AS skipped,
-        count(*) FILTER (WHERE status NOT IN (${list([...SENT, ...SKIPPED])}))::int AS not_sent
+        count(*) FILTER (WHERE status IN (${list(SKIPPED)}) AND NOT ${stuckWhere})::int AS skipped,
+        count(*) FILTER (WHERE status NOT IN (${list([...SENT, ...SKIPPED])}) OR ${stuckWhere})::int AS not_sent,
+        count(*) FILTER (WHERE ${handOffWhere})::int AS handed_off
       FROM ${t} WHERE ${at} >= ${since}::timestamptz GROUP BY 1 ORDER BY 1`);
+    const handOffs = s.handOff
+      ? await rows<{ id: string; brand_id: string | null; p_name: string | null; p_email: string | null; p_phone: string | null; at: Date; recipient: string | null; answer: unknown }>(sql`
+          SELECT id::text AS id, ${scope}, ${sql.raw(s.who)}, ${at} AS at,
+            messages->0->'to'->>0 AS recipient, email_path_answer AS answer
+          FROM ${t} WHERE ${handOffWhere} AND ${at} >= ${since}::timestamptz ORDER BY ${at} DESC, id LIMIT ${STUCK_LIST_LIMIT}`)
+      : [];
     const stuck = byReason.reduce((n, r) => n + r.count, 0);
     const names = await brandNames(stuckList.map((r) => r.brand_id).filter((b): b is string => !!b));
     triggers.push({
@@ -131,7 +164,15 @@ export async function readTriggerHealth(days: number, now: number = Date.now()):
         attempts: r.attempts,
         detectedAt: new Date(r.at).toISOString(),
       })),
-      byDay: daily.map((d) => ({ day: d.day, sent: d.sent, skipped: d.skipped, notSent: d.not_sent })),
+      byDay: daily.map((d) => ({ day: d.day, sent: d.sent, skipped: d.skipped, notSent: d.not_sent, handedOff: d.handed_off })),
+      handOffs: handOffs.map((h) => ({
+        reportId: h.id,
+        brandId: h.brand_id,
+        person: { name: h.p_name, email: h.p_email, phone: h.p_phone },
+        detectedAt: new Date(h.at).toISOString(),
+        to: h.recipient ?? "",
+        answer: h.answer,
+      })),
     });
   }
   return {

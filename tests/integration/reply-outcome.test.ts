@@ -68,6 +68,10 @@ function installFetchStub() {
     }
     if (url.pathname.startsWith("/v1/runs")) return json({ id: "patched" });
     if (url.host === "instantly.test" && url.pathname === "/internal/accounts") return json({ accounts: [] });
+    if (url.host === "instantly.test" && url.pathname === "/orgs/reply-ownership") {
+      const body = JSON.parse(String(init?.body)) as { messages: { from: string }[] };
+      return json({ messages: body.messages.map((m) => ({ from: m.from, owner: "none", reason: "no_sequence" })) });
+    }
     if (url.host === "brand.test" && /^\/internal\/brands\/[^/]+$/.test(url.pathname)) return json({ brand: { domain: "brand-outcome.example" } });
     if (url.host === "client.test" && url.pathname === "/internal/users") return json({ users: [], total: 0 });
     if (url.pathname === "/orgs/judgments") {

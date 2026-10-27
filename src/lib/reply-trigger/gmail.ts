@@ -22,11 +22,14 @@
  *  - ONE REPORT PER BURST: one row per burst (UNIQUE on its first mail's Gmail id
  *    per brand), and campaign-service gets
  *    `idempotencyKey = crm:gmail:reply:<brandId>:<gmail message id>`.
- *  - A COLD-EMAIL REPLY IS THE EMAIL PATH'S: a mail addressed to one of our
- *    sending mailboxes (instantly-service accounts) is a reply to our cold email;
- *    instantly-service detects it in that mailbox and fires the trigger itself,
- *    so it is recorded `cold_email_path` and never reported here. The mailbox the
- *    person wrote TO decides the owner: the brand's own Gmail = here.
+ *  - A REPLY THE EMAIL PATH ACTS ON IS ITS (EMAIL-REPLY-ORPHAN-1027, ./email-path.ts):
+ *    every burst is asked to instantly-service (`POST /orgs/reply-ownership`, its
+ *    own rule: it holds a sequence with the person to file the mail on); one it
+ *    acts on is recorded `handed_off / cold_email_path` with its answer, never
+ *    reported here; anything else follows the rules below, whatever mailbox it
+ *    was addressed to. Unreadable = nothing recorded this pass. (Before: "addressed
+ *    to one of our sending mailboxes" alone, which dropped replies in threads the
+ *    owner opened by hand: nobody acted.)
  *  - THE BRAND'S OWN ADDRESSES (a sending mailbox, the brand's domain) and
  *    EVERY MEMBER OF THE ORG, whatever address they write from (org-members.ts,
  *    OWN-TEAM-GMAIL-1016: the owner's pitch from his personal gmail rang a
@@ -65,6 +68,7 @@ import {
   type DoorIdentity,
 } from "../trigger-door.js";
 import { lazyJudgeRun, outcomeAtDetection } from "./outcome.js";
+import { askEmailPath, type EmailPathAnswer } from "./email-path.js";
 import { readEmailThreadForReply, type EmailBurstMessage, type StoredEmail } from "./email-thread.js";
 import {
   AUTOMATED_MIN_CONFIDENCE,
@@ -88,9 +92,20 @@ export const GMAIL_SOURCE = "gmail";
 const CHANNEL = "email";
 
 export const GMAIL_REPLY_REASONS = {
-  /** Addressed to one of our sending mailboxes: a cold-email reply, the email path reports it. */
+  /**
+   * The email path (instantly-service) said it acts on this mail: status `handed_off`, its answer in
+   * `email_path_answer`. A `skipped` row with this reason and no answer is a LEGACY skip decided on the recipient
+   * alone (before EMAIL-REPLY-ORPHAN-1027): nobody confirmed acting on it, red on Monitoring until re-checked.
+   */
   COLD_EMAIL_PATH: "cold_email_path",
+  /** Re-check only: the brand answered the person since the burst, nobody is waiting. */
+  ANSWERED_SINCE: "answered_since",
+  /** Re-check only: another brand of the org owns this person (gmailOwnerBrands). */
+  OTHER_BRAND: "other_brand",
 } as const;
+
+/** A burst the email path acts on. */
+export const GMAIL_HANDED_OFF = "handed_off";
 
 export const gmailIdempotencyKey = (brandId: string, messageId: string) => `crm:${GMAIL_SOURCE}:reply:${brandId}:${messageId}`;
 
@@ -101,10 +116,14 @@ export interface GmailReplyDetection {
   detected: number;
   skipped: { reason: string; address: string }[];
   notOwner: number;
+  /** Bursts handed to the email path (it acts on them). */
+  handedOff: number;
+  /** Bursts left for the next pass: the email path's answer could not be read. */
+  emailPathUnreadable: number;
 }
 
 /** The scope's stored Gmail conversation with one address, as `email-thread.ts` reads it. */
-async function storedConversation(scopeId: string, address: string): Promise<StoredEmail[]> {
+export async function storedConversation(scopeId: string, address: string): Promise<StoredEmail[]> {
   const rows = await db
     .select({
       messageKey: peopleMessageTexts.messageKey,
@@ -156,6 +175,105 @@ export async function gmailOwnerBrands(orgId: string, address: string): Promise<
   return new Set([ranked[0].brand_id]);
 }
 
+type OwnAddressesOnce = () => Promise<{ addresses: OwnAddresses; members: OrgMembers }>;
+
+/** The brand's own addresses + the org's members, read once per pass (a run is opened for it). */
+export function ownAddressesOnce(scope: PeopleScope, runId: () => Promise<string>): OwnAddressesOnce {
+  let own: { addresses: OwnAddresses; members: OrgMembers } | null = null;
+  return async () => {
+    if (own) return own;
+    const identity = { orgId: scope.orgId, userId: scope.createdByUserId, runId: await runId(), brandId: scope.brandId };
+    const [read, members] = await Promise.all([readOwnAddresses(identity), readOrgMembers(identity)]);
+    // Unreadable = nothing recorded this pass (our own mail must never be reported by mistake).
+    if (read.status !== "ok") throw new Error(`own addresses unreadable: ${read.error}`);
+    return (own = { addresses: read, members });
+  };
+}
+
+export type GmailDecision =
+  | { kind: "not_owner" }
+  /** The email path's answer could not be read: nothing decided, asked again next pass. */
+  | { kind: "unreadable"; error: string }
+  | {
+      kind: "record";
+      status: string;
+      reason: string | null;
+      judgment: Judgment | null;
+      judged: boolean;
+      reported: boolean;
+      emailPathAnswer: EmailPathAnswer | null;
+    };
+
+/**
+ * What to do with one burst of the person's mail written after the watch started (`burst`; `judged` = the
+ * person's words since the watch, what Jev reads). The rules of the file header, in order: own team, the
+ * email path, the owning brand, an automated sender, Jev. Shared by detection and the re-check door.
+ */
+export async function decideGmailBurst(
+  scope: PeopleScope,
+  address: string,
+  burst: EmailBurstMessage[],
+  judged: EmailBurstMessage[],
+  ctx: { runId: () => Promise<string>; judge: ReturnType<typeof lazyJudgeRun>; ownAddresses: OwnAddressesOnce; now: number },
+): Promise<GmailDecision> {
+  const ours = await ctx.ownAddresses();
+  type Recorded = Extract<GmailDecision, { kind: "record" }>;
+  const skip = (reason: string, rest: Partial<Recorded> = {}): Recorded => ({
+    kind: "record",
+    status: REPLY_STATUS.SKIPPED,
+    reason,
+    judgment: null,
+    judged: false,
+    reported: false,
+    emailPathAnswer: null,
+    ...rest,
+  });
+  // A member of the org (any address: a teammate's personal gmail) writing is the brand itself, never a prospect.
+  if (isOwnAddress(address, ours.addresses) || ours.members.emails.has(address)) return skip(REPLY_REASONS.OWN_TEAM);
+
+  let emailPathAnswer: EmailPathAnswer;
+  try {
+    const identity = { orgId: scope.orgId, userId: scope.createdByUserId, runId: await ctx.runId(), brandId: scope.brandId };
+    emailPathAnswer = await askEmailPath(
+      identity,
+      burst.map((m) => ({ messageId: m.messageId, from: address, to: m.to, at: m.at })),
+      ctx.now,
+    );
+  } catch (err) {
+    return { kind: "unreadable", error: (err as Error).message };
+  }
+  if (emailPathAnswer.owner === "email_path") {
+    return { ...skip(GMAIL_REPLY_REASONS.COLD_EMAIL_PATH), status: GMAIL_HANDED_OFF, emailPathAnswer };
+  }
+
+  if (!(await gmailOwnerBrands(scope.orgId, address)).has(scope.brandId)) return { kind: "not_owner" };
+  const [sender] = await db
+    .select({ verdict: senderVerdicts.verdict, confidence: senderVerdicts.confidence })
+    .from(senderVerdicts)
+    .where(and(eq(senderVerdicts.orgId, scope.orgId), eq(senderVerdicts.email, address)));
+  if (sender?.verdict === "automated" && sender.confidence >= AUTOMATED_MIN_CONFIDENCE) {
+    return skip(REPLY_REASONS.AUTOMATED_REPLY, {
+      judgment: { status: "ok", choice: "automated", confidence: sender.confidence, model: "sender_verdicts", error: null },
+      emailPathAnswer,
+    });
+  }
+  const judgment = await judgeBurst(
+    { orgId: scope.orgId, userId: scope.createdByUserId, brandId: scope.brandId, channel: CHANNEL, where: `gmail scope ${scope.id}` },
+    ctx.judge.runId,
+    judged.map((m) => ({ eventId: m.messageId, at: m.at, text: m.subject ? `${m.subject}\n${m.text}` : m.text })),
+  );
+  const verdict = burstVerdict(judgment);
+  return {
+    kind: "record",
+    status: verdict.report ? REPLY_STATUS.PENDING : REPLY_STATUS.SKIPPED,
+    reason: verdict.report ? null : verdict.reason,
+    judgment,
+    judged: judgment.status === "ok",
+    reported: verdict.report,
+    emailPathAnswer,
+  };
+}
+
 /**
  * Read every Gmail conversation of this scope that gained a mail from the person
  * in the lookback, and record each unanswered burst once (pending) or skipped
@@ -186,7 +304,16 @@ async function detectGmailRepliesOn(
   judge: ReturnType<typeof lazyJudgeRun>,
   now: number,
 ): Promise<GmailReplyDetection> {
-  const out: GmailReplyDetection = { scopeId: scope.id, baseline: false, threadsRead: 0, detected: 0, skipped: [], notOwner: 0 };
+  const out: GmailReplyDetection = {
+    scopeId: scope.id,
+    baseline: false,
+    threadsRead: 0,
+    detected: 0,
+    skipped: [],
+    notOwner: 0,
+    handedOff: 0,
+    emailPathUnreadable: 0,
+  };
   if (!scope.gmailReplyWatchSince) {
     await db
       .update(peopleScopes)
@@ -210,15 +337,7 @@ async function detectGmailRepliesOn(
     );
   if (moved.length === 0) return out;
 
-  let own: { addresses: OwnAddresses; members: OrgMembers } | null = null;
-  const ownAddresses = async () => {
-    if (own) return own;
-    const identity = { orgId: scope.orgId, userId: scope.createdByUserId, runId: await runId(), brandId: scope.brandId };
-    const [read, members] = await Promise.all([readOwnAddresses(identity), readOrgMembers(identity)]);
-    // Unreadable = nothing recorded this pass (a cold-email reply must never be reported by mistake).
-    if (read.status !== "ok") throw new Error(`own addresses unreadable: ${read.error}`);
-    return (own = { addresses: read, members });
-  };
+  const ownAddresses = ownAddressesOnce(scope, runId);
 
   for (const { address } of moved) {
     const reading = readEmailThreadForReply(await storedConversation(scope.id, address));
@@ -243,56 +362,23 @@ async function detectGmailRepliesOn(
     const fresh = uncovered.filter((m) => Date.parse(m.at) >= since);
     const burst = fresh.length > 0 ? fresh : uncovered;
 
-    let status: string = REPLY_STATUS.PENDING;
-    let reason: string | null = null;
-    let judgment: Judgment | null = null;
-    let judged = false;
-    let reported = false;
+    let decision: GmailDecision;
     if (fresh.length === 0) {
-      status = REPLY_STATUS.SKIPPED;
-      reason = REPLY_REASONS.BEFORE_WATCH;
+      decision = { kind: "record", status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.BEFORE_WATCH, judgment: null, judged: false, reported: false, emailPathAnswer: null };
     } else {
-      const ours = await ownAddresses();
-      const recipients = burst.flatMap((m) => m.to).map((t) => normalizeEmail(t)).filter((t): t is string => !!t);
-      // A member of the org (any address: a teammate's personal gmail) writing is the brand itself, never a prospect.
-      if (isOwnAddress(address, ours.addresses) || ours.members.emails.has(address)) {
-        status = REPLY_STATUS.SKIPPED;
-        reason = REPLY_REASONS.OWN_TEAM;
-      } else if (recipients.some((t) => ours.addresses.addresses.has(t))) {
-        status = REPLY_STATUS.SKIPPED;
-        reason = GMAIL_REPLY_REASONS.COLD_EMAIL_PATH;
-      } else {
-        if (!(await gmailOwnerBrands(scope.orgId, address)).has(scope.brandId)) {
-          // Another brand of the org owns this person: nothing recorded here.
-          out.notOwner += 1;
-          continue;
-        }
-        const [verdict] = await db
-          .select({ verdict: senderVerdicts.verdict, confidence: senderVerdicts.confidence })
-          .from(senderVerdicts)
-          .where(and(eq(senderVerdicts.orgId, scope.orgId), eq(senderVerdicts.email, address)));
-        if (verdict?.verdict === "automated" && verdict.confidence >= AUTOMATED_MIN_CONFIDENCE) {
-          status = REPLY_STATUS.SKIPPED;
-          reason = REPLY_REASONS.AUTOMATED_REPLY;
-          judgment = { status: "ok", choice: "automated", confidence: verdict.confidence, model: "sender_verdicts", error: null };
-        } else {
-          judgment = await judgeBurst(
-            { orgId: scope.orgId, userId: scope.createdByUserId, brandId: scope.brandId, channel: CHANNEL, where: `gmail scope ${scope.id}` },
-            judge.runId,
-            reading.burst
-              .filter((m) => Date.parse(m.at) >= since)
-              .map((m) => ({ eventId: m.messageId, at: m.at, text: m.subject ? `${m.subject}\n${m.text}` : m.text })),
-          );
-          const verdict = burstVerdict(judgment);
-          judged = judgment.status === "ok";
-          reported = verdict.report;
-          if (!verdict.report) {
-            status = REPLY_STATUS.SKIPPED;
-            reason = verdict.reason;
-          }
-        }
-      }
+      decision = await decideGmailBurst(scope, address, burst, reading.burst.filter((m) => Date.parse(m.at) >= since), { runId, judge, ownAddresses, now });
     }
+    if (decision.kind === "not_owner") {
+      // Another brand of the org owns this person: nothing recorded here.
+      out.notOwner += 1;
+      continue;
+    }
+    if (decision.kind === "unreadable") {
+      out.emailPathUnreadable += 1;
+      console.warn(`[crm-service][reply-trigger] Gmail burst from ${address} (brand ${scope.brandId}) left for the next pass: ${decision.error}`);
+      continue;
+    }
+    const { status, reason, judgment, judged, reported, emailPathAnswer } = decision;
     // Only a burst Jev judged (never a recorded sender verdict) carries the judge run.
     const outcome = outcomeAtDetection({
       judged,
@@ -317,6 +403,7 @@ async function detectGmailRepliesOn(
         firstMessageAt: new Date(burst[0].at),
         lastMessageAt: new Date(burst[burst.length - 1].at),
         judgment,
+        emailPathAnswer,
         detectedAt: new Date(now),
         status,
         reason,
@@ -325,9 +412,10 @@ async function detectGmailRepliesOn(
       .returning({ id: replyTriggerReports.id });
     if (inserted.length === 0) continue;
     if (status === REPLY_STATUS.PENDING) out.detected += 1;
+    else if (status === GMAIL_HANDED_OFF) out.handedOff += 1;
     else out.skipped.push({ reason: reason!, address });
     console.log(
-      `[crm-service][reply-trigger] ${status === REPLY_STATUS.PENDING ? "detected" : `skipped (${reason})`} a Gmail burst of ` +
+      `[crm-service][reply-trigger] ${status === REPLY_STATUS.PENDING ? "detected" : `${status} (${reason})`} a Gmail burst of ` +
         `${burst.length} mail(s) from ${address} (brand ${scope.brandId}), first ${burst[0].at}`,
     );
   }
@@ -457,6 +545,38 @@ export async function deliverGmailReply(r: ReplyTriggerReport, identity: DoorIde
   }
 }
 
+/** Deliver these recorded bursts of ONE scope under one ORG run. A person not built yet rebuilds the scope, then retries. */
+export async function deliverScopeGmailReports(
+  scope: PeopleScope,
+  reports: ReplyTriggerReport[],
+  now: number,
+  opts: { rebuild?: (orgId: string, brandId: string) => Promise<void> },
+): Promise<{ reportId: string; status: string; reason: string | null }[]> {
+  const delivered: { reportId: string; status: string; reason: string | null }[] = [];
+  const ids = { orgId: scope.orgId, userId: scope.createdByUserId, brandIds: [scope.brandId] };
+  const run = await createRun({ ...ids, serviceName: SERVICE_NAME, taskName: "reply-trigger.report-gmail" });
+  const identity = { orgId: scope.orgId, brandId: scope.brandId, userId: scope.createdByUserId, runId: run.id };
+  let failed = false;
+  const notBuilt: ReplyTriggerReport[] = [];
+  for (const r of reports) {
+    const outcome = await deliverGmailReply(r, identity, now);
+    if (outcome.reason === REPLY_REASONS.PERSON_NOT_BUILT) notBuilt.push(r);
+    else if (outcome.status !== REPLY_STATUS.REPORTED) failed = true;
+    delivered.push({ reportId: r.id, ...outcome });
+  }
+  if (notBuilt.length > 0) {
+    await (opts.rebuild ?? rebuildBrandPeople)(scope.orgId, scope.brandId);
+    for (const stale of notBuilt) {
+      const [r] = await db.select().from(replyTriggerReports).where(eq(replyTriggerReports.id, stale.id));
+      const outcome = await deliverGmailReply(r, identity, Date.now());
+      if (outcome.status !== REPLY_STATUS.REPORTED) failed = true;
+      delivered.push({ reportId: r.id, ...outcome });
+    }
+  }
+  await updateRun(run.id, failed ? "failed" : "completed", { ...ids, runId: run.id });
+  return delivered;
+}
+
 let delivering = false;
 
 /** Report every due Gmail burst: one ORG run per scope. A person not built yet rebuilds the scope, then retries. */
@@ -476,27 +596,7 @@ export async function deliverDueGmailReplies(
     for (const [scopeId, reports] of groups) {
       const [scope] = await db.select().from(peopleScopes).where(eq(peopleScopes.id, scopeId));
       if (!scope) continue; // the scope was removed: nobody to answer for
-      const ids = { orgId: scope.orgId, userId: scope.createdByUserId, brandIds: [scope.brandId] };
-      const run = await createRun({ ...ids, serviceName: SERVICE_NAME, taskName: "reply-trigger.report-gmail" });
-      const identity = { orgId: scope.orgId, brandId: scope.brandId, userId: scope.createdByUserId, runId: run.id };
-      let failed = false;
-      const notBuilt: ReplyTriggerReport[] = [];
-      for (const r of reports) {
-        const outcome = await deliverGmailReply(r, identity, now);
-        if (outcome.reason === REPLY_REASONS.PERSON_NOT_BUILT) notBuilt.push(r);
-        else if (outcome.status !== REPLY_STATUS.REPORTED) failed = true;
-        delivered.push({ reportId: r.id, ...outcome });
-      }
-      if (notBuilt.length > 0) {
-        await (opts.rebuild ?? rebuildBrandPeople)(scope.orgId, scope.brandId);
-        for (const stale of notBuilt) {
-          const [r] = await db.select().from(replyTriggerReports).where(eq(replyTriggerReports.id, stale.id));
-          const outcome = await deliverGmailReply(r, identity, Date.now());
-          if (outcome.status !== REPLY_STATUS.REPORTED) failed = true;
-          delivered.push({ reportId: r.id, ...outcome });
-        }
-      }
-      await updateRun(run.id, failed ? "failed" : "completed", { ...ids, runId: run.id });
+      delivered.push(...(await deliverScopeGmailReports(scope, reports, now, opts)));
     }
     return delivered;
   } finally {

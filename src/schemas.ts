@@ -3794,9 +3794,26 @@ registry.registerPath({
     "WA-GREETING-OFFER-1027. Every occurrence crm-service reports to campaign-service's trigger door (form_submitted, " +
     "whatsapp_number_given, positive_reply_received, account_event) is a dated row. A row not sent (failed, pending, handing " +
     "off) older than 15 min is STUCK: `status: red`, with its reason and last error. `byDay` = per UTC day of detection: sent, " +
-    "skipped by rule, not sent. Nothing is emailed: red on the Monitoring hub is the alert. Staff-only behind the gateway.",
+    "skipped by rule, not sent, handed off. A Gmail reply the email path (instantly-service) acts on is SENT as `handed_off`, " +
+    "listed in `handOffs` with the email path's answer; a LEGACY `skipped / cold_email_path` row (decided on the recipient alone, " +
+    "no answer, before EMAIL-REPLY-ORPHAN-1027) is a dropped reply: stuck, red, at any age, until re-checked. " +
+    "Nothing is emailed: red on the Monitoring hub is the alert. Staff-only behind the gateway.",
   request: { query: z.object({ days: z.coerce.number().int().min(1).max(90).optional().describe("Window in days, default 30") }) },
-  responses: { 200: { description: "`{generatedAt, days, stuckAfterMinutes, status, triggers: [{trigger, table, status, stuck, stuckByReason, stuckReports: [{reportId, orgId, brandId, brandName, person: {name, email, phone}, status, reason, lastError, attempts, detectedAt}], byDay}]}`" }, 400: { description: "Invalid days" } },
+  responses: { 200: { description: "`{generatedAt, days, stuckAfterMinutes, status, triggers: [{trigger, table, status, stuck, stuckByReason, stuckReports: [{reportId, orgId, brandId, brandName, person: {name, email, phone}, status, reason, lastError, attempts, detectedAt}], byDay: [{day, sent, skipped, notSent, handedOff}], handOffs: [{reportId, brandId, person, detectedAt, to, answer}]}]}`" }, 400: { description: "Invalid days" } },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/reply-triggers/gmail/recheck-cold-email-skips",
+  summary: "OWNER DOOR: re-check legacy Gmail replies skipped as the email path's on the recipient alone",
+  description:
+    "EMAIL-REPLY-ORPHAN-1027. Each `skipped / cold_email_path` Gmail report with no email-path answer is decided again by the " +
+    "detection rules: the email path (instantly-service `POST /orgs/reply-ownership`) acts on it = `handed_off` with its answer; " +
+    "else own team / owning brand / automated / Jev, a positive burst delivered at once to campaign-service's trigger door; the " +
+    "brand answered since = `answered_since`. `dryRun` (default true) asks the email path and reads the thread only (no Jev, no " +
+    "write). A real run needs `reportIds` (the owner's pick: leads only).",
+  request: { body: { content: { "application/json": { schema: z.object({ reportIds: z.array(z.string().uuid()).min(1).max(200).optional(), dryRun: z.boolean().optional() }) } } } },
+  responses: { 200: { description: "`{dryRun, rows: [{reportId, address, firstMessageAt, outcome, status, reason, emailPath, error, delivery}]}`" }, 400: { description: "Invalid body, or a real run without reportIds" } },
 });
 
 registry.registerPath({
@@ -3951,7 +3968,7 @@ export const ReplyTriggerReportSchema = z.object({
   judgment: z.unknown(),
   status: z.enum(["pending", "reported", "skipped", "failed"]),
   reason: z.string().nullable().describe(
-    "`own_team` | `automated_reply` | `not_positive` (Jev: a person wrote, no positive answer) | `before_watch` | `no_email_or_phone` (neither an email nor an E.164 phone; older rows `no_email`) | `cold_email_path` (gmail: addressed to one of our sending mailboxes, the email path reports it) | `person_not_built` | `offer_unknown` | `campaign_refused` | `campaign_unreachable`",
+    "`own_team` | `automated_reply` | `not_positive` (Jev: a person wrote, no positive answer) | `before_watch` | `no_email_or_phone` (neither an email nor an E.164 phone; older rows `no_email`) | `cold_email_path` (gmail: status `handed_off` = the email path (instantly-service) said it acts on it, its answer stored; status `skipped` = a legacy skip decided on the recipient alone, red on Monitoring until re-checked) | `answered_since` / `other_brand` (re-check only) | `person_not_built` | `offer_unknown` | `campaign_refused` | `campaign_unreachable`",
   ),
   lastError: z.string().nullable(),
   attempts: z.number().int(),
@@ -3972,7 +3989,7 @@ registry.registerPath({
     "the person by email, for an offer (`offerBasis`). Who is answered is the answering pipe's strategy there. An " +
     "auto-reply is not an answer (`automated_reply`, Jev), and only a POSITIVE answer is reported (interested, asks for info, asks for a meeting; else `not_positive`, Jev); the brand's own team is never reported (`own_team`). Gmail " +
     "(`source: gmail`): every mail a person sends to the org's connected mailbox, same rules, under the brand(s) whose " +
-    "people know the person; a reply to our cold email (addressed to a sending mailbox) is the email path's (`cold_email_path`). Newest first.",
+    "people know the person; a reply the email path says it acts on is its (`handed_off / cold_email_path`). Newest first.",
   request: { query: z.object({ brandId: z.string().uuid(), limit: z.coerce.number().int().min(1).max(200).optional() }) },
   responses: {
     200: { description: "Reports", content: { "application/json": { schema: z.object({ reports: z.array(ReplyTriggerReportSchema) }) } } },
