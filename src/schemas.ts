@@ -2454,7 +2454,9 @@ const TimelineItemSchema = z
           "posthog `signup` (dateBasis `person_created_at`), stripe `became_customer` (dateBasis `customer_created_at`). " +
           "Source `api` (channel `api` or `mcp`) carries messages only: each call the person made to our API (or through our MCP server) with their own key is two messages, " +
           "what they asked (inbound, a plain-words summary) and what we answered (outbound, from \"distribute.you API\"), both with `ref.callId` (whole call: GET /orgs/people/api-calls/{callId}), `ref.sessionId` (calls on one channel less than 30 min apart), method, path, status, mcpTool; staff Unibox scope alone. " +
-          "Source `copilot` (channel `chat`) carries messages only: the person's chat with the distribute.you Copilot, served on the staff Unibox scope alone, inbound = the user wrote, outbound = the Copilot answered (`from` \"AI Copilot\").",
+          "Source `copilot` (channel `chat`) carries messages only: the person's chat with the distribute.you Copilot, served on the staff Unibox scope alone, inbound = the user wrote, outbound = the Copilot answered (`from` \"AI Copilot\"). " +
+          "Source `onboarding` (channel `account`, step `onboarding_record`, dateBasis `latest_setup_change`, ONBOARDING-FICHE-1027): WHAT THE PERSON SET UP with us, one event per account (org x brand) they belong to, read on the spot from the services that own each choice (brand-service: brand website, offer name + description + value proposition fields with provenance, client value, booking link; lead-service: qualification signals on / off; human-service: audiences with description and who exactly; campaign-service: funnel campaigns, status, created; billing-service: each campaign's budget / volume cap). " +
+          "`text` = the whole record in plain lines, NOTHING cut (read it verbatim, never the PostHog `Get started` lines); `detail` = the same record structured ({orgId, orgName, userId, email, brand {id, name, website}, offers [{offerId, name, description, status, fields [{key, value, provenance}], clientValueUsd, bookingUrl, destinationUrl, signals [{id, title, question, enabled}], audiences [{id, name, description, targetText, status}], campaigns [{id, name, status, stopReason, createdAt, maxBudget {amountCents, period}, maxVolume {count, period, unit}, funnelType}]}], latestChangeAt}); `ref` accountOrgId / accountBrandId / accountUserId. Staff Unibox scope alone; an owner unreadable = source `failed`, never a partial record.",
       }),
     textClean: z
       .object({
@@ -2483,6 +2485,14 @@ const TimelineItemSchema = z
       .openapi({
         description:
           "Cold-email (instantly) OUTBOUND messages only: which email_sent outreach fact this email is, verbatim from instantly-service. Null on inbound mail, on a send instantly-service cannot tie to a fact (a manual reply), and on every other source.",
+      }),
+    sentBy: z
+      .enum(["person", "automation"])
+      .nullable()
+      .optional()
+      .openapi({
+        description:
+          "WHO sent an outbound message (ONBOARDING-FICHE-1027), on every served item: automation = one of our machines (a transactional email such as the welcome email, a cold-email sequence step, an automated WhatsApp send, the Copilot, the API); person = a human of the brand typed it (a WhatsApp / Telegram message from the brand's account that is none of our sends); null = inbound, an event, or the source does not say (a Gmail send). A Gmail copy of a transactional email we sent is not served (the transactional item is that email).",
       }),
   })
   .openapi("PersonTimelineItem");

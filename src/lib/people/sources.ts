@@ -822,6 +822,25 @@ export async function readTransactional(orgId: string, brandId: string): Promise
   return { ...base, status: "ok", presences: [], sourceCount: n, error: null };
 }
 
+// ─── what a client set up with us (staff Unibox only) ──────────────────────
+
+/**
+ * ONBOARDING-FICHE-1027: the account a client opened with us (offer, audience, signals, campaign, budget), read on
+ * the spot from the services that own each choice (lib/onboarding/record.ts): thread items only, never a presence.
+ * Only the staff Unibox scope reads it; every other (org, brand) is `not_connected`.
+ */
+export async function readOnboarding(orgId: string, brandId: string): Promise<SourceRead> {
+  const base = {
+    source: "onboarding" as const,
+    scope: "brand" as const,
+    sourceCountBasis: "read on each thread open from the owners of a client's setup (staff Unibox only; thread items, no presences)",
+  };
+  if (!isCopilotDestination(orgId, brandId)) {
+    return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
+  }
+  return { ...base, status: "ok", presences: [], sourceCount: null, error: null };
+}
+
 // ─── crm-service silver: contacts the client added one by one ──────────────
 
 /**

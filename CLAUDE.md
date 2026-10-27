@@ -2025,6 +2025,24 @@ created / stopped, reply forwards...) shows on the recipient's thread as an outb
   computed at write) + latest-message preview (`sentBy: automation`). NO presence (a recipient only we wrote to is nobody
   new), NO fact, not in the search index. No template is special. `POST /internal/transactional-emails/watch` = a pass now.
 
+## What a client set up with us, on their staff Unibox thread (`src/lib/onboarding/record.ts`, ONBOARDING-FICHE-1027)
+
+Owner 2026-10-27 (Chaim Tesser): « dans l'Unibox tu n'as pas les infos complètes qu'il a choisi pour l'onboarding ». The
+walk's PostHog lines are analytics (cut by the dashboard, repeated per redo, silent on what was kept): a writer re-asked what
+he had typed 40 min earlier. People source `onboarding` (thread items only, no presence, staff Unibox scope only): one event
+per account (org x brand) the person belongs to (client-service `/internal/users?email=` then `/internal/users/{id}/orgs`,
+staff addresses and the staff org skipped), step `onboarding_record`, channel `account`, `text` = the WHOLE record in plain
+lines (nothing cut), `event.detail` = the same structured, `at` = latest dated change. READ from the owners for the client's
+org (one support run `onboarding.record` per read, client org + user): brand-service (brands, offers, user fields with
+provenance, economics), lead-service (qualification criteria on / off), human-service (audiences), campaign-service
+(`/sales-funnel-campaigns`), billing-service (each funnel's caps). Never parsed out of PostHog, never copied into a table.
+Shared 60 s per person (`ONBOARDING_RECORD_FRESH_MS`); an owner unreadable = source `failed`, never a partial record.
+**`sentBy` on every timeline item** (`sentByOf`, same words as the latest-message read): transactional / Copilot / API /
+Instantly with an outreach fact / our WhatsApp sends = `automation`; a WhatsApp typed on the account = `person`; else null.
+**A Gmail copy of a transactional email** (same recipient, subject, within 10 min: `withoutTransactionalCopies`) is not
+served: growth@'s mailbox holds one of each, Gmail threads same-subject sends to DIFFERENT recipients, so Chaim's thread
+showed his welcome twice (labelled OWNER by writers) and Joshua's welcome too.
+
 ## Owner Telegram ping for EVERY message with our assistant (`src/lib/assistant-pings.ts`)
 
 SOPHIE-TG-PING-1018 (owner 2026-10-18: « Quand il y a une communication entre Sophie et un user, dans un sens ou
