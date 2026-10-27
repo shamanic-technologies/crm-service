@@ -20,10 +20,16 @@ const USER = "user-outcomes-1";
 const API_KEY = process.env.CRM_SERVICE_API_KEY || "test-crm-key";
 process.env.LEAD_SERVICE_URL = "http://lead.test";
 process.env.LEAD_SERVICE_API_KEY = "test-lead-key";
+process.env.BRAND_SERVICE_URL = "http://brand.test";
+process.env.BRAND_SERVICE_API_KEY = "test-brand-key";
+const OFFER_A = "acacacac-1111-4111-8111-0000000000a1";
+const OFFER_B = "acacacac-1111-4111-8111-0000000000b2";
 
 const lead = (email: string, firstName: string | null = null) => ({ email, lead: firstName ? { firstName, lastName: null } : null });
 // lead-service's bucket of each step: the people OUR campaigns brought there.
 let BUCKETS: Record<string, ReturnType<typeof lead>[]> = {};
+// The same buckets scoped to one offer ("<offerId>|<step>"): who our campaigns brought there.
+let OFFER_BUCKETS: Record<string, ReturnType<typeof lead>[]> = {};
 let LEAD_DOWN = false;
 let LEAD_CALLS = 0;
 
@@ -36,15 +42,21 @@ function stubRuns() {
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
       return json({ id: "run-" + Math.random().toString(16).slice(2) });
     }
+    if (url.host === "brand.test" && url.pathname === `/internal/brands/${BRAND}/offers`) {
+      return json({ offers: [{ offerId: OFFER_A, name: "A", status: "active" }, { offerId: OFFER_B, name: "B", status: "archived" }] });
+    }
     if (url.host === "lead.test" && url.pathname === "/orgs/leads") {
-      LEAD_CALLS += 1;
       if (LEAD_DOWN) return json({ error: "boom" }, 500);
       expect(url.searchParams.get("brandId")).toBe(BRAND);
       expect(url.searchParams.get("view")).toBe("compact");
-      const all = BUCKETS[url.searchParams.get("bucket")!] ?? [];
-      const limit = Number(url.searchParams.get("limit"));
-      const offset = Number(url.searchParams.get("offset"));
-      return json({ leads: all.slice(offset, offset + limit) });
+      const offer = url.searchParams.get("offerId");
+      if (!offer) LEAD_CALLS += 1;
+      const all = (offer ? OFFER_BUCKETS[`${offer}|${url.searchParams.get("bucket")}`] : BUCKETS[url.searchParams.get("bucket")!]) ?? [];
+      // lead-service pages by cursor; a page can come back SHORT with more behind it.
+      const limit = Math.min(Number(url.searchParams.get("limit")), 1);
+      const at = Number(url.searchParams.get("cursor") ?? 0);
+      const next = at + limit < all.length ? String(at + limit) : null;
+      return json({ leads: all.slice(at, at + limit), nextCursor: next });
     }
     throw new Error(`unexpected fetch ${url}`);
   });
@@ -152,6 +164,7 @@ describe.skipIf(!RUN)("people outcomes (all sources)", () => {
   };
   beforeEach(async () => {
     BUCKETS = {};
+    OFFER_BUCKETS = {};
     LEAD_DOWN = false;
     stubRuns();
     clearOutcomesCache();
@@ -204,14 +217,16 @@ describe.skipIf(!RUN)("people outcomes (all sources)", () => {
       "meeting_attended",
       "sale",
     ]);
-    expect(by.website_visit).toEqual({ step: "website_visit", people: 2, sources: [{ source: "posthog", people: 2 }], contactedByUs: 1 });
+    // Ann carries an Instantly presence AND lead-service holds her, but lead-service credits no step
+    // to our campaigns (no bucket): she is NOT contacted by us (OUTCOMES-CONTACTED-1027).
+    expect(by.website_visit).toMatchObject({ step: "website_visit", people: 2, sources: [{ source: "posthog", people: 2 }], contactedByUs: 0 });
     // Ann once though Clerk and PostHog both state it; Bob's withdrawn signup is gone.
     expect(by.signup.people).toBe(1);
     expect(by.signup.sources).toEqual([
       { source: "clerk", people: 1 },
       { source: "posthog", people: 1 },
     ]);
-    expect(by.signup.contactedByUs).toBe(1);
+    expect(by.signup.contactedByUs).toBe(0);
     expect(by.form_submission.people).toBe(1);
     expect(by.meeting_booked.people).toBe(2);
     expect(by.meeting_attended.people).toBe(1);
@@ -237,7 +252,9 @@ describe.skipIf(!RUN)("people outcomes (all sources)", () => {
         { source: "posthog", reachedAt: "2026-09-01T00:00:00.000Z" },
         { source: "clerk", reachedAt: "2026-09-02T00:00:00.000Z" },
       ],
-      contactedByUs: true,
+      // Held by lead-service and written to by Instantly, but not in its signup bucket.
+      contactedByUs: false,
+      stateSource: "lead_service",
     });
 
     const seen: string[] = [];
@@ -263,10 +280,12 @@ describe.skipIf(!RUN)("people outcomes (all sources)", () => {
       // Dan's Stripe payment was refunded, but lead-service holds a sale for him.
       sale: [lead("dan@x.com")],
     };
+    // Our campaigns brought Ann and Gus to a visit (offer A) and Dan to a sale (archived offer B).
+    OFFER_BUCKETS = { [`${OFFER_A}|website_visit`]: [lead("ann@x.com"), lead("gus@x.com")], [`${OFFER_B}|sale`]: [lead("dan@x.com")] };
     const r = await asOrg(request(app()).get("/orgs/people/outcomes").query({ brandId: BRAND }));
     expect(r.status).toBe(200);
     const by = Object.fromEntries(r.body.steps.map((s: { step: string }) => [s.step, s]));
-    expect(by.website_visit).toEqual({
+    expect(by.website_visit).toMatchObject({
       step: "website_visit",
       people: 3,
       sources: [
@@ -285,6 +304,59 @@ describe.skipIf(!RUN)("people outcomes (all sources)", () => {
     expect(gus).toMatchObject({ personId: null, displayName: "Gus", emails: ["gus@x.com"], reachedAt: null, contactedByUs: true, sources: [{ source: "campaigns", reachedAt: null }] });
     // Undated (campaigns-only) last.
     expect(visits.body.people.map((p: { personKey: string }) => p.personKey)).toEqual(["email:bob@x.com", "email:ann@x.com", "email:gus@x.com"]);
+  });
+
+  it("OUTCOMES-CONTACTED-1027: contacted by us = an offer's bucket of the step, never a person lead-service merely holds", async () => {
+    await seed();
+    // lead-service's BRAND-WIDE buckets hold Ann for signup and visit (its ledger matched her), but
+    // only offer A's signup bucket holds her: contacted for signup, not for her visits.
+    BUCKETS = { signup: [lead("ann@x.com")], website_visit: [lead("ann@x.com")] };
+    OFFER_BUCKETS = { [`${OFFER_A}|signup`]: [lead("ANN@x.com")] };
+    const r = await asOrg(request(app()).get("/orgs/people/outcomes").query({ brandId: BRAND }));
+    const by = Object.fromEntries(r.body.steps.map((s: { step: string }) => [s.step, s]));
+    expect(by.signup.contactedByUs).toBe(1);
+    expect(by.website_visit.contactedByUs).toBe(0);
+    const visits = await asOrg(request(app()).get("/orgs/people/outcomes/people").query({ brandId: BRAND, step: "website_visit" }));
+    expect(visits.body.people.find((p: { personKey: string }) => p.personKey === "email:ann@x.com").contactedByUs).toBe(false);
+    const signups = await asOrg(request(app()).get("/orgs/people/outcomes/people").query({ brandId: BRAND, step: "signup" }));
+    expect(signups.body.people[0]).toMatchObject({ personKey: "email:ann@x.com", contactedByUs: true });
+  });
+
+  it("serves a monthly series per step that reconciles with the step's people (undated apart)", async () => {
+    await seed();
+    BUCKETS = { website_visit: [lead("ann@x.com"), lead("gus@x.com", "Gus")] };
+    OFFER_BUCKETS = { [`${OFFER_A}|website_visit`]: [lead("ann@x.com"), lead("gus@x.com")] };
+    const r = await asOrg(request(app()).get("/orgs/people/outcomes").query({ brandId: BRAND }));
+    expect(r.status).toBe(200);
+    const now = new Date();
+    const current = `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
+    for (const s of r.body.steps) {
+      // One axis for every step: the brand's first dated reach (Bob's visit, 2026-08) to now.
+      expect(s.months[0].month).toBe("2026-08");
+      expect(s.months[s.months.length - 1].month).toBe(current);
+      const sum = s.months.reduce((n: number, m: { people: number }) => n + m.people, 0);
+      expect(sum + s.undated.people).toBe(s.people);
+      const c = s.months.reduce((n: number, m: { contactedByUs: number }) => n + m.contactedByUs, 0);
+      expect(c + s.undated.contactedByUs).toBe(s.contactedByUs);
+      const last = s.months[s.months.length - 1];
+      expect(last.cumulativePeople + s.undated.people).toBe(s.people);
+      expect(last.cumulativeContactedByUs + s.undated.contactedByUs).toBe(s.contactedByUs);
+    }
+    const by = Object.fromEntries(r.body.steps.map((s: { step: string }) => [s.step, s]));
+    // Bob + Ann visited in August (Ann's earliest of two visits); Gus is campaigns-only, undated.
+    expect(by.website_visit.months.slice(0, 2)).toEqual([
+      { month: "2026-08", people: 2, contactedByUs: 1, cumulativePeople: 2, cumulativeContactedByUs: 1 },
+      { month: "2026-09", people: 0, contactedByUs: 0, cumulativePeople: 2, cumulativeContactedByUs: 1 },
+    ]);
+    expect(by.website_visit.undated).toEqual({ people: 1, contactedByUs: 1 });
+    // Ann's signup: PostHog 09-01 is her earliest statement, one person once.
+    expect(by.signup.months.slice(0, 2)).toEqual([
+      { month: "2026-08", people: 0, contactedByUs: 0, cumulativePeople: 0, cumulativeContactedByUs: 0 },
+      { month: "2026-09", people: 1, contactedByUs: 0, cumulativePeople: 1, cumulativeContactedByUs: 0 },
+    ]);
+    // Cat's undated won deal does not undate her: her dated payment places her in September.
+    expect(by.sale.months[1]).toMatchObject({ month: "2026-09", people: 2, contactedByUs: 0, cumulativePeople: 2 });
+    expect(by.sale.undated).toEqual({ people: 0, contactedByUs: 0 });
   });
 
   it("fails loud when lead-service cannot be read: never a count without our campaigns", async () => {

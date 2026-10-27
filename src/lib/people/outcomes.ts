@@ -31,6 +31,12 @@
  * (owner 2026-10-11: « tous mes outcomes »). lead-service states no date for a
  * bucket, so a campaigns-only reach is undated.
  *
+ * "Contacted by us" (OUTCOMES-CONTACTED-1027) is NOT that bucket: lead-service's brand-wide
+ * outcome buckets hold every lead its ledger matched, contacted or not (distribute.you: all 101
+ * Clerk signups, none caused by outreach). It is the same bucket scoped to each OFFER of the brand
+ * (a campaign of ours served them and is credited the step), what the dashboard's tab counts: see
+ * `CONTACTED_FOR_STEP`.
+ *
  * lead-service unreachable fails the read (502): a count without our campaigns'
  * people would be a lower figure posing as all sources.
  *
@@ -40,6 +46,7 @@ import { sql, type SQL } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { normalizeEmail } from "./identity.js";
 import { mapLimit, siblingGetOk, type SiblingIdentity } from "./siblings.js";
+import { readBrandOffers } from "../form-trigger/offer.js";
 import { SwrCache } from "./swr.js";
 import { createHash } from "node:crypto";
 
@@ -85,6 +92,71 @@ interface CompactLeadRow {
 }
 
 /**
+ * One address lead-service holds in a step's bucket SCOPED TO ONE OF THE BRAND'S OFFERS: a lead
+ * served by a campaign selling that offer, whose reaching the step lead-service credits to that
+ * campaign. This is what the dashboard's "Contacted by us" tab counts (it reads the offer scope).
+ */
+export interface ContactedReach {
+  step: OutcomeStep;
+  email: string;
+}
+
+/** What the Outcomes read needs from lead-service, per brand. */
+export interface OutcomeInputs {
+  /** Brand-wide buckets: who reached each step through lead-service (adds to Everyone). */
+  reach: CampaignReach[];
+  /** Offer-scoped buckets, every offer of the brand: who our campaigns brought there (the contacted flag). */
+  contacted: ContactedReach[];
+}
+
+/**
+ * Every row of one lead-service bucket. Pages by lead-service's own `nextCursor` until it is null:
+ * a bucket is filtered after the rows are read, so a page can come back SHORT with more behind it,
+ * and the old "stop on a short page" walk dropped 7,211 of Doc Dinners' 19,209 contacted leads
+ * (2026-10-27).
+ */
+async function walkBucket(identity: SiblingIdentity, bucket: string, offerId: string | null, onRow: (row: CompactLeadRow) => void): Promise<void> {
+  const base =
+    `/orgs/leads?brandId=${encodeURIComponent(identity.brandId)}` +
+    (offerId ? `&offerId=${encodeURIComponent(offerId)}` : "") +
+    `&bucket=${bucket}&view=compact&limit=${LEAD_PAGE}`;
+  for (let cursor: string | null = null; ; ) {
+    const page: { leads: CompactLeadRow[]; nextCursor?: string | null } = await siblingGetOk<{ leads: CompactLeadRow[]; nextCursor?: string | null }>(
+      "lead",
+      cursor ? `${base}&cursor=${encodeURIComponent(cursor)}` : base,
+      identity,
+    );
+    for (const row of page.leads ?? []) onRow(row);
+    cursor = page.nextCursor ?? null;
+    if (!cursor) break;
+  }
+}
+
+/**
+ * lead-service's step buckets under EACH offer of the brand (brand-service, every status: an
+ * archived offer's campaigns contacted people too), one row per (step, address).
+ * OUTCOMES-CONTACTED-1027: the brand-wide bucket is NOT "contacted": lead-service's ledger matches
+ * leads our campaigns never brought there (distribute.you: all 101 Clerk signups sit in its
+ * brand-wide signup bucket, none caused by outreach, while every offer's signup bucket is 0).
+ */
+export async function readContactedReach(identity: SiblingIdentity, steps: readonly OutcomeStep[]): Promise<ContactedReach[]> {
+  const offers = await readBrandOffers(identity);
+  const pairs = offers.flatMap((o) => steps.map((step) => ({ offerId: o.offerId, step })));
+  const seen = new Set<string>();
+  const out: ContactedReach[] = [];
+  await mapLimit(pairs, 3, async ({ offerId, step }) => {
+    await walkBucket(identity, step, offerId, (row) => {
+      const email = normalizeEmail(row.email);
+      if (!email || seen.has(`${step}|${email}`)) return;
+      seen.add(`${step}|${email}`);
+      out.push({ step, email });
+    });
+  });
+  // A stable order: the cache digests the inputs.
+  return out.sort((a, b) => (a.step + a.email < b.step + b.email ? -1 : a.step + a.email > b.step + b.email ? 1 : 0));
+}
+
+/**
  * lead-service's bucket of each step for the brand, every page, one row per
  * address (a lead in two campaigns is one address). Same population as its
  * `/orgs/leads/bucket-counts` (default statuses).
@@ -92,21 +164,12 @@ interface CompactLeadRow {
 export async function readCampaignReach(identity: SiblingIdentity, steps: readonly OutcomeStep[]): Promise<CampaignReach[]> {
   const perStep = await mapLimit([...steps], 3, async (step) => {
     const byEmail = new Map<string, CampaignReach>();
-    for (let offset = 0; ; offset += LEAD_PAGE) {
-      const page = await siblingGetOk<{ leads: CompactLeadRow[] }>(
-        "lead",
-        `/orgs/leads?brandId=${encodeURIComponent(identity.brandId)}&bucket=${step}&view=compact&limit=${LEAD_PAGE}&offset=${offset}`,
-        identity,
-      );
-      const leads = page.leads ?? [];
-      for (const row of leads) {
-        const email = normalizeEmail(row.email);
-        if (!email || byEmail.has(email)) continue;
-        const name = [row.lead?.firstName, row.lead?.lastName].filter((x) => x && x.trim()).join(" ") || null;
-        byEmail.set(email, { step, email, name });
-      }
-      if (leads.length < LEAD_PAGE) break;
-    }
+    await walkBucket(identity, step, null, (row) => {
+      const email = normalizeEmail(row.email);
+      if (!email || byEmail.has(email)) return;
+      const name = [row.lead?.firstName, row.lead?.lastName].filter((x) => x && x.trim()).join(" ") || null;
+      byEmail.set(email, { step, email, name });
+    });
     return [...byEmail.values()];
   });
   return perStep.flat();
@@ -185,10 +248,42 @@ function evidence(orgId: string, brandId: string, step: OutcomeStep | null, camp
 }
 
 /**
- * "We contacted them": our cold email wrote to them (an Instantly presence = at
- * least one real send) or lead-service holds them as one of our leads.
+ * The LEG-REACH exclusion (leg-reach.ts), NOT the Outcomes "contacted by us": a person our cold
+ * email wrote to (an Instantly presence) or lead-service holds as a lead. lead-service holds a row
+ * for every signup of a brand whose auth provider is connected, so this is far wider than "we
+ * contacted them" (OUTCOMES-CONTACTED-1027): the Outcomes read never uses it.
  */
 export const CONTACTED = sql`(p.sources @> '["instantly"]'::jsonb OR p.state_source = 'lead_service')`;
+
+/**
+ * Per (step, person), the people our campaigns brought to the step (`ContactedReach`): each address
+ * matched onto the person holding it by identity key (a hash join over the brand's unnested email
+ * keys: a containment test per address against every person is quadratic), else a person of its own
+ * (`email:<addr>`, the evidence's own fallback key).
+ */
+function contactedPeople(orgId: string, brandId: string, contacted: ContactedReach[]): SQL {
+  return sql`
+    SELECT DISTINCT x.step, COALESCE(k.person_key, 'email:' || x.email) AS person_key
+    FROM jsonb_to_recordset(${JSON.stringify(contacted)}::jsonb) AS x(step text, email text)
+    LEFT JOIN (
+      SELECT pp.person_key, key FROM people pp, jsonb_array_elements_text(pp.identity_keys) AS key
+      WHERE pp.org_id = ${orgId} AND pp.brand_id = ${brandId} AND key LIKE 'email:%'
+    ) k ON k.key = 'email:' || x.email
+  `;
+}
+
+/**
+ * Outcomes' "contacted by us" for ONE step (OUTCOMES-CONTACTED-1027, owner 2026-10-27: « tu dis
+ * "contacted by us" dans la colonne alors qu'ils ne le sont pas »), on a reach row LEFT JOINed to
+ * `contactedPeople` `c` on (step, person): lead-service holds the person in that step's bucket under
+ * one of the brand's offers, i.e. a campaign of ours served them and lead-service credits the step
+ * to it. Per step it is therefore the dashboard's "Contacted by us" tab, one person once. NOT contacted:
+ *  - a person lead-service merely holds (`state_source = 'lead_service'`): it holds every signup;
+ *  - an Instantly presence alone: distribute.you's 32 signups with one were written to by follow-up
+ *    campaigns AFTER signing up; no offer's signup bucket holds them;
+ *  - lead-service's brand-wide bucket of the step (its ledger matches non-contacted leads).
+ */
+const CONTACTED_FOR_STEP = sql`(c.person_key IS NOT NULL)`;
 
 export interface OutcomeStepCount {
   step: OutcomeStep;
@@ -196,25 +291,97 @@ export interface OutcomeStepCount {
   people: number;
   /** Distinct people per source stating the step. Overlaps: the same person on two sources counts in both. */
   sources: { source: string; people: number }[];
-  /** Of `people`, those our campaigns contacted (the `campaigns` source included). */
+  /** Of `people`, those our campaigns brought to the step (`CONTACTED_FOR_STEP`). */
   contactedByUs: number;
+  /**
+   * Month by month (UTC, `YYYY-MM`), the people who reached the step that month, dated by their
+   * earliest dated statement of it, one person once, and of those the ones contacted by us. Every
+   * month from the brand's first dated reach (any step) up to the current month (or a later dated
+   * one), empty months included; [] when the brand holds no dated reach.
+   */
+  months: OutcomeMonth[];
+  /** Reaches no source dates (a campaigns-only reach: lead-service states no bucket date). sum(months) + undated = people. */
+  undated: { people: number; contactedByUs: number };
 }
 
-export async function readOutcomeCounts(orgId: string, brandId: string, campaigns: CampaignReach[]): Promise<OutcomeStepCount[]> {
-  const ev = evidence(orgId, brandId, null, campaigns);
+export interface OutcomeMonth {
+  month: string;
+  people: number;
+  contactedByUs: number;
+  /** Running totals since the first month, this month included: the cumulative line. */
+  cumulativePeople: number;
+  cumulativeContactedByUs: number;
+}
+
+/** `YYYY-MM` of a UTC month index (year * 12 + month). */
+const monthLabel = (i: number) => `${Math.floor(i / 12)}-${String((i % 12) + 1).padStart(2, "0")}`;
+const monthIndex = (label: string) => Number(label.slice(0, 4)) * 12 + Number(label.slice(5, 7)) - 1;
+
+/**
+ * PURE: every month from the first to the last (or `now`'s month when later) with its figures,
+ * empty months as zeros. `first`/`last` = the brand's whole span, so every step shares one axis.
+ */
+export function fillMonths(
+  rows: { month: string; people: number; contacted: number }[],
+  span: { first: string; last: string } | null,
+  now: Date,
+): OutcomeMonth[] {
+  if (!span) return [];
+  const from = monthIndex(span.first);
+  const to = Math.max(monthIndex(span.last), now.getUTCFullYear() * 12 + now.getUTCMonth());
+  const by = new Map(rows.map((r) => [r.month, r]));
+  const out: OutcomeMonth[] = [];
+  let people = 0;
+  let contacted = 0;
+  for (let i = from; i <= to; i++) {
+    const r = by.get(monthLabel(i));
+    people += r?.people ?? 0;
+    contacted += r?.contacted ?? 0;
+    out.push({
+      month: monthLabel(i),
+      people: r?.people ?? 0,
+      contactedByUs: r?.contacted ?? 0,
+      cumulativePeople: people,
+      cumulativeContactedByUs: contacted,
+    });
+  }
+  return out;
+}
+
+export async function readOutcomeCounts(orgId: string, brandId: string, inputs: OutcomeInputs): Promise<OutcomeStepCount[]> {
+  const ev = evidence(orgId, brandId, null, inputs.reach);
   // ONE statement, the evidence computed once (it used to run twice, in two parallel queries).
-  const all = await rows<{ kind: "total" | "source"; step: OutcomeStep; source: string | null; people: number; contacted: number }>(sql`
+  const all = await rows<{
+    kind: "total" | "source" | "month";
+    step: OutcomeStep;
+    source: string | null;
+    month: string | null;
+    people: number;
+    contacted: number;
+  }>(sql`
     WITH e AS MATERIALIZED (${ev}),
-    r AS (SELECT step, person_key, bool_or(source = ${CAMPAIGNS_SOURCE}) AS ours FROM e GROUP BY step, person_key)
-    SELECT 'total'::text AS kind, r.step, NULL::text AS source, count(*)::int AS people,
-           count(*) FILTER (WHERE r.ours OR ${CONTACTED})::int AS contacted
-    FROM r LEFT JOIN people p ON p.org_id = ${orgId} AND p.brand_id = ${brandId} AND p.person_key = r.person_key
-    GROUP BY r.step
+    c AS MATERIALIZED (${contactedPeople(orgId, brandId, inputs.contacted)}),
+    r0 AS (SELECT step, person_key, min(occurred_at) AS reach_at FROM e GROUP BY step, person_key),
+    r AS (
+      SELECT r.step, r.person_key, ${CONTACTED_FOR_STEP} AS ours, to_char(r.reach_at AT TIME ZONE 'UTC', 'YYYY-MM') AS month
+      FROM r0 r LEFT JOIN c ON c.step = r.step AND c.person_key = r.person_key
+    )
+    SELECT 'total'::text AS kind, step, NULL::text AS source, NULL::text AS month, count(*)::int AS people,
+           count(*) FILTER (WHERE ours)::int AS contacted
+    FROM r GROUP BY step
     UNION ALL
-    SELECT 'source'::text AS kind, step, source, count(DISTINCT person_key)::int AS people, 0 AS contacted
+    SELECT 'month'::text AS kind, step, NULL::text AS source, month, count(*)::int AS people,
+           count(*) FILTER (WHERE ours)::int AS contacted
+    FROM r GROUP BY step, month
+    UNION ALL
+    SELECT 'source'::text AS kind, step, source, NULL::text AS month, count(DISTINCT person_key)::int AS people, 0 AS contacted
     FROM e GROUP BY step, source
   `);
   const totals = all.filter((x) => x.kind === "total");
+  const months = all.filter((x) => x.kind === "month");
+  const dated = months.filter((x) => x.month !== null).map((x) => x.month as string).sort();
+  const span = dated.length > 0 ? { first: dated[0], last: dated[dated.length - 1] } : null;
+  const now = new Date();
   // Per step: most people first, then source name (source tokens are lower-case ASCII).
   const bySource = all
     .filter((x) => x.kind === "source")
@@ -222,11 +389,19 @@ export async function readOutcomeCounts(orgId: string, brandId: string, campaign
     .sort((a, b) => b.people - a.people || (a.source < b.source ? -1 : a.source > b.source ? 1 : 0));
   return OUTCOME_STEPS.map((step) => {
     const t = totals.find((x) => x.step === step);
+    const own = months.filter((x) => x.step === step);
+    const undated = own.find((x) => x.month === null);
     return {
       step,
       people: t?.people ?? 0,
       sources: bySource.filter((s) => s.step === step).map((s) => ({ source: s.source, people: s.people })),
       contactedByUs: t?.contacted ?? 0,
+      months: fillMonths(
+        own.filter((x) => x.month !== null).map((x) => ({ month: x.month as string, people: x.people, contacted: x.contacted })),
+        span,
+        now,
+      ),
+      undated: { people: undated?.people ?? 0, contactedByUs: undated?.contacted ?? 0 },
     };
   });
 }
@@ -258,9 +433,9 @@ export async function readOutcomePeople(
   step: OutcomeStep,
   limit: number,
   offset: number,
-  campaigns: CampaignReach[],
+  inputs: OutcomeInputs,
 ): Promise<{ total: number; people: OutcomePerson[] }> {
-  const ev = evidence(orgId, brandId, step, campaigns);
+  const ev = evidence(orgId, brandId, step, inputs.reach);
   const list = await rows<{
     person_key: string;
     person_id: string | null;
@@ -278,11 +453,12 @@ export async function readOutcomePeople(
     total: number;
   }>(sql`
     WITH e AS (${ev}),
+    c AS (${contactedPeople(orgId, brandId, inputs.contacted)}),
     s AS (
       SELECT person_key, source, min(occurred_at) AS reached_at FROM e GROUP BY person_key, source
     ),
     who AS (
-      SELECT person_key, min(reached_at) AS reached_at, bool_or(source = ${CAMPAIGNS_SOURCE}) AS ours,
+      SELECT person_key, min(reached_at) AS reached_at,
              jsonb_agg(jsonb_build_object('source', source, 'reachedAt', reached_at)
                        ORDER BY reached_at ASC NULLS LAST, source) AS sources
       FROM s GROUP BY person_key
@@ -293,9 +469,10 @@ export async function readOutcomePeople(
     )
     SELECT w.person_key, p.person_id, p.display_name, p.company, p.emails, p.phones,
            l.fact_emails, l.fact_name, w.reached_at, w.sources,
-           (w.ours OR COALESCE(${CONTACTED}, false)) AS contacted, p.state, p.state_source,
+           ${CONTACTED_FOR_STEP} AS contacted, p.state, p.state_source,
            count(*) OVER ()::int AS total
     FROM who w
+    LEFT JOIN c ON c.step = ${step} AND c.person_key = w.person_key
     JOIN latest l ON l.person_key = w.person_key
     LEFT JOIN people p ON p.org_id = ${orgId} AND p.brand_id = ${brandId} AND p.person_key = w.person_key
     ORDER BY w.reached_at ASC NULLS LAST, w.person_key
@@ -345,14 +522,16 @@ export const outcomesReuseMaxMs = () => Number(process.env.PEOPLE_OUTCOMES_REUSE
 /** lead-service could not be read: the route answers 502 campaign_outcomes_unavailable. */
 export class CampaignReachUnavailable extends Error {}
 
-const reachCache = new SwrCache<CampaignReach[]>("outcomes campaign reach", outcomesFreshMs, outcomesMaxStaleMs);
+const reachCache = new SwrCache<OutcomeInputs>("outcomes campaign reach", outcomesFreshMs, outcomesMaxStaleMs);
 
-/** Every step's campaigns reach of the brand (readCampaignReach over all steps), cached. */
-export function cachedCampaignReach(identity: SiblingIdentity): Promise<CampaignReach[]> {
+/** Every step's campaigns reach of the brand (readCampaignReach over all steps) + its contacted leads, cached. */
+export function cachedOutcomeInputs(identity: SiblingIdentity): Promise<OutcomeInputs> {
   return reachCache.get(`${identity.orgId}|${identity.brandId}`, () =>
-    readCampaignReach(identity, OUTCOME_STEPS).catch((err: Error) => {
-      throw new CampaignReachUnavailable(err.message);
-    }),
+    Promise.all([readCampaignReach(identity, OUTCOME_STEPS), readContactedReach(identity, OUTCOME_STEPS)])
+      .then(([reach, contacted]) => ({ reach, contacted }))
+      .catch((err: Error) => {
+        throw new CampaignReachUnavailable(err.message);
+      }),
   );
 }
 
@@ -367,7 +546,7 @@ export async function outcomesFingerprint(orgId: string, brandId: string): Promi
   return `${r?.built ?? ""}|${r?.seq ?? ""}|${r?.calendars ?? ""}`;
 }
 
-const reachDigest = (campaigns: CampaignReach[]) => createHash("sha256").update(JSON.stringify(campaigns)).digest("hex");
+const reachDigest = (inputs: OutcomeInputs) => createHash("sha256").update(JSON.stringify(inputs)).digest("hex");
 
 interface CountsEntry {
   steps: OutcomeStepCount[];
@@ -382,11 +561,11 @@ export async function cachedOutcomeCounts(identity: SiblingIdentity): Promise<Ou
   const { orgId, brandId } = identity;
   const entry = await countsCache.get(`${orgId}|${brandId}`, async (previous) => {
     const startedAt = Date.now();
-    const campaigns = await cachedCampaignReach(identity);
-    const fingerprint = `${await outcomesFingerprint(orgId, brandId)}|${reachDigest(campaigns)}`;
+    const inputs = await cachedOutcomeInputs(identity);
+    const fingerprint = `${await outcomesFingerprint(orgId, brandId)}|${reachDigest(inputs)}`;
     const prev = previous?.value;
     if (prev && prev.fingerprint === fingerprint && Date.now() - prev.computedAt < outcomesReuseMaxMs()) return prev;
-    return { steps: await readOutcomeCounts(orgId, brandId, campaigns), fingerprint, computedAt: startedAt };
+    return { steps: await readOutcomeCounts(orgId, brandId, inputs), fingerprint, computedAt: startedAt };
   });
   return entry.steps;
 }

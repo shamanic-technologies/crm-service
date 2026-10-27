@@ -1706,7 +1706,23 @@ this answers the same steps for everyone the brand's own tools state.
   net of refunds > 0 — lead-service's `paymentStands`).
 - Read off LIVE `people_facts`, person = `owner_person_key` (re-owned on merge /
   split), so Clerk + PostHog signups of one human count once and withdrawn facts
-  count for nothing. `contactedByUs` = Instantly presence or lead-service state.
+  count for nothing.
+- **`contactedByUs` = lead-service holds the person in that step's bucket under one of the brand's
+  OFFERS** (OUTCOMES-CONTACTED-1027, `CONTACTED_FOR_STEP`; offers from brand-service, every status):
+  a campaign of ours served them and is credited the step = the dashboard's "Contacted by us" tab
+  (offer-scoped). NOT the brand-wide bucket (lead-service's ledger matches non-contacted leads:
+  distribute.you's 101 Clerk signups), NOT `state_source = 'lead_service'` (it holds every signup),
+  NOT an Instantly presence (32 of those signups were written to AFTER signing up). Prod 2026-10-27:
+  distribute.you signup 101 → 0; Doc Dinners booked 148 → 7, attended 14 → 4, sale 5 → 3 (= tab).
+  `CONTACTED` (Instantly OR lead-service state) is leg-reach's exclusion only.
+- **Monthly series** on each step: `months [{month YYYY-MM, people, contactedByUs, cumulativePeople,
+  cumulativeContactedByUs}]` (UTC, person dated by their earliest dated statement, one axis per brand:
+  first dated reach of any step → current month, empty months zero) + `undated {people,
+  contactedByUs}` (campaigns-only reaches: lead-service states no bucket date). Last month's
+  cumulative + undated = the step's figures. Same route, the gateway passes it through.
+- lead-service bucket lists page by `nextCursor` (`walkBucket`), never "stop on a short page": a
+  bucket filters after reading, a short page has more behind it (Doc Dinners' contacted walk lost
+  7,211 of 19,209).
 - **PLUS source `campaigns`**: lead-service's bucket of the same token
   (`GET /orgs/leads?bucket=&view=compact`, every page), matched onto people by
   email (else its own `email:<addr>` person). All sources ⊇ "from our
