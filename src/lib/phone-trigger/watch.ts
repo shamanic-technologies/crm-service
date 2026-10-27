@@ -392,10 +392,22 @@ export interface OwnerDoorResult {
   refused: { reportId: string; error: string }[];
 }
 
-/** A report campaign-service took but answered `skipped / campaign_off`: nothing ran, its campaign was Off. */
+/**
+ * campaign-service skips that say nothing about the PERSON, final there: its campaign was Off, or lead-service did not
+ * answer in time (a replay of an old fact is never "young", so one timeout ends it). An owner replay may re-send them.
+ */
+export const REPLAYABLE_SKIPS: ReadonlySet<string> = new Set(["campaign_off", "lead_service_unavailable"]);
+
+/** A report campaign-service took but answered with a `REPLAYABLE_SKIPS` skip: nothing ran. */
 export function repliedOff(r: Pick<PhoneGivenReport, "status" | "campaignEventId" | "campaignOutcome">): boolean {
   const o = (r.campaignOutcome ?? {}) as Record<string, unknown>;
-  return r.status === PHONE_STATUS.REPORTED && !!r.campaignEventId && o.outcome === "skipped" && o.skipReason === "campaign_off";
+  return (
+    r.status === PHONE_STATUS.REPORTED &&
+    !!r.campaignEventId &&
+    o.outcome === "skipped" &&
+    typeof o.skipReason === "string" &&
+    REPLAYABLE_SKIPS.has(o.skipReason)
+  );
 }
 
 async function loadReports(
