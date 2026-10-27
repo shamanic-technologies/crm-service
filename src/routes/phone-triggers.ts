@@ -2,6 +2,9 @@
  * The phone watch, readable and steerable (lib/phone-trigger/watch.ts, WA-GIVEN-TRIGGER-1015):
  *  - GET  /orgs/phone-triggers?brandId=   every number the brand learned, and its `whatsapp_number_given` report;
  *  - POST /internal/phone-triggers/watch  run one pass now (the in-process loop runs every 60s).
+ *  - POST /internal/phone-triggers/reports/redeliver {reportIds}       OWNER DOOR: deliver these unsent reports now,
+ *    past the 24 h retry window (WA-GREETING-OFFER-1027);
+ *  - POST /internal/phone-triggers/reports/withhold {reportIds, note}  OWNER DOOR: never send these (skipped / withheld).
  */
 import { Router } from "express";
 import { and, desc, eq, sql } from "drizzle-orm";
@@ -9,7 +12,7 @@ import { z } from "zod";
 import { db } from "../db/index.js";
 import { phoneGivenReports } from "../db/schema.js";
 import { apiKeyAuth, requireOrg, AuthenticatedRequest } from "../middleware/auth.js";
-import { runPhoneWatchPass } from "../lib/phone-trigger/watch.js";
+import { redeliverReports, runPhoneWatchPass, withholdReports } from "../lib/phone-trigger/watch.js";
 
 const router = Router();
 const brandIdSchema = z.string().uuid();
@@ -60,6 +63,25 @@ router.post("/internal/phone-triggers/watch", apiKeyAuth, async (_req, res) => {
     console.error("[crm-service][phone-trigger] manual pass failed:", err);
     res.status(502).json({ type: "upstream", error: (err as Error).message });
   }
+});
+
+const reportIdsSchema = z.array(z.string().uuid()).min(1).max(200);
+
+router.post("/internal/phone-triggers/reports/redeliver", apiKeyAuth, async (req, res) => {
+  const body = z.object({ reportIds: reportIdsSchema }).strict().safeParse(req.body);
+  if (!body.success) return res.status(400).json({ type: "validation", error: body.error.message });
+  try {
+    res.json(await redeliverReports(body.data.reportIds));
+  } catch (err) {
+    console.error("[crm-service][phone-trigger] redeliver failed:", err);
+    res.status(502).json({ type: "upstream", error: (err as Error).message });
+  }
+});
+
+router.post("/internal/phone-triggers/reports/withhold", apiKeyAuth, async (req, res) => {
+  const body = z.object({ reportIds: reportIdsSchema, note: z.string().min(1).max(500) }).strict().safeParse(req.body);
+  if (!body.success) return res.status(400).json({ type: "validation", error: body.error.message });
+  res.json(await withholdReports(body.data.reportIds, body.data.note));
 });
 
 export default router;

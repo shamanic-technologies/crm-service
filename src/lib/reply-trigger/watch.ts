@@ -73,7 +73,7 @@ import {
 } from "../trigger-door.js";
 import { phoneFromMxid } from "../matrix/events.js";
 import { overlayVoiceTranscripts, transcribeVoiceNote, untranscribedVoiceNotesInBurst } from "../matrix/voice-notes.js";
-import { readBrandOffers } from "../form-trigger/offer.js";
+import { resolveOffer } from "../form-trigger/offer.js";
 import { ownTeamMatch, readOwnTeam, type OwnTeam } from "./own-team.js";
 import { readThreadForReply, type BurstMessage, type RoomSend } from "./thread.js";
 import { humanTypedTo } from "../matrix/human-takeover.js";
@@ -669,7 +669,8 @@ export async function settle(r: ReplyTriggerReport, now: number, set: Partial<Re
  * Which offer the burst is about (campaign-service runs a campaign per (brand, offer)), the first that answers:
  *  1. the offer of the last campaign that wrote in the thread;
  *  2. the offer Jev tagged this conversation about (people/relevance.ts, highest yes-probability);
- *  3. the brand's ONLY active offer.
+ *  3. the offer the brand STATED for every form (`form_offer_mappings` '*', WA-GREETING-OFFER-1027), then its ONLY
+ *     active offer (form-trigger/offer.ts `resolveOffer`, the one rule every trigger shares).
  * Nothing else: `offerId: null` = offer_unknown, never a guess.
  */
 export async function resolveReplyOffer(
@@ -693,9 +694,9 @@ export async function resolveReplyOffer(
     const tagged = pickTaggedOffer((v?.offerIds as string[] | undefined) ?? [], (v?.offerScores as Record<string, number> | null) ?? null);
     if (tagged) return { offerId: tagged, offerBasis: "conversation" };
   }
-  const active = (await readBrandOffers(identity)).filter((o) => o.status === "active");
-  if (active.length === 1) return { offerId: active[0].offerId, offerBasis: "only_offer" };
-  return { offerId: null, offerBasis: null };
+  const answer = await resolveOffer(identity, null);
+  if (answer.offerId === null) return { offerId: null, offerBasis: null };
+  return { offerId: answer.offerId, offerBasis: answer.basis };
 }
 
 /** PURE: of the offers Jev tagged a conversation about, the one it is most sure of. */

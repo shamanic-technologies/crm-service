@@ -1407,11 +1407,17 @@ kind `reported`, reportedBy crm-service, fromStep `lead_found`), within ~1 min. 
   no-churn upserts); every other connector is seen at its own sync. A new detection kicks the brand's people build.
 - **PostHog reads phones**: a person with a phone property is read like an identified one, its first `+` number lands in
   `contacts.phone_e164` (people key `phone:`); one known by the phone ALONE (`raw_attributes.phoneOnly`) emits no `signup`.
-- Delivery: one org run per (org, brand), offer = the brand's only active offer (else `offer_unknown`, retried), body
+- Delivery: one org run per (org, brand), offer = `form-trigger/offer.ts resolveOffer` like a form fill (the offer the brand
+  STATED for every form, `PUT /orgs/gohighlevel/form-offers` without formId, > its only active offer > `offer_unknown`,
+  retried; WA-GREETING-OFFER-1027: it read the only offer alone, 2 offers = 5 days of no greeting), body
   `person {phone, email?, name?}` + `item {kind: "phone_given", phone, firstName, lastName, source, sourceContactId, crmContactId, givenAt}`
   (first / last name as the source states them: PostHog `first_name`/`last_name`/`name`, Clerk's own; a greeting says "Hi Marie").
   Retries 1→60 min for 24h; 400/422 final. Read: `GET /orgs/phone-triggers?brandId=[&includeHistory=true]`; a pass now:
-  `POST /internal/phone-triggers/watch`.
+  `POST /internal/phone-triggers/watch`. Owner doors: `POST /internal/phone-triggers/reports/redeliver {reportIds}` (an
+  unsent report past the 24 h window, sent now, same key) and `.../withhold {reportIds, note}` (`skipped / withheld`, never sent).
+- **Stuck reports are red on Monitoring** (`lib/trigger-health.ts`, `GET /internal/ops/trigger-reports?days=`): every trigger
+  table (form, phone, reply, credit), a row not sent 15 min after detection = stuck, with reason + last error, + `byDay`
+  sent / skipped / not sent. Sends nothing.
 - **Team membership read** (`lib/people/team-membership.ts`, WA-GIVEN-PURE-FACT-1017): `POST /orgs/people/team-membership
   {brandId?, email?, phone?}` → `{staff, ownTeam, matches [{kind, via, description}]}` (staff = `isStaffEmail`; own team =
   linked WhatsApp numbers, sales rep phone, org members by phone or address). A fact for the PIPE's strategy (who to skip
@@ -1479,8 +1485,8 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   `before_watch` (does not block a later message of the same burst). The brand's own team (`own-team.ts`: linked
   WhatsApp numbers, brand-service sales rep phone) = `own_team`: identity, not targeting.
 - **Offer** (`resolveReplyOffer`, `offer_basis`): last campaign that wrote in the thread (`GET /campaigns/{id}`) >
-  the offer Jev tagged the conversation about (`conversation_verdicts`, highest score) > the brand's only active offer
-  > `offer_unknown` (retried, loud).
+  the offer Jev tagged the conversation about (`conversation_verdicts`, highest score) > the brand's stated
+  offer for every form > its only active offer (`resolveOffer`) > `offer_unknown` (retried, loud).
 - **Body**: `person {email?, name?, phone?}` (email = the address our sends used when held, else the person's first;
   none = named by E.164 phone + name, REPLY-PHONE-ONLY-1015: most WhatsApp writers hold no email, campaign-service
   v0.75.81 accepts it; neither = `no_email_or_phone`, older rows `no_email`. ONE rule for every trigger:

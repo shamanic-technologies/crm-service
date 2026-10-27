@@ -34,6 +34,8 @@ export const PHONE_REASONS = {
   /** A number nobody can be reached on (impossible under its country's plan): never offered. */
   INVALID_NUMBER: "invalid_number",
   OFFER_UNKNOWN: "offer_unknown",
+  /** The owner said never send this one (an owner door, WA-GREETING-OFFER-1027): final. */
+  WITHHELD: "withheld",
   CAMPAIGN_REFUSED: "campaign_refused",
   CAMPAIGN_UNREACHABLE: "campaign_unreachable",
 } as const;
