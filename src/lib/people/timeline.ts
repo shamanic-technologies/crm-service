@@ -87,6 +87,7 @@ import { readTxEmailThread, TX_EMAIL_CHANNEL, TX_EMAIL_SENDER_NAME } from "../tr
 import { deferApiAnswer } from "./item-fill.js";
 import { ACCOUNT_CHANNEL, creditDateBasis, creditEventText } from "../credit-events/rules.js";
 import { readVoiceTranscripts, voiceNoteText } from "../matrix/voice-notes.js";
+import { cachedOnboardingRecords, ONBOARDING_CHANNEL, ONBOARDING_STEP, recordText } from "../onboarding/record.js";
 
 export const TIMELINE_SOURCE_STATUSES = ["ok", "empty", "not_connected", "failed"] as const;
 export type TimelineSourceStatus = (typeof TIMELINE_SOURCE_STATUSES)[number];
@@ -135,6 +136,14 @@ export interface TimelineItem {
    * carry their own (page, pageviews; amount, currency, status).
    */
   event: { step: string; dateBasis: string; detail: FunnelEvent["detail"] | Record<string, unknown> } | null;
+  /**
+   * WHO sent an outbound message (ONBOARDING-FICHE-1027), set on every item the timeline serves, the same words as the
+   * latest-message read: `automation` = one of our machines (a transactional email, a cold-email sequence step, an
+   * automated WhatsApp send, the Copilot, the API); `person` = a human of the brand typed it (a WhatsApp / Telegram
+   * message from the brand's account that is none of our sends); null = inbound, an event, or the source does not say
+   * (a Gmail send, a cold email tied to no sequence step). A writer never reads an `automation` line as a person's words.
+   */
+  sentBy?: "person" | "automation" | null;
 }
 
 /** google-service's `bodyCleanStatus`, verbatim. */
@@ -599,6 +608,41 @@ export async function billingItems(person: Pick<Person, "orgId" | "brandId" | "e
   return { status: items.length ? "ok" : "empty", items, error: null, asked: emails };
 }
 
+// ─── what the client set up with us (ONBOARDING-FICHE-1027) ────────────────
+
+/**
+ * The account(s) the person opened with us, one event per (org, brand): the whole record in `text` (plain lines,
+ * nothing cut) and structured in `event.detail`, read from the owners for the person's OWN org
+ * (lib/onboarding/record.ts). Placed at the latest dated change of the setup. Staff Unibox scope only.
+ */
+export async function onboardingItems(
+  person: Pick<Person, "orgId" | "brandId" | "emails">,
+  identity: SiblingIdentity,
+): Promise<SourceResult> {
+  if (!isCopilotDestination(person.orgId, person.brandId)) return notConnected();
+  const emails = person.emails as string[];
+  if (emails.length === 0) return { status: "empty", items: [], error: null, asked: emails };
+  const records = await cachedOnboardingRecords(emails, identity);
+  const items = records.map(
+    (r): TimelineItem => ({
+      at: r.latestChangeAt,
+      source: "onboarding",
+      channel: ONBOARDING_CHANNEL,
+      kind: "event",
+      direction: null,
+      subject: `What they set up: ${r.brand.name ?? r.brand.website ?? "their brand"}`,
+      text: recordText(r),
+      from: null,
+      to: [],
+      ref: { accountOrgId: r.orgId, accountBrandId: r.brand.id, accountUserId: r.userId },
+      textClean: null,
+      outreachFact: null,
+      event: { step: ONBOARDING_STEP, dateBasis: "latest_setup_change", detail: r as unknown as Record<string, unknown> },
+    }),
+  );
+  return { status: items.length ? "ok" : "empty", items, error: null, asked: emails };
+}
+
 // ─── api / mcp calls ────────────────────────────────────────────────────────
 
 /** Brand names seen recently (brand-service), so a thread names "AscendQE", not an id. */
@@ -881,6 +925,85 @@ const toFailed = (err: unknown, asked: string[] = []): SourceResult => ({
   asked,
 });
 
+// ─── who sent it (ONBOARDING-FICHE-1027) ─────────────────────────────────────
+
+/** Which outbound Matrix items are our automated WhatsApp sends (by event id, else same room + same text). */
+async function automatedMatrixSends(items: TimelineItem[]): Promise<Set<string>> {
+  const out = items.filter((i) => i.direction === "outbound" && i.ref.eventId);
+  const auto = new Set<string>();
+  if (out.length === 0) return auto;
+  const ids = out.map((i) => i.ref.eventId as string);
+  const rooms = [...new Set(out.map((i) => i.ref.roomId).filter((r): r is string => !!r))];
+  const sends = (await db.execute(sql`
+    SELECT event_id, room_id, text FROM whatsapp_sends
+    WHERE event_id IN (${sql.join(ids.map((x) => sql`${x}`), sql`, `)})
+      ${rooms.length ? sql`OR room_id IN (${sql.join(rooms.map((x) => sql`${x}`), sql`, `)})` : sql``}
+  `)) as unknown as { event_id: string | null; room_id: string | null; text: string }[];
+  const sentIds = new Set(sends.map((r) => r.event_id).filter((x): x is string => !!x));
+  const sentTexts = new Set(sends.map((r) => `${r.room_id}|${r.text.trim()}`));
+  for (const i of out) {
+    const id = i.ref.eventId as string;
+    if (sentIds.has(id) || (i.text?.trim() && sentTexts.has(`${i.ref.roomId}|${i.text.trim()}`))) auto.add(id);
+  }
+  return auto;
+}
+
+/** PURE: who sent an item (`TimelineItem.sentBy`). */
+export function sentByOf(i: TimelineItem, ourWhatsappSends: Set<string>): TimelineItem["sentBy"] {
+  if (i.kind !== "message" || i.direction === "inbound" || i.direction === null) return null;
+  switch (i.source) {
+    case "transactional":
+    case "copilot":
+    case "api":
+      return "automation";
+    case "instantly":
+      return i.outreachFact ? "automation" : null;
+    case "matrix":
+      if (i.direction !== "outbound") return null;
+      return i.ref.eventId && ourWhatsappSends.has(i.ref.eventId) ? "automation" : "person";
+    default:
+      return null;
+  }
+}
+
+export interface TransactionalSend {
+  recipientEmail: string;
+  subject: string | null;
+  sentAt: Date;
+}
+
+/** Transactional emails that could be the Gmail items' twins (same subject, sent within the window). */
+async function transactionalSends(gmail: TimelineItem[]): Promise<TransactionalSend[]> {
+  const subjects = [...new Set(gmail.map((i) => i.subject).filter((x): x is string => !!x))];
+  if (subjects.length === 0) return [];
+  const rows = (await db.execute(sql`
+    SELECT recipient_email, subject, sent_at FROM transactional_emails
+    WHERE subject IN (${sql.join(subjects.map((x) => sql`${x}`), sql`, `)})
+  `)) as unknown as { recipient_email: string; subject: string | null; sent_at: Date | string }[];
+  return rows.map((r) => ({ recipientEmail: r.recipient_email, subject: r.subject, sentAt: new Date(r.sent_at) }));
+}
+
+/** How far apart the producer's send time and the mailbox's copy of the same email may be. */
+export const TX_GMAIL_TWIN_WINDOW_MS = 10 * 60_000;
+
+/**
+ * PURE: drop every Gmail item that IS a transactional email we sent (same recipient, same subject, sent within
+ * TX_GMAIL_TWIN_WINDOW_MS): a staff mailbox (growth@) holds a copy of each, and Gmail threads same-subject sends to
+ * DIFFERENT recipients together, so the copy showed twice on the recipient's thread and another client's welcome
+ * email on theirs (Chaim's thread held Joshua's, 2026-10-27). The transactional item stays, labelled automation.
+ */
+export function withoutTransactionalCopies(gmail: TimelineItem[], sends: TransactionalSend[]): TimelineItem[] {
+  if (sends.length === 0) return gmail;
+  return gmail.filter((i) => {
+    if (i.direction === "inbound" || !i.subject || !i.at) return true;
+    const at = Date.parse(i.at);
+    const to = new Set(i.to.map((t) => t.trim().toLowerCase()));
+    return !sends.some(
+      (s) => s.subject === i.subject && to.has(s.recipientEmail.trim().toLowerCase()) && Math.abs(s.sentAt.getTime() - at) <= TX_GMAIL_TWIN_WINDOW_MS,
+    );
+  });
+}
+
 export async function readTimeline(
   scope: PeopleScope,
   person: Person,
@@ -929,7 +1052,7 @@ export async function readTimeline(
   const fromStore = (pick: (t: StoredTimeline) => StoredTimeline["gmail"]) =>
     storedRead.then((t): SourceResult => pick(t)).catch((e) => toFailed(e, emails));
 
-  const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional, csv] = await Promise.all([
+  const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional, onboarding, csv] = await Promise.all([
     connected("gmail") ? fromStore((t) => t.gmail) : Promise.resolve(notConnected()),
     fromStore((t) => t.instantly),
     connected("matrix") ? matrixItems(of("matrix")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
@@ -943,9 +1066,14 @@ export async function readTimeline(
     apiCallItems(person, identity, { deferAnswers: opts.paged }).catch((e) => toFailed(e, emails)),
     billingItems(person).catch((e) => toFailed(e, emails)),
     transactionalItems(person).catch((e) => toFailed(e, emails)),
+    onboardingItems(person, identity).catch((e) => toFailed(e, emails)),
     csvRead,
   ]);
-  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional, csv };
+  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional, onboarding, csv };
+  // A Gmail copy of a transactional email we sent (a staff mailbox holds it) is that email: shown once, as ours.
+  if (bySource.gmail.items.length && bySource.transactional.status === "ok") {
+    bySource.gmail = { ...bySource.gmail, items: withoutTransactionalCopies(bySource.gmail.items, await transactionalSends(bySource.gmail.items)) };
+  }
   // The check itself failed: no late-join source may pose as complete (its index items are still served).
   if (lateError) {
     for (const s of LATE_JOIN_SOURCES) {
@@ -965,6 +1093,8 @@ export async function readTimeline(
     })
     .catch(() => undefined);
 
+  const ourWhatsappSends = await automatedMatrixSends(bySource.matrix.items);
+  for (const s of PEOPLE_SOURCES) for (const i of bySource[s].items) i.sentBy = sentByOf(i, ourWhatsappSends);
   const items = PEOPLE_SOURCES.flatMap((s) => bySource[s].items).sort((a, b) => {
     if (a.at === null && b.at === null) return 0;
     if (a.at === null) return 1; // undated last

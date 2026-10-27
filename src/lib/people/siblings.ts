@@ -14,7 +14,7 @@
  * "failed" apart; nothing here turns a failure into an empty list.
  */
 
-export type Sibling = "google" | "instantly" | "lead" | "brand" | "features" | "client";
+export type Sibling = "google" | "instantly" | "lead" | "brand" | "features" | "client" | "human" | "campaign" | "billing";
 
 const ENV: Record<Sibling, { url: string; key: string }> = {
   google: { url: "GOOGLE_SERVICE_URL", key: "GOOGLE_SERVICE_API_KEY" },
@@ -24,6 +24,10 @@ const ENV: Record<Sibling, { url: string; key: string }> = {
   features: { url: "FEATURES_SERVICE_URL", key: "FEATURES_SERVICE_API_KEY" },
   // Who an org / a user is (names, the Clerk org id): the owner's conversation pings.
   client: { url: "CLIENT_SERVICE_URL", key: "CLIENT_SERVICE_API_KEY" },
+  // What a client set up with us (ONBOARDING-FICHE-1027): audiences, funnel campaigns, their caps.
+  human: { url: "HUMAN_SERVICE_URL", key: "HUMAN_SERVICE_API_KEY" },
+  campaign: { url: "CAMPAIGN_SERVICE_URL", key: "CAMPAIGN_SERVICE_API_KEY" },
+  billing: { url: "BILLING_SERVICE_URL", key: "BILLING_SERVICE_API_KEY" },
 };
 
 export const SIBLING_TIMEOUT_MS = Number(process.env.PEOPLE_SIBLING_TIMEOUT_MS) || 30_000;
@@ -116,7 +120,8 @@ export async function siblingGet(
           "x-org-id": identity.orgId,
           "x-user-id": identity.userId,
           "x-run-id": identity.runId,
-          "x-brand-id": identity.brandId,
+          // An org-level read (the org's brands) names no brand: the header is left out, never sent empty.
+          ...(identity.brandId ? { "x-brand-id": identity.brandId } : {}),
         },
         signal: controller.signal,
       });
