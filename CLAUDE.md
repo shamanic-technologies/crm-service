@@ -1453,6 +1453,14 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   line as a LID ghost has its number. chat-service answers
   via `POST /orgs/whatsapp/messages` (`copilot:<messageId>`, `skipIfReplied` false): a recorded send, so it ends the
   burst and is never hand-typed. Campaign sends from the account are unchanged.
+  **What the hand-off knows** (COPILOT-WA-REPEAT-1027, Joshua 2026-10-27: asked 3 times for "the email you signed up with"
+  after our campaign wrote to him by name; read "can't take calls" as HIS ask): `sender.knownEmails` = emails our records tie
+  to the number for the brand (`whatsapp_sends` to that phone naming an email, newest first, then the person record; absent
+  when none). A call the bridge mirrored (`m.text` "Incoming call. Use the WhatsApp app to answer." marked
+  `com.beeper.action_message {type: "call"}`, `events.ts callNotice`) is a `thread[i].kind: "call"` line said in plain words
+  (in the burst too, never the bridge's instruction). The bridge sees INCOMING offers only, no outcome / duration; a call
+  placed FROM the linked phone reaches no linked device (no stanza in the bridge log): it cannot be shown.
+  `buildHandoff` = the body, nothing sent (dry read).
 
 - **Only a POSITIVE answer is reported** (owner 2026-10-16): one Jev `choice` per burst over `REPLY_KINDS`
   (`interested | info_requested | meeting_requested | not_interested | opt_out | wrong_person | neutral |

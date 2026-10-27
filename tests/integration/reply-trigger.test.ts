@@ -553,12 +553,47 @@ describe.skipIf(!RUN)("reply trigger", () => {
         accountUserId: USER,
         fromAccount: `+${SOPHIE}`,
         assistant: { name: "Sophie", role: "Distribute.you Assistant", instructions: null },
-        sender: { phone: "+33770657585", name: "Kevin (WA)" },
+        // COPILOT-WA-REPEAT-1027: our campaign wrote to this number naming the person: the Copilot knows who they are.
+        sender: { phone: "+33770657585", name: "Kevin (WA)", knownEmails: [EMAIL] },
         text: "No thanks\nActually, what does it cost?",
         at: new Date(min(2)).toISOString(),
-        thread: [{ at: new Date(min(0)).toISOString(), direction: "outbound", text: "Hi, it's Sophie from Distribute.you" }],
+        thread: [{ at: new Date(min(0)).toISOString(), direction: "outbound", kind: "message", text: "Hi, it's Sophie from Distribute.you" }],
       });
       expect((await reports())[0]).toMatchObject({ status: "handed_off", reason: "copilot", phone: "+33770657585" });
+    });
+
+    it("a call on the line reaches the next hand-off's thread as a kind call line in its time order (COPILOT-WA-REPEAT-1027)", async () => {
+      await link();
+      await send("$s0", min(0), CAMPAIGN);
+      await event("$s0", OWN, min(0), "Kevin from distribute.you here.");
+      // The bridge's real incoming-call event (prod 2026-10-25): m.text from the caller, marked as a call action.
+      const call = {
+        event_id: "$call", type: "m.room.message", sender: GHOST, origin_server_ts: min(1),
+        content: { body: "Incoming call. Use the WhatsApp app to answer.", msgtype: "m.text", "m.mentions": {}, "com.beeper.action_message": { type: "call" }, "com.beeper.disappearing_timer": {} },
+      };
+      await db.insert(matrixRawEvents).values({
+        orgId: ORG, brandId: BRAND, connectionId: conn.id, eventId: call.event_id, roomId: ROOM, sender: GHOST, eventType: "m.room.message",
+        originServerTs: new Date(call.origin_server_ts), ingestedAt: new Date(), payload: call,
+      });
+      expect((await detectReplies(conn, run1)).detected).toBe(1);
+      await deliverDueReplies();
+      expect(copilotCalls).toHaveLength(1);
+      // The call opened the burst: the Copilot reads it as the call, never the bridge's instruction.
+      expect(copilotCalls[0].body.text).toBe("They called us on WhatsApp (voice call). Whether it was answered or missed is not known.");
+      await db.insert(whatsappSends).values({
+        orgId: ORG, brandId: BRAND, idempotencyKey: "copilot:$call", phone: "+33770657585", text: "Sorry I missed your call!", status: "sent",
+        connectionId: conn.id, roomId: ROOM, ghostMxid: GHOST, eventId: "$ans", sentAt: new Date(min(2)), fromAccount: `+${SOPHIE}`,
+      });
+      await event("$ans", OWN, min(2), "Sorry I missed your call!");
+      await event("$h3", GHOST, min(3), "Sorry I can't take calls at this moment");
+      expect((await detectReplies(conn, run1)).detected).toBe(1);
+      await deliverDueReplies(Date.now() + 10 * 60_000);
+      expect(copilotCalls).toHaveLength(2);
+      expect(copilotCalls[1].body.thread).toEqual([
+        { at: new Date(min(0)).toISOString(), direction: "outbound", kind: "message", text: "Kevin from distribute.you here." },
+        { at: new Date(min(1)).toISOString(), direction: "inbound", kind: "call", text: "They called us on WhatsApp (voice call). Whether it was answered or missed is not known." },
+        { at: new Date(min(2)).toISOString(), direction: "outbound", kind: "message", text: "Sorry I missed your call!" },
+      ]);
     });
 
     it("a message WhatsApp could not decrypt (a notice, then the words as an edit of it) is handed off ONCE with the words (follow-up 3)", async () => {
