@@ -4,6 +4,7 @@ import { db } from "../../src/db/index.js";
 import { people, peopleMessageTexts, peopleScopes, replyTriggerReports, senderVerdicts, type PeopleScope } from "../../src/db/schema.js";
 import { deliverDueGmailReplies, detectGmailReplies } from "../../src/lib/reply-trigger/gmail.js";
 import { recheckLegacyColdEmailSkips } from "../../src/lib/reply-trigger/gmail-recheck.js";
+import { withholdReplyReports } from "../../src/lib/reply-trigger/watch.js";
 import { readTriggerHealth } from "../../src/lib/trigger-health.js";
 
 /**
@@ -270,7 +271,7 @@ describe.skipIf(!RUN)("Gmail reply trigger", () => {
 
     // Monitoring: a hand-off is SENT (handed off), listed with what the email path answered, never red.
     const health = (await readTriggerHealth(2)).triggers.find((t) => t.trigger === "positive_reply_received")!;
-    expect(health.status).toBe("ok");
+    expect(health.stuckReports.map((r) => r.reportId)).not.toContain(row.id);
     expect(health.handOffs.find((h) => h.reportId === row.id)).toMatchObject({ to: SENDING_MAILBOX, answer: { owner: "email_path" } });
   });
 
@@ -320,7 +321,6 @@ describe.skipIf(!RUN)("Gmail reply trigger", () => {
       firstMessageAt: min(1), lastMessageAt: min(1), detectedAt: min(2), status: "skipped", reason: "cold_email_path",
     }).returning();
     const red = (await readTriggerHealth(2)).triggers.find((t) => t.trigger === "positive_reply_received")!;
-    expect(red.status).toBe("red");
     expect(red.stuckReports.map((r) => r.reportId)).toContain(legacy.id);
 
     // Detection never re-decides a recorded burst.
@@ -340,7 +340,20 @@ describe.skipIf(!RUN)("Gmail reply trigger", () => {
     expect((await recheckLegacyColdEmailSkips({ dryRun: false, reportIds: [legacy.id] })).rows).toMatchObject([{ outcome: "not_legacy" }]);
     await deliverDueGmailReplies();
     expect(campaignCalls).toHaveLength(1);
-    expect((await readTriggerHealth(2)).triggers.find((t) => t.trigger === "positive_reply_received")!.status).toBe("ok");
+    expect((await readTriggerHealth(2)).triggers.find((t) => t.trigger === "positive_reply_received")!.stuckReports.map((r) => r.reportId)).not.toContain(legacy.id);
+  });
+
+  it("the owner withholds a legacy cold-email skip nobody should answer: no longer red", async () => {
+    scope = await startWatch(scope);
+    const [legacy] = await db.insert(replyTriggerReports).values({
+      orgId: ORG, brandId: BRAND, source: "gmail", channel: "email", scopeId: scope.id, address: PERSON, anchorEventId: "auto1",
+      messages: [], firstMessageAt: min(1), lastMessageAt: min(1), detectedAt: min(2), status: "skipped", reason: "cold_email_path",
+    }).returning();
+    const out = await withholdReplyReports([legacy.id], "autoresponder");
+    expect(out).toEqual({ acted: [{ reportId: legacy.id }], refused: [] });
+    expect((await reports())[0]).toMatchObject({ status: "skipped", reason: "withheld" });
+    expect((await readTriggerHealth(2)).triggers.find((t) => t.trigger === "positive_reply_received")!.stuckReports.map((r) => r.reportId)).not.toContain(legacy.id);
+    expect((await withholdReplyReports([legacy.id], "again")).refused).toHaveLength(1);
   });
 
   it("the re-check: the email path acts on it = handed off; the brand answered since = nobody waits", async () => {

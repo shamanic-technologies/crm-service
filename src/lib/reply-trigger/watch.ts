@@ -670,7 +670,9 @@ export async function settle(r: ReplyTriggerReport, now: number, set: Partial<Re
 /**
  * OWNER DOOR (WA-GREETING-OFFER-1027): these reply reports, not sent yet (failed / pending, a Copilot hand-off pending /
  * failed), are never sent:
- * `skipped / withheld`, the note kept in last_error (a current client's mail the owner answers himself).
+ * `skipped / withheld`, the note kept in last_error (a current client's mail the owner answers himself). A LEGACY Gmail
+ * `skipped / cold_email_path` row with no email-path answer (red on Monitoring, EMAIL-REPLY-ORPHAN-1027) is closed the
+ * same way when the owner decides nobody should answer it (an autoresponder, a vendor, a staff test).
  */
 export async function withholdReplyReports(
   reportIds: string[],
@@ -679,7 +681,9 @@ export async function withholdReplyReports(
 ): Promise<{ acted: { reportId: string }[]; refused: { reportId: string; error: string }[] }> {
   const found = reportIds.length ? await db.select().from(replyTriggerReports).where(inArray(replyTriggerReports.id, reportIds)) : [];
   const UNSENT: string[] = [REPLY_STATUS.FAILED, REPLY_STATUS.PENDING, HANDOFF_STATUS.PENDING, HANDOFF_STATUS.FAILED];
-  const unsent = (r: ReplyTriggerReport) => UNSENT.includes(r.status);
+  const legacyHandOff = (r: ReplyTriggerReport) =>
+    r.source === "gmail" && r.status === REPLY_STATUS.SKIPPED && r.reason === "cold_email_path" && r.emailPathAnswer === null;
+  const unsent = (r: ReplyTriggerReport) => UNSENT.includes(r.status) || legacyHandOff(r);
   const acted: { reportId: string }[] = [];
   const refused: { reportId: string; error: string }[] = [];
   for (const id of reportIds) {
@@ -690,7 +694,7 @@ export async function withholdReplyReports(
       await db
         .update(replyTriggerReports)
         .set({ status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.WITHHELD, lastError: `withheld: ${note}`.slice(0, 1000), lastAttemptAt: new Date(now) })
-        .where(and(eq(replyTriggerReports.id, r.id), inArray(replyTriggerReports.status, UNSENT)));
+        .where(and(eq(replyTriggerReports.id, r.id), eq(replyTriggerReports.status, r.status)));
       acted.push({ reportId: r.id });
     }
   }
