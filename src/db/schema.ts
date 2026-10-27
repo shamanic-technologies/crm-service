@@ -1507,6 +1507,9 @@ export const replyTriggerReports = pgTable(
     // COST-BACKFILL-1023-CRM (lib/reply-trigger/outcome-backfill.ts): runs-service `occurredAt` for a reply judged
     // before the forward declaration shipped (`run_started_at`); null = declared on time.
     outcomeOccurredAt: text("outcome_occurred_at"),
+    // EMAIL-REPLY-ORPHAN-1027 (lib/reply-trigger/email-path.ts): what the email path answered for a Gmail burst
+    // ({ askedAt, owner, messages: [{ messageId, owner, reason }] }); null = never asked.
+    emailPathAnswer: jsonb("email_path_answer"),
   },
   (table) => [
     index("reply_trigger_reports_outcome_due_idx").on(table.outcomeNextAt).where(sql`${table.outcomeStatus} = 'pending'`),
