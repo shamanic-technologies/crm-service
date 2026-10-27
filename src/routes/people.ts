@@ -37,7 +37,7 @@ import {
   type OutcomeInputs,
   type OutcomeStep,
 } from "../lib/people/outcomes.js";
-import { LEG_STEPS, listLegReachBrands, parseLegStep, readLegReach } from "../lib/people/leg-reach.js";
+import { LEG_STEPS, ServedUnavailable, listLegReachBrands, parseLegStep, readLegReach } from "../lib/people/leg-reach.js";
 import { readLatestMessages } from "../lib/people/latest-messages.js";
 import { LatestMessagesRequestSchema } from "../schemas.js";
 import { familyOf, LEAD_FAMILIES, readBrandFamilies, type FamilyVerdict, type LeadFamily } from "../lib/people/families.js";
@@ -1130,7 +1130,15 @@ router.get("/internal/people/leg-reach", apiKeyAuth, async (req, res) => {
   }
   if (from === to) return res.status(400).json({ type: "validation", error: "from and to must differ" });
   await withPlatformRun(res, "people.leg-reach.read", async () => {
-    const out = await readLegReach(brand.data, orgId, from, to);
+    let out: Awaited<ReturnType<typeof readLegReach>>;
+    try {
+      out = await readLegReach(brand.data, orgId, from, to);
+    } catch (err) {
+      if (!(err instanceof ServedUnavailable)) throw err;
+      // Never a population with our campaigns' people left in it.
+      res.status(502).json({ type: "upstream", reason: "served_unavailable", error: `cannot read whom our campaigns served: ${err.message}` });
+      return;
+    }
     if (out.status === "ambiguous") {
       res.status(409).json({
         type: "ambiguous",

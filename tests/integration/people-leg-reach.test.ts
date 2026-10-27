@@ -5,6 +5,7 @@ import { inArray } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
 import { ghlConnections, ghlRawRecords, people, peopleFacts, peopleScopes } from "../../src/db/schema.js";
 import peopleRoutes from "../../src/routes/people.js";
+import { clearLegReachCache } from "../../src/lib/people/leg-reach.js";
 
 /**
  * GET /internal/people/leg-reach (+ /brands) against a real Postgres (gated on
@@ -18,6 +19,15 @@ const ORG2 = "1e91e91e-1111-4111-8111-000000000002";
 const BRAND = "1e91e91e-1111-4111-8111-00000000000b";
 const BRAND_NONE = "1e91e91e-1111-4111-8111-00000000000c";
 const API_KEY = process.env.CRM_SERVICE_API_KEY || "test-crm-key";
+process.env.LEAD_SERVICE_URL = "http://lead.test";
+process.env.LEAD_SERVICE_API_KEY = "test-lead-key";
+process.env.BRAND_SERVICE_URL = "http://brand.test";
+process.env.BRAND_SERVICE_API_KEY = "test-brand-key";
+const OFFER_A = "1e91e91e-1111-4111-8111-0000000000a1";
+const OFFER_B = "1e91e91e-1111-4111-8111-0000000000b2";
+// lead-service's `contacted` bucket per offer: whom our campaigns served (OUTCOMES-CONTACTED-1027).
+let SERVED: Record<string, string[]> = {};
+let LEAD_DOWN = false;
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -27,6 +37,17 @@ function stubRuns() {
     const url = new URL(String(input));
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
       return json({ id: "run-" + Math.random().toString(16).slice(2) });
+    }
+    if (url.host === "brand.test" && url.pathname === `/internal/brands/${BRAND}/offers`) {
+      return json({ offers: [{ offerId: OFFER_A, name: "A", status: "active" }, { offerId: OFFER_B, name: "B", status: "archived" }] });
+    }
+    if (url.host === "lead.test" && url.pathname === "/orgs/leads") {
+      if (LEAD_DOWN) return json({ error: "boom" }, 500);
+      expect(url.searchParams.get("bucket")).toBe("contacted");
+      const all = SERVED[url.searchParams.get("offerId")!] ?? [];
+      // Cursor paging, one row a page: a short page never ends the walk, a null cursor does.
+      const at = Number(url.searchParams.get("cursor") ?? 0);
+      return json({ leads: all.slice(at, at + 1).map((email) => ({ email, lead: null })), nextCursor: at + 1 < all.length ? String(at + 1) : null });
     }
     throw new Error(`unexpected fetch ${url}`);
   });
@@ -127,7 +148,7 @@ async function seedGhl() {
     // d: undated form, dated booking: counts (cannot be ordered).
     fact(ORG, "email:d@x.com", "form_submitted", "gohighlevel", null),
     fact(ORG, "email:d@x.com", "meeting_booked", "gohighlevel", "2026-09-05T10:00:00Z"),
-    // e + f: our campaigns contacted them: out of the population.
+    // e: our campaigns served them: out. f: lead-service holds them, never served: IN.
     fact(ORG, "email:e@x.com", "form_submitted", "gohighlevel", "2026-09-01T00:00:00Z"),
     fact(ORG, "email:e@x.com", "meeting_booked", "gohighlevel", "2026-09-02T00:00:00Z"),
     fact(ORG, "email:f@x.com", "form_submitted", "gohighlevel", "2026-09-01T00:00:00Z"),
@@ -143,6 +164,11 @@ describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
     await db.delete(peopleScopes).where(inArray(peopleScopes.orgId, [ORG, ORG2]));
   };
   beforeEach(async () => {
+    // e and l were served by offer A's campaigns, E again by archived offer B. f is only HELD by
+    // lead-service (it holds every signup): never served, so in the team's population.
+    SERVED = { [OFFER_A]: ["e@x.com", "l@x.com"], [OFFER_B]: ["E@x.com"] };
+    LEAD_DOWN = false;
+    clearLegReachCache();
     stubRuns();
     await wipe();
   });
@@ -164,14 +190,14 @@ describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
       stepSources: { from: ["gohighlevel"], to: ["gohighlevel", "google_calendar"] },
     });
     expect(r.body.reachedFrom).toEqual({
-      people: 5,
+      people: 6,
       undated: 1,
       byDay: [
         { day: "2026-08-27", people: 1 },
-        { day: "2026-09-01", people: 2 },
+        { day: "2026-09-01", people: 3 },
         { day: "2026-09-04", people: 1 },
       ],
-      sources: [{ source: "gohighlevel", people: 5 }],
+      sources: [{ source: "gohighlevel", people: 6 }],
     });
     expect(r.body.reachedTo).toEqual({
       people: 3,
@@ -187,7 +213,20 @@ describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
       byFromDay: [{ day: "2026-09-01", people: 2 }],
       undatedFrom: 1,
     });
-    expect(r.body.excluded).toEqual({ contactedByUs: 2, automated: 0, notBusiness: 0, groupOnly: 0 });
+    expect(r.body.excluded).toEqual({ contactedByUs: 1, automated: 0, notBusiness: 0, groupOnly: 0 });
+  });
+
+  it("OUTCOMES-CONTACTED-1027: a person lead-service holds but our campaigns never served stays in the team's population; lead-service down = 502", async () => {
+    await seedGhl();
+    // f carries state_source lead_service (lead-service holds every signup) and was never served.
+    const r = await get({ brandId: BRAND, from: "form_submission", to: "meeting_booked" });
+    expect(r.body.reachedFrom.people).toBe(6);
+    expect(r.body.excluded.contactedByUs).toBe(1); // e only (served by offers A and B, once)
+    clearLegReachCache();
+    LEAD_DOWN = true;
+    const down = await get({ brandId: BRAND, from: "form_submission", to: "meeting_booked" });
+    expect(down.status).toBe(502);
+    expect(down.body.reason).toBe("served_unavailable");
   });
 
   it("a submission of a calendar's own booking form is the booking, never a form step", async () => {
@@ -219,8 +258,8 @@ describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
     ]);
     const r = await get({ brandId: BRAND, from: "form_submitted", to: "meeting_booked" });
     expect(r.status).toBe(200);
-    // seedGhl's 5 + i + j; h is out.
-    expect(r.body.reachedFrom.people).toBe(7);
+    // seedGhl's 6 + i + j; h is out.
+    expect(r.body.reachedFrom.people).toBe(8);
     expect(r.body.reachedFrom.byDay).toEqual(
       expect.arrayContaining([
         { day: "2026-09-10", people: 1 },
@@ -235,7 +274,7 @@ describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
     // Without the calendar record, h's submission is a form step like any other.
     await db.delete(ghlRawRecords).where(inArray(ghlRawRecords.connectionId, [conn.id]));
     const raw = await get({ brandId: BRAND, from: "form_submitted", to: "meeting_booked" });
-    expect(raw.body.reachedFrom.people).toBe(8);
+    expect(raw.body.reachedFrom.people).toBe(9);
   });
 
   it("conversation -> booked on a CRM-only brand: a named reason, never 0", async () => {
@@ -316,7 +355,7 @@ describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
     await scope(ORG2, { instantly: "ok" });
     const r = await get({ brandId: BRAND, from: "form_submission", to: "meeting_booked" });
     expect(r.body.orgId).toBe(ORG);
-    expect(r.body.reachedFrom.people).toBe(5);
+    expect(r.body.reachedFrom.people).toBe(6);
 
     await db.delete(peopleScopes).where(inArray(peopleScopes.orgId, [ORG2]));
     await scope(ORG2, { stripe: "ok" });
@@ -378,18 +417,18 @@ describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
     const r = await get({ brandId: BRAND, from: "lead_found", to: "paid_client" });
     expect(r.status).toBe(200);
     expect(r.body).toMatchObject({ fromStep: "lead_found", toStep: "sale", available: true, reason: null });
-    // a b c d (seedGhl people) + g (fact owner left the index) + k; e f l contacted by us.
+    // a b c d f (seedGhl people) + g (fact owner left the index) + k; e l served by our campaigns.
     expect(r.body.reachedFrom).toEqual({
-      people: 6,
+      people: 7,
       undated: 1,
       byDay: [
         { day: "2026-08-15", people: 1 },
         { day: "2026-08-20", people: 1 },
-        { day: "2026-09-01", people: 1 },
+        { day: "2026-09-01", people: 2 },
         { day: "2026-09-04", people: 1 },
         { day: "2026-09-05", people: 1 },
       ],
-      sources: [{ source: "gohighlevel", people: 6 }],
+      sources: [{ source: "gohighlevel", people: 7 }],
     });
     expect(r.body.reachedTo).toEqual({
       people: 1,
@@ -400,14 +439,14 @@ describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
       byFromDay: [{ day: "2026-08-15", people: 1 }],
       undatedFrom: 0,
     });
-    expect(r.body.excluded).toEqual({ contactedByUs: 3, automated: 0, notBusiness: 0, groupOnly: 0 });
+    expect(r.body.excluded).toEqual({ contactedByUs: 2, automated: 0, notBusiness: 0, groupOnly: 0 });
 
     // Never a TO step.
     const back = await get({ brandId: BRAND, from: "form_submission", to: "lead_found" });
     expect(back.body).toMatchObject({ available: false, reason: "to_step_not_recorded" });
     // The existing legs are untouched by the new step.
     const legacy = await get({ brandId: BRAND, from: "form_submitted", to: "meeting_booked" });
-    expect(legacy.body.reachedFrom.people).toBe(5);
+    expect(legacy.body.reachedFrom.people).toBe(6);
   });
 
   it("refuses bad input and an unauthenticated call", async () => {

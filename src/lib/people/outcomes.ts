@@ -248,12 +248,37 @@ function evidence(orgId: string, brandId: string, step: OutcomeStep | null, camp
 }
 
 /**
- * The LEG-REACH exclusion (leg-reach.ts), NOT the Outcomes "contacted by us": a person our cold
- * email wrote to (an Instantly presence) or lead-service holds as a lead. lead-service holds a row
- * for every signup of a brand whose auth provider is connected, so this is far wider than "we
- * contacted them" (OUTCOMES-CONTACTED-1027): the Outcomes read never uses it.
+ * Every address our campaigns SERVED for the brand: lead-service's `contacted` bucket (put in a
+ * sequence) under each offer of the brand, one address once. Leg reach's "contacted by us"
+ * exclusion (OUTCOMES-CONTACTED-1027 follow-up): the same rule as Outcomes' tag, step-free.
  */
-export const CONTACTED = sql`(p.sources @> '["instantly"]'::jsonb OR p.state_source = 'lead_service')`;
+export async function readServedEmails(identity: SiblingIdentity): Promise<string[]> {
+  const offers = await readBrandOffers(identity);
+  const seen = new Set<string>();
+  await mapLimit(offers, 3, async (o) => {
+    await walkBucket(identity, "contacted", o.offerId, (row) => {
+      const email = normalizeEmail(row.email);
+      if (email) seen.add(email);
+    });
+  });
+  return [...seen].sort();
+}
+
+/**
+ * The people of the brand holding one of these addresses (a hash join over the brand's unnested
+ * email keys), else a person of its own (`email:<addr>`, the facts' own fallback key). One column
+ * `person_key`.
+ */
+export function servedPeople(orgId: string, brandId: string, emails: string[]): SQL {
+  return sql`
+    SELECT DISTINCT COALESCE(k.person_key, 'email:' || x.email) AS person_key
+    FROM jsonb_array_elements_text(${JSON.stringify(emails)}::jsonb) AS x(email)
+    LEFT JOIN (
+      SELECT pp.person_key, key FROM people pp, jsonb_array_elements_text(pp.identity_keys) AS key
+      WHERE pp.org_id = ${orgId} AND pp.brand_id = ${brandId} AND key LIKE 'email:%'
+    ) k ON k.key = 'email:' || x.email
+  `;
+}
 
 /**
  * Per (step, person), the people our campaigns brought to the step (`ContactedReach`): each address

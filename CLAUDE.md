@@ -1714,7 +1714,7 @@ this answers the same steps for everyone the brand's own tools state.
   distribute.you's 101 Clerk signups), NOT `state_source = 'lead_service'` (it holds every signup),
   NOT an Instantly presence (32 of those signups were written to AFTER signing up). Prod 2026-10-27:
   distribute.you signup 101 → 0; Doc Dinners booked 148 → 7, attended 14 → 4, sale 5 → 3 (= tab).
-  `CONTACTED` (Instantly OR lead-service state) is leg-reach's exclusion only.
+  Leg reach excludes by the same rule, step-free (below).
 - **Monthly series** on each step: `months [{month YYYY-MM, people, contactedByUs, cumulativePeople,
   cumulativeContactedByUs}]` (UTC, person dated by their earliest dated statement, one axis per brand:
   first dated reach of any step → current month, empty months zero) + `undated {people,
@@ -1774,8 +1774,11 @@ opens a scope or builds, no vendor call, no model, no cost.
   a form / survey created, no form named) stays a form step: GoHighLevel tags a
   contact a calendar created with medium `calendar`, never `form` (Doc Dinners:
   304 of 308 form_origin = the Meta Ads form's own mediumId, 3 a survey).
-- **Population** = people (fact owner) who reached FROM, minus `CONTACTED` (Instantly
-  presence / lead-service lead), minus `automated` and `not_business` people. A fact
+- **Population** = people (fact owner) who reached FROM, minus the people our campaigns SERVED
+  (lead-service's `contacted` bucket under any offer of the brand, `readServedEmails`, cached per brand
+  5 min fresh / 1 h stale on an org run of the scope's creator; unreadable = 502 `served_unavailable`),
+  minus `automated` and `not_business` people. Before (OUTCOMES-CONTACTED-1027 follow-up, 2026-10-27)
+  "lead-service holds them" excluded every signup: distribute.you signup → sale read 0 → 0, now 52 → 9. A fact
   owner no longer in `people` is kept. TO counts only on or after the UTC DAY of the
   first FROM (same day either order counts; undated end counts); TO only before =
   `toBeforeFrom`, not counted. `reachedTo.byFromDay` (+ `undatedFrom`) = the same TO
