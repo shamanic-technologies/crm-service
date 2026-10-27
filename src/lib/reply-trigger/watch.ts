@@ -668,7 +668,8 @@ export async function settle(r: ReplyTriggerReport, now: number, set: Partial<Re
 }
 
 /**
- * OWNER DOOR (WA-GREETING-OFFER-1027): these reply reports, not sent yet (failed / pending), are never sent:
+ * OWNER DOOR (WA-GREETING-OFFER-1027): these reply reports, not sent yet (failed / pending, a Copilot hand-off pending /
+ * failed), are never sent:
  * `skipped / withheld`, the note kept in last_error (a current client's mail the owner answers himself).
  */
 export async function withholdReplyReports(
@@ -677,7 +678,8 @@ export async function withholdReplyReports(
   now: number = Date.now(),
 ): Promise<{ acted: { reportId: string }[]; refused: { reportId: string; error: string }[] }> {
   const found = reportIds.length ? await db.select().from(replyTriggerReports).where(inArray(replyTriggerReports.id, reportIds)) : [];
-  const unsent = (r: ReplyTriggerReport) => r.status === REPLY_STATUS.FAILED || r.status === REPLY_STATUS.PENDING;
+  const UNSENT: string[] = [REPLY_STATUS.FAILED, REPLY_STATUS.PENDING, HANDOFF_STATUS.PENDING, HANDOFF_STATUS.FAILED];
+  const unsent = (r: ReplyTriggerReport) => UNSENT.includes(r.status);
   const acted: { reportId: string }[] = [];
   const refused: { reportId: string; error: string }[] = [];
   for (const id of reportIds) {
@@ -688,7 +690,7 @@ export async function withholdReplyReports(
       await db
         .update(replyTriggerReports)
         .set({ status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.WITHHELD, lastError: `withheld: ${note}`.slice(0, 1000), lastAttemptAt: new Date(now) })
-        .where(and(eq(replyTriggerReports.id, r.id), inArray(replyTriggerReports.status, [REPLY_STATUS.FAILED, REPLY_STATUS.PENDING])));
+        .where(and(eq(replyTriggerReports.id, r.id), inArray(replyTriggerReports.status, UNSENT)));
       acted.push({ reportId: r.id });
     }
   }

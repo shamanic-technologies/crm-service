@@ -32,17 +32,59 @@ export interface TriggerHealth {
     status: "ok" | "red";
     stuck: number;
     stuckByReason: { reason: string | null; count: number; oldestAt: string; latestAt: string }[];
-    stuckReports: { reportId: string; orgId: string | null; brandId: string | null; status: string; reason: string | null; lastError: string | null; attempts: number; detectedAt: string }[];
+    stuckReports: {
+      reportId: string;
+      orgId: string | null;
+      brandId: string | null;
+      /** brand-service's name; null when the brand has none or it could not be read (logged). */
+      brandName: string | null;
+      /** WHO the report is about, as the report recorded them (a Gmail reply: its address). */
+      person: { name: string | null; email: string | null; phone: string | null };
+      status: string;
+      reason: string | null;
+      lastError: string | null;
+      attempts: number;
+      detectedAt: string;
+    }[];
     byDay: { day: string; sent: number; skipped: number; notSent: number }[];
   }[];
 }
 
+/** `who` = the SQL naming the person on each table (name, email, phone). */
 const SOURCES = [
-  { trigger: "form_submitted", table: "form_trigger_reports", at: "detected_at", scoped: true },
-  { trigger: "whatsapp_number_given", table: "phone_given_reports", at: "detected_at", scoped: true },
-  { trigger: "positive_reply_received", table: "reply_trigger_reports", at: "detected_at", scoped: true },
-  { trigger: "account_event", table: "credit_event_reports", at: "created_at", scoped: false },
+  { trigger: "form_submitted", table: "form_trigger_reports", at: "detected_at", scoped: true, who: "full_name AS p_name, email AS p_email, phone AS p_phone" },
+  { trigger: "whatsapp_number_given", table: "phone_given_reports", at: "detected_at", scoped: true, who: "full_name AS p_name, email AS p_email, phone AS p_phone" },
+  { trigger: "positive_reply_received", table: "reply_trigger_reports", at: "detected_at", scoped: true, who: "full_name AS p_name, COALESCE(email, address) AS p_email, phone AS p_phone" },
+  { trigger: "account_event", table: "credit_event_reports", at: "created_at", scoped: false, who: "NULL::text AS p_name, email AS p_email, NULL::text AS p_phone" },
 ] as const;
+
+const BRAND_NAME_TTL_MS = 60 * 60_000;
+const brandNameCache = new Map<string, { name: string | null; at: number }>();
+
+/** brand-service's name per brand (key-only internal read), cached 1 h. Display only: unreadable = null, logged. */
+async function brandNames(ids: string[]): Promise<Map<string, string | null>> {
+  const out = new Map<string, string | null>();
+  const base = process.env.BRAND_SERVICE_URL;
+  const key = process.env.BRAND_SERVICE_API_KEY;
+  await Promise.all(
+    [...new Set(ids)].map(async (id) => {
+      const hit = brandNameCache.get(id);
+      if (hit && Date.now() - hit.at < BRAND_NAME_TTL_MS) return out.set(id, hit.name);
+      if (!base || !key) return out.set(id, null);
+      try {
+        const res = await fetch(`${base}/internal/brands/${encodeURIComponent(id)}`, { headers: { "x-api-key": key }, signal: AbortSignal.timeout(5_000) });
+        if (!res.ok) throw new Error(`brand-service answered ${res.status}`);
+        const name = ((await res.json()) as { brand?: { name?: string | null } }).brand?.name ?? null;
+        brandNameCache.set(id, { name, at: Date.now() });
+        out.set(id, name);
+      } catch (err) {
+        console.warn(`[crm-service][trigger-health] brand ${id} name unreadable: ${(err as Error).message}`);
+        out.set(id, null);
+      }
+    }),
+  );
+  return out;
+}
 
 const rows = async <T>(q: ReturnType<typeof sql>) => (await db.execute(q)) as unknown as T[];
 const list = (xs: readonly string[]) => sql.join(xs.map((x) => sql`${x}`), sql`, `);
@@ -60,8 +102,8 @@ export async function readTriggerHealth(days: number, now: number = Date.now()):
     const byReason = await rows<{ reason: string | null; count: number; oldest: Date; latest: Date }>(sql`
       SELECT reason, count(*)::int AS count, min(${at}) AS oldest, max(${at}) AS latest
       FROM ${t} WHERE ${stuckWhere} GROUP BY reason ORDER BY count(*) DESC, reason`);
-    const stuckList = await rows<{ id: string; org_id: string | null; brand_id: string | null; status: string; reason: string | null; last_error: string | null; attempts: number; at: Date }>(sql`
-      SELECT id::text AS id, ${scope}, status, reason, last_error, attempts, ${at} AS at
+    const stuckList = await rows<{ id: string; org_id: string | null; brand_id: string | null; p_name: string | null; p_email: string | null; p_phone: string | null; status: string; reason: string | null; last_error: string | null; attempts: number; at: Date }>(sql`
+      SELECT id::text AS id, ${scope}, ${sql.raw(s.who)}, status, reason, last_error, attempts, ${at} AS at
       FROM ${t} WHERE ${stuckWhere} ORDER BY ${at} DESC, id LIMIT ${STUCK_LIST_LIMIT}`);
     const daily = await rows<{ day: string; sent: number; skipped: number; not_sent: number }>(sql`
       SELECT to_char(date_trunc('day', ${at} AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
@@ -70,6 +112,7 @@ export async function readTriggerHealth(days: number, now: number = Date.now()):
         count(*) FILTER (WHERE status NOT IN (${list([...SENT, ...SKIPPED])}))::int AS not_sent
       FROM ${t} WHERE ${at} >= ${since}::timestamptz GROUP BY 1 ORDER BY 1`);
     const stuck = byReason.reduce((n, r) => n + r.count, 0);
+    const names = await brandNames(stuckList.map((r) => r.brand_id).filter((b): b is string => !!b));
     triggers.push({
       trigger: s.trigger,
       table: s.table,
@@ -80,6 +123,8 @@ export async function readTriggerHealth(days: number, now: number = Date.now()):
         reportId: r.id,
         orgId: r.org_id,
         brandId: r.brand_id,
+        brandName: r.brand_id ? (names.get(r.brand_id) ?? null) : null,
+        person: { name: r.p_name, email: r.p_email, phone: r.p_phone },
         status: r.status,
         reason: r.reason,
         lastError: r.last_error,
