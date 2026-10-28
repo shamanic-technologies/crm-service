@@ -28,7 +28,7 @@ import { bridgeSaysNoSuchNumber } from "./number-validity.js";
 import { alertRefusal } from "./staff-alert.js";
 import { describeLoggedOut, linkedWhatsappAccounts, sendReadiness, personaOf, type SenderPersona, type WhatsappAccount } from "./accounts.js";
 import { recordGhostPhone } from "./phone-resolution.js";
-import { narrowByLine, type LineRole } from "./line-roles.js";
+import { automationOn, narrowByType, type SendingAccountType } from "../matrix/account-types.js";
 import { humanTypedTo } from "../matrix/human-takeover.js";
 import { joinRoom, readRoomBridgeInfo, sendText, setTyping } from "../matrix/client.js";
 import { expectedChannelIds, roomDeliversTo } from "./room-check.js";
@@ -44,8 +44,8 @@ export const SEND_REFUSAL_CODES = [
   "no_phone_known",
   /**
    * The brand has linked WhatsApp accounts, but none may send automated
-   * messages (`automationAllowed` off on every one, or on the one `fromAccount`
-   * names). Nothing is sent: an automated message never falls back to an
+   * messages (`automationAllowed` off, or typed `personal_human`, on every one,
+   * or on the one `fromAccount` names). Nothing is sent: an automated message never falls back to an
    * account the brand kept for its own hand (SOPHIE-WA-1016).
    */
   "automation_not_allowed",
@@ -92,8 +92,8 @@ export interface SendRequest {
   phone: string | null;
   /** The linked account to send from, as its own number (digits, `+` optional). */
   fromAccount: string | null;
-  /** Send from the brand's line stated with this role (SOPHIE-SENDS-1028, line-roles.ts). */
-  fromLine?: LineRole | null;
+  /** Send only from the brand's accounts of this type (ACCOUNT-TYPES-1028; legacy `fromLine` mapped onto it). */
+  fromAccountType?: SendingAccountType | null;
   skipIfReplied: boolean;
   /** Who asked (`x-user-id`), only to read names for a staff alert. */
   userId: string | null;
@@ -246,26 +246,29 @@ async function sendableAccounts(req: ReachRequest): Promise<WhatsappAccount[]> {
         : "The brand has no linked WhatsApp account. Link one from the dashboard first.",
     );
   }
-  // SOPHIE-SENDS-1028: a number asked > a role asked > the brand's assistant line > every line.
-  const { accounts: linked, by } = narrowByLine(all, { fromAccountDigits: wanted, fromLine: req.fromLine ?? null });
+  // ACCOUNT-TYPES-1028: a number asked > a type asked > every pro_ai account of the brand > every account.
+  const { accounts: linked, by } = narrowByType(all, { fromAccountDigits: wanted, fromAccountType: req.fromAccountType ?? null });
   if (linked.length === 0) {
     throw new SendRefusal(
       "whatsapp_not_linked",
       by === "account"
         ? `The brand has no linked WhatsApp account for +${wanted}.`
-        : `None of the brand's linked WhatsApp accounts is stated as its ${req.fromLine} line. State it on the account (PATCH /orgs/matrix/links/{linkId} lineRole).`,
+        : `None of the brand's linked WhatsApp accounts is typed ${req.fromAccountType}. Type one (PATCH /orgs/matrix/links/{linkId} accountType).`,
     );
   }
   // Every send through this path is automated (a workflow): an account the brand
-  // keeps for its own hand is never picked, even where the person already talks to it.
-  const allowed = linked.filter((a) => a.automationAllowed);
+  // keeps for its own hand (automation off, or a personal line) is never picked,
+  // even where the person already talks to it.
+  const allowed = linked.filter(automationOn);
   if (allowed.length === 0) {
     throw new SendRefusal(
       "automation_not_allowed",
       by === "account"
-        ? `The brand's WhatsApp account +${wanted} is not allowed to send automated messages.`
-        : by === "line" || by === "assistant"
-          ? `The brand's ${by === "line" ? req.fromLine : "assistant"} WhatsApp line (+${digitsOf(linked[0].loginId)}) is not allowed to send automated messages.`
+        ? linked[0].accountType === "personal_human"
+          ? `The brand's WhatsApp account +${wanted} is a personal line: automated messages never go out from it.`
+          : `The brand's WhatsApp account +${wanted} is not allowed to send automated messages.`
+        : by === "type" || by === "pro_ai"
+          ? `None of the brand's ${by === "type" ? req.fromAccountType : "pro_ai"} WhatsApp accounts (${linked.map((a) => `+${digitsOf(a.loginId)}`).join(", ")}) is allowed to send automated messages.`
         : "None of the brand's linked WhatsApp accounts is allowed to send automated messages. Allow one (or link a dedicated number) from the dashboard.",
     );
   }
@@ -297,8 +300,9 @@ async function sendableAccounts(req: ReachRequest): Promise<WhatsappAccount[]> {
  *     (the latest one), so a thread is never restarted from another number;
  *  2. else the account the brand marked as its outreach default;
  *  3. else the oldest linked account.
- * When the brand stated an assistant line (or the send asked a number / a role),
- * only that line reaches here (SOPHIE-SENDS-1028, sendableAccounts), so it writes.
+ * When the brand typed accounts `pro_ai` (or the send asked a number / a type),
+ * only those reach here (ACCOUNT-TYPES-1028, sendableAccounts): among several
+ * pro_ai accounts, the one the person last talked with writes.
  * Only accounts the brand allows automated sends from reach here (SOPHIE-WA-1016):
  * a conversation on a disallowed account is not followed, the message starts a
  * new thread from an allowed one.
@@ -399,8 +403,8 @@ export interface ReachRequest {
   email: string | null;
   phone: string | null;
   fromAccount: string | null;
-  /** Only the brand's line stated with this role may write (SOPHIE-SENDS-1028). */
-  fromLine?: LineRole | null;
+  /** Only the brand's accounts of this type may write (ACCOUNT-TYPES-1028). */
+  fromAccountType?: SendingAccountType | null;
   skipIfReplied: boolean;
 }
 
@@ -493,9 +497,10 @@ export interface ReachResult {
   /** That account's sender persona, as the brand stated it (null when none). */
   persona: SenderPersona | null;
   /**
-   * The brand's stated assistant line (SOPHIE-SENDS-1028), whichever line this
-   * send writes from: a founder hello names it ("our assistant contacted you
-   * from <phone>"). Null when the brand states none.
+   * The brand's `pro_ai` account an automated send to this person writes from
+   * (ACCOUNT-TYPES-1028: among several, the one they last talked with), whichever
+   * account THIS send writes from: a pro_human hello names it ("our assistant
+   * contacted you from <phone>"). Null when the brand typed none pro_ai.
    */
   assistantLine: { phone: string; persona: SenderPersona | null } | null;
 }
@@ -511,7 +516,8 @@ export interface ReachResult {
 export async function reachWhatsApp(req: ReachRequest): Promise<ReachResult> {
   const { phone, phoneSource, accounts, who } = await resolveReach(req);
   const account = await chooseAccount(accounts, who.mxid);
-  const assistant = (await linkedWhatsappAccounts(req.orgId, req.brandId)).find((a) => a.lineRole === "assistant");
+  const ai = (await linkedWhatsappAccounts(req.orgId, req.brandId)).filter((a) => a.accountType === "pro_ai" && automationOn(a));
+  const assistant = ai.length > 0 ? await chooseAccount(ai, who.mxid) : null;
   return {
     reachable: true,
     to: phone,

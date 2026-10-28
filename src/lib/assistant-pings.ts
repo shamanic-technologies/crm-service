@@ -243,6 +243,8 @@ async function assistantAccounts(dest: CopilotDestination): Promise<Map<string, 
         eq(matrixLinks.brandId, dest.brandId),
         eq(matrixLinks.status, "linked"),
         eq(matrixLinks.automationAllowed, true),
+        // A personal line is nobody's assistant (ACCOUNT-TYPES-1028).
+        sql`${matrixLinks.accountType} IS DISTINCT FROM 'personal_human'`,
       ),
     );
   const out = new Map<string, AssistantAccount>();
