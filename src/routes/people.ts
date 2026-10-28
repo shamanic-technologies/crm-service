@@ -23,7 +23,6 @@ import type { LeadCompanyTags, LeadDisqualification, LeadHumanTags } from "../li
 import type { PersonRelevance } from "../lib/people/relevance.js";
 import { decodeCursor, findPerson, pageOf, readTimeline, type TimelineItem } from "../lib/people/timeline.js";
 import { attachFactIds, factFeedSettlement, type FactFeedSettlement } from "../lib/people/fact-ids.js";
-import { requestEmission } from "../lib/people/fact-emitter.js";
 import { completeItems } from "../lib/people/item-fill.js";
 import { readFacts } from "../lib/people/facts.js";
 import { findPersonById } from "../lib/people/person-id.js";
@@ -474,15 +473,11 @@ router.get(
 
 /**
  * UNIBOX-FACT-LAG-1028: is every fact of this thread on the people fact feed yet? A thread holding a
- * fact still in flight answers `factFeed.settled: false` (with the pending items) and asks the fact
- * emitter to state it now; a writer reads again shortly instead of writing on it.
+ * fact still in flight answers `factFeed.settled: false` (with the pending items): the fact emitter
+ * states it within seconds (its inputs mark moved); a writer reads again shortly instead of writing.
  */
 function settlementOf(scope: PeopleScope, person: Person, items: TimelineItem[]): FactFeedSettlement {
-  const settlement = factFeedSettlement(items, person.emails as string[], scope.factsStatedThrough ?? null);
-  if (!settlement.settled) {
-    void requestEmission(scope).catch((e) => console.error(`[crm-service] fact emission failed scope=${scope.id}:`, e));
-  }
-  return settlement;
+  return factFeedSettlement(items, person.emails as string[], scope.factsStatedThrough ?? null);
 }
 
 const timelineQuerySchema = z

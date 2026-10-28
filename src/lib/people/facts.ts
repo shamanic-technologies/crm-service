@@ -1256,7 +1256,9 @@ export function ownershipEvents(moves: OwnershipMove[]): OwnershipEvents {
   const byFrom = new Map<string, Map<string, string[]>>();
   for (const m of moves) {
     const parts = byFrom.get(m.from) ?? new Map<string, string[]>();
-    parts.set(m.to, [...(parts.get(m.to) ?? []), m.factId]);
+    const ids = parts.get(m.to);
+    if (ids) ids.push(m.factId);
+    else parts.set(m.to, [m.factId]);
     byFrom.set(m.from, parts);
   }
   const events: OwnershipEvents = { splits: [], merges: [] };
@@ -1391,7 +1393,25 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
 
     // Everyone the build holds is someone to the feed (RELATIONSHIP-TAGS-1014: no
     // conversation verdict holds a person's facts back any more).
-    const personRows = await tx.select().from(people).where(eq(people.scopeId, scope.id));
+    // Only what the feed reads of a person (never their standing, sources or verdict detail).
+    const personRows = await tx
+      .select({
+        personKey: people.personKey,
+        personId: people.personId,
+        emails: people.emails,
+        phones: people.phones,
+        displayName: people.displayName,
+        company: people.company,
+        identityKeys: people.identityKeys,
+        presences: people.presences,
+        humanId: people.humanId,
+        automated: people.automated,
+        connectionTags: people.connectionTags,
+        organizations: people.organizations,
+        relations: people.relations,
+      })
+      .from(people)
+      .where(eq(people.scopeId, scope.id));
     const index = new PersonIndex(personRows);
 
     const [ghl, matrix, matrixGroups, gmail, posthog, stripe, clerk, csv, connected, calendar, credit] = await Promise.all([
@@ -1439,16 +1459,32 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
       else candidates.set(c.naturalKey, c);
     }
 
-    // Every DATA fact ever emitted for the brand (meta facts carry no natural key), WITHOUT its payload:
-    // 413k facts / 420 MB for Distribute.you, 30 s of the 81 s an emission took (2026-10-28). The few
-    // facts re-stated below get their payload read on their own.
+    // The brand's LIVE data facts (meta facts carry no natural key), WITHOUT their payload; every data fact
+    // ever emitted (withdrawn ones too) only as OWNERSHIP GROUPS (one per owner x subject). Reading all
+    // 413k facts whole (420 MB) was 30 s of the 81 s an emission of Distribute.you took (2026-10-28). The
+    // few facts re-stated below get their payload read on their own.
     const { payload: _payload, ...feedColumns } = getTableColumns(peopleFacts);
-    const existing = (await tx
+    const liveFacts = (await tx
       .select(feedColumns)
       .from(peopleFacts)
-      .where(and(eq(peopleFacts.orgId, orgId), eq(peopleFacts.brandId, brandId), sql`${peopleFacts.naturalKey} IS NOT NULL`))
+      .where(and(eq(peopleFacts.orgId, orgId), eq(peopleFacts.brandId, brandId), eq(peopleFacts.live, true), sql`${peopleFacts.naturalKey} IS NOT NULL`))
       .orderBy(asc(peopleFacts.feedSeq))) as FeedFact[];
-    const liveByKey = new Map(existing.filter((f) => f.live).map((f) => [f.naturalKey!, f]));
+    const liveByKey = new Map(liveFacts.map((f) => [f.naturalKey!, f]));
+    const ownershipGroups = (await tx.execute(sql`
+      SELECT owner_person_key AS "ownerPersonKey", subject_presence AS "subjectPresence", subject_keys AS "subjectKeys",
+             subject_standalone AS "subjectStandalone",
+             CASE WHEN subject_standalone THEN emails END AS emails,
+             CASE WHEN subject_standalone THEN phones END AS phones,
+             CASE WHEN subject_standalone THEN full_name END AS "fullName",
+             array_agg(fact_id::text) AS "factIds"
+      FROM people_facts
+      WHERE org_id = ${orgId} AND brand_id = ${brandId} AND natural_key IS NOT NULL
+      GROUP BY 1, 2, 3, 4, 5, 6, 7
+    `)) as unknown as (Pick<FeedFact, "ownerPersonKey" | "subjectPresence" | "subjectKeys" | "subjectStandalone" | "fullName"> & {
+      emails: string[] | null;
+      phones: string[] | null;
+      factIds: string[];
+    })[];
 
     // The human of every standalone subject (a CSV row no person holds), from human-service's answers.
     const standaloneKeys = new Set<string>();
@@ -1456,21 +1492,20 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
     for (const f of liveByKey.values()) if (f.subjectStandalone) for (const k of (f.subjectKeys as string[] | null) ?? []) standaloneKeys.add(k);
     index.setHumans(await humansOfKeys(tx, orgId, [...standaloneKeys]));
 
-    const subjectOf = (f: FeedFact) => ({
+    const subjectOf = (f: Pick<FeedFact, "subjectPresence" | "subjectKeys" | "subjectStandalone" | "fullName"> & { emails: unknown; phones: unknown }) => ({
       presence: f.subjectPresence,
       keys: (f.subjectKeys as string[] | null) ?? [],
       standalone: f.subjectStandalone,
-      emails: f.emails as string[],
-      phones: f.phones as string[],
+      emails: (f.emails as string[] | null) ?? [],
+      phones: (f.phones as string[] | null) ?? [],
       fullName: f.fullName,
     });
 
-    // 1-2. Merges and splits of people already in the feed.
-    const moves: OwnershipMove[] = existing.map((f) => ({
-      factId: f.factId,
-      from: f.ownerPersonKey!,
-      to: index.resolve(subjectOf(f))?.personKey ?? f.ownerPersonKey!,
-    }));
+    // 1-2. Merges and splits of people already in the feed (one subject resolved once per group).
+    const moves: OwnershipMove[] = ownershipGroups.flatMap((g) => {
+      const to = index.resolve(subjectOf(g))?.personKey ?? g.ownerPersonKey!;
+      return g.factIds.map((factId) => ({ factId, from: g.ownerPersonKey!, to }));
+    });
     const ownership = ownershipEvents(moves);
     const meta: (typeof peopleFacts.$inferInsert)[] = [];
     for (const s of ownership.splits) {

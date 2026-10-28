@@ -2565,7 +2565,7 @@ const PersonTimelineResponseSchema = registry.register(
           settled: z.boolean().openapi({
             description:
               "true = every record of this thread that states a fact is on the people fact feed (lead-service's copy follows within its pull interval). " +
-              "false = at least one is still in flight: recorded by crm-service, stated by the next fact emission (seconds; the read already asked for it). " +
+              "false = at least one is still in flight: recorded by crm-service, stated by the next fact emission (seconds). " +
               "A WRITER reads again shortly instead of writing on a thread that newer facts (a refused payment, an onboarding step) have not reached the feed yet.",
           }),
           statedThrough: z.string().nullable().openapi({ description: "When the scope's last fact emission began reading (null = never emitted)." }),

@@ -1662,7 +1662,7 @@ lead-service serves the overall tag, then go.
   `ref.recordedAt` (when crm-service recorded the record: silver `last_rebuilt_at`, Matrix `ingested_at`, store
   `indexed_at`) and, when the record IS a fact, `ref.factKey` (Matrix / Gmail keyed as before). Pending = a fact-able
   item with no live fact, recorded after `people_scopes.facts_stated_through` (the last emission's read start) minus
-  60 s (`FACT_SETTLE_MARGIN_MS`: a silver write's time is its tx START). A read finding one kicks an emission. A WRITER
+  60 s (`FACT_SETTLE_MARGIN_MS`: a silver write's time is its tx START); the emitter states it within seconds. A WRITER
   reading `settled: false` reads again shortly instead of writing (workflow-service honours it). Not covered yet:
   GoHighLevel funnel events, calendar meetings, credit events (no `recordedAt`: never pending).
 - Groups (RELATIONSHIP-TAGS-1014): `group_member` (natural key room|ghost, payload channel,
