@@ -449,7 +449,7 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
 
     // The person's conversation is on the first line. Nothing stated: that line writes (unchanged).
     await mirroredThread(founder.connectionId, "@whatsapp_lid-1:matrix.test", 12);
-    expect((await reach({})).body).toMatchObject({ reachable: true, fromAccount: "+33611111111" });
+    expect((await reach({})).body).toMatchObject({ reachable: true, fromAccount: "+33611111111", assistantLine: null });
     const noFounder = await reach({ fromLine: "founder" });
     expect(noFounder.body).toMatchObject({ reachable: false, code: "whatsapp_not_linked" });
 
@@ -468,7 +468,12 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
 
     // The founder line, by role.
     await request(app()).patch(`/orgs/matrix/links/${founder.linkId}`).set(headers).send({ brandId: BRAND, lineRole: "founder" }).expect(200);
-    expect((await reach({ fromLine: "founder" })).body).toMatchObject({ reachable: true, fromAccount: "+33611111111", persona: { name: "Kevin", role: "Founder" } });
+    expect((await reach({ fromLine: "founder" })).body).toMatchObject({
+      reachable: true,
+      fromAccount: "+33611111111",
+      persona: { name: "Kevin", role: "Founder" },
+      assistantLine: { phone: "+33622222222", persona: { name: "Sophie", role: "Assistant" } },
+    });
     const hello = await request(app())
       .post("/orgs/whatsapp/messages")
       .set(headers)
@@ -963,7 +968,7 @@ describe.skipIf(!RUN)("WhatsApp reach check (DB)", () => {
     await seedPeople([{ key: "email:ann@x.com", phones: ["+33600000002"], presences: [clerk(["+33600000002"])], at: "2026-09-01T00:00:00Z" }]);
     const res = await reach({ email: "Ann@x.com" });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ reachable: true, to: "+33600000002", phoneSource: "crm:clerk", fromAccount: "+33611111111", persona: null });
+    expect(res.body).toEqual({ reachable: true, to: "+33600000002", phoneSource: "crm:clerk", fromAccount: "+33611111111", persona: null, assistantLine: null });
     expect(lookups).toEqual(["+33600000002"]);
     expect(sends).toEqual([]);
     expect(createdDms).toEqual([]);

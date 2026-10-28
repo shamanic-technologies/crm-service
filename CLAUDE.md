@@ -1337,7 +1337,8 @@ newest first, a person with none absent; a send with no campaign never matches. 
   role holder = 409). Assistant stated = EVERY send / reach without `fromAccount` / `fromLine` writes from it, even where
   another line talks with the person (not connected = refused, never a fallback to another line). `fromLine: "founder"`
   on send / reach = only the founder line (none stated = `whatsapp_not_linked`); exclusive with `fromAccount`. Nothing
-  stated = the pick below, byte-identical. Served as `lineRole` on every link view and `channelAccounts`.
+  stated = the pick below, byte-identical. Served as `lineRole` on every link view and `channelAccounts`; a reachable
+  reach answer adds `assistantLine {phone, persona} | null` (the founder hello names the assistant and her number).
 - **WhatsApp threads merge into their person** (`lib/whatsapp/phone-resolution.ts`):
   WhatsApp names counterparts by LID ghosts (514/514 mirrored contacts had no phone, so 6
   of the first 13 people a campaign wrote to looked "never answered" while they had

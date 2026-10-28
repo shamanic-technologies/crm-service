@@ -3552,6 +3552,16 @@ export const WhatsappReachResponseSchema = registry.register(
         phoneSource: z.string().openapi({ description: "`request`, or `crm:<source>` (the person's record holding the phone)." }),
         fromAccount: z.string().openapi({ description: "The linked account the send would write from right now (its own number). Only accounts allowing automated sends are considered." }),
         persona: SenderPersonaSchema,
+        assistantLine: z
+          .object({
+            phone: z.string().openapi({ description: "The assistant line's own number, E.164." }),
+            persona: SenderPersonaSchema,
+          })
+          .nullable()
+          .openapi({
+            description:
+              "The brand's stated assistant line (`lineRole: \"assistant\"`), whichever line this send writes from, so a founder hello can name it (\"our assistant contacted you from <phone>\"). Null when the brand states none. (SOPHIE-SENDS-1028)",
+          }),
       }),
       z.object({
         reachable: z.literal(false),

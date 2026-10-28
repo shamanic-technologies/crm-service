@@ -492,6 +492,12 @@ export interface ReachResult {
   fromAccount: string;
   /** That account's sender persona, as the brand stated it (null when none). */
   persona: SenderPersona | null;
+  /**
+   * The brand's stated assistant line (SOPHIE-SENDS-1028), whichever line this
+   * send writes from: a founder hello names it ("our assistant contacted you
+   * from <phone>"). Null when the brand states none.
+   */
+  assistantLine: { phone: string; persona: SenderPersona | null } | null;
 }
 
 /**
@@ -505,7 +511,15 @@ export interface ReachResult {
 export async function reachWhatsApp(req: ReachRequest): Promise<ReachResult> {
   const { phone, phoneSource, accounts, who } = await resolveReach(req);
   const account = await chooseAccount(accounts, who.mxid);
-  return { reachable: true, to: phone, phoneSource, fromAccount: `+${digitsOf(account.loginId)}`, persona: account.persona };
+  const assistant = (await linkedWhatsappAccounts(req.orgId, req.brandId)).find((a) => a.lineRole === "assistant");
+  return {
+    reachable: true,
+    to: phone,
+    phoneSource,
+    fromAccount: `+${digitsOf(account.loginId)}`,
+    persona: account.persona,
+    assistantLine: assistant ? { phone: `+${digitsOf(assistant.loginId)}`, persona: assistant.persona } : null,
+  };
 }
 
 /**
