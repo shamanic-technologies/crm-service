@@ -6,6 +6,7 @@ import { db } from "../../src/db/index.js";
 import {
   contacts,
   people,
+  peopleFacts,
   posthogActivities,
   posthogConnections,
   posthogRawRecords,
@@ -14,6 +15,7 @@ import {
   stripeTransactions,
 } from "../../src/db/schema.js";
 import { ensureScope, runScopeBuild } from "../../src/lib/people/build.js";
+import { emitScopeFacts } from "../../src/lib/people/facts.js";
 import { runPosthogSyncPass, rebuildPosthogFromBronze } from "../../src/lib/posthog/sync.js";
 import { mirrorRecentStripe, runStripeSyncPass, rebuildStripeFromBronze } from "../../src/lib/stripe/sync.js";
 import peopleRoutes from "../../src/routes/people.js";
@@ -178,6 +180,9 @@ function hogqlAnswer(query: string) {
         "pageviews",
         "paths",
         "referrer",
+        "viewport_is_screen",
+        "headless_default_screen",
+        "screen",
       ],
       VISITS,
     );
@@ -515,6 +520,82 @@ describe.skipIf(!RUN)("PostHog + Stripe sources", () => {
     expect(st).toMatchObject({ status: "failed", error: "connected, first sync not finished yet" });
     const [row] = await db.select().from(posthogConnections).where(eq(posthogConnections.brandId, BRAND));
     expect(row.status).toBe("error");
+  });
+
+  it("ROBOTS-NEVER-LEAVE-BRONZE-1028: a machine's session stays in bronze: no activity, no event, no fact, no timeline item", async () => {
+    const machineVisit = (session: string, flags: Record<string, unknown>) => ({
+      session_id: session,
+      person_id: "ph-dave",
+      started_at: "2026-09-04T09:00:00Z",
+      ended_at: "2026-09-04T09:00:00Z",
+      entry_url: "https://brand.com/blog?utm_source=newsletter",
+      entry_path: "/blog",
+      pageviews: 1,
+      paths: ["/blog"],
+      referrer: "$direct",
+      ...flags,
+    });
+    const extraVisits = [
+      // Headless: the viewport fills the screen.
+      machineVisit("s-viewport", { viewport_is_screen: 1, headless_default_screen: 0, screen: "1920x1080" }),
+      // Headless default: a desktop on an 800x600 screen (the window smaller than it).
+      machineVisit("s-800", { viewport_is_screen: 0, headless_default_screen: 0, screen: "800x600" }),
+      // A person on a laptop: viewport smaller than the 1536x864 screen. A phone at 800x600-ish reads 0 too.
+      { ...machineVisit("s-person", { viewport_is_screen: 0, headless_default_screen: 0, screen: "1536x864" }), person_id: "ph-alice" },
+    ];
+    const extraEvents = [
+      { id: "ev-robot", event: "landing_variant_viewed", timestamp: "2026-09-04T09:00:01Z", person_id: "ph-dave", url: null, path: "/blog", session_id: "s-viewport" },
+      { id: "ev-robot-800", event: "landing_variant_viewed", timestamp: "2026-09-04T09:00:01Z", person_id: "ph-dave", url: null, path: "/blog", session_id: "s-800" },
+    ];
+    VISITS.push(...extraVisits);
+    EVENTS.push(...extraEvents);
+    try {
+      await connectBoth();
+      await runPosthogSyncPass();
+      const { scope } = await ensureScope(ORG, BRAND, USER);
+      expect((await runScopeBuild(scope)).ok).toBe(true);
+      await emitScopeFacts(scope);
+      const liveRefs = async () =>
+        (await db.select().from(peopleFacts).where(eq(peopleFacts.source, "posthog")))
+          .filter((f) => f.live && f.type !== "withdrawn")
+          .map((f) => f.sourceRef);
+      // Not recognised yet (bronze before the 800x600 fingerprint): s-800 is a person, its fact is live.
+      expect(await liveRefs()).toEqual(expect.arrayContaining(["s-800:ph-dave", "ev-robot-800", "s-person:ph-alice"]));
+      const silver = async () => (await db.select().from(posthogActivities)).map((a) => a.externalId).sort();
+      expect(await silver()).not.toContain("s-viewport:ph-dave");
+      expect(await silver()).not.toContain("ev-robot");
+
+      // The re-read brings the fingerprint: the whole session leaves silver, its live facts are withdrawn machine_visit.
+      extraVisits[1].headless_default_screen = 1;
+      const [{ seq: seqBefore }] = (await db.execute(sql`SELECT coalesce(max(feed_seq), 0)::bigint AS seq FROM people_facts`)) as unknown as { seq: string }[];
+      const pass = await runPosthogSyncPass();
+      expect(pass.results[0].machineActivitiesDropped).toBe(2);
+      expect(await silver()).toEqual(["ev-1", "ev-2", "s-person:ph-alice", "s1:ph-alice", "s2:ph-dave"]);
+      const summary = await emitScopeFacts(scope);
+      expect(summary).toMatchObject({ machineWithdrawn: 2, withdrawnGone: 0 });
+      const live = await liveRefs();
+      for (const robot of ["s-viewport:ph-dave", "ev-robot", "s-800:ph-dave", "ev-robot-800"]) expect(live).not.toContain(robot);
+      expect(live).toContain("s-person:ph-alice");
+      const machineWithdrawals = (await db.select().from(peopleFacts).where(eq(peopleFacts.type, "withdrawn")))
+        .filter((f) => (f.payload as { reason: string }).reason === "machine_visit" && Number(f.feedSeq) > Number(seqBefore))
+        .map((f) => f.sourceRef)
+        .sort();
+      expect(machineWithdrawals).toEqual(["ev-robot-800", "s-800:ph-dave"]);
+
+      // Nothing on dave's thread but his own visit; a rebuild from bronze writes no robot back.
+      const tl = await asOrg(request(app()).get(`/orgs/people/timeline?brandId=${BRAND}&personKey=${encodeURIComponent("email:dave@z.com")}`));
+      const posthogItems = tl.body.items.filter((i: { source: string; event: { step: string } }) => i.source === "posthog" && i.event.step !== "signup");
+      expect(posthogItems.map((i: { ref: { externalId: string } }) => i.ref.externalId)).toEqual(["s2:ph-dave"]);
+      const [pc] = await db.select().from(posthogConnections);
+      await rebuildPosthogFromBronze(pc);
+      expect(await silver()).toEqual(["ev-1", "ev-2", "s-person:ph-alice", "s1:ph-alice", "s2:ph-dave"]);
+      // Bronze keeps every robot for audit.
+      const raw = (await db.select().from(posthogRawRecords)).map((r) => r.externalId);
+      expect(raw).toEqual(expect.arrayContaining(["s-viewport:ph-dave", "s-800:ph-dave", "ev-robot", "ev-robot-800"]));
+    } finally {
+      VISITS.splice(VISITS.length - extraVisits.length);
+      EVENTS.splice(EVENTS.length - extraEvents.length);
+    }
   });
 
   it("disconnecting removes the mirror and the contacts", async () => {

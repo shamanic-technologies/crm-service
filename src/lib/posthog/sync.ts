@@ -48,6 +48,7 @@ import { authUserIds } from "../auth/sync.js";
 import { AUTH_PROVIDER_NAMES } from "../auth/providers.js";
 import { normalizePhone } from "../people/identity.js";
 import {
+  BRONZE_MACHINE_VISIT_SQL,
   deriveKeyEvent,
   derivePosthogContact,
   deriveVisit,
@@ -81,6 +82,8 @@ export interface PosthogSyncResult {
   eventsChanged: number;
   contactsDerived: number;
   activitiesDerived: number;
+  /** Activities of a machine's session dropped from silver (ROBOTS-NEVER-LEAVE-BRONZE-1028). */
+  machineActivitiesDropped: number;
   activitiesLinked: number;
 }
 
@@ -225,9 +228,12 @@ async function deriveActivities(
 ): Promise<number> {
   const now = new Date();
   let derived = 0;
+  const machines = await machineSessions(conn);
   for (const payload of await readBronze(conn, kind, externalIds)) {
     const a = kind === "visit" ? deriveVisit(payload) : deriveKeyEvent(payload);
     if (!a) continue;
+    const sessionId = (a.detail as { sessionId?: string | null }).sessionId;
+    if (sessionId && machines.has(`${sessionId}:${a.externalPersonId}`)) continue;
     const fields = {
       externalPersonId: a.externalPersonId,
       occurredAt: a.occurredAt,
@@ -255,6 +261,40 @@ async function deriveActivities(
     derived++;
   }
   return derived;
+}
+
+/**
+ * ROBOTS-NEVER-LEAVE-BRONZE-1028 (owner 2026-10-28: « Les robots ne sont pas des clics, ils ne doivent même pas
+ * arriver sur l'unibox ni nulle part, ils doivent être filtrés direct »): the sessions (`<session>:<person>`, the
+ * visit's bronze id) a MACHINE made, read off bronze (`BRONZE_MACHINE_VISIT_SQL`, records.ts `visitMachine`). Such a
+ * session stays in bronze only: neither its visit nor any event fired in it is written to silver, so no fact, no
+ * timeline item, no count ever reads it.
+ */
+async function machineSessions(conn: PosthogConnection): Promise<Set<string>> {
+  const rows = (await db.execute(sql`
+    SELECT payload->>'session_id' AS session_id, payload->>'person_id' AS person_id
+    FROM posthog_raw_records
+    WHERE connection_id = ${conn.id} AND kind = 'visit' AND ${sql.raw(BRONZE_MACHINE_VISIT_SQL("payload"))}
+  `)) as unknown as { session_id: string | null; person_id: string | null }[];
+  return new Set(rows.filter((r) => r.session_id && r.person_id).map((r) => `${r.session_id}:${r.person_id}`));
+}
+
+/**
+ * Drop from silver every activity of a machine's session: one written before its visit was read (an event the fast
+ * mirror took first), or before the fingerprint existed. Runs after each derivation, so it is also the cleanup of
+ * what earlier code wrote. Their live facts are withdrawn `machine_visit` by the next emission (people/facts.ts).
+ */
+async function dropMachineActivities(conn: PosthogConnection): Promise<number> {
+  const rows = await db.execute(sql`
+    DELETE FROM posthog_activities a
+    USING posthog_raw_records r
+    WHERE a.connection_id = ${conn.id} AND r.connection_id = ${conn.id} AND r.kind = 'visit'
+      AND ${sql.raw(BRONZE_MACHINE_VISIT_SQL("r.payload"))}
+      AND a.external_person_id = r.payload->>'person_id'
+      AND a.detail->>'sessionId' = r.payload->>'session_id'
+    RETURNING a.id
+  `);
+  return (rows as unknown as unknown[]).length;
 }
 
 /**
@@ -363,6 +403,7 @@ export async function syncPosthogConnection(conn: PosthogConnection, rereadSince
     const contactsDerived = await deriveContacts(conn, persons.changed);
     const activitiesDerived =
       (await deriveActivities(conn, "visit", visits.changed)) + (await deriveActivities(conn, "event", events.changed));
+    const machineActivitiesDropped = await dropMachineActivities(conn);
     const activitiesLinked = await linkActivities(conn);
 
     await db
@@ -389,6 +430,7 @@ export async function syncPosthogConnection(conn: PosthogConnection, rereadSince
       eventsChanged: events.changed.length,
       contactsDerived,
       activitiesDerived,
+      machineActivitiesDropped,
       activitiesLinked,
     };
   } catch (err) {
@@ -428,8 +470,9 @@ export async function rebuildPosthogFromBronze(conn: PosthogConnection) {
   const contactsDerived = await deriveContacts(conn);
   await db.update(posthogActivities).set({ contactId: null }).where(eq(posthogActivities.connectionId, conn.id));
   const activitiesDerived = (await deriveActivities(conn, "visit")) + (await deriveActivities(conn, "event"));
+  const machineActivitiesDropped = await dropMachineActivities(conn);
   const activitiesLinked = await linkActivities(conn);
-  return { contactsDerived, activitiesDerived, activitiesLinked };
+  return { contactsDerived, activitiesDerived, machineActivitiesDropped, activitiesLinked };
 }
 
 export interface FastMirrorResult {
@@ -498,6 +541,7 @@ export async function mirrorRecentPersons(conn: PosthogConnection, since: Date):
   await deriveContacts(conn, changed);
   await deriveActivities(conn, "visit", visits);
   await deriveActivities(conn, "event", events);
+  await dropMachineActivities(conn);
   await linkActivities(conn);
   return { changed, created: fresh.length, eventsChanged };
 }

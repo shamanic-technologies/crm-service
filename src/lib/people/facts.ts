@@ -55,7 +55,7 @@ import { LATE_JOIN_SOURCES, mirrorContactKeys } from "./record-keys.js";
 import { eventsQuery, type FunnelEventSource } from "../gohighlevel/funnel-events.js";
 import { labelEventsQuery, type LabelEventRow } from "../gohighlevel/label-verdicts.js";
 import { GHL_SOURCE } from "../gohighlevel/records.js";
-import { POSTHOG_SOURCE, brandEventProperties, describeKeyEvent } from "../posthog/records.js";
+import { BRONZE_MACHINE_VISIT_SQL, POSTHOG_SOURCE, brandEventProperties, describeKeyEvent } from "../posthog/records.js";
 import { STRIPE_SOURCE } from "../stripe/records.js";
 import { emailKey, keysOf, normalizeEmail, pickPersonKey, type Presence } from "./identity.js";
 import type { PersonConnectionTag } from "./connection-tags.js";
@@ -1209,6 +1209,27 @@ async function mirroredStripeIds(tx: Tx, orgId: string, brandId: string, ids: st
 }
 
 /**
+ * ROBOTS-NEVER-LEAVE-BRONZE-1028: of these PostHog visit / event ids, those of a session a MACHINE made, read off
+ * bronze (posthog/records.ts `BRONZE_MACHINE_VISIT_SQL`). Silver no longer holds them, so their live facts are
+ * withdrawn `machine_visit` (what they were), not `vendor_record_gone`.
+ */
+async function machinePosthogIds(tx: Tx, orgId: string, brandId: string, ids: string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (let i = 0; i < ids.length; i += 1000) {
+    const found = (await tx.execute(sql`
+      SELECT DISTINCT a.external_id FROM posthog_raw_records a
+      JOIN posthog_raw_records v ON v.connection_id = a.connection_id AND v.kind = 'visit'
+        AND ${sql.raw(BRONZE_MACHINE_VISIT_SQL("v.payload"))}
+        AND v.payload->>'session_id' = a.payload->>'session_id' AND v.payload->>'person_id' = a.payload->>'person_id'
+      WHERE a.org_id = ${orgId} AND a.brand_id = ${brandId} AND a.kind IN ('visit', 'event')
+        AND a.external_id IN (${sql.join(ids.slice(i, i + 1000).map((id) => sql`${id}`), sql`, `)})
+    `)) as unknown as { external_id: string }[];
+    for (const r of found) out.add(r.external_id);
+  }
+  return out;
+}
+
+/**
  * Which snapshot sources are connected AND fully synced at least once (so an
  * absent record may be withdrawn). A connection still on its first pass, e.g.
  * right after a reconnect, has not re-mirrored everything yet: nothing is gone.
@@ -1684,8 +1705,22 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
         .map(([, live]) => live.sourceRef)
         .filter((ref): ref is string => !!ref),
     );
+    const goneMachines = await machinePosthogIds(
+      tx,
+      orgId,
+      brandId,
+      [...liveByKey.entries()]
+        .filter(([key, live]) => !candidates.has(key) && (live.family === "posthog_visit" || live.family === "posthog_event"))
+        .map(([, live]) => live.sourceRef)
+        .filter((ref): ref is string => !!ref),
+    );
     for (const [key, live] of liveByKey) {
       if (candidates.has(key)) continue;
+      if (goneMachines.has(live.sourceRef ?? "") && (live.family === "posthog_visit" || live.family === "posthog_event")) {
+        withdrawals.push({ fact: live, reason: "machine_visit" });
+        machineWithdrawn++;
+        continue;
+      }
       if (authStatesSignups && live.family === "posthog_person") {
         withdrawals.push({ fact: live, reason: "signup_stated_by_auth_provider" });
         retired++;

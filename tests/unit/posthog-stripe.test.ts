@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { deriveKeyEvent, derivePosthogContact, deriveVisit, visitId } from "../../src/lib/posthog/records.js";
-import { lit, ts } from "../../src/lib/posthog/client.js";
+import { BRONZE_MACHINE_VISIT_SQL, deriveKeyEvent, derivePosthogContact, deriveVisit, visitId, visitMachine } from "../../src/lib/posthog/records.js";
+import { lit, MACHINE_VIEWPORT_SQL, ts } from "../../src/lib/posthog/client.js";
 import {
   deriveCharge,
   deriveRefund,
@@ -77,6 +77,19 @@ describe("PostHog derivation", () => {
     expect(deriveVisit({ ...row, viewport_is_screen: 0, screen: "1920.0x1080.0" })!.detail.machine).toBeNull();
     // A bronze row read before the fingerprint was asked: no proof, a person.
     expect(deriveVisit(row)!.detail.machine).toBeNull();
+  });
+
+  it("ROBOTS-NEVER-LEAVE-BRONZE-1028: every pageview a desktop on an 800x600 screen is a machine's; the same SQL twin", () => {
+    const row = { session_id: "s3", person_id: "p1", started_at: "2026-10-24T14:21:37Z", entry_path: "/blog/x", pageviews: 1, paths: ["/blog/x"] };
+    expect(visitMachine({ ...row, viewport_is_screen: 0, headless_default_screen: 1, screen: "800x600" })).toEqual({ fingerprint: "headless_default_screen", screen: "800x600" });
+    // A phone at 800x600-ish, a laptop at 1536x864 with a smaller viewport: the query answers 0 for both, a person.
+    expect(visitMachine({ ...row, viewport_is_screen: 0, headless_default_screen: 0, screen: "800x600" })).toBeNull();
+    expect(visitMachine({ ...row, viewport_is_screen: 0, headless_default_screen: 0, screen: "1536x864" })).toBeNull();
+    expect(BRONZE_MACHINE_VISIT_SQL("r.payload")).toBe("(r.payload->>'viewport_is_screen' IN ('1', 'true') OR r.payload->>'headless_default_screen' IN ('1', 'true'))");
+  });
+
+  it("ROBOTS-NEVER-LEAVE-BRONZE-1028: the visit query asks the 800x600 fingerprint on desktop pageviews only", () => {
+    expect(MACHINE_VIEWPORT_SQL).toMatch(/\$device_type\) = 'Desktop'\s+AND toFloat\(properties\.\$screen_width\) = 800 AND toFloat\(properties\.\$screen_height\) = 600, 0\)\) AS headless_default_screen/);
   });
 
   it("a key event keeps its own name, verbatim", () => {
