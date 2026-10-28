@@ -67,7 +67,8 @@ import { judgeNameTwins, readNameTwinEvidence, type NameTwinSummary } from "./na
 import { personRelevance, personView, readBrandContext, resolvePeopleRelevance, type PersonView, type RelevanceSummary } from "./relevance.js";
 import { leadAddressesFirst, resolvePersonState, type GhlDeal, type LeadObservation, type StripeStandingInput } from "./state.js";
 import { indexScopeMessages, type MessageIndexSummary } from "./search.js";
-import { emitScopeFacts, type FactEmissionSummary } from "./facts.js";
+import { type FactEmissionSummary } from "./facts.js";
+import { requestEmission } from "./fact-emitter.js";
 import { persistPersonIds } from "./person-id.js";
 import { visitorLabel } from "../posthog/records.js";
 import { readAccountUsers } from "./account-users.js";
@@ -796,10 +797,11 @@ async function buildScopePeopleOn(
     );
   }
 
-  // Then append to the fact feed what this build changed (lead-service reads it).
+  // Then append to the fact feed what this build changed (lead-service reads it), through the fact
+  // emitter (one emission per scope at a time; it also emits on its own when a record moves).
   // Same contract: a failure is recorded beside the build and retried next pass.
   try {
-    summary.facts = { status: "ok", ...(await emitScopeFacts(scope)) };
+    summary.facts = { status: "ok", ...(await requestEmission(scope)) };
   } catch (err) {
     console.error(`[crm-service] people fact emission failed scope=${scope.id}:`, err);
     summary.facts = { status: "failed", error: (err as Error).message };

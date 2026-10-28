@@ -28,14 +28,23 @@
  * two can never disagree. Our own outreach (Instantly, self-send) is NOT in the
  * feed: lead-service reads it directly.
  *
- * Emission takes a global advisory lock for its transaction, so feed_seq values
- * commit in order and a reader paging by cursor never skips a fact.
+ * FEED ORDER IS A GUARANTEE, not luck (UNIBOX-FACT-LAG-1028): every write to the feed happens
+ * under ONE exclusive advisory lock (`FEED_LOCK`), taken right before the first write and held to
+ * commit, so feed_seq values (drawn at insert) commit in increasing order; the reader
+ * (`readFacts`) takes the SAME lock SHARED, so it never reads while a writer is between drawing a
+ * seq and committing it. A cursor can therefore never step over a fact committed later with a
+ * lower seq. The DERIVATION (reads + diff, the slow part) runs before that lock, under a lock of
+ * its own scope only, so one big brand's emission no longer holds every other brand's back.
+ *
+ * Emission is driven by the fact emitter (fact-emitter.ts): within seconds of any record of the
+ * scope moving, not only after a whole people build (UNIBOX-FACT-LAG-1028).
  */
 
 import { createHash } from "node:crypto";
-import { and, asc, eq, gt, inArray, sql, type SQL } from "drizzle-orm";
+import { and, asc, eq, getTableColumns, gt, inArray, sql, type SQL } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { humanKeys, people, peopleFacts, personIdAliases, type PeopleFact, type PeopleScope, type Person } from "../../db/schema.js";
+import { humanKeys, people, peopleFacts, peopleScopes, personIdAliases, type PeopleFact, type PeopleScope, type Person } from "../../db/schema.js";
+import { LATE_JOIN_SOURCES, mirrorContactKeys } from "./record-keys.js";
 import { eventsQuery, type FunnelEventSource } from "../gohighlevel/funnel-events.js";
 import { labelEventsQuery, type LabelEventRow } from "../gohighlevel/label-verdicts.js";
 import { GHL_SOURCE } from "../gohighlevel/records.js";
@@ -266,6 +275,35 @@ export class PersonIndex {
     }
     return null;
   }
+}
+
+/**
+ * UNIBOX-FACT-LAG-1028: the identity keys every mirrored contact of the brand states (as the build
+ * derives them), by crm contact id. A fact about a record the people build has not joined yet (its
+ * presence is unknown: a Stripe customer created at checkout a minute ago) resolves on these keys to
+ * the person who holds one, exactly as the next build will cluster them, instead of waiting for it.
+ */
+export async function recordKeysByContact(orgId: string, brandId: string): Promise<Map<string, string[]>> {
+  const rows = await db.execute(sql`
+    SELECT id, source, primary_email AS "primaryEmail", phone_e164 AS "phoneE164", external_id AS "externalId",
+           jsonb_build_object('emails', raw_attributes->'emails', 'phones', raw_attributes->'phones', 'distinctIds', raw_attributes->'distinctIds') AS "rawAttributes"
+    FROM contacts
+    WHERE org_id = ${orgId} AND brand_id = ${brandId}
+      AND source IN (${sql.join(LATE_JOIN_SOURCES.map((x) => sql`${x}`), sql`, `)})
+  `);
+  const out = new Map<string, string[]>();
+  for (const r of rows as unknown as Parameters<typeof mirrorContactKeys>[0][]) {
+    const keys = mirrorContactKeys(r);
+    if (keys.length) out.set(r.id, keys);
+  }
+  return out;
+}
+
+/** PURE: a candidate known only by its record's presence also states the record's own identity keys (fallback lookup). */
+export function withRecordKeys(c: CandidateFact, keysOfContact: Map<string, string[]>): CandidateFact {
+  if (!c.subject.presence || c.subject.keys.length > 0 || c.subject.standalone || !c.crmContactId) return c;
+  const keys = keysOfContact.get(c.crmContactId);
+  return keys ? { ...c, subject: { ...c.subject, keys } } : c;
 }
 
 /** identity key -> humanId for the org, among `keys` (`human_keys`, refreshed by each people build). */
@@ -1262,7 +1300,16 @@ export interface FactEmissionSummary {
   bySource: Record<string, number>;
 }
 
-const FEED_LOCK = sql`SELECT pg_advisory_xact_lock(hashtext('crm-service.people_facts'))`;
+const FEED_LOCK_KEY = sql`hashtext('crm-service.people_facts')`;
+/** Exclusive: held from a writer's first write to its commit (feed_seq values commit in order). */
+const FEED_LOCK = sql`SELECT pg_advisory_xact_lock(${FEED_LOCK_KEY})`;
+/** Shared: a feed READ never overlaps a writer between drawing its seqs and committing them. */
+const FEED_READ_LOCK = sql`SELECT pg_advisory_xact_lock_shared(${FEED_LOCK_KEY})`;
+/** One emission per scope at a time (the diff reads the scope's facts, then writes on them). */
+const scopeLock = (scopeId: string) => sql`SELECT pg_advisory_xact_lock(hashtext(${`crm-service.people_facts.scope:${scopeId}`}))`;
+
+/** A fact already on the feed, without its payload (read only for the few facts re-stated). */
+type FeedFact = Omit<PeopleFact, "payload">;
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -1297,6 +1344,29 @@ function factRow(
   };
 }
 
+/** Stand-in for a re-stated fact's payload, read by `fillRestatedPayloads` (the emission reads facts without it). */
+const PAYLOAD_OF_LIVE: Record<string, unknown> = Object.freeze({}) as Record<string, unknown>;
+
+/** A re-stated fact carries the payload of the live fact it re-states (same natural key), read here for those only. */
+async function fillRestatedPayloads(tx: Tx, rows: (typeof peopleFacts.$inferInsert)[]): Promise<void> {
+  const restated = rows.filter((r) => r.payload === PAYLOAD_OF_LIVE);
+  if (restated.length === 0) return;
+  const { orgId, brandId } = restated[0];
+  const keys = [...new Set(restated.map((r) => r.naturalKey!))];
+  const payloadOf = new Map<string, unknown>();
+  for (let i = 0; i < keys.length; i += 1000) {
+    const found = await tx
+      .select({ naturalKey: peopleFacts.naturalKey, payload: peopleFacts.payload })
+      .from(peopleFacts)
+      .where(and(eq(peopleFacts.orgId, orgId), eq(peopleFacts.brandId, brandId), eq(peopleFacts.live, true), inArray(peopleFacts.naturalKey, keys.slice(i, i + 1000))));
+    for (const f of found) payloadOf.set(f.naturalKey!, f.payload);
+  }
+  for (const r of restated) {
+    if (!payloadOf.has(r.naturalKey!)) throw new Error(`fact feed: no live fact holds ${r.naturalKey} to re-state`);
+    r.payload = payloadOf.get(r.naturalKey!) as Record<string, unknown>;
+  }
+}
+
 async function insertAll(tx: Tx, values: (typeof peopleFacts.$inferInsert)[]) {
   for (let i = 0; i < values.length; i += 500) await tx.insert(peopleFacts).values(values.slice(i, i + 500));
 }
@@ -1306,10 +1376,12 @@ async function insertAll(tx: Tx, values: (typeof peopleFacts.$inferInsert)[]) {
  * splits, merges, withdrawals, then new facts, in that order, in ONE
  * transaction under the feed lock.
  */
-export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSummary> {
+export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "brandId">): Promise<FactEmissionSummary> {
   const { orgId, brandId } = scope;
   return db.transaction(async (tx) => {
-    await tx.execute(FEED_LOCK);
+    await tx.execute(scopeLock(scope.id));
+    // Every record committed before this instant is read below: what `facts_stated_through` promises.
+    const [{ readsFrom }] = (await tx.execute(sql`SELECT clock_timestamp() AS "readsFrom"`)) as unknown as { readsFrom: Date | string }[];
 
     // Everyone the build holds is someone to the feed (RELATIONSHIP-TAGS-1014: no
     // conversation verdict holds a person's facts back any more).
@@ -1348,9 +1420,12 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
     const builtKeys = new Set(personRows.flatMap((r) => r.identityKeys as string[]));
     const registry = [...registryCandidates(personRows), ...standaloneRegistryCandidates(csv, builtKeys, brandId)];
     const csvKeys = new Set(csv.map((c) => pickPersonKey(c.subject.keys)));
-    const all = [...ghl, ...matrix, ...matrixGroups, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv, ...calendar, ...credit, ...registry].filter(
-      (c) => !(authStatesSignups && c.family === "posthog_person"),
-    );
+    // A record the build has not joined yet (a new Stripe customer, a PostHog person who just typed
+    // their email) is filed on the person holding one of its keys now, not held until the next build.
+    const recordKeys = await recordKeysByContact(orgId, brandId);
+    const all = [...ghl, ...matrix, ...matrixGroups, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv, ...calendar, ...credit, ...registry]
+      .filter((c) => !(authStatesSignups && c.family === "posthog_person"))
+      .map((c) => withRecordKeys(c, recordKeys));
     const candidates = new Map<string, CandidateFact>();
     let duplicateKeys = 0;
     for (const c of all) {
@@ -1358,12 +1433,15 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       else candidates.set(c.naturalKey, c);
     }
 
-    // Every DATA fact ever emitted for the brand (meta facts carry no natural key).
+    // Every DATA fact ever emitted for the brand (meta facts carry no natural key), WITHOUT its payload:
+    // 413k facts / 420 MB for Distribute.you, 30 s of the 81 s an emission took (2026-10-28). The few
+    // facts re-stated below get their payload read on their own.
+    const { payload: _payload, ...feedColumns } = getTableColumns(peopleFacts);
     const existing = (await tx
-      .select()
+      .select(feedColumns)
       .from(peopleFacts)
       .where(and(eq(peopleFacts.orgId, orgId), eq(peopleFacts.brandId, brandId), sql`${peopleFacts.naturalKey} IS NOT NULL`))
-      .orderBy(asc(peopleFacts.feedSeq))) as PeopleFact[];
+      .orderBy(asc(peopleFacts.feedSeq))) as FeedFact[];
     const liveByKey = new Map(existing.filter((f) => f.live).map((f) => [f.naturalKey!, f]));
 
     // The human of every standalone subject (a CSV row no person holds), from human-service's answers.
@@ -1372,7 +1450,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
     for (const f of liveByKey.values()) if (f.subjectStandalone) for (const k of (f.subjectKeys as string[] | null) ?? []) standaloneKeys.add(k);
     index.setHumans(await humansOfKeys(tx, orgId, [...standaloneKeys]));
 
-    const subjectOf = (f: PeopleFact) => ({
+    const subjectOf = (f: FeedFact) => ({
       presence: f.subjectPresence,
       keys: (f.subjectKeys as string[] | null) ?? [],
       standalone: f.subjectStandalone,
@@ -1437,16 +1515,11 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
         payload: { fromPersonKey: m.fromPersonKey, intoPersonKey: m.intoPersonKey },
       });
     }
-    await insertAll(tx, meta);
-    const moved = moves.filter((m) => m.from !== m.to);
-    for (const m of moved) {
-      await tx.update(peopleFacts).set({ ownerPersonKey: m.to }).where(eq(peopleFacts.factId, m.factId));
-    }
     const ownerNow = new Map(moves.map((m) => [m.factId, m.to]));
 
     // 3-4. Withdrawals, then new facts.
     const withdrawals: {
-      fact: PeopleFact;
+      fact: FeedFact;
       reason:
         | "vendor_record_changed"
         | "vendor_record_gone"
@@ -1573,7 +1646,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
         dateBasis: live.dateBasis,
         source: live.source,
         sourceRef: live.sourceRef,
-        payload: live.payload,
+        payload: PAYLOAD_OF_LIVE,
         naturalKey: live.naturalKey,
         family: live.family,
         contentHash: live.contentHash,
@@ -1613,7 +1686,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
         dateBasis: live.dateBasis,
         source: live.source,
         sourceRef: live.sourceRef,
-        payload: live.payload,
+        payload: PAYLOAD_OF_LIVE,
         naturalKey: live.naturalKey,
         family: live.family,
         contentHash: live.contentHash,
@@ -1646,12 +1719,22 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
         withdrawnOf: fact.factId,
       };
     });
+    await fillRestatedPayloads(tx, fresh);
+
+    // Writes start here, in feed order (splits, merges, withdrawals, new facts): the feed lock (see the
+    // header) is held from now to commit. Everything above only READ.
+    await tx.execute(FEED_LOCK);
+    await insertAll(tx, meta);
+    for (const m of moves) {
+      if (m.from !== m.to) await tx.update(peopleFacts).set({ ownerPersonKey: m.to }).where(eq(peopleFacts.factId, m.factId));
+    }
     const ids = withdrawals.map((w) => w.fact.factId);
     for (let i = 0; i < ids.length; i += 1000) {
       await tx.update(peopleFacts).set({ live: false }).where(inArray(peopleFacts.factId, ids.slice(i, i + 1000)));
     }
     await insertAll(tx, withdrawnRows);
     await insertAll(tx, fresh);
+    await tx.update(peopleScopes).set({ factsStatedThrough: new Date(readsFrom) }).where(eq(peopleScopes.id, scope.id));
 
     return {
       candidates: candidates.size,
@@ -1729,7 +1812,11 @@ export function toFact(r: PeopleFact): Fact {
   };
 }
 
-/** One page of the feed after `since` (exclusive), in feed order. */
+/**
+ * One page of the feed after `since` (exclusive), in feed order. Read under the feed lock SHARED
+ * (see the header): no writer is between drawing a seq and committing it while the page is read, so
+ * every seq below the last one served is already committed and a cursor never skips a fact.
+ */
 export async function readFacts(args: {
   since: number;
   limit: number;
@@ -1739,12 +1826,15 @@ export async function readFacts(args: {
   const where = [gt(peopleFacts.feedSeq, args.since)];
   if (args.orgId) where.push(eq(peopleFacts.orgId, args.orgId));
   if (args.brandId) where.push(eq(peopleFacts.brandId, args.brandId));
-  const page = (await db
-    .select()
-    .from(peopleFacts)
-    .where(and(...where))
-    .orderBy(asc(peopleFacts.feedSeq))
-    .limit(args.limit + 1)) as PeopleFact[];
+  const page = await db.transaction(async (tx) => {
+    await tx.execute(FEED_READ_LOCK);
+    return (await tx
+      .select()
+      .from(peopleFacts)
+      .where(and(...where))
+      .orderBy(asc(peopleFacts.feedSeq))
+      .limit(args.limit + 1)) as PeopleFact[];
+  });
   const hasMore = page.length > args.limit;
   const facts = page.slice(0, args.limit).map(toFact);
   return { facts, nextCursor: facts.length ? facts[facts.length - 1].seq : String(args.since), hasMore };

@@ -574,6 +574,7 @@ export async function readStoredTimeline(
             source: peopleMessageTexts.source,
             unit: peopleMessageTexts.unit,
             messageKey: peopleMessageTexts.messageKey,
+            indexedAt: peopleMessageTexts.indexedAt,
             item: opts.paged ? sql<unknown>`${peopleMessageTexts.item} - 'text' - 'textClean'` : peopleMessageTexts.item,
           })
           .from(peopleMessageTexts)
@@ -629,7 +630,9 @@ export async function readStoredTimeline(
       // One message, one item: a Gmail message to two of the person's addresses, a cold email
       // read through two campaign units of one family. A cold email's key is computed from the
       // item itself, so a row an older build stored under a per-unit key still counts once.
-      const item = r.item as TimelineItem;
+      // UNIBOX-FACT-LAG-1028: when crm-service stored this message (a re-read stores it again).
+      const item = { ...(r.item as TimelineItem) };
+      item.ref = { ...item.ref, recordedAt: r.indexedAt.toISOString() };
       const key =
         source === "gmail"
           ? r.messageKey

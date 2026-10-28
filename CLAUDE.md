@@ -1630,12 +1630,32 @@ lead-service serves the overall tag, then go.
   with the new id, history facts included, so the id always names a row the
   contacts reads still serve. A snapshot record counts as gone only once its
   connection has finished a full sync (`last_synced_at`).
-- **Emitted after every people build** (`emitScopeFacts`, recorded as
-  `sourceReads.facts`; a failure never undoes the build). Candidates are
+- **Emitted within seconds of a record moving, not only after a build** (`emitScopeFacts`, UNIBOX-FACT-LAG-1028,
+  owner 2026-10-28: refused payments and every dashboard / onboarding action belong in the Unibox at once). The fact
+  emitter (`fact-emitter.ts`, every 10 s, first pass 60 s after boot, `FACT_EMIT=off`) emits each scope whose INPUTS
+  MARK moved (latest write to every table a fact is derived from, index-only, migration 0068); a build still emits
+  right after itself through `requestEmission` (one emission per scope at a time, one more coalesced after it), the
+  backstop for what the mark cannot see (a deleted record, a stored judgment). Candidates are
   re-derived from silver + the Gmail store and DIFFED on a natural key (vendor
   id + what about it) and a content hash: new key → fact; same hash → nothing (a
   re-sync emits 0); changed hash → `withdrawn` + a new fact. The first pass is
-  the backfill. One global advisory lock per emission so seqs commit in order.
+  the backfill. A record the build has not joined yet (a NEW Stripe customer at checkout, a PostHog person who just
+  typed their email) resolves on its own identity keys (`withRecordKeys`, `record-keys.ts`, as the build will
+  cluster it) instead of being held until a build. Before (2026-10-28, tari@slipless.ng): two refused charges
+  mirrored 05:04:05 reached the feed 05:08:43 + ~50 s commit: held (new customer) until the NEXT build re-read 31k
+  people (4 min 12 s), then an emission of 81-107 s (30 s of it reading 413k facts' payloads, now read narrow).
+- **Feed order is a guarantee** (UNIBOX-FACT-LAG-1028): the derivation runs under a per-SCOPE lock; every write takes
+  the global exclusive `FEED_LOCK` right before the first write, held to commit (seqs commit in order); `readFacts`
+  reads under the same lock SHARED, so no page is read while a writer holds seqs uncommitted. Only `facts.ts` writes
+  `people_facts` (pinned by `tests/unit/fact-lag.test.ts`). An EMPTY feed page opens no platform run (lead-service
+  asks every 15 s).
+- **`factFeed` on the person timeline** (UNIBOX-FACT-LAG-1028): `{settled, statedThrough, pending[]}`. Items carry
+  `ref.recordedAt` (when crm-service recorded the record: silver `last_rebuilt_at`, Matrix `ingested_at`, store
+  `indexed_at`) and, when the record IS a fact, `ref.factKey` (Matrix / Gmail keyed as before). Pending = a fact-able
+  item with no live fact, recorded after `people_scopes.facts_stated_through` (the last emission's read start) minus
+  60 s (`FACT_SETTLE_MARGIN_MS`: a silver write's time is its tx START). A read finding one kicks an emission. A WRITER
+  reading `settled: false` reads again shortly instead of writing (workflow-service honours it). Not covered yet:
+  GoHighLevel funnel events, calendar meetings, credit events (no `recordedAt`: never pending).
 - Groups (RELATIONSHIP-TAGS-1014): `group_member` (natural key room|ghost, payload channel,
   threadId, groupName, membership, dated joined_at) and `group_message` (a word the person WROTE
   in a group, payload groupName/text/direction; never `message_in`: lead-service's "waiting on us"
