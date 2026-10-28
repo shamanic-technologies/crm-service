@@ -1115,7 +1115,7 @@ owner had written to. A recorded fact, never an address-shape guess.
   record that brought the person in adds one dated event, so a CRM-only person
   is never an empty thread: GoHighLevel `added_to_crm` (`contact_created_at`),
   CSV `added_to_crm` (`uploaded_at`, item `source: "csv"`), PostHog `signup`,
-  Stripe `became_customer`. No vendor date → no event (never build time).
+  Stripe `stripe_customer_created`. No vendor date → no event (never build time).
 - **ONE state, read not graded** (`state.ts`): lead-service standing verbatim
   (first exact-address row of its own `sort=activity` search; a failed read is
   `unavailable`, never a guess; from `PEOPLE_STANDING_WALK_MIN` (200) addresses
@@ -1838,6 +1838,17 @@ re-derives silver with no vendor call. API reads are free → no cost declared.
   `stripe_transactions` (`payment` | `refund` | `subscription`, amount in MINOR
   units verbatim + currency + Stripe status). Passes re-list the last 30 days;
   a full re-list runs daily (`last_full_sync_at`).
+  **Every payment attempt reads as what it was** (UNIBOX-PAYMENT-REFUSED-1028, `stripe/attempts.ts`, owner 2026-10-28:
+  « Les paiements refusés doivent être dans l'unibox »): timeline step + label per charge status: `payment` ("Payment
+  received: $X") only when `succeeded`; `payment_refused` ("Payment refused: $X · <Stripe's failure_message, else decline
+  reason / failure code in words> · <description>"), `payment_pending`, `payment_disputed`, `payment_attempt` (a status
+  Stripe adds later); `refund` / `refund_failed`; `subscription_started` / `_canceled` with their price. The Stripe
+  customer record's entry step is `stripe_customer_created` (a card check creates one; it was `became_customer`). Fact
+  feed types unchanged (`payment` + payload `status`, lead-service's `paymentStands`). **Within a minute**: the phone
+  watch's fast mirror lists every kind CREATED in the last 10 min per synced connection (`mirrorRecentStripe`, 4 GETs,
+  no-churn) → silver → the thread at once; any fast-mirror change (Stripe, PostHog person OR event, auth user) kicks a
+  `followUp` people build so the fact feed follows (a 31k-people scope builds in 1-4 min). Prod 2026-10-28: a $100 top-up
+  refused at 05:01:24 was mirrored 05:04, served as a plain green `payment`; a writer told the person it was going through.
 - **Person layer**: both are `PEOPLE_SOURCES`; a Stripe customer with email +
   phone is merge evidence (`stripe_customer`). State precedence: lead_service >
   **stripe** (`subscription_<active|trialing|past_due|unpaid>` > `paid` >

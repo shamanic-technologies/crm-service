@@ -15,7 +15,7 @@ import {
 } from "../../src/db/schema.js";
 import { ensureScope, runScopeBuild } from "../../src/lib/people/build.js";
 import { runPosthogSyncPass, rebuildPosthogFromBronze } from "../../src/lib/posthog/sync.js";
-import { runStripeSyncPass, rebuildStripeFromBronze } from "../../src/lib/stripe/sync.js";
+import { mirrorRecentStripe, runStripeSyncPass, rebuildStripeFromBronze } from "../../src/lib/stripe/sync.js";
 import peopleRoutes from "../../src/routes/people.js";
 import posthogStripeRoutes from "../../src/routes/posthog-stripe.js";
 
@@ -421,7 +421,7 @@ describe.skipIf(!RUN)("PostHog + Stripe sources", () => {
     expect(t).toEqual([
       // How alice came in: PostHog person created, Stripe customer created (each dated by the vendor).
       "2026-09-01T08:00:00.000Z posthog:signup",
-      "2026-09-01T08:06:40.000Z stripe:became_customer",
+      "2026-09-01T08:06:40.000Z stripe:stripe_customer_created",
       "2026-09-01T09:00:00.000Z posthog:visit",
       "2026-09-01T09:05:00.000Z posthog:event",
       "2026-09-01T10:53:20.000Z stripe:subscription_started",
@@ -446,6 +446,59 @@ describe.skipIf(!RUN)("PostHog + Stripe sources", () => {
       matrix: "not_connected",
       gohighlevel: "not_connected",
     });
+  });
+
+  it("a refused card lands on the thread within one fast-mirror pass, as refused, beside the paid charge", async () => {
+    await connectBoth();
+    await runPosthogSyncPass();
+    await runStripeSyncPass();
+    const { scope } = await ensureScope(ORG, BRAND, USER);
+    await runScopeBuild(scope);
+    const refused = {
+      id: "ch_refused",
+      object: "charge",
+      customer: "cus_alice",
+      amount: 10000,
+      amount_refunded: 0,
+      refunded: false,
+      currency: "usd",
+      status: "failed",
+      paid: false,
+      created: 1_788_270_000,
+      description: null,
+      failure_code: "card_declined",
+      failure_message: "Your card has insufficient funds. Use a different payment method to complete this purchase.",
+      outcome: { type: "issuer_declined", reason: "insufficient_funds" },
+    };
+    STRIPE.charges.push(refused);
+    try {
+      calls = [];
+      const [sc] = await db.select().from(stripeConnections);
+      const fast = await mirrorRecentStripe(sc, new Date(Date.now() - 10 * 60_000));
+      expect(fast.changed).toMatchObject({ charge: 1, customer: 0 });
+      // One list per kind (customers, charges, refunds, subscriptions), nothing else.
+      expect(calls.filter((c) => c.includes("api.stripe.com"))).toHaveLength(4);
+      // A second pass over the same window writes nothing.
+      expect((await mirrorRecentStripe(sc, new Date(Date.now() - 10 * 60_000))).changed).toMatchObject({ charge: 0 });
+
+      const tl = await asOrg(
+        request(app()).get(`/orgs/people/timeline?brandId=${BRAND}&personKey=${encodeURIComponent("email:alice@x.com")}`),
+      );
+      expect(tl.status).toBe(200);
+      const money = tl.body.items
+        .filter((i: { source: string; event: { step: string } }) => i.source === "stripe" && i.event.step.startsWith("payment"))
+        .map((i: { text: string; event: { step: string; detail: { status: string } } }) => [i.event.step, i.text, i.event.detail.status]);
+      expect(money).toEqual([
+        ["payment", "Payment received: $99.00 · Subscription creation", "succeeded"],
+        [
+          "payment_refused",
+          "Payment refused: $100.00 · Your card has insufficient funds. Use a different payment method to complete this purchase.",
+          "failed",
+        ],
+      ]);
+    } finally {
+      STRIPE.charges.pop();
+    }
   });
 
   it("a connection whose first sync failed is reported failed, never as zero people", async () => {

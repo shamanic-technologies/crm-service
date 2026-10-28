@@ -34,9 +34,11 @@ import {
   phoneGivenReports,
   phoneWatchArtifacts,
   posthogConnections,
+  stripeConnections,
   type PhoneGivenReport,
 } from "../../db/schema.js";
 import { mirrorRecentPersons } from "../posthog/sync.js";
+import { mirrorRecentStripe } from "../stripe/sync.js";
 import { mirrorRecentlyUpdatedUsers } from "../auth/sync.js";
 import { runScopeBuild } from "../people/build.js";
 import { createRun, updateRun } from "../runs-client.js";
@@ -94,6 +96,20 @@ async function fastMirror(now: number): Promise<PhoneWatchResult["mirrored"]> {
     } catch (err) {
       console.warn(`[crm-service][phone-trigger] PostHog fast mirror of ${conn.id} (brand ${conn.brandId}) failed: ${(err as Error).message}`);
       out.push({ source: "posthog", connectionId: conn.id, orgId: conn.orgId, brandId: conn.brandId, changed: 0, error: (err as Error).message });
+    }
+  }
+  // Every payment attempt (refused ones too) on the brand's Stripe, mirrored within a minute (UNIBOX-PAYMENT-REFUSED-1028).
+  const stripe = await db
+    .select()
+    .from(stripeConnections)
+    .where(and(inArray(stripeConnections.status, ["active", "error"]), sql`${stripeConnections.lastSyncedAt} IS NOT NULL`));
+  for (const conn of stripe) {
+    try {
+      const r = await mirrorRecentStripe(conn, new Date(since));
+      out.push({ source: "stripe", connectionId: conn.id, orgId: conn.orgId, brandId: conn.brandId, changed: Object.values(r.changed).reduce((a, b) => a + b, 0) });
+    } catch (err) {
+      console.warn(`[crm-service][phone-trigger] Stripe fast mirror of ${conn.id} (brand ${conn.brandId}) failed: ${(err as Error).message}`);
+      out.push({ source: "stripe", connectionId: conn.id, orgId: conn.orgId, brandId: conn.brandId, changed: 0, error: (err as Error).message });
     }
   }
   const auth = await db
@@ -493,10 +509,14 @@ export async function runPhoneWatchPass(now: number = Date.now()): Promise<Phone
   const mirrored = process.env.PHONE_WATCH_FAST_MIRROR === "off" ? [] : await fastMirror(now);
   const { brands, ...detected } = await detectNewPhones(now);
   // A PostHog person new or changed (a visitor who typed their website, name, email...:
-  // ONBOARDING-IN-UNIBOX-1015) becomes a person of the brand's Unibox at the build; their
-  // later events need none (the thread reads the mirror live).
+  // ONBOARDING-IN-UNIBOX-1015) becomes a person of the brand's Unibox at the build. Their later
+  // events and a Stripe payment attempt show on the thread at once (it reads the mirror live) but
+  // reach the fact feed (lead-service) only at the next build, so they kick one too
+  // (UNIBOX-PAYMENT-REFUSED-1028: a product event waited ~4 min for the next build).
   const refresh = new Set(brands);
-  for (const m of mirrored) if (m.source === "posthog" && m.changed > 0) refresh.add(`${m.orgId}|${m.brandId}`);
+  for (const m of mirrored) {
+    if (m.changed > 0 || (m.eventsChanged ?? 0) > 0) refresh.add(`${m.orgId}|${m.brandId}`);
+  }
   if (process.env.PHONE_TRIGGER_REFRESH !== "off") {
     for (const b of refresh) {
       const [orgId, brandId] = b.split("|");

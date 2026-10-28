@@ -83,6 +83,9 @@ export function deriveCharge(payload: Record<string, unknown>): DerivedTransacti
       invoice: idOf(payload.invoice),
       paymentIntent: idOf(payload.payment_intent),
       failureMessage: str(payload.failure_message),
+      // Stripe's fixed codes for WHY a charge failed (`card_declined`, `insufficient_funds`...): verbatim.
+      failureCode: str(payload.failure_code),
+      declineReason: str((payload.outcome as { reason?: unknown } | null | undefined)?.reason),
       livemode: payload.livemode === true,
     },
   };
