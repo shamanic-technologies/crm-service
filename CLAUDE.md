@@ -1330,15 +1330,19 @@ newest first, a person with none absent; a send with no campaign never matches. 
   `automation_not_allowed` by the reply trigger (pass-through: allowed again, the next message is judged). Set with
   `PATCH /orgs/matrix/links/{linkId} {brandId, outreachDefault?: true, automationAllowed?, persona?}`; served on
   every link view and `channelAccounts`. Generic on every channel.
-- **Line roles: assistant + founder** (`lib/whatsapp/line-roles.ts`, SOPHIE-SENDS-1028, owner 2026-10-28 « les campagnes de
-  base envoient via Sophie. Mais juste une welcome WA de plus en parallèle depuis mon WA pro »): `matrix_links.line_role`
-  (`assistant | founder`, one account per role per brand + channel, set by the brand: `PATCH /orgs/matrix/links/{linkId}
-  {brandId, lineRole}`, `null` clears, 409 on a line not linked or not allowing automation; turning automation off on a
-  role holder = 409). Assistant stated = EVERY send / reach without `fromAccount` / `fromLine` writes from it, even where
-  another line talks with the person (not connected = refused, never a fallback to another line). `fromLine: "founder"`
-  on send / reach = only the founder line (none stated = `whatsapp_not_linked`); exclusive with `fromAccount`. Nothing
-  stated = the pick below, byte-identical. Served as `lineRole` on every link view and `channelAccounts`; a reachable
-  reach answer adds `assistantLine {phone, persona} | null` (the founder hello names the assistant and her number).
+- **Account types: Pro (human), Personal (human), Pro (AI)** (`lib/matrix/account-types.ts`, ACCOUNT-TYPES-1028, owner
+  2026-10-28 « des comptes pro (human), des comptes perso (human), ou des comptes pro (AI) »; replaces SOPHIE-SENDS-1028's
+  one-line-per-role, owner: « tu es en train de faire plein d'exceptions là, c'est dégueulasse »): `matrix_links.account_type`
+  `pro_human | personal_human | pro_ai` (same values as meta-service's Threads accounts), on EVERY linked account, set by the
+  brand (`PATCH /orgs/matrix/links/{linkId} {brandId, accountType}`, `null` clears), NO cap per type. Any account typed `pro_ai`
+  = every automated send / reach without `fromAccount` writes from one of the brand's `pro_ai` accounts (the pick below among
+  them: the one the person last talked with first). `fromAccountType: "pro_human"` = only those. `personal_human` = never
+  written from by automation (even named by `fromAccount`: `automation_not_allowed`), fires no automated reply, no assistant
+  ping; typing it turns `automation_allowed` off, turning it back on = 409. `pro_ai` with automation off = 409. Old words
+  still read and written: `lineRole` / `fromLine` `assistant` = pro_ai, `founder` = pro_human (migration 0070 carried them;
+  `line_role` column no longer read). Nothing typed = the pick below, byte-identical. Served as `accountType` (+ `lineRole`)
+  on every link view and `channelAccounts`; a reachable reach answer adds `assistantLine {phone, persona} | null` = the pro_ai
+  account an automated send to this person would use (a pro_human hello names it).
 - **WhatsApp threads merge into their person** (`lib/whatsapp/phone-resolution.ts`):
   WhatsApp names counterparts by LID ghosts (514/514 mirrored contacts had no phone, so 6
   of the first 13 people a campaign wrote to looked "never answered" while they had

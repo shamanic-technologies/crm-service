@@ -9,7 +9,7 @@ import { db } from "../../db/index.js";
 import { matrixConnections, matrixLinks } from "../../db/schema.js";
 import { bridgeLogins, type BridgeLogin } from "../matrix/bridge.js";
 import { personaOf, type SenderPersona } from "../matrix/persona.js";
-import { isLineRole, type LineRole } from "./line-roles.js";
+import { isAccountType, type AccountType } from "../matrix/account-types.js";
 
 export { personaOf, type SenderPersona };
 
@@ -22,12 +22,15 @@ export interface WhatsappAccount {
   loginId: string;
   /** The brand marked this account as the one first messages go out from. */
   outreachDefault: boolean;
-  /** An automated send may write from this account (SOPHIE-WA-1016, `matrix_links.automation_allowed`). */
+  /**
+   * The brand allows automated sends from this account (SOPHIE-WA-1016, `matrix_links.automation_allowed`).
+   * A personal line is never written from whatever this says (`automationOn`, ACCOUNT-TYPES-1028).
+   */
   automationAllowed: boolean;
   /** Who writes from this account, as the brand states it. */
   persona: SenderPersona | null;
-  /** The role the brand stated for this line (SOPHIE-SENDS-1028, line-roles.ts), null when none. */
-  lineRole: LineRole | null;
+  /** The type the brand picked for this account (ACCOUNT-TYPES-1028, account-types.ts), null when not typed. */
+  accountType: AccountType | null;
 }
 
 
@@ -46,7 +49,7 @@ export async function linkedWhatsappAccounts(orgId: string, brandId: string): Pr
       personaName: matrixLinks.personaName,
       personaRole: matrixLinks.personaRole,
       personaInstructions: matrixLinks.personaInstructions,
-      lineRole: matrixLinks.lineRole,
+      accountType: matrixLinks.accountType,
     })
     .from(matrixLinks)
     .innerJoin(matrixConnections, eq(matrixConnections.id, matrixLinks.connectionId))
@@ -70,7 +73,7 @@ export async function linkedWhatsappAccounts(orgId: string, brandId: string): Pr
       outreachDefault: r.outreachDefault,
       automationAllowed: r.automationAllowed,
       persona: personaOf(r),
-      lineRole: isLineRole(r.lineRole) ? r.lineRole : null,
+      accountType: isAccountType(r.accountType) ? r.accountType : null,
     }));
 }
 

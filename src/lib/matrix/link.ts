@@ -27,7 +27,7 @@
  */
 
 import { personaOf, type SenderPersona } from "./persona.js";
-import { isLineRole, type LineRole } from "../whatsapp/line-roles.js";
+import { isAccountType, roleOfAccountType, type AccountType, type LineRole } from "./account-types.js";
 import { and, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import QRCode from "qrcode";
 import { db } from "../../db/index.js";
@@ -597,7 +597,9 @@ export interface ChannelAccount {
   outreachDefault: boolean;
   automationAllowed: boolean;
   persona: SenderPersona | null;
-  /** The role the brand stated for this line (SOPHIE-SENDS-1028), null when none. */
+  /** The type the brand picked for this account (ACCOUNT-TYPES-1028), null when not typed. */
+  accountType: AccountType | null;
+  /** SOPHIE-SENDS-1028's word for the type: `assistant` = pro_ai, `founder` = pro_human, else null. */
   lineRole: LineRole | null;
   needsRelink: boolean;
 }
@@ -632,7 +634,9 @@ export interface LinkView {
   automationAllowed: boolean;
   /** Who writes from this account, as the brand stated it. */
   persona: SenderPersona | null;
-  /** The role the brand stated for this line: `assistant` | `founder` (SOPHIE-SENDS-1028), null when none. */
+  /** The type the brand picked for this account: `pro_human` | `personal_human` | `pro_ai` (ACCOUNT-TYPES-1028), null when not typed. */
+  accountType: AccountType | null;
+  /** SOPHIE-SENDS-1028's word for the type: `assistant` = pro_ai, `founder` = pro_human, else null. */
   lineRole: LineRole | null;
   connection: {
     id: string;
@@ -727,6 +731,7 @@ function toChannelAccount(v: LinkView): ChannelAccount {
     outreachDefault: v.outreachDefault,
     automationAllowed: v.automationAllowed,
     persona: v.persona,
+    accountType: v.accountType,
     lineRole: v.lineRole,
     needsRelink: v.needsRelink,
   };
@@ -865,7 +870,8 @@ export async function toView(
     outreachDefault: link?.outreachDefault ?? false,
     automationAllowed: link?.automationAllowed ?? true,
     persona: link ? personaOf(link) : null,
-    lineRole: link && isLineRole(link.lineRole) ? link.lineRole : null,
+    accountType: link && isAccountType(link.accountType) ? link.accountType : null,
+    lineRole: roleOfAccountType(link && isAccountType(link.accountType) ? link.accountType : null),
     connection: conn
       ? {
           id: conn.id,

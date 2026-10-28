@@ -9,6 +9,7 @@ import { runSyncPass } from "../lib/matrix/sync.js";
 import { runScopeBuild } from "../lib/people/build.js";
 import { reachWhatsApp, SendRefusal, sendConnection, sendWhatsApp, sendWhatsAppBubbles } from "../lib/whatsapp/send.js";
 import { normalizeEmail, normalizePhone } from "../lib/people/identity.js";
+import { accountTypeOfRole } from "../lib/matrix/account-types.js";
 
 const router = Router();
 
@@ -65,7 +66,7 @@ router.post("/orgs/whatsapp/messages", apiKeyAuth, requireOrg("whatsapp.send"), 
       email: body.email ?? null,
       phone: body.phone ?? null,
       fromAccount: body.fromAccount ?? null,
-        fromLine: body.fromLine ?? null,
+      fromAccountType: body.fromAccountType ?? (body.fromLine ? accountTypeOfRole(body.fromLine) : null),
       skipIfReplied: body.skipIfReplied ?? false,
       userId: req.userId ?? null,
     };
@@ -117,7 +118,7 @@ router.post("/orgs/whatsapp/reach", apiKeyAuth, requireOrg("whatsapp.reach"), as
         email: body.email ?? null,
         phone: body.phone ?? null,
         fromAccount: body.fromAccount ?? null,
-        fromLine: body.fromLine ?? null,
+        fromAccountType: body.fromAccountType ?? (body.fromLine ? accountTypeOfRole(body.fromLine) : null),
         skipIfReplied: body.skipIfReplied ?? false,
       }),
     );

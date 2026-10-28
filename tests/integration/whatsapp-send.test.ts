@@ -482,25 +482,70 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
     expect(sends.at(-1)!.auth).toBe("Bearer tok-33611111111");
     expect((await reach({ fromLine: "founder", fromAccount: "+33611111111" })).status).toBe(400);
 
-    // One line per role: stating it elsewhere moves it.
+    // Both lines listed with their type and its older word.
     const list = await request(app()).get(`/orgs/matrix/links?brandId=${BRAND}`).set(headers);
     const wa = list.body.links.find((l: { channel: string }) => l.channel === "whatsapp");
-    expect(wa.channelAccounts.map((a: { phone: string; lineRole: string | null }) => [a.phone, a.lineRole])).toEqual([
-      ["+33611111111", "founder"],
-      ["+33622222222", "assistant"],
+    expect(wa.channelAccounts.map((a: { phone: string; accountType: string | null; lineRole: string | null }) => [a.phone, a.accountType, a.lineRole])).toEqual([
+      ["+33611111111", "pro_human", "founder"],
+      ["+33622222222", "pro_ai", "assistant"],
     ]);
+    // No cap per type (ACCOUNT-TYPES-1028): stating it on another line keeps it on this one too.
     await request(app()).patch(`/orgs/matrix/links/${founder.linkId}`).set(headers).send({ brandId: BRAND, lineRole: "assistant" }).expect(200);
-    const moved = await request(app()).get(`/orgs/matrix/links?brandId=${BRAND}`).set(headers);
-    expect(moved.body.accounts.map((a: { lineRole: string | null }) => a.lineRole)).toEqual(["assistant", null]);
+    const both = await request(app()).get(`/orgs/matrix/links?brandId=${BRAND}`).set(headers);
+    expect(both.body.accounts.map((a: { lineRole: string | null; accountType: string | null }) => [a.lineRole, a.accountType])).toEqual([
+      ["assistant", "pro_ai"],
+      ["assistant", "pro_ai"],
+    ]);
 
-    // A role holder cannot be turned mirror-only silently; a mirror-only line takes no role.
+    // A pro_ai line cannot be turned mirror-only silently; a mirror-only line cannot be pro_ai.
     const off = await request(app()).patch(`/orgs/matrix/links/${founder.linkId}`).set(headers).send({ brandId: BRAND, automationAllowed: false });
     expect(off.status).toBe(409);
+    await request(app()).patch(`/orgs/matrix/links/${assistant.linkId}`).set(headers).send({ brandId: BRAND, accountType: null }).expect(200);
     await request(app()).patch(`/orgs/matrix/links/${assistant.linkId}`).set(headers).send({ brandId: BRAND, automationAllowed: false }).expect(200);
-    const roleOnOff = await request(app()).patch(`/orgs/matrix/links/${assistant.linkId}`).set(headers).send({ brandId: BRAND, lineRole: "founder" });
+    const roleOnOff = await request(app()).patch(`/orgs/matrix/links/${assistant.linkId}`).set(headers).send({ brandId: BRAND, lineRole: "assistant" });
     expect(roleOnOff.status).toBe(409);
+    const exclusive = await request(app()).patch(`/orgs/matrix/links/${assistant.linkId}`).set(headers).send({ brandId: BRAND, lineRole: "founder", accountType: "pro_human" });
+    expect(exclusive.status).toBe(400);
     await request(app()).patch(`/orgs/matrix/links/${founder.linkId}`).set(headers).send({ brandId: BRAND, lineRole: null }).expect(200);
     expect((await reach({})).body).toMatchObject({ reachable: true, fromAccount: "+33611111111" });
+  });
+
+  it("several pro_ai accounts all write; the one the person talks with answers; a personal line never writes (ACCOUNT-TYPES-1028)", async () => {
+    const first = await linkAccount(ACCOUNT, { linkedAt: new Date("2026-10-01T00:00:00Z") });
+    const second = await linkAccount(ACCOUNT_PRO, { linkedAt: new Date("2026-10-02T00:00:00Z") });
+    const reach = (body: Record<string, unknown>) => request(app()).post("/orgs/whatsapp/reach").set(headers).send({ brandId: BRAND, phone: "+33600000001", ...body });
+    const type = (linkId: string, body: Record<string, unknown>) => request(app()).patch(`/orgs/matrix/links/${linkId}`).set(headers).send({ brandId: BRAND, ...body });
+
+    // Two accounts typed pro_ai on one brand and channel: both accepted.
+    await type(first.linkId, { accountType: "pro_ai" }).expect(200);
+    const again = await type(second.linkId, { accountType: "pro_ai" });
+    expect(again.status).toBe(200);
+    expect(again.body.link.accountType).toBe("pro_ai");
+    const list = await request(app()).get(`/orgs/matrix/links?brandId=${BRAND}`).set(headers);
+    expect(list.body.accounts.map((a: { accountType: string | null }) => a.accountType)).toEqual(["pro_ai", "pro_ai"]);
+
+    // Nobody talks with the person yet: the oldest pro_ai account writes.
+    expect((await reach({})).body).toMatchObject({ reachable: true, fromAccount: "+33611111111" });
+    // The person's conversation is on the second account: it answers.
+    await mirroredThread(second.connectionId, "@whatsapp_lid-1:matrix.test", 4);
+    expect((await reach({})).body).toMatchObject({ reachable: true, fromAccount: "+33622222222", assistantLine: { phone: "+33622222222" } });
+    const sent = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000001", text: "Hi again", idempotencyKey: "k-types" });
+    expect(sent.body).toMatchObject({ fromAccount: "+33622222222" });
+    expect(sends.at(-1)!.auth).toBe("Bearer tok-33622222222");
+
+    // Typed personal: automated sends turn off on it, and it is never written from, even asked by number.
+    const personal = await type(second.linkId, { accountType: "personal_human" });
+    expect(personal.body.link).toMatchObject({ accountType: "personal_human", automationAllowed: false, lineRole: null });
+    expect((await reach({})).body).toMatchObject({ reachable: true, fromAccount: "+33611111111" });
+    expect((await reach({ fromAccount: "+33622222222" })).body).toMatchObject({ reachable: false, code: "automation_not_allowed" });
+    expect((await type(second.linkId, { automationAllowed: true })).status).toBe(409);
+    expect((await reach({ fromAccountType: "pro_human" })).body).toMatchObject({ reachable: false, code: "whatsapp_not_linked" });
+    expect((await reach({ fromAccountType: "personal_human" })).status).toBe(400);
+    await type(first.linkId, { accountType: "personal_human" }).expect(200);
+    expect((await reach({})).body).toMatchObject({ reachable: false, code: "automation_not_allowed" });
   });
 
   it("refuses human_in_conversation, nothing sent, when someone of the brand typed to the person by hand on any linked account (HUMAN-IN-THREAD-1016)", async () => {

@@ -78,6 +78,7 @@ import { ownTeamMatch, readOwnTeam, type OwnTeam } from "./own-team.js";
 import { readThreadForReply, type BurstMessage, type RoomSend } from "./thread.js";
 import { humanTypedTo } from "../matrix/human-takeover.js";
 import { copilotAnswersOn, deliverDueHandoffs, HANDOFF_STATUS, HANDOFF_STATUSES } from "./copilot.js";
+import { automationOn, isAccountType } from "../matrix/account-types.js";
 import { ourAutomatedEchoesOn } from "./own-automated.js";
 import { lazyJudgeRun, outcomeAtDetection } from "./outcome.js";
 
@@ -250,14 +251,15 @@ export const PASS_THROUGH_REASONS: readonly string[] = [
 
 /**
  * May a message received on this connection fire an automated reply? Its link's
- * `automation_allowed`; a connection with no link (registered by hand) is allowed.
+ * `automation_allowed`, never on a personal line (ACCOUNT-TYPES-1028); a
+ * connection with no link (registered by hand) is allowed.
  */
 export async function automationAllowedOn(connectionId: string): Promise<boolean> {
   const rows = await db
-    .select({ allowed: matrixLinks.automationAllowed })
+    .select({ automationAllowed: matrixLinks.automationAllowed, accountType: matrixLinks.accountType })
     .from(matrixLinks)
     .where(eq(matrixLinks.connectionId, connectionId));
-  return rows.length === 0 || rows.some((r) => r.allowed);
+  return rows.length === 0 || rows.some((r) => automationOn({ automationAllowed: r.automationAllowed, accountType: isAccountType(r.accountType) ? r.accountType : null }));
 }
 
 /**

@@ -11,6 +11,7 @@ import {
   SERVICE_NAME,
 } from "../middleware/auth.js";
 import { MATRIX_CHANNELS } from "../lib/matrix/events.js";
+import { accountTypeOfRole } from "../lib/matrix/account-types.js";
 import { MatrixLinkUpdateRequestSchema } from "../schemas.js";
 import { LEAD_STATUSES } from "../lib/matrix/leads.js";
 import { BRAND_MIN_PROBABILITY } from "../lib/people/relevance.js";
@@ -423,11 +424,14 @@ router.get(
  *    stays mirrored for the Unibox.
  *  - `persona {name, role, instructions}`: who writes from it, served on the
  *    link views and on the WhatsApp reach / send. Omitted fields keep their
- *    value; null or "" clears one; `persona: null` clears all. *  - `lineRole` (SOPHIE-SENDS-1028, lib/whatsapp/line-roles.ts): `assistant` =
- *    every automated send writes from it; `founder` = only a send asking
- *    `fromLine: "founder"`. One account per role per (brand, channel): the
- *    holder loses it. `null` clears. Only a linked account allowing automated
- *    sends takes a role (a role on a mirror-only line could never write).
+ *    value; null or "" clears one; `persona: null` clears all.
+ *  - `accountType` (ACCOUNT-TYPES-1028, lib/matrix/account-types.ts):
+ *    `pro_human` | `personal_human` | `pro_ai`, any number per (brand, channel),
+ *    `null` clears; `lineRole` = SOPHIE-SENDS-1028's words for it (`assistant` =
+ *    pro_ai, `founder` = pro_human). Only a linked account takes one. `pro_ai`
+ *    needs automated sends allowed (a pro_ai line that can never write is a
+ *    contradiction); `personal_human` turns them off, and they cannot be turned
+ *    back on while the account is personal.
  */
 router.patch(
   "/orgs/matrix/links/:linkId",
@@ -440,33 +444,41 @@ router.patch(
       return res.status(400).json({
         type: "validation",
         error:
-          "linkId (uuid) path, body {brandId (uuid), and at least one of outreachDefault: true, automationAllowed: boolean, persona: {name?, role?, instructions?} | null, lineRole: assistant | founder | null}" +
+          "linkId (uuid) path, body {brandId (uuid), and at least one of outreachDefault: true, automationAllowed: boolean, persona: {name?, role?, instructions?} | null, accountType: pro_human | personal_human | pro_ai | null (or lineRole: assistant | founder | null)}" +
           (parsed.success ? "" : `: ${parsed.error.issues.map((i) => i.message).join("; ")}`),
       });
     }
     const { brandId, outreachDefault, automationAllowed, persona, lineRole } = parsed.data;
+    const accountType =
+      parsed.data.accountType !== undefined ? parsed.data.accountType : lineRole === undefined ? undefined : lineRole && accountTypeOfRole(lineRole);
     const [link] = await db
       .select()
       .from(matrixLinks)
       .where(and(eq(matrixLinks.id, linkParse.data), eq(matrixLinks.orgId, req.orgId!), eq(matrixLinks.brandId, brandId)));
     if (!link) return res.status(404).json({ type: "not_found", error: "no such link for this brand" });
-    if ((outreachDefault || lineRole) && link.status !== "linked") {
+    if ((outreachDefault || accountType) && link.status !== "linked") {
       return res.status(409).json({ type: "conflict", error: `the account is ${link.status}, not linked` });
     }
-    if (lineRole && !(automationAllowed ?? link.automationAllowed)) {
+    const typeAfter = accountType !== undefined ? accountType : link.accountType;
+    if (typeAfter === "personal_human" && automationAllowed === true) {
       return res.status(409).json({
         type: "conflict",
-        error: `the account does not allow automated sends, so it cannot be the ${lineRole} line: allow them first (automationAllowed: true)`,
+        error: "the account is a personal line: automated sends never write from it. Type it pro_human or pro_ai first (accountType)",
       });
     }
-    if (automationAllowed === false && lineRole === undefined && link.lineRole) {
+    const automationAfter = typeAfter === "personal_human" ? false : (automationAllowed ?? link.automationAllowed);
+    if (typeAfter === "pro_ai" && !automationAfter) {
       return res.status(409).json({
         type: "conflict",
-        error: `the account is the brand's ${link.lineRole} line: clear it (lineRole: null) or state the role on another account before turning automated sends off`,
+        error:
+          accountType === "pro_ai"
+            ? "the account does not allow automated sends, so it cannot be pro_ai: allow them first (automationAllowed: true)"
+            : "the account is pro_ai: type it otherwise (accountType) before turning automated sends off",
       });
     }
     const set: Partial<typeof matrixLinks.$inferInsert> = {};
-    if (automationAllowed !== undefined) set.automationAllowed = automationAllowed;
+    if (automationAllowed !== undefined || automationAfter !== link.automationAllowed) set.automationAllowed = automationAfter;
+    if (accountType !== undefined) set.accountType = accountType;
     if (persona === null) Object.assign(set, { personaName: null, personaRole: null, personaInstructions: null });
     else if (persona) {
       const clean = (v: string | null | undefined) => (v == null ? null : v.trim() || null);
@@ -481,22 +493,6 @@ router.patch(
           .set({ outreachDefault: false, updatedAt: new Date() })
           .where(and(eq(matrixLinks.orgId, req.orgId!), eq(matrixLinks.brandId, brandId), eq(matrixLinks.channel, link.channel)));
         set.outreachDefault = true;
-      }
-      if (lineRole !== undefined) {
-        if (lineRole) {
-          await tx
-            .update(matrixLinks)
-            .set({ lineRole: null, updatedAt: new Date() })
-            .where(
-              and(
-                eq(matrixLinks.orgId, req.orgId!),
-                eq(matrixLinks.brandId, brandId),
-                eq(matrixLinks.channel, link.channel),
-                eq(matrixLinks.lineRole, lineRole),
-              ),
-            );
-        }
-        set.lineRole = lineRole;
       }
       if (Object.keys(set).length > 0) {
         await tx.update(matrixLinks).set({ ...set, updatedAt: new Date() }).where(eq(matrixLinks.id, link.id));
