@@ -423,7 +423,11 @@ router.get(
  *    stays mirrored for the Unibox.
  *  - `persona {name, role, instructions}`: who writes from it, served on the
  *    link views and on the WhatsApp reach / send. Omitted fields keep their
- *    value; null or "" clears one; `persona: null` clears all.
+ *    value; null or "" clears one; `persona: null` clears all. *  - `lineRole` (SOPHIE-SENDS-1028, lib/whatsapp/line-roles.ts): `assistant` =
+ *    every automated send writes from it; `founder` = only a send asking
+ *    `fromLine: "founder"`. One account per role per (brand, channel): the
+ *    holder loses it. `null` clears. Only a linked account allowing automated
+ *    sends takes a role (a role on a mirror-only line could never write).
  */
 router.patch(
   "/orgs/matrix/links/:linkId",
@@ -436,18 +440,30 @@ router.patch(
       return res.status(400).json({
         type: "validation",
         error:
-          "linkId (uuid) path, body {brandId (uuid), and at least one of outreachDefault: true, automationAllowed: boolean, persona: {name?, role?, instructions?} | null}" +
+          "linkId (uuid) path, body {brandId (uuid), and at least one of outreachDefault: true, automationAllowed: boolean, persona: {name?, role?, instructions?} | null, lineRole: assistant | founder | null}" +
           (parsed.success ? "" : `: ${parsed.error.issues.map((i) => i.message).join("; ")}`),
       });
     }
-    const { brandId, outreachDefault, automationAllowed, persona } = parsed.data;
+    const { brandId, outreachDefault, automationAllowed, persona, lineRole } = parsed.data;
     const [link] = await db
       .select()
       .from(matrixLinks)
       .where(and(eq(matrixLinks.id, linkParse.data), eq(matrixLinks.orgId, req.orgId!), eq(matrixLinks.brandId, brandId)));
     if (!link) return res.status(404).json({ type: "not_found", error: "no such link for this brand" });
-    if (outreachDefault && link.status !== "linked") {
+    if ((outreachDefault || lineRole) && link.status !== "linked") {
       return res.status(409).json({ type: "conflict", error: `the account is ${link.status}, not linked` });
+    }
+    if (lineRole && !(automationAllowed ?? link.automationAllowed)) {
+      return res.status(409).json({
+        type: "conflict",
+        error: `the account does not allow automated sends, so it cannot be the ${lineRole} line: allow them first (automationAllowed: true)`,
+      });
+    }
+    if (automationAllowed === false && lineRole === undefined && link.lineRole) {
+      return res.status(409).json({
+        type: "conflict",
+        error: `the account is the brand's ${link.lineRole} line: clear it (lineRole: null) or state the role on another account before turning automated sends off`,
+      });
     }
     const set: Partial<typeof matrixLinks.$inferInsert> = {};
     if (automationAllowed !== undefined) set.automationAllowed = automationAllowed;
@@ -465,6 +481,22 @@ router.patch(
           .set({ outreachDefault: false, updatedAt: new Date() })
           .where(and(eq(matrixLinks.orgId, req.orgId!), eq(matrixLinks.brandId, brandId), eq(matrixLinks.channel, link.channel)));
         set.outreachDefault = true;
+      }
+      if (lineRole !== undefined) {
+        if (lineRole) {
+          await tx
+            .update(matrixLinks)
+            .set({ lineRole: null, updatedAt: new Date() })
+            .where(
+              and(
+                eq(matrixLinks.orgId, req.orgId!),
+                eq(matrixLinks.brandId, brandId),
+                eq(matrixLinks.channel, link.channel),
+                eq(matrixLinks.lineRole, lineRole),
+              ),
+            );
+        }
+        set.lineRole = lineRole;
       }
       if (Object.keys(set).length > 0) {
         await tx.update(matrixLinks).set({ ...set, updatedAt: new Date() }).where(eq(matrixLinks.id, link.id));

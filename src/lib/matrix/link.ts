@@ -27,6 +27,7 @@
  */
 
 import { personaOf, type SenderPersona } from "./persona.js";
+import { isLineRole, type LineRole } from "../whatsapp/line-roles.js";
 import { and, desc, eq, inArray, isNull, ne, sql } from "drizzle-orm";
 import QRCode from "qrcode";
 import { db } from "../../db/index.js";
@@ -596,6 +597,8 @@ export interface ChannelAccount {
   outreachDefault: boolean;
   automationAllowed: boolean;
   persona: SenderPersona | null;
+  /** The role the brand stated for this line (SOPHIE-SENDS-1028), null when none. */
+  lineRole: LineRole | null;
   needsRelink: boolean;
 }
 
@@ -629,6 +632,8 @@ export interface LinkView {
   automationAllowed: boolean;
   /** Who writes from this account, as the brand stated it. */
   persona: SenderPersona | null;
+  /** The role the brand stated for this line: `assistant` | `founder` (SOPHIE-SENDS-1028), null when none. */
+  lineRole: LineRole | null;
   connection: {
     id: string;
     status: string;
@@ -722,6 +727,7 @@ function toChannelAccount(v: LinkView): ChannelAccount {
     outreachDefault: v.outreachDefault,
     automationAllowed: v.automationAllowed,
     persona: v.persona,
+    lineRole: v.lineRole,
     needsRelink: v.needsRelink,
   };
 }
@@ -859,6 +865,7 @@ export async function toView(
     outreachDefault: link?.outreachDefault ?? false,
     automationAllowed: link?.automationAllowed ?? true,
     persona: link ? personaOf(link) : null,
+    lineRole: link && isLineRole(link.lineRole) ? link.lineRole : null,
     connection: conn
       ? {
           id: conn.id,

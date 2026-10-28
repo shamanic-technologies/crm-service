@@ -9,6 +9,7 @@ import { db } from "../../db/index.js";
 import { matrixConnections, matrixLinks } from "../../db/schema.js";
 import { bridgeLogins, type BridgeLogin } from "../matrix/bridge.js";
 import { personaOf, type SenderPersona } from "../matrix/persona.js";
+import { isLineRole, type LineRole } from "./line-roles.js";
 
 export { personaOf, type SenderPersona };
 
@@ -25,6 +26,8 @@ export interface WhatsappAccount {
   automationAllowed: boolean;
   /** Who writes from this account, as the brand states it. */
   persona: SenderPersona | null;
+  /** The role the brand stated for this line (SOPHIE-SENDS-1028, line-roles.ts), null when none. */
+  lineRole: LineRole | null;
 }
 
 
@@ -43,6 +46,7 @@ export async function linkedWhatsappAccounts(orgId: string, brandId: string): Pr
       personaName: matrixLinks.personaName,
       personaRole: matrixLinks.personaRole,
       personaInstructions: matrixLinks.personaInstructions,
+      lineRole: matrixLinks.lineRole,
     })
     .from(matrixLinks)
     .innerJoin(matrixConnections, eq(matrixConnections.id, matrixLinks.connectionId))
@@ -66,6 +70,7 @@ export async function linkedWhatsappAccounts(orgId: string, brandId: string): Pr
       outreachDefault: r.outreachDefault,
       automationAllowed: r.automationAllowed,
       persona: personaOf(r),
+      lineRole: isLineRole(r.lineRole) ? r.lineRole : null,
     }));
 }
 
