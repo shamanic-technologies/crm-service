@@ -47,6 +47,7 @@
  */
 
 import { createHash } from "node:crypto";
+import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { and, asc, eq, getTableColumns, gt, inArray, sql, type SQL } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { humanKeys, people, peopleFacts, peopleScopes, personIdAliases, type PeopleFact, type PeopleScope, type Person } from "../../db/schema.js";
@@ -1319,6 +1320,65 @@ const FEED_READ_LOCK = sql`SELECT pg_advisory_xact_lock_shared(hashtext('crm-ser
 /** A fact already on the feed, without its payload (read only for the few facts re-stated). */
 type FeedFact = Omit<PeopleFact, "payload">;
 
+const { payload: _payload, ...FEED_COLUMNS } = getTableColumns(peopleFacts);
+
+/** A standalone subject's own column, null on every other fact (the diff resolves only those by subject). */
+const standaloneOnly = <T>(column: AnyPgColumn) => sql<T>`CASE WHEN ${peopleFacts.subjectStandalone} THEN ${column} END`;
+
+/**
+ * What the emission's DIFF reads of every live fact (BOX-LOAD-1028-CRM-MEM). The subject's own fields
+ * (presence, keys, emails, phones, name) are read only for a standalone subject (a CSV row): the diff
+ * resolves no other fact by its subject. A fact withdrawn or re-stated is read whole (`readFeedFacts`).
+ */
+const DIFF_COLUMNS = {
+  factId: peopleFacts.factId,
+  naturalKey: peopleFacts.naturalKey,
+  contentHash: peopleFacts.contentHash,
+  family: peopleFacts.family,
+  source: peopleFacts.source,
+  sourceRef: peopleFacts.sourceRef,
+  sourceContactId: peopleFacts.sourceContactId,
+  crmContactId: peopleFacts.crmContactId,
+  ownerPersonKey: peopleFacts.ownerPersonKey,
+  humanId: peopleFacts.humanId,
+  subjectStandalone: peopleFacts.subjectStandalone,
+  subjectPresence: standaloneOnly<string | null>(peopleFacts.subjectPresence),
+  subjectKeys: standaloneOnly<unknown>(peopleFacts.subjectKeys),
+  emails: standaloneOnly<unknown>(peopleFacts.emails),
+  phones: standaloneOnly<unknown>(peopleFacts.phones),
+  fullName: standaloneOnly<string | null>(peopleFacts.fullName),
+};
+type DiffFact = Pick<
+  FeedFact,
+  | "factId"
+  | "naturalKey"
+  | "contentHash"
+  | "family"
+  | "source"
+  | "sourceRef"
+  | "sourceContactId"
+  | "crmContactId"
+  | "ownerPersonKey"
+  | "humanId"
+  | "subjectStandalone"
+  | "subjectPresence"
+  | "subjectKeys"
+  | "emails"
+  | "phones"
+  | "fullName"
+>;
+
+/** The whole rows (payload aside) of the given facts, by fact id. */
+async function readFeedFacts(tx: Tx, factIds: string[]): Promise<Map<string, FeedFact>> {
+  const out = new Map<string, FeedFact>();
+  const ids = [...new Set(factIds)];
+  for (let i = 0; i < ids.length; i += 1000) {
+    const found = (await tx.select(FEED_COLUMNS).from(peopleFacts).where(inArray(peopleFacts.factId, ids.slice(i, i + 1000)))) as FeedFact[];
+    for (const f of found) out.set(f.factId, f);
+  }
+  return out;
+}
+
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 function factRow(
@@ -1463,12 +1523,14 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
     // ever emitted (withdrawn ones too) only as OWNERSHIP GROUPS (one per owner x subject). Reading all
     // 413k facts whole (420 MB) was 30 s of the 81 s an emission of Distribute.you took (2026-10-28). The
     // few facts re-stated below get their payload read on their own.
-    const { payload: _payload, ...feedColumns } = getTableColumns(peopleFacts);
+    // BOX-LOAD-1028-CRM-MEM: and only the columns the DIFF reads (a standalone subject's own fields beside).
+    // The whole rows of 145k live facts held 413 MB of heap per emission, every minute; this slice holds
+    // ~100 MB. The facts withdrawn or re-stated below are read whole on their own (`readFeedFacts`).
     const liveFacts = (await tx
-      .select(feedColumns)
+      .select(DIFF_COLUMNS)
       .from(peopleFacts)
       .where(and(eq(peopleFacts.orgId, orgId), eq(peopleFacts.brandId, brandId), eq(peopleFacts.live, true), sql`${peopleFacts.naturalKey} IS NOT NULL`))
-      .orderBy(asc(peopleFacts.feedSeq))) as FeedFact[];
+      .orderBy(asc(peopleFacts.feedSeq))) as DiffFact[];
     const liveByKey = new Map(liveFacts.map((f) => [f.naturalKey!, f]));
     const ownershipGroups = (await tx.execute(sql`
       SELECT owner_person_key AS "ownerPersonKey", subject_presence AS "subjectPresence", subject_keys AS "subjectKeys",
@@ -1561,7 +1623,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
 
     // 3-4. Withdrawals, then new facts.
     const withdrawals: {
-      fact: FeedFact;
+      fact: DiffFact;
       reason:
         | "vendor_record_changed"
         | "vendor_record_gone"
@@ -1654,6 +1716,8 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
     const rowNow = await crmContactRows(orgId, brandId);
     const touched = new Set(withdrawals.map((w) => w.fact.factId));
     let reminted = 0;
+    // Re-stated once the withdrawn facts are read whole (below), in this order.
+    const remints: { factId: string; crmContactId: string }[] = [];
     for (const live of liveByKey.values()) {
       if (touched.has(live.factId) || !live.sourceContactId || !live.crmContactId) continue;
       const held = rowNow.get(`${live.source}|${live.sourceContactId}`);
@@ -1663,6 +1727,36 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
       const now = fromCandidate && held.has(fromCandidate) ? fromCandidate : [...held].sort()[0];
       withdrawals.push({ fact: live, reason: "crm_contact_reminted" });
       reminted++;
+      remints.push({ factId: live.factId, crmContactId: now });
+      bySource[live.source] = (bySource[live.source] ?? 0) + 1;
+    }
+
+    // 5. A person's fleet human (human-service) known now, or changed (a merge /
+    // split there): every live fact of theirs is re-stated carrying it. Served
+    // columns are never updated in place (lead-service copies each fact once);
+    // the first pass after the column existed is the backfill.
+    const restated = new Set(withdrawals.map((w) => w.fact.factId));
+    let humanIdentified = 0;
+    const humanRestates: { factId: string; owner: string; person: FactPerson }[] = [];
+    for (const live of liveByKey.values()) {
+      if (restated.has(live.factId)) continue;
+      const owner = ownerNow.get(live.factId) ?? live.ownerPersonKey!;
+      const person = personByKey.get(owner) ?? (live.subjectStandalone ? index.resolve(subjectOf(live)) : null);
+      if (!person?.humanId || person.humanId === live.humanId) continue;
+      withdrawals.push({ fact: live, reason: "human_identified" });
+      humanIdentified++;
+      humanRestates.push({ factId: live.factId, owner, person });
+    }
+
+    // Every fact withdrawn or re-stated, read whole (the diff above held only its slice).
+    const whole = await readFeedFacts(tx, withdrawals.map((w) => w.fact.factId));
+    const wholeOf = (factId: string): FeedFact => {
+      const f = whole.get(factId);
+      if (!f) throw new Error(`fact feed: live fact ${factId} vanished during the emission`);
+      return f;
+    };
+    for (const { factId, crmContactId: now } of remints) {
+      const live = wholeOf(factId);
       const person =
         index.resolve({
           presence: live.subjectPresence,
@@ -1697,22 +1791,9 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
         subjectKeys: live.subjectKeys,
         subjectStandalone: live.subjectStandalone,
       });
-      bySource[live.source] = (bySource[live.source] ?? 0) + 1;
     }
-
-    // 5. A person's fleet human (human-service) known now, or changed (a merge /
-    // split there): every live fact of theirs is re-stated carrying it. Served
-    // columns are never updated in place (lead-service copies each fact once);
-    // the first pass after the column existed is the backfill.
-    const restated = new Set(withdrawals.map((w) => w.fact.factId));
-    let humanIdentified = 0;
-    for (const live of liveByKey.values()) {
-      if (restated.has(live.factId)) continue;
-      const owner = ownerNow.get(live.factId) ?? live.ownerPersonKey!;
-      const person = personByKey.get(owner) ?? (live.subjectStandalone ? index.resolve(subjectOf(live)) : null);
-      if (!person?.humanId || person.humanId === live.humanId) continue;
-      withdrawals.push({ fact: live, reason: "human_identified" });
-      humanIdentified++;
+    for (const { factId, owner, person } of humanRestates) {
+      const live = wholeOf(factId);
       fresh.push({
         orgId,
         brandId,
@@ -1739,7 +1820,8 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
       });
     }
 
-    const withdrawnRows = withdrawals.map(({ fact, reason }): typeof peopleFacts.$inferInsert => {
+    const withdrawnRows = withdrawals.map(({ fact: slice, reason }): typeof peopleFacts.$inferInsert => {
+      const fact = wholeOf(slice.factId);
       const owner = ownerNow.get(fact.factId) ?? fact.ownerPersonKey!;
       const person = personByKey.get(owner);
       return {
