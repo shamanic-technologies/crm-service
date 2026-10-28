@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { pgErrorOf } from "../../src/lib/pg-error.js";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import express from "express";
 import request from "supertest";
@@ -441,7 +442,8 @@ async function retryOnDeadlock(fn: () => Promise<unknown>): Promise<void> {
       return;
     } catch (err) {
       // A background people build (its fact emission included) can hold rows for a few seconds.
-      if ((err as { code?: string }).code !== "40P01" || attempt >= 30) throw err;
+      // drizzle wraps the Postgres error: its code sits on the cause (pgErrorOf walks it).
+      if (pgErrorOf(err).code !== "40P01" || attempt >= 30) throw err;
       await new Promise((r) => setTimeout(r, 200));
     }
   }
