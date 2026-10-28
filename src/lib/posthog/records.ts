@@ -107,26 +107,55 @@ export interface DerivedActivity {
 
 const flag = (v: unknown) => v === 1 || v === true || v === "1" || v === "true";
 
-export type MachineFingerprint = "viewport_equals_screen" | "headless_default_screen";
+export type MachineFingerprint =
+  | "viewport_equals_screen"
+  | "headless_default_screen"
+  | "desktop_1280_on_1080p"
+  | "headless_screen_wider_viewport"
+  | "newsletter_bounce";
+
+/** A newsletter link we sent (`utm_source=newsletter` in the landing URL's query). */
+const NEWSLETTER_LANDING = /[?&]utm_source=newsletter(?:[&#]|$)/;
+const NEWSLETTER_LANDING_SQL = "[?&]utm_source=newsletter([&#]|$)";
+
+/**
+ * ROBOTS-NEVER-LEAVE-BRONZE-1028 part 2 (owner 2026-10-28: « retirer aussi ces 10 clics "1 page en 0 s" »): a session
+ * landing on a newsletter link with ONE pageview and zero duration is a mail scanner opening the link. The owner
+ * accepted losing a hurried real reader. Read off fields every bronze visit already holds (no re-read needed). In prod
+ * no such session ever fired an act of the person (only the landing's own `landing_variant_viewed`).
+ */
+function newsletterBounce(payload: Record<string, unknown>): boolean {
+  const url = str(payload.entry_url);
+  const started = str(payload.started_at);
+  return !!url && NEWSLETTER_LANDING.test(url) && Number(payload.pageviews) === 1 && !!started && started === str(payload.ended_at);
+}
 
 /**
  * POSTHOG-SCANNER-VISIT-1025 + ROBOTS-NEVER-LEAVE-BRONZE-1028: the machine a visit (bronze payload) is POSITIVELY
- * tied to (client.ts `MACHINE_VIEWPORT_SQL`), or null. Null covers "a person" AND "unknown" (a bronze row read
- * before the fingerprint was asked): never a guess, never a time or pageview threshold. A machine's session stays
- * in bronze only: its visit and every event fired in it never reach silver (`deriveActivities`).
+ * tied to (client.ts `MACHINE_VIEWPORT_SQL`, + the newsletter bounce), or null. Null covers "a person" AND "unknown"
+ * (a bronze row read before a fingerprint was asked): never a guess. A machine's session stays in bronze only: its
+ * visit and every event fired in it never reach silver (`deriveActivities`).
  */
 export function visitMachine(payload: Record<string, unknown>): { fingerprint: MachineFingerprint; screen: string | null } | null {
-  if (flag(payload.viewport_is_screen)) return { fingerprint: "viewport_equals_screen", screen: str(payload.screen) };
-  if (flag(payload.headless_default_screen)) return { fingerprint: "headless_default_screen", screen: str(payload.screen) };
+  const screen = str(payload.screen);
+  if (flag(payload.viewport_is_screen)) return { fingerprint: "viewport_equals_screen", screen };
+  if (flag(payload.headless_default_screen)) return { fingerprint: "headless_default_screen", screen };
+  if (flag(payload.desktop_1280_on_1080p)) return { fingerprint: "desktop_1280_on_1080p", screen };
+  if (flag(payload.headless_screen_wider_viewport)) return { fingerprint: "headless_screen_wider_viewport", screen };
+  if (newsletterBounce(payload)) return { fingerprint: "newsletter_bounce", screen };
   return null;
 }
+
+const FLAGS = ["viewport_is_screen", "headless_default_screen", "desktop_1280_on_1080p", "headless_screen_wider_viewport"];
 
 /**
  * The same rule in SQL over a bronze `posthog_raw_records.payload` (jsonb): HogQL serves the flags as numbers,
  * `->>` reads them as text. Twin of `visitMachine`, keep them together.
  */
 export const BRONZE_MACHINE_VISIT_SQL = (payload: string) =>
-  `(${payload}->>'viewport_is_screen' IN ('1', 'true') OR ${payload}->>'headless_default_screen' IN ('1', 'true'))`;
+  `(${FLAGS.map((f) => `${payload}->>'${f}' IN ('1', 'true')`).join(" OR ")}` +
+  ` OR (${payload}->>'entry_url' ~ '${NEWSLETTER_LANDING_SQL}' AND ${payload}->>'pageviews' IN ('1', '1.0')` +
+  ` AND ${payload}->>'started_at' = ${payload}->>'ended_at'))`;
 
 export function deriveVisit(payload: Record<string, unknown>): DerivedActivity | null {
   const personId = str(payload.person_id);

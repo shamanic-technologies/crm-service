@@ -182,6 +182,8 @@ function hogqlAnswer(query: string) {
         "referrer",
         "viewport_is_screen",
         "headless_default_screen",
+        "desktop_1280_on_1080p",
+        "headless_screen_wider_viewport",
         "screen",
       ],
       VISITS,
@@ -522,13 +524,91 @@ describe.skipIf(!RUN)("PostHog + Stripe sources", () => {
     expect(row.status).toBe("error");
   });
 
+  it("ROBOTS-NEVER-LEAVE-BRONZE-1028 part 2: newsletter bounce, 1280 on 1080p, 800x600 wider viewport leave silver; real readers stay", async () => {
+    const visit = (session: string, person: string, over: Record<string, unknown>) => ({
+      session_id: session,
+      person_id: person,
+      started_at: "2026-09-05T09:00:00Z",
+      ended_at: "2026-09-05T09:00:00Z",
+      entry_url: "https://brand.com/blog/x?utm_source=newsletter&utm_medium=email",
+      entry_path: "/blog/x",
+      pageviews: 1,
+      paths: ["/blog/x"],
+      referrer: "$direct",
+      viewport_is_screen: 0,
+      headless_default_screen: 0,
+      desktop_1280_on_1080p: 0,
+      headless_screen_wider_viewport: 0,
+      screen: "1920x1080",
+      ...over,
+    });
+    const extraVisits = [
+      // The owner's rule: a newsletter link, one page, zero seconds.
+      visit("s-nl-bounce", "ph-dave", {}),
+      // A desktop 1920x1080 screen with a 1280-wide viewport, anywhere on the site, several pages.
+      visit("s-1280", "ph-dave", { entry_url: "https://brand.com/pricing", pageviews: 3, ended_at: "2026-09-05T09:00:40Z", desktop_1280_on_1080p: 1 }),
+      // An 800x600 screen (tablet) with a 1366-wide viewport: 2 pages over 3 s. Read first without the flag.
+      visit("s-wide", "ph-dave", { pageviews: 2, ended_at: "2026-09-05T09:00:03Z", screen: "800x600" }),
+      // Real readers of the newsletter: 6 pages over 131 s, 3 pages over 21 min.
+      visit("s-reader6", "ph-alice", { pageviews: 6, ended_at: "2026-09-05T09:02:11Z", screen: "2308x1298" }),
+      visit("s-reader3", "ph-alice", { pageviews: 3, ended_at: "2026-09-05T09:21:12Z" }),
+      // A phone: one page, zero seconds, not from a newsletter.
+      visit("s-phone", "ph-alice", { entry_url: "https://brand.com/blog/x", screen: "390x844" }),
+    ];
+    const extraEvents = [
+      { id: "ev-nl-bounce", event: "landing_variant_viewed", timestamp: "2026-09-05T09:00:00Z", person_id: "ph-dave", url: null, path: "/blog/x", session_id: "s-nl-bounce" },
+      { id: "ev-wide", event: "landing_variant_viewed", timestamp: "2026-09-05T09:00:01Z", person_id: "ph-dave", url: null, path: "/blog/x", session_id: "s-wide" },
+    ];
+    VISITS.push(...extraVisits);
+    EVENTS.push(...extraEvents);
+    try {
+      await connectBoth();
+      await runPosthogSyncPass();
+      const { scope } = await ensureScope(ORG, BRAND, USER);
+      expect((await runScopeBuild(scope)).ok).toBe(true);
+      await emitScopeFacts(scope);
+      const liveRefs = async () =>
+        (await db.select().from(peopleFacts).where(eq(peopleFacts.source, "posthog")))
+          .filter((f) => f.live && f.type !== "withdrawn")
+          .map((f) => f.sourceRef);
+      const silver = async () => (await db.select().from(posthogActivities)).map((a) => a.externalId).sort();
+      for (const robot of ["s-nl-bounce:ph-dave", "ev-nl-bounce", "s-1280:ph-dave"]) expect(await silver()).not.toContain(robot);
+      // Before its fingerprint is read, the wide-viewport session is a person.
+      expect(await liveRefs()).toEqual(expect.arrayContaining(["s-wide:ph-dave", "ev-wide"]));
+
+      // The post-deploy re-read brings the flag: the session leaves silver, its live facts are withdrawn machine_visit.
+      extraVisits[2].headless_screen_wider_viewport = 1;
+      await runPosthogSyncPass();
+      const people = ["s-reader6:ph-alice", "s-reader3:ph-alice", "s-phone:ph-alice"];
+      const kept = await silver();
+      for (const p of people) expect(kept).toContain(p);
+      for (const robot of ["s-nl-bounce:ph-dave", "ev-nl-bounce", "s-1280:ph-dave", "s-wide:ph-dave", "ev-wide"]) expect(kept).not.toContain(robot);
+      const summary = await emitScopeFacts(scope);
+      expect(summary).toMatchObject({ machineWithdrawn: 2, withdrawnGone: 0 });
+      const live = await liveRefs();
+      for (const p of people) expect(live).toContain(p);
+      for (const robot of ["s-nl-bounce:ph-dave", "ev-nl-bounce", "s-1280:ph-dave", "s-wide:ph-dave", "ev-wide"]) expect(live).not.toContain(robot);
+
+      // Dave's thread holds none of them.
+      const tl = await asOrg(request(app()).get(`/orgs/people/timeline?brandId=${BRAND}&personKey=${encodeURIComponent("email:dave@z.com")}`));
+      const refs = tl.body.items.filter((i: { source: string }) => i.source === "posthog").map((i: { ref: { externalId: string } }) => i.ref.externalId);
+      for (const robot of ["s-nl-bounce:ph-dave", "s-1280:ph-dave", "s-wide:ph-dave", "ev-wide"]) expect(refs).not.toContain(robot);
+      // Bronze keeps every robot.
+      const raw = (await db.select().from(posthogRawRecords)).map((r) => r.externalId);
+      expect(raw).toEqual(expect.arrayContaining(["s-nl-bounce:ph-dave", "s-1280:ph-dave", "s-wide:ph-dave", "ev-wide"]));
+    } finally {
+      VISITS.splice(VISITS.length - extraVisits.length);
+      EVENTS.splice(EVENTS.length - extraEvents.length);
+    }
+  });
+
   it("ROBOTS-NEVER-LEAVE-BRONZE-1028: a machine's session stays in bronze: no activity, no event, no fact, no timeline item", async () => {
     const machineVisit = (session: string, flags: Record<string, unknown>) => ({
       session_id: session,
       person_id: "ph-dave",
       started_at: "2026-09-04T09:00:00Z",
       ended_at: "2026-09-04T09:00:00Z",
-      entry_url: "https://brand.com/blog?utm_source=newsletter",
+      entry_url: "https://brand.com/blog",
       entry_path: "/blog",
       pageviews: 1,
       paths: ["/blog"],

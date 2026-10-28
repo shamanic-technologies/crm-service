@@ -85,7 +85,40 @@ describe("PostHog derivation", () => {
     // A phone at 800x600-ish, a laptop at 1536x864 with a smaller viewport: the query answers 0 for both, a person.
     expect(visitMachine({ ...row, viewport_is_screen: 0, headless_default_screen: 0, screen: "800x600" })).toBeNull();
     expect(visitMachine({ ...row, viewport_is_screen: 0, headless_default_screen: 0, screen: "1536x864" })).toBeNull();
-    expect(BRONZE_MACHINE_VISIT_SQL("r.payload")).toBe("(r.payload->>'viewport_is_screen' IN ('1', 'true') OR r.payload->>'headless_default_screen' IN ('1', 'true'))");
+    expect(BRONZE_MACHINE_VISIT_SQL("r.payload")).toContain("r.payload->>'viewport_is_screen' IN ('1', 'true') OR r.payload->>'headless_default_screen' IN ('1', 'true')");
+  });
+
+  it("ROBOTS-NEVER-LEAVE-BRONZE-1028 part 2: newsletter bounce, 1280 on 1080p, wider viewport on 800x600; readers and phones stay", () => {
+    const nl = {
+      session_id: "s4",
+      person_id: "p1",
+      started_at: "2026-10-28T12:10:14.469000Z",
+      ended_at: "2026-10-28T12:10:14.469000Z",
+      entry_url: "https://distribute.you/?utm_source=newsletter&utm_medium=email",
+      pageviews: 1,
+      viewport_is_screen: 0,
+      headless_default_screen: 0,
+      screen: "1920x1080",
+    };
+    expect(visitMachine(nl)).toEqual({ fingerprint: "newsletter_bounce", screen: "1920x1080" });
+    // Read through: 6 pages over 131 s, 3 pages over 21 min, one page that lasted.
+    expect(visitMachine({ ...nl, pageviews: 6, ended_at: "2026-10-28T12:12:25Z" })).toBeNull();
+    expect(visitMachine({ ...nl, pageviews: 3, ended_at: "2026-10-28T12:31:26Z" })).toBeNull();
+    expect(visitMachine({ ...nl, ended_at: "2026-10-28T12:10:20Z" })).toBeNull();
+    // One page, zero seconds, but not a newsletter link (a phone opening the blog): a person.
+    expect(visitMachine({ ...nl, entry_url: "https://distribute.you/blog/x", screen: "390x844" })).toBeNull();
+    expect(visitMachine({ ...nl, entry_url: "https://distribute.you/?utm_source=newsletterish" })).toBeNull();
+    expect(visitMachine({ ...nl, pageviews: 2, desktop_1280_on_1080p: 1 })).toEqual({ fingerprint: "desktop_1280_on_1080p", screen: "1920x1080" });
+    expect(visitMachine({ ...nl, pageviews: 2, headless_screen_wider_viewport: 1, screen: "800x600" })).toEqual({ fingerprint: "headless_screen_wider_viewport", screen: "800x600" });
+    const twin = BRONZE_MACHINE_VISIT_SQL("p");
+    expect(twin).toContain("p->>'desktop_1280_on_1080p' IN ('1', 'true')");
+    expect(twin).toContain("p->>'headless_screen_wider_viewport' IN ('1', 'true')");
+    expect(twin).toContain("p->>'entry_url' ~ '[?&]utm_source=newsletter([&#]|$)' AND p->>'pageviews' IN ('1', '1.0') AND p->>'started_at' = p->>'ended_at'");
+  });
+
+  it("ROBOTS-NEVER-LEAVE-BRONZE-1028 part 2: the visit query asks 1280 on 1080p on desktop, wider viewport on 800x600 on any device", () => {
+    expect(MACHINE_VIEWPORT_SQL).toMatch(/\$device_type\) = 'Desktop'\s+AND toFloat\(properties\.\$screen_width\) = 1920 AND toFloat\(properties\.\$screen_height\) = 1080\s+AND toFloat\(properties\.\$viewport_width\) = 1280, 0\)\) AS desktop_1280_on_1080p/);
+    expect(MACHINE_VIEWPORT_SQL).toMatch(/ifNull\(\s+toFloat\(properties\.\$screen_width\) = 800 AND toFloat\(properties\.\$screen_height\) = 600\s+AND toFloat\(properties\.\$viewport_width\) > 800, 0\)\) AS headless_screen_wider_viewport/);
   });
 
   it("ROBOTS-NEVER-LEAVE-BRONZE-1028: the visit query asks the 800x600 fingerprint on desktop pageviews only", () => {
