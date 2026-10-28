@@ -230,6 +230,12 @@ export async function listPersonsByDistinctIds(target: PosthogTarget, distinctId
  * 800x600 SCREEN: the headless default (Puppeteer / Chromium's own), no desktop a person browses on today. Measured
  * 2026-10-28: 29 of the 44 newsletter-link visits the first fingerprint let through were single-pageview 0-second
  * sessions on it. A phone / tablet of that size, or a pageview missing a size, reads 0: unknown = a person.
+ * ROBOTS-NEVER-LEAVE-BRONZE-1028 part 2 (measured 2026-10-28, 30-90 days, project 171095):
+ * `desktop_1280_on_1080p` = EVERY pageview a desktop one on a 1920x1080 screen with a viewport exactly 1280 wide:
+ * 1,627 sessions, 0 of a person PostHog knows an email for (20 on newsletter links, 0 on the signed-in dashboard).
+ * `headless_screen_wider_viewport` = EVERY pageview on an 800x600 screen (the headless default, any device type) with
+ * a viewport WIDER than it: 0 sessions with an email over 90 days. A viewport wider than the screen in general is NOT
+ * a machine: browser zoom below 100% does it (a client's admin at 80%: 1920 screen, 2400 viewport, 33 pageviews).
  * `screen` = the size it matched, for the record.
  */
 export const MACHINE_VIEWPORT_SQL = `
@@ -241,6 +247,13 @@ export const MACHINE_VIEWPORT_SQL = `
              min(ifNull(
                toString(properties.$device_type) = 'Desktop'
                AND toFloat(properties.$screen_width) = 800 AND toFloat(properties.$screen_height) = 600, 0)) AS headless_default_screen,
+             min(ifNull(
+               toString(properties.$device_type) = 'Desktop'
+               AND toFloat(properties.$screen_width) = 1920 AND toFloat(properties.$screen_height) = 1080
+               AND toFloat(properties.$viewport_width) = 1280, 0)) AS desktop_1280_on_1080p,
+             min(ifNull(
+               toFloat(properties.$screen_width) = 800 AND toFloat(properties.$screen_height) = 600
+               AND toFloat(properties.$viewport_width) > 800, 0)) AS headless_screen_wider_viewport,
              any(concat(toString(properties.$screen_width), 'x', toString(properties.$screen_height))) AS screen`;
 
 /**

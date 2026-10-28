@@ -1850,7 +1850,12 @@ re-derives silver with no vendor call. API reads are free → no cost declared.
   (`dy_sub` identifies the subscriber), so each visit read as "they visited" → Lead event. `visit.detail.machine` =
   POSITIVE fingerprint only: EVERY pageview desktop with viewport == screen in both dims (headless; measured 7,423 vs
   47 on newsletter links, 0 vs 1,247 signed-in), OR every pageview a desktop on an 800x600 SCREEN (the headless
-  default: `headless_default_screen`). Unknown / absent = a person; never a time / pageview-count rule.
+  default: `headless_default_screen`), OR every pageview a desktop on a 1920x1080 screen with a viewport exactly 1280 wide
+  (`desktop_1280_on_1080p`: 1,627 sessions / 30 d, 0 with an email), OR every pageview on an 800x600 screen (any device)
+  with a viewport WIDER than it (`headless_screen_wider_viewport`), OR (owner 2026-10-28 « retirer aussi ces 10 clics "1
+  page en 0 s" », a hurried reader's loss accepted) a session landing on a NEWSLETTER link (`utm_source=newsletter`) with
+  one pageview and zero duration (`newsletter_bounce`, read off bronze fields, no re-read). A viewport wider than the
+  screen in general is NO proof: browser zoom < 100 % does it (a client's admin at 80 %). Unknown / absent = a person.
   **A machine's session never leaves BRONZE** (ROBOTS-NEVER-LEAVE-BRONZE-1028, owner 2026-10-28 « ils ne doivent même
   pas arriver sur l'unibox ni nulle part »): neither its visit nor any event of the session is written to
   `posthog_activities` (`machineSessions`), and every derive pass deletes the silver rows of a session bronze now
