@@ -64,7 +64,7 @@ export function requestEmission(scope: EmitScope): Promise<FactEmissionSummary> 
  * The scope's INPUTS MARK: the latest write to every table a fact of the scope is derived from
  * (silver contacts and activities, Matrix events, the Gmail / cold-email store, CRM funnel records,
  * calendar meetings, credit events) + the last build + the contacts count (a deleted record). Same
- * mark = nothing new to state. Each part reads one index (migration 0068) or a small table.
+ * mark = nothing new to state. Each part reads one index (migration 0069) or a small table.
  */
 export async function inputsMark(scope: EmitScope): Promise<string> {
   const { orgId, brandId, id } = scope;

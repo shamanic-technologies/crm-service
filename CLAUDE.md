@@ -1115,7 +1115,7 @@ owner had written to. A recorded fact, never an address-shape guess.
   record that brought the person in adds one dated event, so a CRM-only person
   is never an empty thread: GoHighLevel `added_to_crm` (`contact_created_at`),
   CSV `added_to_crm` (`uploaded_at`, item `source: "csv"`), PostHog `signup`,
-  Stripe `became_customer`. No vendor date → no event (never build time).
+  Stripe `stripe_customer_created`. No vendor date → no event (never build time).
 - **ONE state, read not graded** (`state.ts`): lead-service standing verbatim
   (first exact-address row of its own `sort=activity` search; a failed read is
   `unavailable`, never a guess; from `PEOPLE_STANDING_WALK_MIN` (200) addresses
@@ -1330,6 +1330,15 @@ newest first, a person with none absent; a send with no campaign never matches. 
   `automation_not_allowed` by the reply trigger (pass-through: allowed again, the next message is judged). Set with
   `PATCH /orgs/matrix/links/{linkId} {brandId, outreachDefault?: true, automationAllowed?, persona?}`; served on
   every link view and `channelAccounts`. Generic on every channel.
+- **Line roles: assistant + founder** (`lib/whatsapp/line-roles.ts`, SOPHIE-SENDS-1028, owner 2026-10-28 « les campagnes de
+  base envoient via Sophie. Mais juste une welcome WA de plus en parallèle depuis mon WA pro »): `matrix_links.line_role`
+  (`assistant | founder`, one account per role per brand + channel, set by the brand: `PATCH /orgs/matrix/links/{linkId}
+  {brandId, lineRole}`, `null` clears, 409 on a line not linked or not allowing automation; turning automation off on a
+  role holder = 409). Assistant stated = EVERY send / reach without `fromAccount` / `fromLine` writes from it, even where
+  another line talks with the person (not connected = refused, never a fallback to another line). `fromLine: "founder"`
+  on send / reach = only the founder line (none stated = `whatsapp_not_linked`); exclusive with `fromAccount`. Nothing
+  stated = the pick below, byte-identical. Served as `lineRole` on every link view and `channelAccounts`; a reachable
+  reach answer adds `assistantLine {phone, persona} | null` (the founder hello names the assistant and her number).
 - **WhatsApp threads merge into their person** (`lib/whatsapp/phone-resolution.ts`):
   WhatsApp names counterparts by LID ghosts (514/514 mirrored contacts had no phone, so 6
   of the first 13 people a campaign wrote to looked "never answered" while they had
@@ -1633,7 +1642,7 @@ lead-service serves the overall tag, then go.
 - **Emitted within seconds of a record moving, not only after a build** (`emitScopeFacts`, UNIBOX-FACT-LAG-1028,
   owner 2026-10-28: refused payments and every dashboard / onboarding action belong in the Unibox at once). The fact
   emitter (`fact-emitter.ts`, every 10 s, first pass 60 s after boot, `FACT_EMIT=off`) emits each scope whose INPUTS
-  MARK moved (latest write to every table a fact is derived from, index-only, migration 0068); a build still emits
+  MARK moved (latest write to every table a fact is derived from, index-only, migration 0069); a build still emits
   right after itself through `requestEmission` (one emission per scope at a time, one more coalesced after it), the
   backstop for what the mark cannot see (a deleted record, a stored judgment). Candidates are
   re-derived from silver + the Gmail store and DIFFED on a natural key (vendor
@@ -1858,6 +1867,17 @@ re-derives silver with no vendor call. API reads are free → no cost declared.
   `stripe_transactions` (`payment` | `refund` | `subscription`, amount in MINOR
   units verbatim + currency + Stripe status). Passes re-list the last 30 days;
   a full re-list runs daily (`last_full_sync_at`).
+  **Every payment attempt reads as what it was** (UNIBOX-PAYMENT-REFUSED-1028, `stripe/attempts.ts`, owner 2026-10-28:
+  « Les paiements refusés doivent être dans l'unibox »): timeline step + label per charge status: `payment` ("Payment
+  received: $X") only when `succeeded`; `payment_refused` ("Payment refused: $X · <Stripe's failure_message, else decline
+  reason / failure code in words> · <description>"), `payment_pending`, `payment_disputed`, `payment_attempt` (a status
+  Stripe adds later); `refund` / `refund_failed`; `subscription_started` / `_canceled` with their price. The Stripe
+  customer record's entry step is `stripe_customer_created` (a card check creates one; it was `became_customer`). Fact
+  feed types unchanged (`payment` + payload `status`, lead-service's `paymentStands`). **Within a minute**: the phone
+  watch's fast mirror lists every kind CREATED in the last 10 min per synced connection (`mirrorRecentStripe`, 4 GETs,
+  no-churn) → silver → the thread at once; any fast-mirror change (Stripe, PostHog person OR event, auth user) kicks a
+  `followUp` people build so the fact feed follows (a 31k-people scope builds in 1-4 min). Prod 2026-10-28: a $100 top-up
+  refused at 05:01:24 was mirrored 05:04, served as a plain green `payment`; a writer told the person it was going through.
 - **Person layer**: both are `PEOPLE_SOURCES`; a Stripe customer with email +
   phone is merge evidence (`stripe_customer`). State precedence: lead_service >
   **stripe** (`subscription_<active|trialing|past_due|unpaid>` > `paid` >

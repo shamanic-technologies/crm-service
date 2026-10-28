@@ -28,6 +28,7 @@ import { bridgeSaysNoSuchNumber } from "./number-validity.js";
 import { alertRefusal } from "./staff-alert.js";
 import { describeLoggedOut, linkedWhatsappAccounts, sendReadiness, personaOf, type SenderPersona, type WhatsappAccount } from "./accounts.js";
 import { recordGhostPhone } from "./phone-resolution.js";
+import { narrowByLine, type LineRole } from "./line-roles.js";
 import { humanTypedTo } from "../matrix/human-takeover.js";
 import { joinRoom, readRoomBridgeInfo, sendText, setTyping } from "../matrix/client.js";
 import { expectedChannelIds, roomDeliversTo } from "./room-check.js";
@@ -91,6 +92,8 @@ export interface SendRequest {
   phone: string | null;
   /** The linked account to send from, as its own number (digits, `+` optional). */
   fromAccount: string | null;
+  /** Send from the brand's line stated with this role (SOPHIE-SENDS-1028, line-roles.ts). */
+  fromLine?: LineRole | null;
   skipIfReplied: boolean;
   /** Who asked (`x-user-id`), only to read names for a staff alert. */
   userId: string | null;
@@ -234,13 +237,23 @@ function phoneSourceOf(person: PersonView, phone: string): string {
  */
 async function sendableAccounts(req: ReachRequest): Promise<WhatsappAccount[]> {
   const wanted = req.fromAccount ? digitsOf(req.fromAccount) : null;
-  const linked = (await linkedWhatsappAccounts(req.orgId, req.brandId)).filter((a) => !wanted || digitsOf(a.loginId) === wanted);
-  if (linked.length === 0) {
+  const all = await linkedWhatsappAccounts(req.orgId, req.brandId);
+  if (all.length === 0) {
     throw new SendRefusal(
       "whatsapp_not_linked",
       wanted
         ? `The brand has no linked WhatsApp account for +${wanted}.`
         : "The brand has no linked WhatsApp account. Link one from the dashboard first.",
+    );
+  }
+  // SOPHIE-SENDS-1028: a number asked > a role asked > the brand's assistant line > every line.
+  const { accounts: linked, by } = narrowByLine(all, { fromAccountDigits: wanted, fromLine: req.fromLine ?? null });
+  if (linked.length === 0) {
+    throw new SendRefusal(
+      "whatsapp_not_linked",
+      by === "account"
+        ? `The brand has no linked WhatsApp account for +${wanted}.`
+        : `None of the brand's linked WhatsApp accounts is stated as its ${req.fromLine} line. State it on the account (PATCH /orgs/matrix/links/{linkId} lineRole).`,
     );
   }
   // Every send through this path is automated (a workflow): an account the brand
@@ -249,8 +262,10 @@ async function sendableAccounts(req: ReachRequest): Promise<WhatsappAccount[]> {
   if (allowed.length === 0) {
     throw new SendRefusal(
       "automation_not_allowed",
-      wanted
+      by === "account"
         ? `The brand's WhatsApp account +${wanted} is not allowed to send automated messages.`
+        : by === "line" || by === "assistant"
+          ? `The brand's ${by === "line" ? req.fromLine : "assistant"} WhatsApp line (+${digitsOf(linked[0].loginId)}) is not allowed to send automated messages.`
         : "None of the brand's linked WhatsApp accounts is allowed to send automated messages. Allow one (or link a dedicated number) from the dashboard.",
     );
   }
@@ -282,6 +297,8 @@ async function sendableAccounts(req: ReachRequest): Promise<WhatsappAccount[]> {
  *     (the latest one), so a thread is never restarted from another number;
  *  2. else the account the brand marked as its outreach default;
  *  3. else the oldest linked account.
+ * When the brand stated an assistant line (or the send asked a number / a role),
+ * only that line reaches here (SOPHIE-SENDS-1028, sendableAccounts), so it writes.
  * Only accounts the brand allows automated sends from reach here (SOPHIE-WA-1016):
  * a conversation on a disallowed account is not followed, the message starts a
  * new thread from an allowed one.
@@ -382,6 +399,8 @@ export interface ReachRequest {
   email: string | null;
   phone: string | null;
   fromAccount: string | null;
+  /** Only the brand's line stated with this role may write (SOPHIE-SENDS-1028). */
+  fromLine?: LineRole | null;
   skipIfReplied: boolean;
 }
 
@@ -473,6 +492,12 @@ export interface ReachResult {
   fromAccount: string;
   /** That account's sender persona, as the brand stated it (null when none). */
   persona: SenderPersona | null;
+  /**
+   * The brand's stated assistant line (SOPHIE-SENDS-1028), whichever line this
+   * send writes from: a founder hello names it ("our assistant contacted you
+   * from <phone>"). Null when the brand states none.
+   */
+  assistantLine: { phone: string; persona: SenderPersona | null } | null;
 }
 
 /**
@@ -486,7 +511,15 @@ export interface ReachResult {
 export async function reachWhatsApp(req: ReachRequest): Promise<ReachResult> {
   const { phone, phoneSource, accounts, who } = await resolveReach(req);
   const account = await chooseAccount(accounts, who.mxid);
-  return { reachable: true, to: phone, phoneSource, fromAccount: `+${digitsOf(account.loginId)}`, persona: account.persona };
+  const assistant = (await linkedWhatsappAccounts(req.orgId, req.brandId)).find((a) => a.lineRole === "assistant");
+  return {
+    reachable: true,
+    to: phone,
+    phoneSource,
+    fromAccount: `+${digitsOf(account.loginId)}`,
+    persona: account.persona,
+    assistantLine: assistant ? { phone: `+${digitsOf(assistant.loginId)}`, persona: assistant.persona } : null,
+  };
 }
 
 /**

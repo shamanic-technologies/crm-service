@@ -25,7 +25,7 @@ import {
   stripeTransactions,
   type PeopleScope,
 } from "../../src/db/schema.js";
-import { emitScopeFacts, readFacts } from "../../src/lib/people/facts.js";
+import { FEED_LOCK, emitScopeFacts, readFacts } from "../../src/lib/people/facts.js";
 import { readFunnelEvents } from "../../src/lib/gohighlevel/funnel-events.js";
 import type { Presence } from "../../src/lib/people/identity.js";
 import peopleRoutes from "../../src/routes/people.js";
@@ -427,6 +427,59 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
     expect(again.emitted).toBe(0);
     expect(again.corrected + again.withdrawnGone + again.merged + again.split).toBe(0);
     expect(await maxSeq()).toBe(before);
+  });
+
+  it("BOX-DB-LOAD-1028-CRM-LOCK: the global feed lock is taken only to write, so a pass with nothing to write never waits on it", async () => {
+    const s = await seed();
+    await emitScopeFacts(s.scope);
+    const before = await maxSeq();
+    // Another brand's emission holds the global feed lock (its write tail).
+    let release!: () => void;
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => (held = r));
+    const holder = db.transaction(async (tx) => {
+      await tx.execute(FEED_LOCK);
+      held();
+      await new Promise<void>((r) => (release = r));
+    });
+    await isHeld;
+    try {
+      const again = await Promise.race([
+        emitScopeFacts(s.scope),
+        new Promise<"blocked">((r) => setTimeout(() => r("blocked"), 3000)),
+      ]);
+      expect(again).not.toBe("blocked");
+      expect(again).toMatchObject({ emitted: 0 });
+    } finally {
+      release();
+      await holder;
+    }
+    expect(await maxSeq()).toBe(before);
+  });
+
+  it("BOX-DB-LOAD-1028-CRM-LOCK: a pass with facts to write waits for the feed lock, then appends in feed order", async () => {
+    const s = await seed();
+    let release!: () => void;
+    let held!: () => void;
+    const isHeld = new Promise<void>((r) => (held = r));
+    const holder = db.transaction(async (tx) => {
+      await tx.execute(FEED_LOCK);
+      held();
+      await new Promise<void>((r) => (release = r));
+    });
+    await isHeld;
+    const emission = emitScopeFacts(s.scope);
+    const early = await Promise.race([emission.then(() => "done"), new Promise((r) => setTimeout(() => r("waiting"), 1500))]);
+    expect(early).toBe("waiting");
+    expect(await maxSeq()).toBe(0);
+    release();
+    await holder;
+    const summary = await emission;
+    expect(summary.emitted).toBeGreaterThan(0);
+    const facts = await allFacts();
+    expect(facts.length).toBe(summary.emitted);
+    const seqs = facts.map((f) => Number(f.seq));
+    expect([...seqs].sort((a, b) => a - b)).toEqual(seqs);
   });
 
   it("a counterpart on two linked accounts of one channel never re-mints on every pass", async () => {

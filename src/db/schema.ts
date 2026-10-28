@@ -462,6 +462,10 @@ export const matrixLinks = pgTable(
     personaName: text("persona_name"),
     personaRole: text("persona_role"),
     personaInstructions: text("persona_instructions"),
+    // SOPHIE-SENDS-1028: the role the brand states for this account (lib/whatsapp/line-roles.ts):
+    // `assistant` = every automated send writes from it; `founder` = only a send asking
+    // `fromLine: "founder"`. One account per role per (org, brand, channel); null = none.
+    lineRole: text("line_role"),
     startedAt: timestamp("started_at", { withTimezone: true }),
     linkedAt: timestamp("linked_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -471,6 +475,9 @@ export const matrixLinks = pgTable(
     // NOT unique: a brand links N accounts per channel, one row (and one
     // dedicated Matrix account) each. A link is addressed by its id.
     index("matrix_links_org_brand_channel_idx").on(table.orgId, table.brandId, table.channel),
+    uniqueIndex("matrix_links_line_role_uq")
+      .on(table.orgId, table.brandId, table.channel, table.lineRole)
+      .where(sql`${table.lineRole} IS NOT NULL`),
   ],
 );
 

@@ -28,13 +28,19 @@
  * two can never disagree. Our own outreach (Instantly, self-send) is NOT in the
  * feed: lead-service reads it directly.
  *
- * FEED ORDER IS A GUARANTEE, not luck (UNIBOX-FACT-LAG-1028): every write to the feed happens
- * under ONE exclusive advisory lock (`FEED_LOCK`), taken right before the first write and held to
- * commit, so feed_seq values (drawn at insert) commit in increasing order; the reader
- * (`readFacts`) takes the SAME lock SHARED, so it never reads while a writer is between drawing a
- * seq and committing it. A cursor can therefore never step over a fact committed later with a
- * lower seq. The DERIVATION (reads + diff, the slow part) runs before that lock, under a lock of
- * its own scope only, so one big brand's emission no longer holds every other brand's back.
+ * Emission takes TWO advisory locks (BOX-DB-LOAD-1028-CRM-LOCK):
+ *  - a per-BRAND lock for the whole transaction, so two emissions for one brand
+ *    never diff against the same feed state (no double write);
+ *  - the global FEED lock only for the WRITE tail (every insert / update sits at
+ *    the end), so feed_seq values commit in order and a reader paging by cursor
+ *    never skips a fact. A pass with nothing to write never takes it.
+ * Before, the global lock covered the whole diff (reads of every source), and
+ * every brand's emission in the fleet queued behind every other's.
+ *
+ * FEED ORDER IS A GUARANTEE, not luck (UNIBOX-FACT-LAG-1028): the writer's seqs are drawn and
+ * committed under the exclusive FEED lock; the reader (`readFacts`) takes the SAME lock SHARED, so it
+ * never reads while a writer is between drawing a seq and committing it, and a cursor can never step
+ * over a fact committed later with a lower seq. Only this module writes `people_facts`.
  *
  * Emission is driven by the fact emitter (fact-emitter.ts): within seconds of any record of the
  * scope moving, not only after a whole people build (UNIBOX-FACT-LAG-1028).
@@ -1300,13 +1306,13 @@ export interface FactEmissionSummary {
   bySource: Record<string, number>;
 }
 
-const FEED_LOCK_KEY = sql`hashtext('crm-service.people_facts')`;
-/** Exclusive: held from a writer's first write to its commit (feed_seq values commit in order). */
-const FEED_LOCK = sql`SELECT pg_advisory_xact_lock(${FEED_LOCK_KEY})`;
+/** The fleet-wide feed order lock: held from the first feed write to commit, never during the diff. */
+export const FEED_LOCK = sql`SELECT pg_advisory_xact_lock(hashtext('crm-service.people_facts'))`;
+/** One brand's emission at a time (the diff reads the brand's feed, then writes against it). */
+export const brandFeedLock = (orgId: string, brandId: string) =>
+  sql`SELECT pg_advisory_xact_lock(hashtextextended(${`crm-service.people_facts|${orgId}|${brandId}`}, 0))`;
 /** Shared: a feed READ never overlaps a writer between drawing its seqs and committing them. */
-const FEED_READ_LOCK = sql`SELECT pg_advisory_xact_lock_shared(${FEED_LOCK_KEY})`;
-/** One emission per scope at a time (the diff reads the scope's facts, then writes on them). */
-const scopeLock = (scopeId: string) => sql`SELECT pg_advisory_xact_lock(hashtext(${`crm-service.people_facts.scope:${scopeId}`}))`;
+const FEED_READ_LOCK = sql`SELECT pg_advisory_xact_lock_shared(hashtext('crm-service.people_facts'))`;
 
 /** A fact already on the feed, without its payload (read only for the few facts re-stated). */
 type FeedFact = Omit<PeopleFact, "payload">;
@@ -1379,7 +1385,7 @@ async function insertAll(tx: Tx, values: (typeof peopleFacts.$inferInsert)[]) {
 export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "brandId">): Promise<FactEmissionSummary> {
   const { orgId, brandId } = scope;
   return db.transaction(async (tx) => {
-    await tx.execute(scopeLock(scope.id));
+    await tx.execute(brandFeedLock(orgId, brandId));
     // Every record committed before this instant is read below: what `facts_stated_through` promises.
     const [{ readsFrom }] = (await tx.execute(sql`SELECT clock_timestamp() AS "readsFrom"`)) as unknown as { readsFrom: Date | string }[];
 
@@ -1515,6 +1521,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
         payload: { fromPersonKey: m.fromPersonKey, intoPersonKey: m.intoPersonKey },
       });
     }
+    const moved = moves.filter((m) => m.from !== m.to);
     const ownerNow = new Map(moves.map((m) => [m.factId, m.to]));
 
     // 3-4. Withdrawals, then new facts.
@@ -1721,14 +1728,14 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
     });
     await fillRestatedPayloads(tx, fresh);
 
-    // Writes start here, in feed order (splits, merges, withdrawals, new facts): the feed lock (see the
-    // header) is held from now to commit. Everything above only READ.
-    await tx.execute(FEED_LOCK);
-    await insertAll(tx, meta);
-    for (const m of moves) {
-      if (m.from !== m.to) await tx.update(peopleFacts).set({ ownerPersonKey: m.to }).where(eq(peopleFacts.factId, m.factId));
-    }
     const ids = withdrawals.map((w) => w.fact.factId);
+    // The write tail, under the global feed lock (taken only when there is something to write):
+    // splits / merges, ownership moves, withdrawals, then new facts, in that feed order.
+    if (meta.length || moved.length || withdrawnRows.length || fresh.length) await tx.execute(FEED_LOCK);
+    await insertAll(tx, meta);
+    for (const m of moved) {
+      await tx.update(peopleFacts).set({ ownerPersonKey: m.to }).where(eq(peopleFacts.factId, m.factId));
+    }
     for (let i = 0; i < ids.length; i += 1000) {
       await tx.update(peopleFacts).set({ live: false }).where(inArray(peopleFacts.factId, ids.slice(i, i + 1000)));
     }

@@ -29,7 +29,7 @@
  * Every source record that brought the person in also adds ONE entry event,
  * dated by the source (`entryItems`): GoHighLevel `added_to_crm` (contact
  * created), CSV `added_to_crm` (file uploaded), PostHog `signup` (person
- * created), Stripe `became_customer` (customer created), Clerk `signup` (user
+ * created), Stripe `stripe_customer_created` (customer created), Clerk `signup` (user
  * created). A record whose source
  * gives no date adds nothing: a date is never invented, never the build time.
  * So a person is never an empty thread while any of their records is dated.
@@ -63,6 +63,7 @@ import {
   type Person,
 } from "../../db/schema.js";
 import { majorAmount } from "../stripe/records.js";
+import { stripeAttempt, subscriptionAttempt } from "../stripe/attempts.js";
 import { readFunnelEvents, type FunnelEvent } from "../gohighlevel/funnel-events.js";
 import type { BuildSummary } from "./build.js";
 import { PEOPLE_SOURCES, type PeopleSource, type Presence } from "./identity.js";
@@ -316,7 +317,8 @@ async function matrixItems(presences: Presence[]): Promise<SourceResult> {
 const ENTRY: Record<"gohighlevel" | "posthog" | "stripe" | "clerk", { step: string; dateBasis: string; channel: string }> = {
   gohighlevel: { step: "added_to_crm", dateBasis: "contact_created_at", channel: "crm" },
   posthog: { step: "signup", dateBasis: "person_created_at", channel: "web" },
-  stripe: { step: "became_customer", dateBasis: "customer_created_at", channel: "payment" },
+  // A Stripe customer record is no payment (a card check creates one): never "became a customer" (UNIBOX-PAYMENT-REFUSED-1028).
+  stripe: { step: "stripe_customer_created", dateBasis: "customer_created_at", channel: "payment" },
   clerk: { step: "signup", dateBasis: "user_created_at", channel: "web" },
 };
 
@@ -770,8 +772,6 @@ export async function apiCallItems(
 
 // ─── stripe ─────────────────────────────────────────────────────────────────
 
-const STRIPE_STEP: Record<string, string> = { payment: "payment", refund: "refund", subscription: "subscription_started" };
-
 async function stripeItems(presences: Presence[]): Promise<SourceResult> {
   const contactIds = presences.map((p) => p.sourceRef);
   if (contactIds.length === 0) return { status: "empty", items: [], error: null, asked: [] };
@@ -805,18 +805,22 @@ async function stripeItems(presences: Presence[]): Promise<SourceResult> {
         recordedAt: t.lastRebuiltAt.toISOString(),
       },
     };
+    // What the record WAS (UNIBOX-PAYMENT-REFUSED-1028): a refused card is `payment_refused`, never `payment`.
+    const record = { kind: t.kind, amountMinor: t.amountMinor, currency: t.currency, status: t.status, description: t.description, detail };
+    const attempt = stripeAttempt(record);
     items.push({
       ...base,
       at: t.occurredAt.toISOString(),
-      text: t.description,
-      event: { step: STRIPE_STEP[t.kind], dateBasis: t.kind === "subscription" ? "start_date" : "created", detail: { ...money, ...detail } },
+      text: attempt.text,
+      event: { step: attempt.step, dateBasis: t.kind === "subscription" ? "start_date" : "created", detail: { ...money, ...detail } },
     });
     if (t.kind === "subscription" && typeof detail.canceledAt === "string") {
+      const ended = subscriptionAttempt(record, true);
       items.push({
         ...base,
         at: detail.canceledAt,
-        text: t.description,
-        event: { step: "subscription_canceled", dateBasis: "canceled_at", detail: { ...money, ...detail } },
+        text: ended.text,
+        event: { step: ended.step, dateBasis: "canceled_at", detail: { ...money, ...detail } },
       });
     }
   }
