@@ -105,15 +105,28 @@ export interface DerivedActivity {
   detail: Record<string, unknown>;
 }
 
+const flag = (v: unknown) => v === 1 || v === true || v === "1" || v === "true";
+
+export type MachineFingerprint = "viewport_equals_screen" | "headless_default_screen";
+
 /**
- * POSTHOG-SCANNER-VISIT-1025: the machine a visit is POSITIVELY tied to (client.ts `MACHINE_VIEWPORT_SQL`), or
- * null. Null covers "a person" AND "unknown" (a bronze row read before the fingerprint was asked): never a guess.
+ * POSTHOG-SCANNER-VISIT-1025 + ROBOTS-NEVER-LEAVE-BRONZE-1028: the machine a visit (bronze payload) is POSITIVELY
+ * tied to (client.ts `MACHINE_VIEWPORT_SQL`), or null. Null covers "a person" AND "unknown" (a bronze row read
+ * before the fingerprint was asked): never a guess, never a time or pageview threshold. A machine's session stays
+ * in bronze only: its visit and every event fired in it never reach silver (`deriveActivities`).
  */
-export function visitMachine(payload: Record<string, unknown>): { fingerprint: "viewport_equals_screen"; screen: string | null } | null {
-  const v = payload.viewport_is_screen;
-  if (!(v === 1 || v === true || v === "1" || v === "true")) return null;
-  return { fingerprint: "viewport_equals_screen", screen: str(payload.screen) };
+export function visitMachine(payload: Record<string, unknown>): { fingerprint: MachineFingerprint; screen: string | null } | null {
+  if (flag(payload.viewport_is_screen)) return { fingerprint: "viewport_equals_screen", screen: str(payload.screen) };
+  if (flag(payload.headless_default_screen)) return { fingerprint: "headless_default_screen", screen: str(payload.screen) };
+  return null;
 }
+
+/**
+ * The same rule in SQL over a bronze `posthog_raw_records.payload` (jsonb): HogQL serves the flags as numbers,
+ * `->>` reads them as text. Twin of `visitMachine`, keep them together.
+ */
+export const BRONZE_MACHINE_VISIT_SQL = (payload: string) =>
+  `(${payload}->>'viewport_is_screen' IN ('1', 'true') OR ${payload}->>'headless_default_screen' IN ('1', 'true'))`;
 
 export function deriveVisit(payload: Record<string, unknown>): DerivedActivity | null {
   const personId = str(payload.person_id);

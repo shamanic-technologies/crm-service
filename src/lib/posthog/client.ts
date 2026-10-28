@@ -226,6 +226,10 @@ export async function listPersonsByDistinctIds(target: PosthogTarget, distinctId
  * 30 days the only signed-in desktop sessions matching were our own test accounts and probes.
  * `viewport_is_screen` = 1 only when EVERY pageview of the session is a desktop one matching it; a pageview
  * missing either size, or a phone / tablet (in-app browsers fill the screen), reads 0: unknown = a person.
+ * `headless_default_screen` (ROBOTS-NEVER-LEAVE-BRONZE-1028) = 1 only when EVERY pageview is a desktop one on an
+ * 800x600 SCREEN: the headless default (Puppeteer / Chromium's own), no desktop a person browses on today. Measured
+ * 2026-10-28: 29 of the 44 newsletter-link visits the first fingerprint let through were single-pageview 0-second
+ * sessions on it. A phone / tablet of that size, or a pageview missing a size, reads 0: unknown = a person.
  * `screen` = the size it matched, for the record.
  */
 export const MACHINE_VIEWPORT_SQL = `
@@ -234,6 +238,9 @@ export const MACHINE_VIEWPORT_SQL = `
                AND toFloat(properties.$screen_width) > 0 AND toFloat(properties.$screen_height) > 0
                AND toFloat(properties.$viewport_width) = toFloat(properties.$screen_width)
                AND toFloat(properties.$viewport_height) = toFloat(properties.$screen_height), 0)) AS viewport_is_screen,
+             min(ifNull(
+               toString(properties.$device_type) = 'Desktop'
+               AND toFloat(properties.$screen_width) = 800 AND toFloat(properties.$screen_height) = 600, 0)) AS headless_default_screen,
              any(concat(toString(properties.$screen_width), 'x', toString(properties.$screen_height))) AS screen`;
 
 /**

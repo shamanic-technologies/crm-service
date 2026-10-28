@@ -1849,9 +1849,14 @@ re-derives silver with no vendor call. API reads are free → no cost declared.
   **A machine's visit is no act of theirs** (POSTHOG-SCANNER-VISIT-1025): mail scanners open every newsletter link
   (`dy_sub` identifies the subscriber), so each visit read as "they visited" → Lead event. `visit.detail.machine` =
   POSITIVE fingerprint only: EVERY pageview desktop with viewport == screen in both dims (headless; measured 7,423 vs
-  47 on newsletter links, 0 vs 1,247 signed-in). Unknown / absent = a person. A machine visit: no `website_visit` fact
-  (a live one withdrawn `machine_visit`), no activity span; still on the thread with `machine`. Backfill =
-  `POST /internal/posthog/sync {connectionId, rereadSince}` then a people sync.
+  47 on newsletter links, 0 vs 1,247 signed-in), OR every pageview a desktop on an 800x600 SCREEN (the headless
+  default: `headless_default_screen`). Unknown / absent = a person; never a time / pageview-count rule.
+  **A machine's session never leaves BRONZE** (ROBOTS-NEVER-LEAVE-BRONZE-1028, owner 2026-10-28 « ils ne doivent même
+  pas arriver sur l'unibox ni nulle part »): neither its visit nor any event of the session is written to
+  `posthog_activities` (`machineSessions`), and every derive pass deletes the silver rows of a session bronze now
+  fingerprints (`dropMachineActivities`); their live facts are withdrawn `machine_visit` (facts.ts reads the bronze of a
+  gone PostHog fact). Rule twins: records.ts `visitMachine` (TS) / `BRONZE_MACHINE_VISIT_SQL`. A new fingerprint reaches
+  old bronze by `POST /internal/posthog/sync {connectionId, rereadSince}` (2026-10-28: since 2026-10-24).
   The `website` property a person typed is canonical silver (`contacts.website` + `company_domain`, WA-THREAD-IDENTITY-1023):
   it is company evidence like a CRM contact's website (`organizations.ts` `websiteOfPresence` reads EVERY source's contact,
   it read GoHighLevel only, so a signup known by phone + typed website was served with no company). Migration 0057 carried
