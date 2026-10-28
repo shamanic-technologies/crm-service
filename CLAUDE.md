@@ -1652,7 +1652,8 @@ lead-service serves the overall tag, then go.
   typed their email) resolves on its own identity keys (`withRecordKeys`, `record-keys.ts`, as the build will
   cluster it) instead of being held until a build. Before (2026-10-28, tari@slipless.ng): two refused charges
   mirrored 05:04:05 reached the feed 05:08:43 + ~50 s commit: held (new customer) until the NEXT build re-read 31k
-  people (4 min 12 s), then an emission of 81-107 s (30 s of it reading 413k facts' payloads, now read narrow).
+  people (4 min 12 s), then an emission of 81-107 s (30 s of it reading 413k facts whole). Now live facts without
+  payload + ownership GROUPS + a narrow person read: 29-40 s for Distribute.you at box load ~30, Doc Dinners 21 s.
 - **Feed order is a guarantee** (UNIBOX-FACT-LAG-1028): the derivation runs under a per-SCOPE lock; every write takes
   the global exclusive `FEED_LOCK` right before the first write, held to commit (seqs commit in order); `readFacts`
   reads under the same lock SHARED, so no page is read while a writer holds seqs uncommitted. Only `facts.ts` writes
