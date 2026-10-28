@@ -845,6 +845,16 @@ swallowed, and one broken connection does not stop the others.
   person timeline stand on it.
 - `GET /orgs/gohighlevel/stage-meanings?brandId=` — the recorded stage decisions.
 
+### A sync that takes in nothing is not healthy (`lib/connector-intake*.ts`, GHL-MIRROR-FROZEN-1028)
+
+`status active` + a fresh `last_synced_at` prove the CREDENTIAL, not that the account lives. Doc Dinners' GoHighLevel
+took in nothing 2026-10-20 → 10-28 while "active"; GoHighLevel's own API said the same (2,721 contacts = mirror, last
+activity 10-20 20:47): no mirror bug, the account went quiet, unseen. `GET /internal/ops/connector-intake?days=` (staff,
+Monitoring hub) = per mirror connection (GoHighLevel, PostHog, Stripe, auth) records the VENDOR dates per UTC day, read
+from bronze; red on `sync_error`, `sync_late` (2 h), `quiet_unusual` (quieter than its own longest stretch over the 180
+days before, >= 3 days, only with 20+ active days). Sends nothing. ⚠️ Probing GoHighLevel by hand: key-service decrypt
+needs `X-Caller-Service/Method/Path`, else 400 and a token-less call reads GHL's "401 Invalid JWT" (not a dead token).
+
 ### Funnel evidence — appointments, stage history, stage meanings
 
 The CRM knows things our funnel does not (a meeting BOOKED, ATTENDED or not, a

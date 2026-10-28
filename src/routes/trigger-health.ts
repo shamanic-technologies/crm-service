@@ -1,6 +1,8 @@
 /**
  * Trigger reports for the dashboard v2 Monitoring hub (lib/trigger-health.ts, WA-GREETING-OFFER-1027):
  *  - GET /internal/ops/trigger-reports?days=30   per trigger: reports stuck unsent (red) + a daily series.
+ *  - GET /internal/ops/connector-intake?days=30   per mirror connection: records the vendor dates per day + red when
+ *    the sync fails, is late, or the account went unusually quiet (GHL-MIRROR-FROZEN-1028).
  *  - POST /internal/reply-triggers/reports/withhold {reportIds, note}   OWNER DOOR: never send these reply reports.
  *  - POST /internal/reply-triggers/gmail/recheck-cold-email-skips {reportIds?, dryRun?}   OWNER DOOR: re-decide legacy
  *    Gmail skips handed to the email path on the recipient alone (EMAIL-REPLY-ORPHAN-1027).
@@ -10,6 +12,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { apiKeyAuth } from "../middleware/auth.js";
 import { readTriggerHealth } from "../lib/trigger-health.js";
+import { readConnectorIntake } from "../lib/connector-intake.js";
 import { withholdReplyReports } from "../lib/reply-trigger/watch.js";
 import { recheckLegacyColdEmailSkips } from "../lib/reply-trigger/gmail-recheck.js";
 
@@ -20,6 +23,12 @@ router.get("/internal/ops/trigger-reports", apiKeyAuth, async (req, res) => {
   const days = req.query.days === undefined ? { success: true as const, data: 30 } : daysSchema.safeParse(req.query.days);
   if (!days.success) return res.status(400).json({ type: "validation", error: "days must be an integer from 1 to 90" });
   res.json(await readTriggerHealth(days.data));
+});
+
+router.get("/internal/ops/connector-intake", apiKeyAuth, async (req, res) => {
+  const days = req.query.days === undefined ? { success: true as const, data: 30 } : daysSchema.safeParse(req.query.days);
+  if (!days.success) return res.status(400).json({ type: "validation", error: "days must be an integer from 1 to 90" });
+  res.json(await readConnectorIntake(days.data));
 });
 
 router.post("/internal/reply-triggers/reports/withhold", apiKeyAuth, async (req, res) => {
