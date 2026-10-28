@@ -86,7 +86,7 @@ const BRAND_NAME_TTL_MS = 60 * 60_000;
 const brandNameCache = new Map<string, { name: string | null; at: number }>();
 
 /** brand-service's name per brand (key-only internal read), cached 1 h. Display only: unreadable = null, logged. */
-async function brandNames(ids: string[]): Promise<Map<string, string | null>> {
+export async function brandNames(ids: string[]): Promise<Map<string, string | null>> {
   const out = new Map<string, string | null>();
   const base = process.env.BRAND_SERVICE_URL;
   const key = process.env.BRAND_SERVICE_API_KEY;

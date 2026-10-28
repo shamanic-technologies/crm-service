@@ -3911,6 +3911,22 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "get",
+  path: "/internal/ops/connector-intake",
+  summary: "Per mirror connection: records the vendor dated per day, red when it fails, is late or went unusually quiet (dashboard v2 Monitoring)",
+  description:
+    "GHL-MIRROR-FROZEN-1028. Every mirror connection (GoHighLevel, PostHog, Stripe, auth provider such as Clerk), read from bronze: " +
+    "`byDay` = records whose VENDOR creation date (GoHighLevel contact / deal / appointment / form submission, PostHog visit / event / " +
+    "person, Stripe charge / refund / customer, auth user / membership) falls on each UTC day of the window, zero-filled. `status: red` " +
+    "with `reasons` when: `sync_error` (the sync fails), `sync_late` (no good sync for 2 h), `quiet_unusual` (nothing new for longer " +
+    "than the connection's own longest quiet stretch over the 180 days before, at least 3 days, only with 20+ active days of history). " +
+    "A sync that succeeds while the account takes in nothing is therefore red, never healthy. Paused = `paused`, never red. " +
+    "Nothing is emailed: red on the Monitoring hub is the alert. Staff-only behind the gateway.",
+  request: { query: z.object({ days: z.coerce.number().int().min(1).max(90).optional().describe("Window in days, default 30") }) },
+  responses: { 200: { description: "`{generatedAt, days, rule: {historyDays, minActiveDays, minQuietDays, syncLateAfterMinutes}, status, connections: [{source, connectionId, orgId, brandId, brandName, account, syncStatus, lastSyncedAt, lastError, status: ok|red|paused, reasons: [{code, text}], newestRecordDay, quietDays, usualLongestQuietDays, activeDaysInHistory, byDay: [{day, records}]}]}`" }, 400: { description: "Invalid days" } },
+});
+
+registry.registerPath({
   method: "post",
   path: "/internal/reply-triggers/gmail/recheck-cold-email-skips",
   summary: "OWNER DOOR: re-check legacy Gmail replies skipped as the email path's on the recipient alone",
