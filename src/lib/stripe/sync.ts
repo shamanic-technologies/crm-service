@@ -336,3 +336,33 @@ export async function rebuildStripeFromBronze(conn: StripeConnection) {
   const transactionsLinked = await linkTransactions(conn);
   return { contactsDerived, transactionsDerived, transactionsLinked };
 }
+
+export interface StripeFastMirrorResult {
+  changed: Record<StripeKind, number>;
+}
+
+/**
+ * The fast path (UNIBOX-PAYMENT-REFUSED-1028), asked every minute by the phone watch's fast
+ * mirror: every object of every kind CREATED since `since` (a payment attempt, refused or not,
+ * its customer, a refund, a subscription) mirrored NOW, bronze + silver, without waiting for the
+ * 15-min pass. One list call per kind; no-churn upserts, so overlapping windows write nothing.
+ * Prod 2026-10-28: a $100 top-up refused at 05:01:24 reached our mirror at 05:04:05 and the
+ * registry minutes later; a writer told the person their top-up was going through at 05:11.
+ */
+export async function mirrorRecentStripe(conn: StripeConnection, since: Date): Promise<StripeFastMirrorResult> {
+  const key = await resolveBrandCredential(conn.credentialProvider, "Stripe", conn.brandId, {
+    orgId: conn.orgId,
+    userId: conn.createdByUserId,
+  });
+  const changed = { customer: [], charge: [], refund: [], subscription: [] } as Record<StripeKind, string[]>;
+  for (const kind of STRIPE_KINDS) {
+    for await (const page of listStripe(key, kind, since)) changed[kind].push(...(await mirrorBatch(conn, kind, page)));
+  }
+  const moved = STRIPE_KINDS.some((k) => changed[k].length > 0);
+  if (moved) {
+    await deriveContacts(conn, changed.customer);
+    await deriveTransactions(conn, changed);
+    await linkTransactions(conn);
+  }
+  return { changed: Object.fromEntries(STRIPE_KINDS.map((k) => [k, changed[k].length])) as Record<StripeKind, number> };
+}

@@ -2451,7 +2451,7 @@ const TimelineItemSchema = z
           "Events only. Besides the funnel / web / payment steps, every source record that brought the person in adds ONE entry event, " +
           "only when the source dates it (never invented, never the build time): " +
           "gohighlevel `added_to_crm` (dateBasis `contact_created_at`), csv `added_to_crm` (dateBasis `uploaded_at`, detail filename + uploadId), " +
-          "posthog `signup` (dateBasis `person_created_at`), stripe `became_customer` (dateBasis `customer_created_at`). " +
+          "posthog `signup` (dateBasis `person_created_at`), stripe `stripe_customer_created` (dateBasis `customer_created_at`; a customer record is no payment). " +
           "Source `api` (channel `api` or `mcp`) carries messages only: each call the person made to our API (or through our MCP server) with their own key is two messages, " +
           "what they asked (inbound, a plain-words summary) and what we answered (outbound, from \"distribute.you API\"), both with `ref.callId` (whole call: GET /orgs/people/api-calls/{callId}), `ref.sessionId` (calls on one channel less than 30 min apart), method, path, status, mcpTool; staff Unibox scope alone. " +
           "Source `copilot` (channel `chat`) carries messages only: the person's chat with the distribute.you Copilot, served on the staff Unibox scope alone, inbound = the user wrote, outbound = the Copilot answered (`from` \"AI Copilot\"). " +
