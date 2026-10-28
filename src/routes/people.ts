@@ -8,7 +8,7 @@ import { Router, type Response } from "express";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../db/index.js";
-import { people } from "../db/schema.js";
+import { people, type PeopleScope, type Person } from "../db/schema.js";
 import {
   apiKeyAuth,
   requireOrgAndUser,
@@ -21,8 +21,8 @@ import { PEOPLE_SOURCES, type Presence } from "../lib/people/identity.js";
 import type { PossibleLead } from "../lib/people/sources.js";
 import type { LeadCompanyTags, LeadDisqualification, LeadHumanTags } from "../lib/people/state.js";
 import type { PersonRelevance } from "../lib/people/relevance.js";
-import { decodeCursor, findPerson, pageOf, readTimeline } from "../lib/people/timeline.js";
-import { attachFactIds } from "../lib/people/fact-ids.js";
+import { decodeCursor, findPerson, pageOf, readTimeline, type TimelineItem } from "../lib/people/timeline.js";
+import { attachFactIds, factFeedSettlement, type FactFeedSettlement } from "../lib/people/fact-ids.js";
 import { completeItems } from "../lib/people/item-fill.js";
 import { readFacts } from "../lib/people/facts.js";
 import { findPersonById } from "../lib/people/person-id.js";
@@ -471,6 +471,15 @@ router.get(
 
 // ─── GET /orgs/people/timeline?brandId=&personKey= ───────────────────────────
 
+/**
+ * UNIBOX-FACT-LAG-1028: is every fact of this thread on the people fact feed yet? A thread holding a
+ * fact still in flight answers `factFeed.settled: false` (with the pending items): the fact emitter
+ * states it within seconds (its inputs mark moved); a writer reads again shortly instead of writing.
+ */
+function settlementOf(scope: PeopleScope, person: Person, items: TimelineItem[]): FactFeedSettlement {
+  return factFeedSettlement(items, person.emails as string[], scope.factsStatedThrough ?? null);
+}
+
 const timelineQuerySchema = z
   .object({
     brandId: brandIdSchema,
@@ -561,11 +570,13 @@ router.get(
         const page = pageOf(timeline.items, limit, before);
         // Only the page's items get their heavy part (message text, API answer summary).
         await Promise.all([completeItems(page.items), attachFactIds(req.orgId!, brandId, person.emails as string[], page.items)]);
+        const factFeed = settlementOf(scope, person, page.items);
         return res.json({
           brandId,
           person: personView(person),
           builtAt: person.builtAt.toISOString(),
           indexCurrent: timeline.indexCurrent,
+          factFeed,
           sources: timeline.sources,
           itemCount: page.items.length,
           totalItems: page.totalItems,
@@ -574,11 +585,13 @@ router.get(
         });
       }
       await attachFactIds(req.orgId!, brandId, person.emails as string[], timeline.items);
+      const factFeed = settlementOf(scope, person, timeline.items);
       res.json({
         brandId,
         person: personView(person),
         builtAt: person.builtAt.toISOString(),
         indexCurrent: timeline.indexCurrent,
+        factFeed,
         sources: timeline.sources,
         itemCount: timeline.items.length,
         items: timeline.items,
@@ -1055,33 +1068,38 @@ const factsQuerySchema = z.object({
 });
 
 /**
- * The fact feed after `since` (exclusive), in feed order. Read-only and
- * DB-only (no cost); its own platform run, like every internal route.
+ * The fact feed after `since` (exclusive), in feed order. Read-only and DB-only (no cost).
+ * UNIBOX-FACT-LAG-1028: lead-service asks every 15 s and most answers are empty. A page that
+ * serves facts opens its platform run, like every internal route; an EMPTY page served nothing and
+ * spent nothing, so it opens none (5,760 empty runs a day otherwise). A read that fails opens one, failed.
  */
 router.get("/internal/people/facts", apiKeyAuth, async (req, res) => {
   const parsed = factsQuerySchema.safeParse(req.query);
   if (!parsed.success) {
     return res.status(400).json({ type: "validation", error: parsed.error.issues.map((i) => i.message).join("; ") });
   }
-  let platformRunId: string;
+  const { since, limit, orgId, brandId } = parsed.data;
+  let page: Awaited<ReturnType<typeof readFacts>>;
+  try {
+    page = await readFacts({ since: since ? Number(since) : 0, limit: limit ?? 500, orgId, brandId });
+  } catch (err) {
+    console.error("[crm-service] people facts read failed:", err);
+    try {
+      const run = await createPlatformRun({ serviceName: SERVICE_NAME, taskName: "people.facts.read" });
+      await updatePlatformRun(run.id, "failed", SERVICE_NAME);
+    } catch (e) {
+      console.error("[crm-service] failed to record the failed people facts read:", e);
+    }
+    return res.status(500).json({ type: "internal", error: (err as Error).message });
+  }
+  if (page.facts.length === 0) return res.json(page);
   try {
     const run = await createPlatformRun({ serviceName: SERVICE_NAME, taskName: "people.facts.read" });
-    platformRunId = run.id;
+    await updatePlatformRun(run.id, "completed", SERVICE_NAME);
   } catch (err) {
     return res.status(502).json({ type: "upstream", error: `run tracking unavailable: ${(err as Error).message}` });
   }
-  try {
-    const { since, limit, orgId, brandId } = parsed.data;
-    const page = await readFacts({ since: since ? Number(since) : 0, limit: limit ?? 500, orgId, brandId });
-    await updatePlatformRun(platformRunId, "completed", SERVICE_NAME);
-    res.json(page);
-  } catch (err) {
-    console.error("[crm-service] people facts read failed:", err);
-    await updatePlatformRun(platformRunId, "failed", SERVICE_NAME).catch((e) =>
-      console.error("[crm-service] failed to close people facts run:", e),
-    );
-    res.status(500).json({ type: "internal", error: (err as Error).message });
-  }
+  res.json(page);
 });
 
 // ─── GET /internal/people/leg-reach (features-service: the brand's own team per leg) ──

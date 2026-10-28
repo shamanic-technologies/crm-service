@@ -1126,6 +1126,9 @@ export const peopleScopes = pgTable(
     outreachFactsCursor: text("outreach_facts_cursor"),
     // When the Gmail reply trigger first looked at this scope (lib/reply-trigger/gmail.ts): earlier mail is history.
     gmailReplyWatchSince: timestamp("gmail_reply_watch_since", { withTimezone: true }),
+    // UNIBOX-FACT-LAG-1028: when the last completed fact emission of this scope STARTED reading (DB clock).
+    // Every record crm-service held before it is stated on the fact feed (or is no fact by rule).
+    factsStatedThrough: timestamp("facts_stated_through", { withTimezone: true }),
 
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },

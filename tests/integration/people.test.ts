@@ -440,8 +440,9 @@ async function retryOnDeadlock(fn: () => Promise<unknown>): Promise<void> {
       await fn();
       return;
     } catch (err) {
-      if ((err as { code?: string }).code !== "40P01" || attempt >= 5) throw err;
-      await new Promise((r) => setTimeout(r, 100));
+      // A background people build (its fact emission included) can hold rows for a few seconds.
+      if ((err as { code?: string }).code !== "40P01" || attempt >= 30) throw err;
+      await new Promise((r) => setTimeout(r, 200));
     }
   }
 }

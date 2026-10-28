@@ -66,7 +66,8 @@ import { majorAmount } from "../stripe/records.js";
 import { stripeAttempt, subscriptionAttempt } from "../stripe/attempts.js";
 import { readFunnelEvents, type FunnelEvent } from "../gohighlevel/funnel-events.js";
 import type { BuildSummary } from "./build.js";
-import { keysOf, PEOPLE_SOURCES, type PeopleSource, type Presence } from "./identity.js";
+import { PEOPLE_SOURCES, type PeopleSource, type Presence } from "./identity.js";
+import { LATE_JOIN_SOURCES, mirrorContactKeys, type LateJoinSource, type MirrorContactRow } from "./record-keys.js";
 import type { SiblingIdentity } from "./siblings.js";
 import { readStoredTimeline, type StoredReadOptions, type StoredTimeline } from "./search.js";
 import { lookupLeadStanding } from "./sources.js";
@@ -253,7 +254,7 @@ async function matrixItems(presences: Presence[]): Promise<SourceResult> {
         text: typeof content?.body === "string" ? content.body : null,
         from: e.sender,
         to: [],
-        ref: { eventId: e.eventId, roomId: e.roomId, groupRoomId: e.roomId },
+        ref: { eventId: e.eventId, roomId: e.roomId, groupRoomId: e.roomId, recordedAt: e.ingestedAt.toISOString() },
         textClean: null,
         outreachFact: null,
         event: null,
@@ -299,7 +300,7 @@ async function matrixItems(presences: Presence[]): Promise<SourceResult> {
         text: typeof content?.body === "string" ? content.body : null,
         from: e.sender,
         to: [],
-        ref: { eventId: e.eventId, roomId: e.roomId, conversationId: c.id },
+        ref: { eventId: e.eventId, roomId: e.roomId, conversationId: c.id, recordedAt: e.ingestedAt.toISOString() },
         textClean: null,
         outreachFact: null,
         event: null,
@@ -319,6 +320,13 @@ const ENTRY: Record<"gohighlevel" | "posthog" | "stripe" | "clerk", { step: stri
   // A Stripe customer record is no payment (a card check creates one): never "became a customer" (UNIBOX-PAYMENT-REFUSED-1028).
   stripe: { step: "stripe_customer_created", dateBasis: "customer_created_at", channel: "payment" },
   clerk: { step: "signup", dateBasis: "user_created_at", channel: "web" },
+};
+
+/** The natural key of the fact an entry event is (facts.ts ghlCandidates / posthogCandidates / authCandidates). */
+const ENTRY_FACT_KEY: Partial<Record<keyof typeof ENTRY, (externalId: string | null) => string | null>> = {
+  gohighlevel: (id) => (id ? `gohighlevel|contact|${id}` : null),
+  posthog: (id) => (id ? `posthog|signup|${id}` : null),
+  clerk: (id) => (id ? `clerk|signup|${id}` : null),
 };
 
 const entryEvent = (
@@ -354,6 +362,7 @@ export async function entryItems(source: keyof typeof ENTRY, presences: Presence
       id: contacts.id,
       externalId: contacts.externalId,
       createdAt: contacts.sourceCreatedAt,
+      lastRebuiltAt: contacts.lastRebuiltAt,
       leadSource: contacts.leadSource,
       originMedium: contacts.originMedium,
       contactType: contacts.contactType,
@@ -376,7 +385,13 @@ export async function entryItems(source: keyof typeof ENTRY, presences: Presence
         source,
         channel,
         r.createdAt!,
-        { contactId: r.id, externalContactId: r.externalId },
+        {
+          contactId: r.id,
+          externalContactId: r.externalId,
+          // The fact this entry IS on the feed (facts.ts), when it is one: a Stripe customer record states none.
+          factKey: ENTRY_FACT_KEY[source]?.(r.externalId) ?? null,
+          recordedAt: r.lastRebuiltAt.toISOString(),
+        },
         step,
         dateBasis,
         source === "gohighlevel"
@@ -481,7 +496,13 @@ async function posthogItems(presences: Presence[], authStatesSignups: boolean): 
     text: a.kind === "event" ? describeKeyEvent(a.name, (a.detail as { properties?: Record<string, unknown> } | null)?.properties) : a.name,
     from: null,
     to: [],
-    ref: { contactId: a.contactId, externalId: a.externalId, externalPersonId: a.externalPersonId },
+    ref: {
+      contactId: a.contactId,
+      externalId: a.externalId,
+      externalPersonId: a.externalPersonId,
+      factKey: `posthog|${a.kind}|${a.externalId}`,
+      recordedAt: a.lastRebuiltAt.toISOString(),
+    },
     textClean: null,
     outreachFact: null,
     event: {
@@ -775,7 +796,14 @@ async function stripeItems(presences: Presence[]): Promise<SourceResult> {
       subject: null,
       from: null,
       to: [],
-      ref: { contactId: t.contactId, externalId: t.externalId, externalCustomerId: t.externalCustomerId },
+      ref: {
+        contactId: t.contactId,
+        externalId: t.externalId,
+        externalCustomerId: t.externalCustomerId,
+        // The fact this record IS on the feed (facts.ts stripeCandidates), and when crm-service recorded it.
+        factKey: t.kind === "subscription" ? `stripe|subscription|${t.externalId}|${t.status}` : `stripe|${t.kind}|${t.externalId}`,
+        recordedAt: t.lastRebuiltAt.toISOString(),
+      },
     };
     // What the record WAS (UNIBOX-PAYMENT-REFUSED-1028): a refused card is `payment_refused`, never `payment`.
     const record = { kind: t.kind, amountMinor: t.amountMinor, currency: t.currency, status: t.status, description: t.description, detail };
@@ -829,31 +857,7 @@ export async function findPerson(orgId: string, brandId: string, key: string): P
  * the person's identity keys (exactly as the build derives them) is read, joined or not, and the
  * ones the index did not hold yet are named on the source (`joinedAtRead`).
  */
-export const LATE_JOIN_SOURCES = ["gohighlevel", "posthog", "stripe", "clerk"] as const;
-export type LateJoinSource = (typeof LATE_JOIN_SOURCES)[number];
-
-export interface MirrorContactRow {
-  id: string;
-  source: string;
-  primaryEmail: string | null;
-  phoneE164: string | null;
-  externalId: string | null;
-  rawAttributes: unknown;
-}
-
-/** PURE: the identity keys a mirrored contact states, as the build derives them (people/sources.ts readers). */
-export function mirrorContactKeys(r: MirrorContactRow): string[] {
-  const raw = (r.rawAttributes ?? {}) as { emails?: unknown; phones?: unknown; distinctIds?: unknown };
-  const strings = (x: unknown) => (Array.isArray(x) ? x.filter((v): v is string => typeof v === "string") : []);
-  const one = (x: string | null) => (x ? [x] : []);
-  if (r.source === "clerk") {
-    return keysOf({ emails: strings(raw.emails), phones: strings(raw.phones), userIds: one(r.externalId) }, null);
-  }
-  return keysOf(
-    { emails: one(r.primaryEmail), phones: one(r.phoneE164), userIds: r.source === "posthog" ? strings(raw.distinctIds) : [] },
-    null,
-  );
-}
+export { LATE_JOIN_SOURCES, mirrorContactKeys, type LateJoinSource, type MirrorContactRow };
 
 /** PURE: the rows that state one of `identityKeys` and are not among the person's presences yet, as presences. */
 export function unjoinedPresences(rows: MirrorContactRow[], identityKeys: string[], presences: Presence[]): Presence[] {

@@ -29,6 +29,7 @@ import creditEventRoutes from "./routes/credit-events.js";
 import transactionalRoutes from "./routes/transactional.js";
 import { startFreshnessWatch } from "./lib/people/freshness.js";
 import { startFormWatch } from "./lib/form-trigger/watch.js";
+import { startFactEmitter } from "./lib/people/fact-emitter.js";
 import { startPhoneWatch } from "./lib/phone-trigger/watch.js";
 import { startMatrixLiveWatch } from "./lib/matrix/sync.js";
 import { startCalendarWatch } from "./lib/calendar/feed.js";
@@ -129,6 +130,8 @@ if (process.env.NODE_ENV !== "test") {
         migrated = true;
         // Keeps the people message store current before anyone opens a person.
         startFreshnessWatch();
+        // States every record on the people fact feed within seconds of it moving, not only after a build.
+        startFactEmitter();
         // Reports each new CRM form submission as a `form_submitted` trigger, within a minute.
         startFormWatch();
         // Reports a person giving the brand their phone number (any connector) as `whatsapp_number_given`, within a minute.

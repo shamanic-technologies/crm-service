@@ -2457,7 +2457,9 @@ const TimelineItemSchema = z
         "The source's own ids for this item (thread, message, campaign, contact...). " +
         "`factId` (UNIBOX-FACT-ID-1019): on a message that IS one of our facts on the people fact feed (Matrix: WhatsApp / LinkedIn / Telegram..., `message_in` / `message_out` / `group_message`; Gmail `message_in` / `message_out`), " +
         "the id of the LIVE fact (`factId` on GET /internal/people/facts; lead-service's copy keeps it as its message id). " +
-        "Absent on anything that is no fact here (events, cold email, Copilot, API calls) and on a message whose fact is not emitted (held, unattributed): never a guess.",
+        "Absent on anything that is no fact here (cold email, Copilot, API calls) and on an item whose fact is not emitted (held, unattributed, not yet): never a guess. " +
+        "UNIBOX-FACT-LAG-1028: events carry it too when they are facts (Stripe payments, refunds, subscriptions; PostHog visits and events; CRM / auth entries), " +
+        "with `factKey` = the natural key of the fact the record states, and every item a fact is derived from carries `recordedAt` = when crm-service recorded its source record (read by `factFeed`).",
     }),
     event: z
       .object({ step: z.string(), dateBasis: z.string(), detail: z.record(z.string(), z.unknown()) })
@@ -2558,6 +2560,20 @@ const PersonTimelineResponseSchema = registry.register(
           "false = at least one source served records the person index had not joined yet (`sources[].joinedAtRead`), or that check failed. " +
           "The answer is still complete for those sources; the index catches up on the rebuild this read kicked.",
       }),
+      factFeed: z
+        .object({
+          settled: z.boolean().openapi({
+            description:
+              "true = every record of this thread that states a fact is on the people fact feed (lead-service's copy follows within its pull interval). " +
+              "false = at least one is still in flight: recorded by crm-service, stated by the next fact emission (seconds). " +
+              "A WRITER reads again shortly instead of writing on a thread that newer facts (a refused payment, an onboarding step) have not reached the feed yet.",
+          }),
+          statedThrough: z.string().nullable().openapi({ description: "When the scope's last fact emission began reading (null = never emitted)." }),
+          pending: z
+            .array(z.object({ source: z.string(), at: z.string().nullable(), step: z.string().nullable(), factKey: z.string(), recordedAt: z.string() }))
+            .openapi({ description: "The items whose fact is still in flight (on a paged read: of this page)." }),
+        })
+        .openapi({ description: "UNIBOX-FACT-LAG-1028: is this person's thread on the people fact feed yet? Generic over every source." }),
       itemCount: z.number().int().openapi({ description: "Items in THIS response (the page, on a paged read)." }),
       totalItems: z.number().int().optional().openapi({ description: "Paged read only: items of the whole thread." }),
       page: z
@@ -3109,6 +3125,8 @@ registry.registerPath({
   summary: "The people fact feed: dated, untagged facts from the client's own accounts",
   description:
     "Every fact after `since` (exclusive) in one total order. Facts are immutable; a correction is a `withdrawn` fact plus a new one. " +
+    "A cursor never skips a fact: writers commit seqs in order under one lock and a page is read under it, shared. " +
+    "A fact is stated within seconds of crm-service recording its source record (UNIBOX-FACT-LAG-1028). An empty page opens no run. " +
     "Disconnecting a source stops its facts and never withdraws them. Out of the feed: our own outreach (Instantly, self-send).",
   request: {
     query: z.object({
