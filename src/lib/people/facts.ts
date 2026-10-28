@@ -28,8 +28,14 @@
  * two can never disagree. Our own outreach (Instantly, self-send) is NOT in the
  * feed: lead-service reads it directly.
  *
- * Emission takes a global advisory lock for its transaction, so feed_seq values
- * commit in order and a reader paging by cursor never skips a fact.
+ * Emission takes TWO advisory locks (BOX-DB-LOAD-1028-CRM-LOCK):
+ *  - a per-BRAND lock for the whole transaction, so two emissions for one brand
+ *    never diff against the same feed state (no double write);
+ *  - the global FEED lock only for the WRITE tail (every insert / update sits at
+ *    the end), so feed_seq values commit in order and a reader paging by cursor
+ *    never skips a fact. A pass with nothing to write never takes it.
+ * Before, the global lock covered the whole diff (reads of every source), and
+ * every brand's emission in the fleet queued behind every other's.
  */
 
 import { createHash } from "node:crypto";
@@ -1262,7 +1268,11 @@ export interface FactEmissionSummary {
   bySource: Record<string, number>;
 }
 
-const FEED_LOCK = sql`SELECT pg_advisory_xact_lock(hashtext('crm-service.people_facts'))`;
+/** The fleet-wide feed order lock: held from the first feed write to commit, never during the diff. */
+export const FEED_LOCK = sql`SELECT pg_advisory_xact_lock(hashtext('crm-service.people_facts'))`;
+/** One brand's emission at a time (the diff reads the brand's feed, then writes against it). */
+export const brandFeedLock = (orgId: string, brandId: string) =>
+  sql`SELECT pg_advisory_xact_lock(hashtextextended(${`crm-service.people_facts|${orgId}|${brandId}`}, 0))`;
 
 type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -1309,7 +1319,7 @@ async function insertAll(tx: Tx, values: (typeof peopleFacts.$inferInsert)[]) {
 export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSummary> {
   const { orgId, brandId } = scope;
   return db.transaction(async (tx) => {
-    await tx.execute(FEED_LOCK);
+    await tx.execute(brandFeedLock(orgId, brandId));
 
     // Everyone the build holds is someone to the feed (RELATIONSHIP-TAGS-1014: no
     // conversation verdict holds a person's facts back any more).
@@ -1437,11 +1447,7 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
         payload: { fromPersonKey: m.fromPersonKey, intoPersonKey: m.intoPersonKey },
       });
     }
-    await insertAll(tx, meta);
     const moved = moves.filter((m) => m.from !== m.to);
-    for (const m of moved) {
-      await tx.update(peopleFacts).set({ ownerPersonKey: m.to }).where(eq(peopleFacts.factId, m.factId));
-    }
     const ownerNow = new Map(moves.map((m) => [m.factId, m.to]));
 
     // 3-4. Withdrawals, then new facts.
@@ -1647,6 +1653,13 @@ export async function emitScopeFacts(scope: PeopleScope): Promise<FactEmissionSu
       };
     });
     const ids = withdrawals.map((w) => w.fact.factId);
+    // The write tail, under the global feed lock (taken only when there is something to write):
+    // splits / merges, ownership moves, withdrawals, then new facts, in that feed order.
+    if (meta.length || moved.length || withdrawnRows.length || fresh.length) await tx.execute(FEED_LOCK);
+    await insertAll(tx, meta);
+    for (const m of moved) {
+      await tx.update(peopleFacts).set({ ownerPersonKey: m.to }).where(eq(peopleFacts.factId, m.factId));
+    }
     for (let i = 0; i < ids.length; i += 1000) {
       await tx.update(peopleFacts).set({ live: false }).where(inArray(peopleFacts.factId, ids.slice(i, i + 1000)));
     }
