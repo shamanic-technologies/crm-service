@@ -65,6 +65,7 @@ router.post("/orgs/whatsapp/messages", apiKeyAuth, requireOrg("whatsapp.send"), 
       email: body.email ?? null,
       phone: body.phone ?? null,
       fromAccount: body.fromAccount ?? null,
+        fromLine: body.fromLine ?? null,
       skipIfReplied: body.skipIfReplied ?? false,
       userId: req.userId ?? null,
     };
@@ -116,6 +117,7 @@ router.post("/orgs/whatsapp/reach", apiKeyAuth, requireOrg("whatsapp.reach"), as
         email: body.email ?? null,
         phone: body.phone ?? null,
         fromAccount: body.fromAccount ?? null,
+        fromLine: body.fromLine ?? null,
         skipIfReplied: body.skipIfReplied ?? false,
       }),
     );

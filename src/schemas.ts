@@ -3,6 +3,7 @@ import { z } from "zod";
 import { extendZodWithOpenApi, OpenAPIRegistry } from "@asteasolutions/zod-to-openapi";
 import { COLUMN_FIELDS } from "./lib/column-typing.js";
 import { MATRIX_CHANNELS } from "./lib/matrix/events.js";
+import { LINE_ROLES } from "./lib/whatsapp/line-roles.js";
 import { LEAD_STATUSES } from "./lib/matrix/leads.js";
 import { PEOPLE_SOURCES } from "./lib/people/identity.js";
 import { STATE_SOURCES } from "./lib/people/state.js";
@@ -1178,6 +1179,11 @@ export const MatrixLinkStartRequestSchema = registry.register(
     .openapi("MatrixLinkStartRequest"),
 );
 
+const WhatsappLineRoleSchema = z.enum(LINE_ROLES).openapi("LinkedLineRole", {
+  description:
+    "A role the brand states for one of its linked accounts (SOPHIE-SENDS-1028): `assistant` = the line every automated send writes from; `founder` = the line a send asking `fromLine: \"founder\"` writes from.",
+});
+
 const SenderPersonaSchema = z
   .object({
     name: z.string().nullable().openapi({ description: "Display first name of whoever writes from this account (e.g. the assistant's name)." }),
@@ -1242,6 +1248,7 @@ export const MatrixLinkSchema = registry.register(
             outreachDefault: z.boolean(),
             automationAllowed: z.boolean(),
             persona: SenderPersonaSchema,
+            lineRole: WhatsappLineRoleSchema.nullable(),
             needsRelink: z.boolean(),
           }),
         )
@@ -1257,6 +1264,10 @@ export const MatrixLinkSchema = registry.register(
           "Automated sends (workflows: welcome, follow-ups, auto-replies) may write from this account, and a message received on it may fire an automated reply. Off = mirrored for the Unibox only, never picked by an automated send, even for a person whose conversation is on it. True unless the brand turns it off. Set with PATCH /orgs/matrix/links/{linkId}.",
       }),
       persona: SenderPersonaSchema,
+      lineRole: WhatsappLineRoleSchema.nullable().openapi({
+        description:
+          "The role the brand stated for this account (null = none). `assistant`: every automated send writes from it, even for a person whose conversation is on another linked line. `founder`: only a send asking `fromLine: \"founder\"` writes from it. One account per role per brand and channel. Set with PATCH /orgs/matrix/links/{linkId}.",
+      }),
       connection: z
         .object({
           id: z.string().uuid(),
@@ -1341,18 +1352,23 @@ export const MatrixLinkUpdateRequestSchema = z
       .nullable()
       .optional()
       .openapi({ description: "Who writes from this account. Omitted fields keep their value; null or \"\" clears one; persona: null clears all." }),
+    lineRole: WhatsappLineRoleSchema.nullable().optional().openapi({
+      description:
+        "State this account's role: `assistant` = every automated send writes from it (even where another linked line already talks with the person); `founder` = only a send asking `fromLine: \"founder\"` writes from it. One account per role per brand and channel: the account holding it loses it. `null` clears it. Needs a linked account allowing automated sends.",
+    }),
   })
-  .refine((b) => b.outreachDefault !== undefined || b.automationAllowed !== undefined || b.persona !== undefined, {
-    message: "set at least one of outreachDefault, automationAllowed, persona",
-  })
+  .refine(
+    (b) => b.outreachDefault !== undefined || b.automationAllowed !== undefined || b.persona !== undefined || b.lineRole !== undefined,
+    { message: "set at least one of outreachDefault, automationAllowed, persona, lineRole" },
+  )
   .openapi("MatrixLinkUpdateRequest");
 
 registry.registerPath({
   method: "patch",
   path: "/orgs/matrix/links/{linkId}",
-  summary: "Update a linked account: outreach default, automated sends allowed, sender persona",
+  summary: "Update a linked account: outreach default, automated sends allowed, sender persona, line role",
   description:
-    "Every field but brandId is optional; at least one is required. `outreachDefault: true`: a first message to a person no allowed account already talks with goes out from this account (one per brand and channel: the others lose it). `automationAllowed`: may automated sends write from this account and may a message received on it fire an automated reply (false = Unibox mirror only). `persona`: who writes from it (`null` clears it; a field set to null or \"\" clears that field). Requires x-api-key, x-org-id.",
+    "Every field but brandId is optional; at least one is required. `outreachDefault: true`: a first message to a person no allowed account already talks with goes out from this account (one per brand and channel: the others lose it). `automationAllowed`: may automated sends write from this account and may a message received on it fire an automated reply (false = Unibox mirror only). `persona`: who writes from it (`null` clears it; a field set to null or \"\" clears that field). `lineRole`: `assistant` (every automated send writes from this line) or `founder` (only sends asking `fromLine: \"founder\"`), one account per role per brand and channel, `null` clears; 409 when the account is not linked or does not allow automated sends. Requires x-api-key, x-org-id.",
   request: {
     params: z.object({ linkId: z.string().uuid() }),
     body: { content: { "application/json": { schema: MatrixLinkUpdateRequestSchema } }, required: true },
@@ -3430,10 +3446,15 @@ export const WhatsappSendRequestSchema = registry.register(
             "SEVERAL short messages (1 to 5), delivered as separate WhatsApp messages in this order, a few seconds apart with \"typing...\" shown between them (2 to 6 s scaled to length, plus jitter). Every check is decided once before the first; each message is its own send row (listed by GET /orgs/whatsapp/messages). A retry with the same key never re-sends a message already sent and sends the rest. Exactly one of `text` or `messages`. (WA-BUBBLES-1023)",
         }),
       idempotencyKey: z.string().min(1).max(200).openapi({ description: "One per person per step. A retry with the same key answers the first outcome and never sends twice." }),
-      fromAccount: z.string().optional().openapi({ description: "Send from this linked account (its own number). Default: the account that already has a conversation (with messages) with the person, else the brand's outreach default account (PATCH /orgs/matrix/links/{linkId}), else the oldest linked." }),
+      fromAccount: z.string().optional().openapi({ description: "Send from this linked account (its own number). Default: the brand's assistant line when it stated one (`lineRole: \"assistant\"`, PATCH /orgs/matrix/links/{linkId}), even when another linked line already talks with the person; else the account that already has a conversation (with messages) with the person, else the brand's outreach default account, else the oldest linked. Not with `fromLine`." }),
+      fromLine: WhatsappLineRoleSchema.optional().openapi({
+        description:
+          "Send from the brand's line stated with this role (`lineRole` on PATCH /orgs/matrix/links/{linkId}), e.g. `founder` for a hello from the founder next to the assistant's messages. None stated = refused `whatsapp_not_linked`. Not with `fromAccount`. (SOPHIE-SENDS-1028)",
+      }),
       skipIfReplied: z.boolean().optional().openapi({ description: "Refuse with `person_replied` when the person has written to the brand on any channel (use on follow-ups)." }),
     })
     .refine((b) => (b.text === undefined) !== (b.messages === undefined), { message: "exactly one of `text` or `messages` is required" })
+    .refine((b) => !(b.fromAccount && b.fromLine), { message: "`fromAccount` and `fromLine` are exclusive" })
     .openapi("WhatsappSendRequest"),
 );
 
@@ -3514,8 +3535,10 @@ export const WhatsappReachRequestSchema = registry.register(
       email: z.string().optional().openapi({ description: "The person, by email, exactly as the send names them. Their phone is read from the brand's CRM people when `phone` is absent." }),
       phone: z.string().optional().openapi({ description: "The number the send would write to, international form (+<country><number>). Wins over the CRM's." }),
       fromAccount: z.string().optional().openapi({ description: "As on the send: only this linked account (its own number) may write." }),
+      fromLine: WhatsappLineRoleSchema.optional().openapi({ description: "As on the send: only the brand's line stated with this role (`assistant` | `founder`) may write. Not with `fromAccount`." }),
       skipIfReplied: z.boolean().optional().openapi({ description: "As on the send: answer `person_replied` when the person has written to the brand on any channel." }),
     })
+    .refine((b) => !(b.fromAccount && b.fromLine), { message: "`fromAccount` and `fromLine` are exclusive" })
     .openapi("WhatsappReachRequest"),
 );
 
@@ -3529,6 +3552,16 @@ export const WhatsappReachResponseSchema = registry.register(
         phoneSource: z.string().openapi({ description: "`request`, or `crm:<source>` (the person's record holding the phone)." }),
         fromAccount: z.string().openapi({ description: "The linked account the send would write from right now (its own number). Only accounts allowing automated sends are considered." }),
         persona: SenderPersonaSchema,
+        assistantLine: z
+          .object({
+            phone: z.string().openapi({ description: "The assistant line's own number, E.164." }),
+            persona: SenderPersonaSchema,
+          })
+          .nullable()
+          .openapi({
+            description:
+              "The brand's stated assistant line (`lineRole: \"assistant\"`), whichever line this send writes from, so a founder hello can name it (\"our assistant contacted you from <phone>\"). Null when the brand states none. (SOPHIE-SENDS-1028)",
+          }),
       }),
       z.object({
         reachable: z.literal(false),

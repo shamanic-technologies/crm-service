@@ -440,6 +440,69 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
     expect(empty.status).toBe(400);
   });
 
+  it("the brand's stated assistant line writes every automated send, even where another line talks with the person; the founder line only when asked (SOPHIE-SENDS-1028)", async () => {
+    const founder = await linkAccount(ACCOUNT, { linkedAt: new Date("2026-10-01T00:00:00Z") });
+    const assistant = await linkAccount(ACCOUNT_PRO, { linkedAt: new Date("2026-10-02T00:00:00Z") });
+    const reach = (body: Record<string, unknown>) => request(app()).post("/orgs/whatsapp/reach").set(headers).send({ brandId: BRAND, phone: "+33600000001", ...body });
+    await request(app()).patch(`/orgs/matrix/links/${assistant.linkId}`).set(headers).send({ brandId: BRAND, persona: { name: "Sophie", role: "Assistant" } }).expect(200);
+    await request(app()).patch(`/orgs/matrix/links/${founder.linkId}`).set(headers).send({ brandId: BRAND, persona: { name: "Kevin", role: "Founder" } }).expect(200);
+
+    // The person's conversation is on the first line. Nothing stated: that line writes (unchanged).
+    await mirroredThread(founder.connectionId, "@whatsapp_lid-1:matrix.test", 12);
+    expect((await reach({})).body).toMatchObject({ reachable: true, fromAccount: "+33611111111", assistantLine: null });
+    const noFounder = await reach({ fromLine: "founder" });
+    expect(noFounder.body).toMatchObject({ reachable: false, code: "whatsapp_not_linked" });
+
+    // Stated: the assistant line answers, with its persona.
+    const set = await request(app()).patch(`/orgs/matrix/links/${assistant.linkId}`).set(headers).send({ brandId: BRAND, lineRole: "assistant" });
+    expect(set.status).toBe(200);
+    expect(set.body.link.lineRole).toBe("assistant");
+    const r = await reach({});
+    expect(r.body).toMatchObject({ reachable: true, fromAccount: "+33622222222", persona: { name: "Sophie", role: "Assistant" } });
+    const sent = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000001", text: "Hi, Sophie here", idempotencyKey: "k-assistant" });
+    expect(sent.body).toMatchObject({ fromAccount: "+33622222222" });
+    expect(sends.at(-1)!.auth).toBe("Bearer tok-33622222222");
+
+    // The founder line, by role.
+    await request(app()).patch(`/orgs/matrix/links/${founder.linkId}`).set(headers).send({ brandId: BRAND, lineRole: "founder" }).expect(200);
+    expect((await reach({ fromLine: "founder" })).body).toMatchObject({
+      reachable: true,
+      fromAccount: "+33611111111",
+      persona: { name: "Kevin", role: "Founder" },
+      assistantLine: { phone: "+33622222222", persona: { name: "Sophie", role: "Assistant" } },
+    });
+    const hello = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000001", text: "Hi, Kevin here", idempotencyKey: "k-founder", fromLine: "founder" });
+    expect(hello.body).toMatchObject({ fromAccount: "+33611111111" });
+    expect(sends.at(-1)!.auth).toBe("Bearer tok-33611111111");
+    expect((await reach({ fromLine: "founder", fromAccount: "+33611111111" })).status).toBe(400);
+
+    // One line per role: stating it elsewhere moves it.
+    const list = await request(app()).get(`/orgs/matrix/links?brandId=${BRAND}`).set(headers);
+    const wa = list.body.links.find((l: { channel: string }) => l.channel === "whatsapp");
+    expect(wa.channelAccounts.map((a: { phone: string; lineRole: string | null }) => [a.phone, a.lineRole])).toEqual([
+      ["+33611111111", "founder"],
+      ["+33622222222", "assistant"],
+    ]);
+    await request(app()).patch(`/orgs/matrix/links/${founder.linkId}`).set(headers).send({ brandId: BRAND, lineRole: "assistant" }).expect(200);
+    const moved = await request(app()).get(`/orgs/matrix/links?brandId=${BRAND}`).set(headers);
+    expect(moved.body.accounts.map((a: { lineRole: string | null }) => a.lineRole)).toEqual(["assistant", null]);
+
+    // A role holder cannot be turned mirror-only silently; a mirror-only line takes no role.
+    const off = await request(app()).patch(`/orgs/matrix/links/${founder.linkId}`).set(headers).send({ brandId: BRAND, automationAllowed: false });
+    expect(off.status).toBe(409);
+    await request(app()).patch(`/orgs/matrix/links/${assistant.linkId}`).set(headers).send({ brandId: BRAND, automationAllowed: false }).expect(200);
+    const roleOnOff = await request(app()).patch(`/orgs/matrix/links/${assistant.linkId}`).set(headers).send({ brandId: BRAND, lineRole: "founder" });
+    expect(roleOnOff.status).toBe(409);
+    await request(app()).patch(`/orgs/matrix/links/${founder.linkId}`).set(headers).send({ brandId: BRAND, lineRole: null }).expect(200);
+    expect((await reach({})).body).toMatchObject({ reachable: true, fromAccount: "+33611111111" });
+  });
+
   it("refuses human_in_conversation, nothing sent, when someone of the brand typed to the person by hand on any linked account (HUMAN-IN-THREAD-1016)", async () => {
     const personal = await linkAccount(ACCOUNT, { linkedAt: new Date("2026-10-01T00:00:00Z") });
     await linkAccount(ACCOUNT_PRO, { linkedAt: new Date("2026-10-02T00:00:00Z") });
@@ -905,7 +968,7 @@ describe.skipIf(!RUN)("WhatsApp reach check (DB)", () => {
     await seedPeople([{ key: "email:ann@x.com", phones: ["+33600000002"], presences: [clerk(["+33600000002"])], at: "2026-09-01T00:00:00Z" }]);
     const res = await reach({ email: "Ann@x.com" });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ reachable: true, to: "+33600000002", phoneSource: "crm:clerk", fromAccount: "+33611111111", persona: null });
+    expect(res.body).toEqual({ reachable: true, to: "+33600000002", phoneSource: "crm:clerk", fromAccount: "+33611111111", persona: null, assistantLine: null });
     expect(lookups).toEqual(["+33600000002"]);
     expect(sends).toEqual([]);
     expect(createdDms).toEqual([]);
