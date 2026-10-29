@@ -562,6 +562,117 @@ describe.skipIf(!RUN)("reply trigger", () => {
       expect((await reports())[0]).toMatchObject({ status: "handed_off", reason: "copilot", phone: "+33770657585" });
     });
 
+    describe("a person writes to the founder line: Sophie answers from HER line (SOPHIE-ANSWERS-FROM-HER-LINE-1029)", () => {
+      const FOUNDER = "33680478702";
+      const PERSONAL = "33611111111";
+      const SOPHIE_OWN = "@crm_sophie_line:hs";
+      const PERSONAL_OWN = "@crm_personal_line:hs";
+      const SOPHIE_ROOM = "!sophie-room:hs";
+      const PERSONAL_LINE_ROOM = "!personal-line-room:hs";
+      let sophieConn: MatrixConnection;
+      let personalConn: MatrixConnection;
+
+      async function line(c: MatrixConnection, own: string, remote: string, accountType: string, persona: { name: string; role: string } | null, automationAllowed = true) {
+        await db.insert(matrixLinks).values({
+          orgId: ORG, brandId: BRAND, channel: "whatsapp", createdByUserId: USER, matrixUserId: own, status: "linked", method: "qr",
+          remoteLoginId: remote, connectionId: c.id, linkedAt: new Date(), automationAllowed, accountType,
+          personaName: persona?.name ?? null, personaRole: persona?.role ?? null, personaInstructions: null,
+        });
+      }
+
+      async function roomWith(c: MatrixConnection, room: string, events: [string, string, number, string][]) {
+        const [contact] = await db
+          .insert(contacts)
+          .values({ orgId: ORG, brandId: BRAND, phoneE164: "+33770657585", fullName: "Kevin (WA)", rawAttributes: {}, source: "matrix", channel: "whatsapp", channelHandle: GHOST, sourceConnectionId: c.id })
+          .returning();
+        await db.insert(conversations).values({
+          orgId: ORG, brandId: BRAND, connectionId: c.id, contactId: contact.id, channel: "whatsapp", roomId: room,
+          firstMessageAt: new Date(events[0][2]), lastMessageAt: new Date(events[events.length - 1][2]), messageCount: events.length,
+          inboundCount: 0, outboundCount: events.length, lastEventId: events[events.length - 1][0],
+        });
+        for (const [id, sender, at, body] of events) {
+          await db.insert(matrixRawEvents).values({
+            orgId: ORG, brandId: BRAND, connectionId: c.id, eventId: id, roomId: room, sender, eventType: "m.room.message",
+            originServerTs: new Date(at), ingestedAt: new Date(), payload: { event_id: id, type: "m.room.message", sender, origin_server_ts: at, content: { msgtype: "m.text", body } },
+          });
+        }
+      }
+
+      beforeEach(async () => {
+        [sophieConn] = await db
+          .insert(matrixConnections)
+          .values({ orgId: ORG, brandId: BRAND, channel: "whatsapp", matrixUserId: SOPHIE_OWN, counterpartPrefix: "@whatsapp_", createdByUserId: USER })
+          .returning();
+        [personalConn] = await db
+          .insert(matrixConnections)
+          .values({ orgId: ORG, brandId: BRAND, channel: "whatsapp", matrixUserId: PERSONAL_OWN, counterpartPrefix: "@whatsapp_", createdByUserId: USER })
+          .returning();
+        await line(conn, OWN, FOUNDER, "pro_human", { name: "Kevin", role: "Founder" });
+        await line(sophieConn, SOPHIE_OWN, SOPHIE, "pro_ai", { name: "Sophie", role: "Distribute.you Assistant" });
+        await line(personalConn, PERSONAL_OWN, PERSONAL, "personal_human", null, false);
+        // The founder's private chat with the same person: never in Sophie's thread.
+        await roomWith(personalConn, PERSONAL_LINE_ROOM, [["$priv", GHOST, min(-5), "see you at dinner"]]);
+      });
+
+      it("the founder hello's answer is handed off to answer from the pro_ai line with ITS persona, the founder line named, nothing from the personal line", async () => {
+        await send("$hello", min(0), CAMPAIGN);
+        await event("$hello", OWN, min(0), "Hi, Kevin from distribute.you here");
+        await event("$ans1", GHOST, min(1), "Hi Kevin, tell me more");
+        expect((await detectReplies(conn, run1)).detected).toBe(1);
+        await deliverDueReplies();
+        expect(copilotCalls).toHaveLength(1);
+        expect(copilotCalls[0].body).toMatchObject({
+          messageId: "$ans1",
+          fromAccount: `+${SOPHIE}`,
+          assistant: { name: "Sophie", role: "Distribute.you Assistant", instructions: null },
+          receivedOn: { account: `+${FOUNDER}`, name: "Kevin", role: "Founder" },
+          text: "Hi Kevin, tell me more",
+          thread: [{ at: new Date(min(0)).toISOString(), direction: "outbound", kind: "message", text: "Hi, Kevin from distribute.you here", account: `+${FOUNDER}` }],
+        });
+        expect(JSON.stringify(copilotCalls[0].body)).not.toContain("see you at dinner");
+        expect((await reports())[0]).toMatchObject({ status: "handed_off", reason: "copilot" });
+      });
+
+      it("the person's next message on Sophie's line still carries the founder-line conversation, in time order; the burst itself is unchanged", async () => {
+        await send("$hello", min(0), CAMPAIGN);
+        await db.insert(whatsappSends).values({
+          orgId: ORG, brandId: BRAND, idempotencyKey: "copilot:$ans1", phone: "+33770657585", text: "Hi, Sophie here, Kevin's assistant", status: "sent",
+          connectionId: sophieConn.id, roomId: SOPHIE_ROOM, ghostMxid: GHOST, eventId: "$soph1", sentAt: new Date(min(2)), fromAccount: `+${SOPHIE}`,
+        });
+        await event("$hello", OWN, min(0), "Hi, Kevin from distribute.you here");
+        await event("$ans1", GHOST, min(1), "Hi Kevin, tell me more");
+        await roomWith(sophieConn, SOPHIE_ROOM, [["$soph1", SOPHIE_OWN, min(2), "Hi, Sophie here, Kevin's assistant"]]);
+        await db.insert(matrixRawEvents).values({
+          orgId: ORG, brandId: BRAND, connectionId: sophieConn.id, eventId: "$ans2", roomId: SOPHIE_ROOM, sender: GHOST, eventType: "m.room.message",
+          originServerTs: new Date(min(3)), ingestedAt: new Date(), payload: { event_id: "$ans2", type: "m.room.message", sender: GHOST, origin_server_ts: min(3), content: { msgtype: "m.text", body: "How much?" } },
+        });
+        await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, sophieConn.id));
+        const [s] = await db.select().from(matrixConnections).where(eq(matrixConnections.id, sophieConn.id));
+        expect((await detectReplies(s, run1)).detected).toBe(1);
+        await deliverDueReplies();
+        const body = copilotCalls.find((c) => c.body.messageId === "$ans2")!.body;
+        expect(body.fromAccount).toBe(`+${SOPHIE}`);
+        expect(body.receivedOn).toBeUndefined();
+        expect(body.thread).toEqual([
+          { at: new Date(min(0)).toISOString(), direction: "outbound", kind: "message", text: "Hi, Kevin from distribute.you here", account: `+${FOUNDER}` },
+          { at: new Date(min(1)).toISOString(), direction: "inbound", kind: "message", text: "Hi Kevin, tell me more", account: `+${FOUNDER}` },
+          { at: new Date(min(2)).toISOString(), direction: "outbound", kind: "message", text: "Hi, Sophie here, Kevin's assistant" },
+        ]);
+      });
+
+      it("a brand with no pro_ai line answers from the line written to, as before", async () => {
+        await db.delete(matrixLinks).where(eq(matrixLinks.connectionId, sophieConn.id));
+        await send("$hello", min(0), CAMPAIGN);
+        await event("$hello", OWN, min(0), "Hi, Kevin from distribute.you here");
+        await event("$ans1", GHOST, min(1), "Hi Kevin");
+        expect((await detectReplies(conn, run1)).detected).toBe(1);
+        await deliverDueReplies();
+        expect(copilotCalls[0].body).toMatchObject({ fromAccount: `+${FOUNDER}`, assistant: { name: "Kevin", role: "Founder", instructions: null } });
+        expect(copilotCalls[0].body.receivedOn).toBeUndefined();
+        expect((copilotCalls[0].body.thread as Record<string, unknown>[])[0].account).toBeUndefined();
+      });
+    });
+
     it("a call on the line reaches the next hand-off's thread as a kind call line in its time order (COPILOT-WA-REPEAT-1027)", async () => {
       await link();
       await send("$s0", min(0), CAMPAIGN);

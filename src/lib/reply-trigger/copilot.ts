@@ -24,6 +24,18 @@
  * chat-service answers with THAT user's access (owner 2026-10-18 « FAUX j'ai
  * intégré ces deux nums dans l'intégration »). Absent when linked nowhere.
  *
+ * SOPHIE ANSWERS FROM HER LINE (SOPHIE-ANSWERS-FROM-HER-LINE-1029, owner 2026-10-29: « ok to
+ * have a hello message from the founder, but the Sophie talk must be from her number »): a
+ * burst received on a line NOT typed `pro_ai` (a `pro_human` founder line the founder hello
+ * went out from) is answered from one of the brand's `pro_ai` lines (`answeringLine`: the one
+ * the person already talks with, else the outreach default, else the oldest), with THAT line's
+ * persona; `receivedOn` names the line they wrote to. Never a fallback to the line written to:
+ * a pro_ai line that cannot send is refused loud by the send. No pro_ai line = answered from
+ * the line written to, as before. The thread is the person's conversation on EVERY line of
+ * the brand (`personThreadRooms`, personal lines never), so Sophie sees the founder hello and,
+ * once they write on her line, still sees it; a line on another number than `fromAccount`
+ * carries `account`. A burst on a pro_ai line with no other line's history: byte-identical.
+ *
  * Statuses on `reply_trigger_reports`: `handoff_pending` → `handed_off` (reason
  * `copilot`), `handoff_failed` (retried with backoff for 24h, same messageId),
  * or `skipped` / `copilot_phone_unknown` (a LID ghost no number is known for:
@@ -47,6 +59,7 @@ import {
 import { isCopilotDestination } from "../copilot/messages.js";
 import type { MatrixEvent } from "../matrix/client.js";
 import { callNotice, describeCall, editTarget, foldEdits, humanText, phoneFromMxid } from "../matrix/events.js";
+import { automationOn, isAccountType, type AccountType } from "../matrix/account-types.js";
 import { personaOf, type SenderPersona } from "../matrix/persona.js";
 import { overlayVoiceTranscripts } from "../matrix/voice-notes.js";
 import { dialablePhone } from "../trigger-door.js";
@@ -91,6 +104,8 @@ export interface ThreadLine {
   /** `call` = a WhatsApp call the bridge mirrored (COPILOT-WA-REPEAT-1027), its text says it in plain words. */
   kind: "message" | "call";
   text: string;
+  /** The brand's number this line happened on, present only when it is NOT the number answering (`fromAccount`). */
+  account?: string;
 }
 
 /** At most this many emails travel as `sender.knownEmails` (chat-service's contract). */
@@ -135,7 +150,13 @@ export function burstForCopilot(messages: BurstMessage[], events: MatrixEvent[],
  * (`humanText`), edits folded into what they rewrite (`foldEdits`), plus every
  * call the bridge mirrored as a `kind: "call"` line in its time order.
  */
-export function threadBeforeBurst(events: MatrixEvent[], ownMxid: string, burstFirstEventId: string, burstFirstAt: string): ThreadLine[] {
+export function threadBeforeBurst(
+  events: MatrixEvent[],
+  ownMxid: string,
+  burstFirstEventId: string,
+  burstFirstAt: string,
+  max: number = HANDOFF_THREAD_MAX,
+): ThreadLine[] {
   const firstTs = Date.parse(burstFirstAt);
   const lines: ThreadLine[] = [];
   for (const e of foldEdits(events)) {
@@ -152,6 +173,60 @@ export function threadBeforeBurst(events: MatrixEvent[], ownMxid: string, burstF
     lines.push({ at, direction, kind: "message", text });
   }
   return lines.slice(-HANDOFF_THREAD_MAX);
+}
+
+/** One of the person's rooms on one of the brand's linked lines: its events and whose account it is. */
+export interface PersonRoom {
+  /** The line's own number (E.164), "" when its link holds none. */
+  account: string;
+  ownMxid: string;
+  events: MatrixEvent[];
+}
+
+/**
+ * PURE: the conversation BEFORE the burst across every line of the brand the
+ * person talks with, oldest first, the latest `HANDOFF_THREAD_MAX`. A line on
+ * another number than the one answering carries `account`.
+ */
+export function threadAcrossLines(rooms: PersonRoom[], answeringAccount: string, burstFirstEventId: string, burstFirstAt: string): ThreadLine[] {
+  const lines = rooms.flatMap((room) =>
+    threadBeforeBurst(room.events, room.ownMxid, burstFirstEventId, burstFirstAt, Infinity).map((l) =>
+      room.account && room.account !== answeringAccount ? { ...l, account: room.account } : l,
+    ),
+  );
+  // Stable: lines of one room keep their order on a tie.
+  return lines.sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).slice(-HANDOFF_THREAD_MAX);
+}
+
+/** A linked line of the brand, as the answering pick reads it. */
+export interface BrandLine {
+  connectionId: string;
+  account: string;
+  accountType: AccountType | null;
+  automationAllowed: boolean;
+  outreachDefault: boolean;
+  linkedAt: Date | null;
+  persona: SenderPersona | null;
+}
+
+/**
+ * PURE: which line answers a burst received on `received`. A pro_ai line
+ * answers on itself. Any other line hands the answer to one of the brand's
+ * pro_ai lines automation may use: the one the person last talked with
+ * (`talkingConnectionIds`, latest first), else the outreach default, else the
+ * oldest linked. None = the line written to (the brand typed no assistant).
+ */
+export function answeringLine(received: BrandLine, lines: BrandLine[], talkingConnectionIds: string[]): BrandLine {
+  if (received.accountType === "pro_ai") return received;
+  const ai = lines
+    .filter((l) => l.accountType === "pro_ai" && automationOn(l) && l.account)
+    .sort((a, b) => (a.linkedAt?.getTime() ?? Number.MAX_SAFE_INTEGER) - (b.linkedAt?.getTime() ?? Number.MAX_SAFE_INTEGER));
+  if (ai.length === 0) return received;
+  for (const id of talkingConnectionIds) {
+    const talking = ai.find((l) => l.connectionId === id);
+    if (talking) return talking;
+  }
+  return ai.find((l) => l.outreachDefault) ?? ai[0];
 }
 
 /** Who linked a WhatsApp number in Integrations: the link's org + the user who linked it. */
@@ -192,6 +267,8 @@ export function copilotHandoffBody(input: {
   accountUserId: string;
   fromAccount: string;
   persona: SenderPersona | null;
+  /** The line the person wrote to, when another line answers (SOPHIE-ANSWERS-FROM-HER-LINE-1029). */
+  receivedOn?: { account: string; persona: SenderPersona | null } | null;
   sender: { phone: string; name: string | null; linkedBy?: LinkedBy | null; knownEmails?: string[] };
   messages: BurstMessage[];
   thread: ThreadLine[];
@@ -209,6 +286,15 @@ export function copilotHandoffBody(input: {
       role: input.persona?.role ?? null,
       instructions: input.persona?.instructions ?? null,
     },
+    ...(input.receivedOn
+      ? {
+          receivedOn: {
+            account: input.receivedOn.account,
+            name: input.receivedOn.persona?.name ?? null,
+            role: input.receivedOn.persona?.role ?? null,
+          },
+        }
+      : {}),
     sender: {
       phone: input.sender.phone,
       name: input.sender.name,
@@ -238,7 +324,7 @@ async function settle(r: ReplyTriggerReport, now: number, set: Partial<ReplyTrig
 async function senderOf(
   r: ReplyTriggerReport,
   conn: MatrixConnection,
-): Promise<{ phone: string | null; name: string | null; personEmails: string[] }> {
+): Promise<{ phone: string | null; name: string | null; personEmails: string[]; ghost: string | null }> {
   const [row] = await db
     .select({ phone: contacts.phoneE164, ghost: contacts.channelHandle, name: contacts.fullName })
     .from(conversations)
@@ -273,7 +359,7 @@ async function senderOf(
     ghost ? phoneFromMxid(ghost, conn.counterpartPrefix) : null,
     ...personPhones,
   ]);
-  return { phone, name: row?.name ?? personName, personEmails };
+  return { phone, name: row?.name ?? personName, personEmails, ghost };
 }
 
 /**
@@ -307,6 +393,73 @@ export async function knownEmailsForSender(
   );
 }
 
+/** The brand's linked lines on the connection's channel (status linked), each with its type and persona. */
+async function brandLines(conn: MatrixConnection): Promise<BrandLine[]> {
+  const rows = await db
+    .select({
+      connectionId: matrixLinks.connectionId,
+      remoteLoginId: matrixLinks.remoteLoginId,
+      accountType: matrixLinks.accountType,
+      automationAllowed: matrixLinks.automationAllowed,
+      outreachDefault: matrixLinks.outreachDefault,
+      linkedAt: matrixLinks.linkedAt,
+      personaName: matrixLinks.personaName,
+      personaRole: matrixLinks.personaRole,
+      personaInstructions: matrixLinks.personaInstructions,
+    })
+    .from(matrixLinks)
+    .where(
+      and(
+        eq(matrixLinks.orgId, conn.orgId),
+        eq(matrixLinks.brandId, conn.brandId),
+        eq(matrixLinks.channel, conn.channel),
+        isNotNull(matrixLinks.connectionId),
+        sql`(${matrixLinks.status} = 'linked' OR ${matrixLinks.connectionId} = ${conn.id})`,
+      ),
+    );
+  return rows.map((l) => ({
+    connectionId: l.connectionId!,
+    account: l.remoteLoginId ? `+${l.remoteLoginId.replace(/\D/g, "")}` : "",
+    accountType: isAccountType(l.accountType) ? l.accountType : null,
+    automationAllowed: l.automationAllowed,
+    outreachDefault: l.outreachDefault,
+    linkedAt: l.linkedAt,
+    persona: personaOf(l),
+  }));
+}
+
+/** Every bridge ghost known to be this person: the thread's own, and every ghost resolved to their number. */
+async function personGhosts(ghost: string | null, phone: string): Promise<string[]> {
+  const resolved = await db.select({ ghost: matrixGhostPhones.ghostMxid }).from(matrixGhostPhones).where(eq(matrixGhostPhones.phone, phone));
+  return [...new Set([...(ghost ? [ghost] : []), ...resolved.map((x) => x.ghost)])];
+}
+
+/** The person's one-to-one conversations on the brand's lines (by ghost or number), latest activity first. */
+async function personConversations(
+  lines: BrandLine[],
+  ghosts: string[],
+  phone: string,
+): Promise<{ connectionId: string; roomId: string; ownMxid: string }[]> {
+  if (lines.length === 0) return [];
+  const rows = await db
+    .select({ connectionId: conversations.connectionId, roomId: conversations.roomId, ownMxid: matrixConnections.matrixUserId })
+    .from(conversations)
+    .innerJoin(contacts, eq(contacts.id, conversations.contactId))
+    .innerJoin(matrixConnections, eq(matrixConnections.id, conversations.connectionId))
+    .where(
+      and(
+        inArray(
+          conversations.connectionId,
+          lines.map((l) => l.connectionId),
+        ),
+        gt(conversations.messageCount, 0),
+        ghosts.length > 0 ? sql`(${inArray(contacts.channelHandle, ghosts)} OR ${contacts.phoneE164} = ${phone})` : eq(contacts.phoneE164, phone),
+      ),
+    )
+    .orderBy(sql`${conversations.lastMessageAt} DESC NULLS LAST`, conversations.id);
+  return rows.map((x) => ({ connectionId: x.connectionId, roomId: x.roomId, ownMxid: x.ownMxid }));
+}
+
 /** The hand-off body for ONE recorded burst, nothing sent; `skip` when nobody can be answered. */
 export async function buildHandoff(
   r: ReplyTriggerReport,
@@ -314,39 +467,47 @@ export async function buildHandoff(
 ): Promise<{ skip: "no_phone"; name: string | null } | { skip: null; sender: { phone: string; name: string | null }; body: Record<string, unknown> }> {
   const sender = await senderOf(r, conn);
   if (!sender.phone) return { skip: "no_phone", name: sender.name };
-  const [link] = await db
-    .select({
-      remoteLoginId: matrixLinks.remoteLoginId,
-      personaName: matrixLinks.personaName,
-      personaRole: matrixLinks.personaRole,
-      personaInstructions: matrixLinks.personaInstructions,
-    })
-    .from(matrixLinks)
-    .where(eq(matrixLinks.connectionId, conn.id))
-    .limit(1);
-  const rows = await db
-    .select({ payload: matrixRawEvents.payload })
-    .from(matrixRawEvents)
-    .where(
-      and(eq(matrixRawEvents.connectionId, conn.id), eq(matrixRawEvents.roomId, r.roomId!), eq(matrixRawEvents.eventType, "m.room.message")),
-    );
-  const events = await overlayVoiceTranscripts(rows.map((e) => e.payload as unknown as MatrixEvent));
+  const lines = await brandLines(conn);
+  const received = lines.find((l) => l.connectionId === conn.id) ?? null;
+  const ghosts = await personGhosts(sender.ghost, sender.phone);
+  const talks = await personConversations(lines, ghosts, sender.phone);
+  const answering = received ? answeringLine(received, lines, talks.map((t) => t.connectionId)) : null;
+  // Personal lines never: their chats are the person's own, not the brand's (and never written from).
+  const threadRooms = talks.filter((t) => lines.find((l) => l.connectionId === t.connectionId)?.accountType !== "personal_human");
+  if (!threadRooms.some((t) => t.connectionId === conn.id && t.roomId === r.roomId)) {
+    threadRooms.push({ connectionId: conn.id, roomId: r.roomId!, ownMxid: conn.matrixUserId });
+  }
+  const rooms: PersonRoom[] = [];
+  let ownEvents: MatrixEvent[] = [];
+  for (const t of threadRooms) {
+    const rows = await db
+      .select({ payload: matrixRawEvents.payload })
+      .from(matrixRawEvents)
+      .where(
+        and(eq(matrixRawEvents.connectionId, t.connectionId), eq(matrixRawEvents.roomId, t.roomId), eq(matrixRawEvents.eventType, "m.room.message")),
+      );
+    const events = await overlayVoiceTranscripts(rows.map((e) => e.payload as unknown as MatrixEvent));
+    if (t.connectionId === conn.id && t.roomId === r.roomId) ownEvents = events;
+    rooms.push({ account: lines.find((l) => l.connectionId === t.connectionId)?.account ?? "", ownMxid: t.ownMxid, events });
+  }
   const messages = r.messages as BurstMessage[];
+  const fromAccount = answering?.account ?? "";
   const body = copilotHandoffBody({
     messageId: r.anchorEventId,
     orgId: conn.orgId,
     brandId: conn.brandId,
     accountUserId: conn.createdByUserId,
-    fromAccount: link?.remoteLoginId ? `+${link.remoteLoginId.replace(/\D/g, "")}` : "",
-    persona: link ? personaOf(link) : null,
+    fromAccount,
+    persona: answering?.persona ?? null,
+    receivedOn: received && answering && answering.connectionId !== received.connectionId ? { account: received.account, persona: received.persona } : null,
     sender: {
       phone: sender.phone,
       name: sender.name,
       linkedBy: await linkedByOf(sender.phone),
       knownEmails: await knownEmailsForSender(conn, sender.phone, sender.personEmails),
     },
-    messages: burstForCopilot(messages, events, conn.matrixUserId),
-    thread: threadBeforeBurst(events, conn.matrixUserId, r.anchorEventId, messages[0].at),
+    messages: burstForCopilot(messages, ownEvents, conn.matrixUserId),
+    thread: threadAcrossLines(rooms, fromAccount, r.anchorEventId, messages[0].at),
   });
   return { skip: null, sender: { phone: sender.phone, name: sender.name }, body };
 }
@@ -374,7 +535,7 @@ export async function handOffBurst(r: ReplyTriggerReport, conn: MatrixConnection
   const messages = r.messages as BurstMessage[];
   const who = { phone: sender.phone, fullName: sender.name };
   try {
-    if (!body.fromAccount) throw new Error(`the account's link holds no number (connection ${conn.id})`);
+    if (!body.fromAccount) throw new Error(`the answering account's link holds no number (connection ${conn.id})`);
     const url = process.env.CHAT_SERVICE_URL;
     const key = process.env.CHAT_SERVICE_API_KEY;
     if (!url || !key) throw new Error("CHAT_SERVICE_URL / CHAT_SERVICE_API_KEY are not set");

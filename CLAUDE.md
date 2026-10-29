@@ -1477,6 +1477,14 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   line as a LID ghost has its number. chat-service answers
   via `POST /orgs/whatsapp/messages` (`copilot:<messageId>`, `skipIfReplied` false): a recorded send, so it ends the
   burst and is never hand-typed. Campaign sends from the account are unchanged.
+  **Sophie answers from HER line** (SOPHIE-ANSWERS-FROM-HER-LINE-1029, owner 2026-10-29 « ok to have a hello message from
+  the founder, but the Sophie talk must be from her number »): a burst on a line NOT typed `pro_ai` (the founder's `pro_human`
+  hello line) is handed off with `fromAccount` + `assistant` = one of the brand's `pro_ai` lines (`answeringLine`: the one the
+  person talks with, else outreach default, else oldest) and `receivedOn {account, name, role}` = the line written to; never a
+  fallback to the founder line (a pro_ai line that cannot send is refused loud by the send). No pro_ai line = the line written
+  to, as before. `thread` = the person's rooms on EVERY line of the brand (by ghost / number, personal lines never), merged in
+  time order, a line on another number than `fromAccount` carrying `account`: Sophie sees the founder hello, and still does once
+  they write on her line. A pro_ai burst with no other line's history = byte-identical.
   **What the hand-off knows** (COPILOT-WA-REPEAT-1027, Joshua 2026-10-27: asked 3 times for "the email you signed up with"
   after our campaign wrote to him by name; read "can't take calls" as HIS ask): `sender.knownEmails` = emails our records tie
   to the number for the brand (`whatsapp_sends` to that phone naming an email, newest first, then the person record; absent
