@@ -419,7 +419,7 @@ export const TIMELINE_REFRESH_MS = Number(process.env.PEOPLE_TIMELINE_REFRESH_MS
  * 14:39:12; a writer starting at 14:24:38 would have written a second email on the same point.
  */
 export const freshReadWindowMs = () => Number(process.env.PEOPLE_TIMELINE_FRESH_WINDOW_MS) || 10_000;
-/** The answer waits this long for the fresh reads; a Gmail thread not re-read by then is reported failed. */
+/** The answer waits this long for the fresh reads; a thread not re-read by then is served from the store (`refreshing`). */
 export const freshReadDeadlineMs = () => Number(process.env.PEOPLE_TIMELINE_FRESH_DEADLINE_MS) || 15_000;
 /**
  * A PAGED read (the Unibox showing the latest messages, DASH-LATENCY-1014) waits this long for
@@ -475,7 +475,7 @@ export interface StoredReadOptions {
   /**
    * paged = the answer waits at most `pageFreshWaitMs()` for the re-reads; a thread whose stored
    * copy is fine but not re-read in time is served `refreshing`, never `failed`. Default (the
-   * whole thread, every writer) = wait up to `freshReadDeadlineMs()`, Gmail fail-loud.
+   * whole thread, every writer) = wait up to `freshReadDeadlineMs()`, then the same store answer.
    */
   paged?: boolean;
 }
@@ -540,13 +540,16 @@ const refreshing = new Set<string>();
  * `freshReadWindowMs()` is re-read from its source first (bounded by
  * `freshReadDeadlineMs()`), then the answer is served from the store.
  *
- * Gmail is fail-loud: a Gmail thread that could not be re-read for this answer
- * (source error, deadline, mailbox gone) makes the gmail source `failed`, its
- * stored items still served beside the error, so a reader never takes a stale
- * thread for a complete one. Cold email keeps its rule (failed only when nothing
- * could ever be read): 639 cold-email threads of cancelled Instantly plans can
- * never be read again (2026-10-14), and a strict rule there would stop every
- * writer on those people for good.
+ * The re-read never fails the read (HEAVY-MAILBOX-THREAD-READ-1029): a Gmail
+ * thread crm-service holds a copy of is served from that copy when its re-read
+ * is still running past the deadline (`refreshing`, it lands for the next read)
+ * or failed (`error` says why, `readAt` how old the copy is). The staff
+ * person's 8 addresses and heavy mailbox took longer than the deadline on every
+ * read and every writer threw "thread unreadable": 5 of 5 Lead event runs failed
+ * on 2026-10-29. Gmail is `failed` only when crm-service holds NO copy of a
+ * thread (never read, or every read failed) or the mailbox is gone. Cold email
+ * keeps its rule (failed only when nothing could ever be read): 639 cold-email
+ * threads of cancelled Instantly plans can never be read again (2026-10-14).
  */
 export async function readStoredTimeline(
   scope: PeopleScope,
@@ -655,27 +658,44 @@ export async function readStoredTimeline(
     const stillReading = timedOut && mine.some((u) => toReadKeys.has(keyOf(u)) && !freshFor(k1.get(keyOf(u)), startedAt, windowMs));
     if (source === "gmail") {
       const notFresh = mine.filter((u) => !freshFor(k1.get(keyOf(u)), startedAt, windowMs));
-      // Paged: a thread whose stored copy is good and is being re-read is `refreshing`, not failed.
-      const broken = opts.paged
-        ? notFresh.filter((u) => {
+      const why = (us: Unit[]) =>
+        us
+          .map((u) => {
             const k = k1.get(keyOf(u));
-            return gmailGone || !k || k.status !== "ok" || !(timedOut && toReadKeys.has(keyOf(u)));
+            const reason = gmailGone
+              ? "google-service answered no_google_account_connected"
+              : k && k.status !== "ok"
+                ? (k.error ?? "read failed")
+                : (readFailure ?? "not re-read");
+            return `${u.unit}: ${reason}`;
           })
-        : notFresh;
+          .join("; ");
+      // HEAVY-MAILBOX-THREAD-READ-1029: a thread crm-service holds a copy of is SERVED, whether its re-read
+      // finished, is still running (`refreshing`) or failed: the re-read never fails the read. Failed = crm
+      // holds nothing for that address (never read, or every read failed) or the mailbox is gone.
+      const heldUnits = new Set(rows.filter((r) => r.source === "gmail").map((r) => r.unit));
+      const held = (u: Unit) => {
+        const k = k1.get(keyOf(u));
+        return !!k && (k.status === "ok" || heldUnits.has(u.unit));
+      };
+      const broken = notFresh.filter((u) => gmailGone || !held(u));
       if (broken.length) {
-        const why = broken.map((u) => {
-          const k = k1.get(keyOf(u));
-          const reason = gmailGone
-            ? "google-service answered no_google_account_connected"
-            : k && k.status !== "ok"
-              ? (k.error ?? "read failed")
-              : (readFailure ?? "not re-read");
-          return `${u.unit}: ${reason}`;
-        });
         return {
           status: "failed",
           items,
-          error: `Gmail could not be read fresh, the stored thread may miss recent messages (${why.join("; ")})`,
+          error: `Gmail could not be read, crm-service holds no copy of the thread (${why(broken)})`,
+          asked,
+          readAt,
+          refreshing: stillReading,
+        };
+      }
+      // Served from the store: say why a thread was not re-read, unless its re-read is still running.
+      const stale = notFresh.filter((u) => !(timedOut && toReadKeys.has(keyOf(u))));
+      if (stale.length) {
+        return {
+          status: items.length ? "ok" : "empty",
+          items,
+          error: `Gmail served from crm-service's copy read at ${readAt ?? "an earlier read"}, not re-read for this answer (${why(stale)})`,
           asked,
           readAt,
           refreshing: stillReading,

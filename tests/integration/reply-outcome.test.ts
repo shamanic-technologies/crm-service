@@ -28,8 +28,8 @@ process.env.BRAND_SERVICE_URL = "http://brand.test";
 process.env.BRAND_SERVICE_API_KEY = "brand-key";
 process.env.INSTANTLY_SERVICE_URL = "http://instantly.test";
 process.env.INSTANTLY_SERVICE_API_KEY = "instantly-key";
-process.env.CLIENT_SERVICE_URL = "http://client.test";
-process.env.CLIENT_SERVICE_API_KEY = "client-key";
+process.env.GOOGLE_SERVICE_URL = "http://google.test";
+process.env.GOOGLE_SERVICE_API_KEY = "google-key";
 process.env.LEAD_SERVICE_URL = "http://lead.test";
 process.env.LEAD_SERVICE_API_KEY = "lead-key";
 
@@ -73,7 +73,7 @@ function installFetchStub() {
       return json({ messages: body.messages.map((m) => ({ from: m.from, owner: "none", reason: "no_sequence" })) });
     }
     if (url.host === "brand.test" && /^\/internal\/brands\/[^/]+$/.test(url.pathname)) return json({ brand: { domain: "brand-outcome.example" } });
-    if (url.host === "client.test" && url.pathname === "/internal/users") return json({ users: [], total: 0 });
+    if (url.host === "google.test" && url.pathname === "/orgs/google/accounts") return json({ accounts: [{ email: OWNER_MAILBOX }] });
     if (url.pathname === "/orgs/judgments") {
       return json({ model: "jev", answers: { reply: { type: "choice", choice: jevChoice, confidence: 0.93, probabilities: { [jevChoice]: 0.93 } } } });
     }

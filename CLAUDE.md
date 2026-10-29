@@ -1215,8 +1215,13 @@ owner had written to. A recorded fact, never an address-shape guess.
   by `PEOPLE_TIMELINE_FRESH_DEADLINE_MS` (15s). Every writer reads this right
   before writing and holds back when the owner just answered by hand: a store
   re-read AFTER the answer let a writer miss a Gmail answer for 15 min
-  (2026-10-14). Gmail is fail-loud: a Gmail thread not re-read for this answer
-  makes `gmail` `failed`, stored items still served beside the error. Cold email
+  (2026-10-14). **The re-read never fails the read (HEAVY-MAILBOX-THREAD-READ-1029)**: a Gmail
+  thread crm holds a copy of is served from it when the re-read runs past the deadline
+  (`refreshing`, lands for the next read) or fails (`error` + `readAt` say why and how old); the
+  staff person's 8 addresses + heavy mailbox missed 15s on every read and every Lead event writer
+  threw "thread unreadable" (5/5 runs, 2026-10-29). `gmail` `failed` only when crm holds NO copy
+  of a thread (never read, every read failed) or the mailbox is gone. Never restore the strict
+  rule. Cold email
   keeps "failed only when nothing ever read" (639 threads of cancelled Instantly
   plans can never be read; strict would block every writer on them). A
   background pass after the answer does lead-service campaign discovery only.
@@ -1227,7 +1232,7 @@ owner had written to. A recorded fact, never an address-shape guess.
   at its start: a good stored thread still being re-read is `refreshing`, never `failed` (the client
   reads again shortly). The thread is built WITHOUT the heavy parts (stored message text, API answer
   summaries); `completeItems` (`item-fill.ts`) fills them for the page only. Whole-thread reads (no
-  `limit`/`before`, every writer) are unchanged. Concurrent reads of one thread share ONE re-read
+  `limit`/`before`, every writer) wait up to the 15s deadline, same store rule. Concurrent reads of one thread share ONE re-read
   (`refreshShared`): each re-read deletes and re-writes every stored message of the thread.
   ⚠️ **One message is stored ONCE per (scope, source, address)**
   (`people_message_texts_address_message_uq`): instantly-service answers a
@@ -1474,7 +1479,9 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   retry loop; migration 0071 turned hand-offs still waiting into reports, older ones `skipped / copilot_retired`). No row ends
   a burst: messages after the last recorded one, before an answer, are their own occurrence (`burstUntilNextReport`: carried
   once). **Own team is no skip on a line** (staff test from their own numbers; who answers is the pipe's strategy, like the
-  phone trigger WA-GIVEN-PURE-FACT-1017); Gmail keeps `own_team` (a mailbox of the brand itself). Old statuses
+  phone trigger WA-GIVEN-PURE-FACT-1017), nor on Gmail (a teammate's mail TO the brand is a Lead event; the
+  "brand's team" play answers). Gmail keeps only facts: `own_address` (see Gmail below), `not_addressed_to_brand`.
+  `own_team` = old rows. Old statuses
   `handoff_*` / `handed_off` = legacy rows only.
   **What the occurrence carries about the line** (`line-context.ts` `readLineContext`, on `item`): `line {receivedOn,
   answeringLine}` each `{account, accountType, name, role, instructions}` = the line written to and the line the answer
@@ -1503,10 +1510,14 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   had no words. A connection linked after boot is read by the next live tick (connections re-read each tick); its first
   look is the never-history baseline; any brand
   send `sending` < 2 min holds the pass. Jev (`person|automated`, >= 0.75 silences; down = person) drops auto-replies.
-- **Gmail own team = the org's members too** (`lib/org-members.ts`, OWN-TEAM-GMAIL-1016, owner 2026-10-16: his own pitch
-  from his personal gmail, brand mailbox in copy, rang an AI Instant Call): client-service `GET /internal/users?orgId=
-  &allMembers=true` (Clerk members, staff who set the org up included), emails (Gmail) + phones (WhatsApp, phone
-  trigger). Unreadable = the pass records nothing. **A phone is offered to campaign-service only when DIALABLE**
+- **Gmail: our own mail is never a person, words to someone else are not words to us** (ONE-AI-CONVERSES-1029,
+  replaces OWN-TEAM-GMAIL-1016's member skip). `own_address` = the address is the org's CONNECTED MAILBOX
+  (google-service `GET /orgs/google/accounts`: google files the mailbox's own sent mail as `inbound` on the mailbox's
+  address since from == address; all 8 `own_team` rows ever, 2026-10-21..29, were the owner's own mails to clients from
+  his connected gmail), a sending mailbox or the brand's domain. `not_addressed_to_brand` = no mail of the burst names
+  one of those in To (store keeps To only; a teammate's pitch to a prospect, mailbox in Cc; empty To = benefit). Never
+  re-add a member skip: a member's mail TO the brand is a Lead event. Unreadable accounts = the pass records nothing.
+  Brand-domain addresses are never people (the build drops them), so they never reach the trigger. **A phone is offered to campaign-service only when DIALABLE**
   (`trigger-door.ts` `dialablePhone`: E.164 + libphonenumber valid; else logged, dropped; phone trigger skips it
   `invalid_number`).
 - **Never history**: `reply_watch_since` (campaign threads, since 2026-10-12) / `open_reply_watch_since` (every other
@@ -1537,7 +1548,7 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   legacy `skipped / cold_email_path` row (no answer) is RED on Monitoring until `POST /internal/reply-triggers/gmail/
   recheck-cold-email-skips {reportIds?, dryRun?}` (owner door, `gmail-recheck.ts`; real run needs picked ids) re-decides
   it with the same rules and delivers a positive one at once. Own
-  addresses (sending mailboxes, brand domain) AND every org MEMBER, any address = `own_team`; `sender_verdicts` automated >= 0.75 or Jev on the burst =
+  addresses (connected mailbox, sending mailboxes, brand domain) = `own_address`, not addressed = `not_addressed_to_brand`; `sender_verdicts` automated >= 0.75 or Jev on the burst =
   `automated_reply`. **Gmail is per ORG**: reported under every brand whose people know the person OUTSIDE the mailbox
   (any non-gmail presence), else the ONE brand with the highest `conversation_verdicts` brand probability, else the
   oldest scope; other brands record nothing. Offer: conversation tag > only active offer. Delivery: one org run per

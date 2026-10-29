@@ -151,7 +151,7 @@ export const REPLY_STATUS = { PENDING: "pending", REPORTED: "reported", SKIPPED:
 export const REPLY_REASONS = {
   /** The owner said never send this one (an owner door, WA-GREETING-OFFER-1027): final. */
   WITHHELD: "withheld",
-  /** The other side is the brand's own team. Gmail only since ONE-AI-CONVERSES-1029 (a mailbox of the brand itself). */
+  /** LEGACY: the other side was the brand's own team. No channel skips a team member since ONE-AI-CONVERSES-1029 (Gmail: `own_address`). */
   OWN_TEAM: "own_team",
   /** Jev: no person wrote it (away message, greeting, auto-reply). */
   AUTOMATED_REPLY: "automated_reply",
