@@ -1950,14 +1950,14 @@ describe.skipIf(!RUN)("person layer", () => {
       expect(siblingReads()).toEqual([]);
     });
 
-    it("a fresh Gmail read that fails says gmail failed, the stored thread beside it, never a complete-looking ok", async () => {
+    it("HEAVY-MAILBOX-THREAD-READ-1029: a fresh Gmail read that fails serves crm's stored copy, saying why and how old", async () => {
       await db.execute(sql`UPDATE people_message_units SET indexed_at = now() - interval '30 seconds'`);
       gmailConversationDown = true;
       const res = await timeline();
       expect(res.status).toBe(200);
       const sources = Object.fromEntries(res.body.sources.map((x: { source: string }) => [x.source, x]));
-      expect(sources.gmail).toMatchObject({ status: "failed", items: 2 });
-      expect(sources.gmail.error).toContain("could not be read fresh");
+      expect(sources.gmail).toMatchObject({ status: "ok", items: 2, refreshing: false });
+      expect(sources.gmail.error).toContain("not re-read for this answer");
       expect(sources.gmail.error).toContain("returned 500");
       expect(texts(res)).toContain("Sure, call me"); // what was stored is still shown, flagged
       expect(sources.instantly).toMatchObject({ status: "ok" });
@@ -1967,17 +1967,18 @@ describe.skipIf(!RUN)("person layer", () => {
       expect(back.body.sources.find((x: { source: string }) => x.source === "gmail")).toMatchObject({ status: "ok", error: null });
     });
 
-    it("a fresh Gmail read slower than the deadline says gmail failed; the late read lands for the next one", async () => {
+    it("HEAVY-MAILBOX-THREAD-READ-1029: a Gmail re-read slower than the deadline never fails the read: the stored copy is served at the deadline (refreshing), the late read lands for the next one", async () => {
       const prev = process.env.PEOPLE_TIMELINE_FRESH_DEADLINE_MS;
       process.env.PEOPLE_TIMELINE_FRESH_DEADLINE_MS = "200";
       try {
         await db.execute(sql`UPDATE people_message_units SET indexed_at = now() - interval '30 seconds'`);
         aliceNewMessage = true;
         gmailConversationDelayMs = 800;
+        const startedAt = Date.now();
         const slow = await timeline();
+        expect(Date.now() - startedAt).toBeLessThan(800); // answered at the deadline, never after the re-read
         const gmail = slow.body.sources.find((x: { source: string }) => x.source === "gmail");
-        expect(gmail).toMatchObject({ status: "failed", items: 2 });
-        expect(gmail.error).toContain("not re-read within 0.2s");
+        expect(gmail).toMatchObject({ status: "ok", items: 2, error: null, refreshing: true });
         expect(texts(slow)).not.toContain("Send me the deck");
         gmailConversationDelayMs = 0;
         await vi.waitFor(

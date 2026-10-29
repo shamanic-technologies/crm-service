@@ -32,10 +32,20 @@
  *    was addressed to. Unreadable = nothing recorded this pass. (Before: "addressed
  *    to one of our sending mailboxes" alone, which dropped replies in threads the
  *    owner opened by hand: nobody acted.)
- *  - THE BRAND'S OWN ADDRESSES (a sending mailbox, the brand's domain) and
- *    EVERY MEMBER OF THE ORG, whatever address they write from (org-members.ts,
- *    OWN-TEAM-GMAIL-1016: the owner's pitch from his personal gmail rang a
- *    call), are nobody: `own_team`.
+ *  - THE BRAND'S OWN ADDRESSES are our own mail, never a person writing:
+ *    `own_address`. Its connected mailbox (google-service accounts: the store
+ *    files the mailbox's OWN sent mail as "inbound" on the mailbox's address,
+ *    from == address; every `own_team` row ever recorded, 2026-10-21..29, was
+ *    the owner's own mail to a client from his connected gmail), a sending
+ *    mailbox, the brand's domain.
+ *  - WORDS ADDRESSED TO SOMEONE ELSE are not words to the brand: a mail whose
+ *    To names none of the brand's addresses (the brand only copied, e.g. a
+ *    teammate's pitch to a prospect, mailbox in Cc, OWN-TEAM-GMAIL-1016) is not
+ *    counted: `not_addressed_to_brand`. An empty To (Bcc) gets the benefit.
+ *  - A TEAM MEMBER is a person like any other (ONE-AI-CONVERSES-1029, owner
+ *    2026-10-29 « tu veux faire un cas particulier ? WTF »): their mail TO the
+ *    brand is a Lead event, the "brand's team" play answers them (lead-service
+ *    team policy decides who is team), as on WhatsApp. `own_team` = old rows.
  *  - AN AUTOMATED SENDER (sender_verdicts, Jev, >= 0.75) or an automatic reply
  *    (Jev on the burst, like WhatsApp) is no answer: `automated_reply`.
  *  - ONLY A POSITIVE ANSWER IS REPORTED (Jev on the burst, like WhatsApp:
@@ -60,7 +70,7 @@ import {
 import { createRun, updateRun } from "../runs-client.js";
 import { normalizeEmail, type Presence } from "../people/identity.js";
 import { isOwnAddress, readOwnAddresses, type OwnAddresses } from "../people/sources.js";
-import { readOrgMembers, type OrgMembers } from "../org-members.js";
+import { siblingGet } from "../people/siblings.js";
 import {
   CampaignRefusal,
   campaignServiceConfigured,
@@ -103,6 +113,10 @@ export const GMAIL_REPLY_REASONS = {
   ANSWERED_SINCE: "answered_since",
   /** Re-check only: another brand of the org owns this person (gmailOwnerBrands). */
   OTHER_BRAND: "other_brand",
+  /** The address is the brand's own (its connected mailbox, a sending mailbox, its domain): our own mail. */
+  OWN_ADDRESS: "own_address",
+  /** No mail of the burst is addressed TO the brand (its addresses absent from To: only copied). */
+  NOT_ADDRESSED_TO_BRAND: "not_addressed_to_brand",
 } as const;
 
 /** A burst the email path acts on. */
@@ -176,18 +190,43 @@ export async function gmailOwnerBrands(orgId: string, address: string): Promise<
   return new Set([ranked[0].brand_id]);
 }
 
-type OwnAddressesOnce = () => Promise<{ addresses: OwnAddresses; members: OrgMembers }>;
+export interface BrandAddresses {
+  /** Sending mailboxes + the brand's domain (people/sources.ts). */
+  addresses: OwnAddresses;
+  /** The org's connected Gmail mailboxes (google-service `GET /orgs/google/accounts`). */
+  mailboxes: Set<string>;
+}
+type OwnAddressesOnce = () => Promise<BrandAddresses>;
 
-/** The brand's own addresses + the org's members, read once per pass (a run is opened for it). */
+/** PURE: the address is the brand's own (connected mailbox, sending mailbox, domain). */
+export function isBrandAddress(email: string, own: BrandAddresses): boolean {
+  const e = normalizeEmail(email);
+  return !!e && (own.mailboxes.has(e) || isOwnAddress(e, own.addresses));
+}
+
+/** PURE: the mail is addressed TO the brand: one of its addresses in To, or no To at all (Bcc: benefit of the doubt). */
+export function addressedToBrand(to: string[], own: BrandAddresses): boolean {
+  return to.length === 0 || to.some((t) => isBrandAddress(t, own));
+}
+
+/** The brand's own addresses + the org's connected mailboxes, read once per pass (a run is opened for it). */
 export function ownAddressesOnce(scope: PeopleScope, runId: () => Promise<string>): OwnAddressesOnce {
-  let own: { addresses: OwnAddresses; members: OrgMembers } | null = null;
+  let own: BrandAddresses | null = null;
   return async () => {
     if (own) return own;
     const identity = { orgId: scope.orgId, userId: scope.createdByUserId, runId: await runId(), brandId: scope.brandId };
-    const [read, members] = await Promise.all([readOwnAddresses(identity), readOrgMembers(identity)]);
+    const [read, accounts] = await Promise.all([readOwnAddresses(identity), siblingGet("google", "/orgs/google/accounts", identity)]);
     // Unreadable = nothing recorded this pass (our own mail must never be reported by mistake).
     if (read.status !== "ok") throw new Error(`own addresses unreadable: ${read.error}`);
-    return (own = { addresses: read, members });
+    if (accounts.status !== 200) {
+      throw new Error(`google-service GET /orgs/google/accounts returned ${accounts.status}: ${JSON.stringify(accounts.body).slice(0, 300)}`);
+    }
+    const mailboxes = new Set<string>();
+    for (const a of (accounts.body as { accounts?: { email?: string | null }[] } | null)?.accounts ?? []) {
+      const e = normalizeEmail(a.email ?? null);
+      if (e) mailboxes.add(e);
+    }
+    return (own = { addresses: read, mailboxes });
   };
 }
 
@@ -207,8 +246,8 @@ export type GmailDecision =
 
 /**
  * What to do with one burst of the person's mail written after the watch started (`burst`; `judged` = the
- * person's words since the watch, what Jev reads). The rules of the file header, in order: own team, the
- * email path, the owning brand, an automated sender, Jev. Shared by detection and the re-check door.
+ * person's words since the watch, what Jev reads). The rules of the file header, in order: own address, addressed
+ * to the brand, the email path, the owning brand, an automated sender, Jev. Shared by detection and the re-check door.
  */
 export async function decideGmailBurst(
   scope: PeopleScope,
@@ -229,8 +268,12 @@ export async function decideGmailBurst(
     emailPathAnswer: null,
     ...rest,
   });
-  // A member of the org (any address: a teammate's personal gmail) writing is the brand itself, never a prospect.
-  if (isOwnAddress(address, ours.addresses) || ours.members.emails.has(address)) return skip(REPLY_REASONS.OWN_TEAM);
+  // The brand's own address (its connected mailbox: its own sent mail; a sending mailbox; its domain) is never a person.
+  if (isBrandAddress(address, ours)) return skip(GMAIL_REPLY_REASONS.OWN_ADDRESS);
+  // Only words addressed TO the brand count: a mail to someone else, the brand only copied, is not one.
+  burst = burst.filter((m) => addressedToBrand(m.to, ours));
+  judged = judged.filter((m) => addressedToBrand(m.to, ours));
+  if (burst.length === 0) return skip(GMAIL_REPLY_REASONS.NOT_ADDRESSED_TO_BRAND);
 
   let emailPathAnswer: EmailPathAnswer;
   try {

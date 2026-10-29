@@ -4092,7 +4092,7 @@ export const ReplyTriggerReportSchema = z.object({
   judgment: z.unknown(),
   status: z.enum(["pending", "reported", "skipped", "failed"]),
   reason: z.string().nullable().describe(
-    "`own_team` | `automated_reply` | `not_positive` (Jev: a person wrote, no positive answer) | `before_watch` | `no_email_or_phone` (neither an email nor an E.164 phone; older rows `no_email`) | `cold_email_path` (gmail: status `handed_off` = the email path (instantly-service) said it acts on it, its answer stored; status `skipped` = a legacy skip decided on the recipient alone, red on Monitoring until re-checked) | `answered_since` / `other_brand` (re-check only) | `person_not_built` | `offer_unknown` | `campaign_refused` | `campaign_unreachable`",
+    "`own_address` (gmail: the brand's own address, its connected mailbox included: our own mail) | `not_addressed_to_brand` (gmail: no mail of the burst names the brand in To) | `own_team` (old rows only) | `automated_reply` | `not_positive` (Jev: a person wrote, no positive answer) | `before_watch` | `no_email_or_phone` (neither an email nor an E.164 phone; older rows `no_email`) | `cold_email_path` (gmail: status `handed_off` = the email path (instantly-service) said it acts on it, its answer stored; status `skipped` = a legacy skip decided on the recipient alone, red on Monitoring until re-checked) | `answered_since` / `other_brand` (re-check only) | `person_not_built` | `offer_unknown` | `campaign_refused` | `campaign_unreachable`",
   ),
   lastError: z.string().nullable(),
   attempts: z.number().int(),
@@ -4111,8 +4111,8 @@ registry.registerPath({
     "opened it. The person's words since our last message (a send or a message typed by hand on the account) are ONE " +
     "burst, reported ONCE to campaign-service (`POST /internal/trigger-events`, trigger `positive_reply_received`), naming " +
     "the person by email, for an offer (`offerBasis`). Who is answered is the answering pipe's strategy there. An " +
-    "auto-reply is not an answer (`automated_reply`, Jev), and only a POSITIVE answer is reported (interested, asks for info, asks for a meeting; else `not_positive`, Jev); the brand's own team is never reported (`own_team`). Gmail " +
-    "(`source: gmail`): every mail a person sends to the org's connected mailbox, same rules, under the brand(s) whose " +
+    "auto-reply is not an answer (`automated_reply`, Jev), and only a POSITIVE answer is reported (interested, asks for info, asks for a meeting; else `not_positive`, Jev); a team member is reported like anyone (the answering pipe decides). Gmail " +
+    "(`source: gmail`): every mail a person sends TO the org's connected mailbox, same rules (our own addresses never a person: `own_address`), under the brand(s) whose " +
     "people know the person; a reply the email path says it acts on is its (`handed_off / cold_email_path`). Newest first.",
   request: { query: z.object({ brandId: z.string().uuid(), limit: z.coerce.number().int().min(1).max(200).optional() }) },
   responses: {

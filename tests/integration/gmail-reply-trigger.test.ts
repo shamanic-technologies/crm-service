@@ -32,14 +32,15 @@ process.env.BRAND_SERVICE_URL = "http://brand.test";
 process.env.BRAND_SERVICE_API_KEY = "brand-key";
 process.env.INSTANTLY_SERVICE_URL = "http://instantly.test";
 process.env.INSTANTLY_SERVICE_API_KEY = "instantly-key";
-process.env.CLIENT_SERVICE_URL = "http://client.test";
-process.env.CLIENT_SERVICE_API_KEY = "client-key";
+process.env.GOOGLE_SERVICE_URL = "http://google.test";
+process.env.GOOGLE_SERVICE_API_KEY = "google-key";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
-// A member of the org writing from a PERSONAL address (not the brand's domain): the owner's gmail on 2026-10-16.
-let members: { email: string | null; phone: string | null }[] = [];
+// The org's connected Gmail mailbox (google-service accounts): a personal gmail, the owner's own (prod 2026-10-29).
+const CONNECTED_MAILBOX = "owner.personal@gmail-like.example";
+let googleAccountsDown = false;
 let campaignCalls: { headers: Headers; body: Record<string, unknown> }[] = [];
 let jevChoice = "interested";
 let jevCalls = 0;
@@ -73,10 +74,10 @@ function installFetchStub() {
     if (url.host === "brand.test" && /^\/internal\/brands\/[^/]+\/offers$/.test(url.pathname)) {
       return json({ offers: [{ offerId: ONLY_OFFER, name: "Only", status: "active" }] });
     }
-    if (url.host === "client.test" && url.pathname === "/internal/users") {
-      expect(url.searchParams.get("orgId")).toBe(ORG);
-      expect(url.searchParams.get("allMembers")).toBe("true");
-      return json({ users: members, total: members.length });
+    if (url.host === "google.test" && url.pathname === "/orgs/google/accounts") {
+      expect(new Headers(init?.headers).get("x-org-id")).toBe(ORG);
+      if (googleAccountsDown) return json({ error: "db down" }, 500);
+      return json({ accounts: [{ email: "Owner.Personal@gmail-like.example", status: "active" }] });
     }
     if (url.pathname === "/orgs/judgments") {
       jevCalls += 1;
@@ -140,7 +141,7 @@ describe.skipIf(!RUN)("Gmail reply trigger", () => {
     await cleanup();
     jevChoice = "interested";
     ownership = { owner: "none", reason: "no_sequence" };
-    members = [{ email: "Owner.Personal@gmail-like.example", phone: null }];
+    googleAccountsDown = false;
     installFetchStub();
     scope = await newScope(BRAND, ["gmail", "instantly"]);
   });
@@ -207,26 +208,55 @@ describe.skipIf(!RUN)("Gmail reply trigger", () => {
     expect(second).toEqual(["m2"]);
   });
 
-  it("a member of the org writing from a personal address is the brand itself: never reported (OWN-TEAM-GMAIL-1016)", async () => {
-    const MEMBER = "owner.personal@gmail-like.example";
+  /** A second person of the scope, holding `email`. */
+  async function addPerson(email: string, name: string) {
     await db.insert(people).values({
-      scopeId: scope.id, orgId: ORG, brandId: BRAND, personKey: `email:${MEMBER}`, identityKeys: [`email:${MEMBER}`],
-      displayName: "Owner", emails: [MEMBER], phones: ["+1501657753"], sources: ["gmail"], mergeEvidence: [],
-      presences: [{ source: "gmail", sourceRef: MEMBER, displayName: "Owner", company: null, emails: [MEMBER], phones: [],
+      scopeId: scope.id, orgId: ORG, brandId: BRAND, personKey: `email:${email}`, identityKeys: [`email:${email}`],
+      displayName: name, emails: [email], phones: [], sources: ["gmail"], mergeEvidence: [],
+      presences: [{ source: "gmail", sourceRef: email, displayName: name, company: null, emails: [email], phones: [],
         firstActivityAt: null, lastActivityAt: null, messageCount: 1, inboundCount: 1, outboundCount: 0, detail: {} }],
       state: "in_conversation", stateSource: "gmail",
     });
+  }
+
+  it("ONE-AI-CONVERSES-1029: a team member writing TO the brand's mailbox is a Lead event like anyone (no own-team skip)", async () => {
+    const TEAMMATE = "teammate.personal@gmail-like.example";
+    await addPerson(TEAMMATE, "Teammate");
     scope = await startWatch(scope);
-    // The owner's own pitch to a prospect, the brand's mailbox in copy: stored as a mail FROM the member.
-    await mail(scope.id, "k1", min(1), "Hi RUPI team, We could run that for you. Interested?", ["prospect@rupi.example", OWNER_MAILBOX], MEMBER);
+    await mail(scope.id, "t1", min(1), "Hey, can you check the campaign numbers for me?", [OWNER_MAILBOX], TEAMMATE);
+    const d = await detectGmailReplies(scope, run1);
+    expect(d).toMatchObject({ detected: 1, skipped: [] });
+    await deliverDueGmailReplies();
+    expect(campaignCalls).toHaveLength(1);
+    expect(campaignCalls[0].body).toMatchObject({ person: { email: TEAMMATE, name: "Teammate" }, idempotencyKey: `crm:gmail:reply:${BRAND}:t1` });
+  });
+
+  it("a mail to someone else, the brand only copied (a teammate's pitch to a prospect), is not words to the brand (OWN-TEAM-GMAIL-1016)", async () => {
+    const TEAMMATE = "teammate.personal@gmail-like.example";
+    await addPerson(TEAMMATE, "Teammate");
+    scope = await startWatch(scope);
+    // To holds only the prospect: the mailbox was in Cc (the store keeps To only).
+    await mail(scope.id, "k1", min(1), "Hi RUPI team, We could run that for you. Interested?", ["prospect@rupi.example"], TEAMMATE);
     const d = await detectGmailReplies(scope, run1);
     expect(d.detected).toBe(0);
-    expect(d.skipped).toEqual([{ reason: "own_team", address: MEMBER }]);
+    expect(d.skipped).toEqual([{ reason: "not_addressed_to_brand", address: TEAMMATE }]);
     expect(jevCalls).toBe(0);
+    expect(ownershipAsks).toEqual([]);
     await deliverDueGmailReplies();
     expect(campaignCalls).toHaveLength(0);
+  });
 
-    // A real outsider's positive mail to the same mailbox still rings.
+  it("the connected mailbox's own sent mail (filed inbound on the mailbox's address) is our own mail, never a Lead event", async () => {
+    await addPerson(CONNECTED_MAILBOX, "Owner");
+    scope = await startWatch(scope);
+    // prod 2026-10-29: the owner's gmail IS the connected mailbox; his mail to a client sits on his own address as "inbound".
+    await mail(scope.id, "o1", min(1), "Sure, here is the content status", ["client@mfg.example"], CONNECTED_MAILBOX);
+    const d = await detectGmailReplies(scope, run1);
+    expect(d.detected).toBe(0);
+    expect(d.skipped).toEqual([{ reason: "own_address", address: CONNECTED_MAILBOX }]);
+    expect(jevCalls).toBe(0);
+
+    // A real outsider's mail to the same mailbox still rings.
     await mail(scope.id, "m1", min(2), "Hi, how much is it?");
     expect((await detectGmailReplies(scope, run1)).detected).toBe(1);
     await deliverDueGmailReplies();
@@ -243,16 +273,13 @@ describe.skipIf(!RUN)("Gmail reply trigger", () => {
     expect(campaignCalls[0].body.person).toEqual({ email: PERSON, name: "QA Gmail", phone: "+33680478702" });
   });
 
-  it("client-service unable to say who the org's members are: nothing recorded this pass", async () => {
+  it("google-service unable to say which mailboxes are the org's: nothing recorded this pass", async () => {
     scope = await startWatch(scope);
     await mail(scope.id, "m1", min(1), "Hi, how much is it?");
-    const base = globalThis.fetch;
-    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) =>
-      new URL(String(input)).host === "client.test" ? json({ error: "identity provider down" }, 502) : base(input, init),
-    );
-    await expect(detectGmailReplies(scope, run1)).rejects.toThrow(/client-service GET \/internal\/users.* returned 502/);
+    googleAccountsDown = true;
+    await expect(detectGmailReplies(scope, run1)).rejects.toThrow(/google-service GET \/orgs\/google\/accounts returned 500/);
     expect(await reports()).toHaveLength(0);
-    installFetchStub();
+    googleAccountsDown = false;
     expect((await detectGmailReplies(scope, run1)).detected).toBe(1);
   });
 
