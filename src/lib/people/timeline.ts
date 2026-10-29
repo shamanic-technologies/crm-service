@@ -45,6 +45,8 @@
  * into an empty thread.
  */
 
+import { connectionOwnSenders } from "../matrix/own-senders.js";
+import { isOwnSender } from "../matrix/events.js";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { describeKeyEvent } from "../posthog/records.js";
@@ -272,12 +274,14 @@ async function matrixItems(presences: Presence[]): Promise<SourceResult> {
       channel: conversations.channel,
       connectionId: conversations.connectionId,
       ownMxid: matrixConnections.matrixUserId,
+      counterpartPrefix: matrixConnections.counterpartPrefix,
     })
     .from(conversations)
     .innerJoin(matrixConnections, eq(matrixConnections.id, conversations.connectionId))
     .where(inArray(conversations.id, conversationIds));
   const items: TimelineItem[] = [];
   for (const c of convs) {
+    const own = await connectionOwnSenders({ id: c.connectionId, matrixUserId: c.ownMxid, counterpartPrefix: c.counterpartPrefix });
     const events = await db
       .select()
       .from(matrixRawEvents)
@@ -295,7 +299,7 @@ async function matrixItems(presences: Presence[]): Promise<SourceResult> {
         source: "matrix",
         channel: c.channel,
         kind: "message",
-        direction: e.sender === c.ownMxid ? "outbound" : "inbound",
+        direction: isOwnSender(e.sender, own) ? "outbound" : "inbound",
         subject: null,
         text: typeof content?.body === "string" ? content.body : null,
         from: e.sender,

@@ -50,6 +50,7 @@ import { readThread, THREAD_WINDOW } from "./leads.js";
 import { readAccountUsers } from "../people/account-users.js";
 import { announceAssistantMatrixMessages } from "../assistant-pings.js";
 import { overlayVoiceTranscripts } from "./voice-notes.js";
+import { connectionOwnSenders } from "./own-senders.js";
 import { deliverDueReplies, detectReplies, type ReplyDetection } from "../reply-trigger/watch.js";
 import {
   hidesConversation,
@@ -190,6 +191,7 @@ async function ingestBronze(
   // A self-serve connection syncs as its brand's own dedicated account; a
   // hand-registered one as the platform account. Two kinds of row, not a fallback.
   const token = conn.accessToken ?? platformAccessToken();
+  const own = await connectionOwnSenders(conn);
 
   // Rooms this connection already mirrors. An INCREMENTAL /sync page carries a
   // room's new messages without its member state, so routing on the page alone
@@ -220,7 +222,7 @@ async function ingestBronze(
 
     for (const [roomId, room] of Object.entries(joined)) {
       const events = collectRoomEvents(room);
-      const counterpart = resolveCounterpart(events, conn.matrixUserId, conn.counterpartPrefix);
+      const counterpart = resolveCounterpart(events, own, conn.counterpartPrefix);
       // Neither routed by this page's members nor known: another bridge's room.
       if (!counterpart && !knownRooms.has(roomId)) continue;
       knownRooms.add(roomId);
@@ -299,14 +301,15 @@ async function rebuildRoom(
     .orderBy(asc(matrixRawEvents.originServerTs), asc(matrixRawEvents.eventId));
 
   const events = rows.map((r) => r.payload as unknown as MatrixEvent);
-  if (isGroupRoom(events, conn.matrixUserId, conn.counterpartPrefix)) {
+  const own = await connectionOwnSenders(conn);
+  if (isGroupRoom(events, own, conn.counterpartPrefix)) {
     await rebuildGroup(conn, roomId);
     return null;
   }
-  const counterpart = resolveCounterpart(events, conn.matrixUserId, conn.counterpartPrefix);
+  const counterpart = resolveCounterpart(events, own, conn.counterpartPrefix);
   if (!counterpart) return null;
 
-  const aggregate = aggregateMessages(events, conn.matrixUserId);
+  const aggregate = aggregateMessages(events, own);
   if (!aggregate) return null;
 
   const names = splitName(counterpart.displayName);
@@ -593,7 +596,7 @@ async function computeLead(
 
   const lines = renderThread(
     await overlayVoiceTranscripts(rows.map((r) => r.payload as unknown as MatrixEvent)),
-    conn.matrixUserId,
+    await connectionOwnSenders(conn),
     THREAD_WINDOW,
   );
 

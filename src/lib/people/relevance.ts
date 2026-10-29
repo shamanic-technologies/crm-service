@@ -47,6 +47,7 @@
  * cold email, a lead, the CRM, Stripe) is never hidden by this.
  */
 
+import { connectionOwnSenders } from "../matrix/own-senders.js";
 import { createHash } from "node:crypto";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
@@ -551,6 +552,7 @@ export async function matrixConversationInput(conversationId: string): Promise<(
       conversation: conversations,
       contact: { fullName: contacts.fullName, phone: contacts.phoneE164 },
       ownMxid: matrixConnections.matrixUserId,
+      counterpartPrefix: matrixConnections.counterpartPrefix,
     })
     .from(conversations)
     .innerJoin(contacts, eq(contacts.id, conversations.contactId))
@@ -565,7 +567,7 @@ export async function matrixConversationInput(conversationId: string): Promise<(
   const lines = threadWindow(
     renderThread(
       await overlayVoiceTranscripts(events.map((e) => e.payload as unknown as MatrixEvent)),
-      row.ownMxid,
+      await connectionOwnSenders({ id: row.conversation.connectionId, matrixUserId: row.ownMxid, counterpartPrefix: row.counterpartPrefix }),
       Number.POSITIVE_INFINITY,
     ),
   );

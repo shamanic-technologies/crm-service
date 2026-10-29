@@ -4,9 +4,12 @@ import {
   compareEvents,
   ingestionFloor,
   isAtOrAfterFloor,
+  isGroupRoom,
+  isOwnSender,
   phoneFromMxid,
   renderThread,
   resolveCounterpart,
+  selfGhostMxid,
   shouldMirror,
   splitName,
 } from "../../src/lib/matrix/events.js";
@@ -273,5 +276,44 @@ describe("renderThread", () => {
     expect(renderThread(notices, OWN, 10)).toEqual([]);
     const lines = renderThread([message("$0", GHOST, 1, "real words"), ...notices], OWN, 10);
     expect(lines.map((l) => l.body)).toEqual(["real words"]);
+  });
+});
+
+describe("the account's self-ghost is us, never the counterpart (OLIVE-TG-SELF-GHOST-1029)", () => {
+  // Prod 2026-10-15, mautrix-telegram without double puppeting: the bridge invited Kevin's own Telegram
+  // ghost into the DM before Sepehr's, and every message Kevin typed in the Telegram app came from it.
+  const TG = "@telegram_";
+  const ACCOUNT = "@crm_07039c38ad09a4c2:matrix.distribute.you";
+  const SELF = "@telegram_1501657753:matrix.distribute.you";
+  const SEPEHR = "@telegram_545209489:matrix.distribute.you";
+  const events: MatrixEvent[] = [
+    member(SELF, "join", 1, "Kevin Lourd"),
+    member(ACCOUNT, "join", 2),
+    member(SEPEHR, "join", 3, "Sepehr Vali | Olive Exchange"),
+    message("$a", SELF, 10, "email 1 example: I'm with Olive."),
+    message("$b", SEPEHR, 20, "looks good"),
+    message("$c", ACCOUNT, 30, "Hey Sepehr! Update on Olive's campaign so far"),
+  ];
+
+  it("derives the self-ghost from the linked login id, on the account's server", () => {
+    expect(selfGhostMxid(TG, ACCOUNT, "1501657753")).toBe(SELF);
+    expect(selfGhostMxid("@whatsapp_", "@crm_x:hs.example", "+33680478702")).toBe("@whatsapp_33680478702:hs.example");
+    expect(selfGhostMxid(TG, ACCOUNT, null)).toBeNull();
+    expect(selfGhostMxid(TG, ACCOUNT, "  ")).toBeNull();
+  });
+
+  it("resolves the counterpart past the self-ghost that joined first", () => {
+    expect(resolveCounterpart(events, ACCOUNT, TG)?.mxid).toBe(SELF); // the bug, with the account alone
+    expect(resolveCounterpart(events, [ACCOUNT, SELF], TG)?.mxid).toBe(SEPEHR);
+    expect(isGroupRoom(events, [ACCOUNT, SELF], TG)).toBe(false);
+  });
+
+  it("counts and renders what the self-ghost wrote as outbound", () => {
+    const agg = aggregateMessages(events, [ACCOUNT, SELF]);
+    expect(agg).toMatchObject({ messageCount: 3, inboundCount: 1, outboundCount: 2 });
+    expect(renderThread(events, [ACCOUNT, SELF], 10).map((l) => l.direction)).toEqual(["outbound", "inbound", "outbound"]);
+    expect(isOwnSender(SELF, [ACCOUNT, SELF])).toBe(true);
+    expect(isOwnSender(SEPEHR, [ACCOUNT, SELF])).toBe(false);
+    expect(isOwnSender(ACCOUNT, ACCOUNT)).toBe(true);
   });
 });

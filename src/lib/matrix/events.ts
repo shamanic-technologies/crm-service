@@ -55,6 +55,31 @@ export function shouldMirror(event: MatrixEvent, floor: Date): boolean {
   return true;
 }
 
+/**
+ * WHO "we" are in a room of one connection: the connection's own Matrix account, plus the bridge's
+ * SELF-GHOST of the account that linked (`<counterpartPrefix><remote_login_id>:<server>`). A bridge that
+ * does not double-puppet (mautrix-telegram before its `double_puppet.secrets` were set) relays what the
+ * user types in their own app from that self-ghost, and invites it into DMs it creates, often FIRST: read
+ * as a person, it became the counterpart of the whole thread and every message the user typed read
+ * inbound (OLIVE-TG-SELF-GHOST-1029: Sepehr Vali's Telegram thread was filed under Kevin's own Telegram
+ * account, 30 of Kevin's messages read as the client's). Scoped to ONE connection: another linked account
+ * of the same brand is a real counterpart in a DM with this one (Sophie writing to Kevin).
+ */
+export type OwnSenders = string | readonly string[];
+
+export function isOwnSender(sender: string | null | undefined, own: OwnSenders): boolean {
+  if (!sender) return false;
+  return typeof own === "string" ? sender === own : own.includes(sender);
+}
+
+/** The self-ghost MXID of the account a connection linked, or null when the login id is unknown. */
+export function selfGhostMxid(counterpartPrefix: string, ownMxid: string, remoteLoginId: string | null | undefined): string | null {
+  const local = (remoteLoginId ?? "").trim().replace(/^\+/, "");
+  const at = ownMxid.indexOf(":");
+  if (!local || at < 0) return null;
+  return `${counterpartPrefix}${local}${ownMxid.slice(at)}`;
+}
+
 /** Stable ordering: oldest first, event id breaks ties on identical timestamps. */
 export function compareEvents(a: MatrixEvent, b: MatrixEvent): number {
   if (a.origin_server_ts !== b.origin_server_ts) return a.origin_server_ts - b.origin_server_ts;
@@ -91,14 +116,14 @@ export interface Counterpart {
  */
 export function resolveCounterpart(
   memberEvents: MatrixEvent[],
-  ownMxid: string,
+  ownMxid: OwnSenders,
   counterpartPrefix: string,
 ): Counterpart | null {
   const ghosts = new Map<string, { first: MatrixEvent; latest: MatrixEvent }>();
   for (const ev of memberEvents) {
     if (ev.type !== "m.room.member") continue;
     const stateKey = ev.state_key;
-    if (!stateKey || stateKey === ownMxid) continue;
+    if (!stateKey || isOwnSender(stateKey, ownMxid)) continue;
     if (!stateKey.startsWith(counterpartPrefix)) continue;
     const membership = String(ev.content?.membership ?? "");
     const g = ghosts.get(stateKey);
@@ -139,13 +164,13 @@ export function resolveCounterpart(
  * RELATIONSHIP-TAGS-1014: a WhatsApp group used to be read as a conversation
  * with its first-joined member, and every other member was nobody.
  */
-export function isGroupRoom(events: MatrixEvent[], ownMxid: string, counterpartPrefix: string): boolean {
+export function isGroupRoom(events: MatrixEvent[], ownMxid: OwnSenders, counterpartPrefix: string): boolean {
   const ghosts = new Set<string>();
   for (const ev of events) {
     if (ev.type !== "m.room.member") continue;
     if (ev.content?.is_direct === true) return false;
     const k = ev.state_key;
-    if (k && k !== ownMxid && k.startsWith(counterpartPrefix)) ghosts.add(k);
+    if (k && !isOwnSender(k, ownMxid) && k.startsWith(counterpartPrefix)) ghosts.add(k);
   }
   return ghosts.size >= 2;
 }
@@ -177,12 +202,12 @@ export interface GroupMember extends Counterpart {
  * itself is never a ghost), with what they did there. Pure, deterministic,
  * sorted by MXID.
  */
-export function groupMembers(events: MatrixEvent[], ownMxid: string, counterpartPrefix: string): GroupMember[] {
+export function groupMembers(events: MatrixEvent[], ownMxid: OwnSenders, counterpartPrefix: string): GroupMember[] {
   const byMxid = new Map<string, { first: MatrixEvent | null; latest: MatrixEvent; authored: number; firstAuthored: number | null; lastAuthored: number | null }>();
   for (const ev of events) {
     if (ev.type !== "m.room.member") continue;
     const k = ev.state_key;
-    if (!k || k === ownMxid || !k.startsWith(counterpartPrefix)) continue;
+    if (!k || isOwnSender(k, ownMxid) || !k.startsWith(counterpartPrefix)) continue;
     const membership = String(ev.content?.membership ?? "");
     const entered = membership === "join" || membership === "invite";
     const m = byMxid.get(k);
@@ -310,7 +335,7 @@ export interface ConversationAggregate {
  */
 export function aggregateMessages(
   messageEvents: MatrixEvent[],
-  ownMxid: string,
+  ownMxid: OwnSenders,
 ): ConversationAggregate | null {
   const messages = messageEvents.filter((e) => e.type === "m.room.message").sort(compareEvents);
   if (messages.length === 0) return null;
@@ -318,7 +343,7 @@ export function aggregateMessages(
   let inbound = 0;
   let outbound = 0;
   for (const m of messages) {
-    if (m.sender === ownMxid) outbound += 1;
+    if (isOwnSender(m.sender, ownMxid)) outbound += 1;
     else inbound += 1;
   }
 
@@ -439,7 +464,7 @@ export function foldEdits(events: MatrixEvent[]): MatrixEvent[] {
  */
 export function renderThread(
   messageEvents: MatrixEvent[],
-  ownMxid: string,
+  ownMxid: OwnSenders,
   maxLines: number,
 ): ThreadLine[] {
   const messages = messageEvents.filter((e) => e.type === "m.room.message").sort(compareEvents);
@@ -461,7 +486,7 @@ export function renderThread(
     const body = humanText(content);
     if (!body) continue;
     lines.push({
-      direction: m.sender === ownMxid ? "outbound" : "inbound",
+      direction: isOwnSender(m.sender, ownMxid) ? "outbound" : "inbound",
       at: new Date(m.origin_server_ts).toISOString(),
       body,
     });
