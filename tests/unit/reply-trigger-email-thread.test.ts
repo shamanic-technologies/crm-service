@@ -31,11 +31,13 @@ describe("readEmailThreadForReply", () => {
 describe("gmailReplyBody", () => {
   it("is brand-scoped in its idempotency key and omits absent values", () => {
     const body = gmailReplyBody({
+      triggerId: "message_received",
       brandId: "b1", offerId: "o1", anchorMessageId: "m1",
       person: { email: "qa@distribute.you", name: null, phone: null, personId: null },
       messages: [{ messageId: "m1", at: "2026-10-15T10:00:00.000Z", subject: "s", text: "t", to: [], threadId: "t1" }],
     });
     expect(body.idempotencyKey).toBe(gmailIdempotencyKey("b1", "m1"));
+    expect(body.triggerId).toBe("message_received");
     expect(body.person).toEqual({ email: "qa@distribute.you" });
     expect(body.item).toMatchObject({ source: "gmail", channel: "email", threadId: "t1", campaignId: null });
   });
