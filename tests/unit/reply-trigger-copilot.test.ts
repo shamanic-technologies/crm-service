@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  answeringLine,
   burstForCopilot,
+  threadAcrossLines,
+  type BrandLine,
   copilotAnswersOn,
   copilotHandoffBody,
   knownEmailsOf,
@@ -181,5 +184,46 @@ describe("the Copilot's line (SOPHIE-COPILOT-WA-1018)", () => {
     ).toEqual({ phone: "+2349135497828", name: "fanice (WA)", knownEmails: ["fanoikijoshua@gmail.com"] });
     const unknown = copilotHandoffBody({ ...base, sender: { phone: "+2349135497828", name: null, knownEmails: [] } }).sender;
     expect("knownEmails" in (unknown as object)).toBe(false);
+  });
+});
+
+describe("Sophie answers from her line (SOPHIE-ANSWERS-FROM-HER-LINE-1029)", () => {
+  const line = (connectionId: string, accountType: "pro_ai" | "pro_human" | "personal_human" | null, extra: Partial<BrandLine> = {}): BrandLine => ({
+    connectionId,
+    account: `+3360000000${connectionId}`,
+    accountType,
+    automationAllowed: true,
+    outreachDefault: false,
+    linkedAt: new Date(Number(connectionId) * 1000),
+    persona: null,
+    ...extra,
+  });
+
+  it("a pro_ai line answers on itself; any other line hands it to a pro_ai line; none = the line written to", () => {
+    const founder = line("1", "pro_human");
+    const sophie = line("2", "pro_ai");
+    const sophie2 = line("3", "pro_ai");
+    expect(answeringLine(sophie, [founder, sophie, sophie2], ["3"])).toBe(sophie);
+    expect(answeringLine(founder, [founder, sophie, sophie2], [])).toBe(sophie);
+    expect(answeringLine(founder, [founder, sophie, sophie2], ["1", "3"])).toBe(sophie2);
+    expect(answeringLine(founder, [founder, sophie, line("3", "pro_ai", { outreachDefault: true })], []).connectionId).toBe("3");
+    const untyped = line("1", null);
+    expect(answeringLine(untyped, [untyped, line("2", "pro_human")], [])).toBe(untyped);
+    // A pro_ai line with no number cannot answer: never named.
+    expect(answeringLine(founder, [founder, line("2", "pro_ai", { account: "" })], [])).toBe(founder);
+  });
+
+  it("the thread merges the person's rooms in time order, a line on another number carries it", () => {
+    const rooms = [
+      { account: "+33680478702", ownMxid: "@crm_founder:hs", events: [msg("$h", "@crm_founder:hs", 1000, "hello from Kevin"), msg("$a", GHOST, 2000, "tell me more")] },
+      { account: "+77776879632", ownMxid: OWN, events: [msg("$s", OWN, 3000, "Sophie here"), msg("$b", GHOST, 4000, "burst")] },
+    ];
+    expect(threadAcrossLines(rooms, "+77776879632", "$b", new Date(4000).toISOString())).toEqual([
+      { at: new Date(1000).toISOString(), direction: "outbound", kind: "message", text: "hello from Kevin", account: "+33680478702" },
+      { at: new Date(2000).toISOString(), direction: "inbound", kind: "message", text: "tell me more", account: "+33680478702" },
+      { at: new Date(3000).toISOString(), direction: "outbound", kind: "message", text: "Sophie here" },
+    ]);
+    const one = [rooms[1]];
+    expect(threadAcrossLines(one, "+77776879632", "$b", new Date(4000).toISOString())).toEqual(threadBeforeBurst(one[0].events, OWN, "$b", new Date(4000).toISOString()));
   });
 });
