@@ -22,7 +22,7 @@ import whatsappRoutes from "../../src/routes/whatsapp.js";
 import contactsRoutes from "../../src/routes/contacts.js";
 import matrixRoutes from "../../src/routes/matrix.js";
 import { resolveBrandWhatsappPhones } from "../../src/lib/whatsapp/phone-resolution.js";
-import { linkedByOf } from "../../src/lib/reply-trigger/copilot.js";
+import { linkedByOf } from "../../src/lib/reply-trigger/line-context.js";
 
 /**
  * The WhatsApp send and the people-pool serve, end to end against a real

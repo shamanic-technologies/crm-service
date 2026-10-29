@@ -1,7 +1,7 @@
 /**
  * OUR OWN AUTOMATED SENDS ARE NEVER A PERSON WRITING (SOPHIE-BOT-LOOP-1023).
  *
- * A brand can link two WhatsApp accounts, both the Copilot's line (copilot.ts).
+ * A brand can link two WhatsApp accounts, both answered by automation.
  * When the Copilot answers on account A to account B, its automated send lands
  * on B as an inbound message: handed to the Copilot again, answered from B to
  * A, and so on, forever (2026-10-22 23:00 UTC, +33770657585 <-> +77776879632,

@@ -195,7 +195,8 @@ describe.skipIf(!RUN)("Positive reply declared on its judge run (COST-ACCOUNTING
     await seed(["gmail"]);
     await mail("in-2", min(1), "No thanks.");
     await detectGmailReplies(scope, run1);
-    expect(await report()).toMatchObject({ status: "skipped", outcomeStatus: null });
+    // A Lead event (message_received, ONE-AI-CONVERSES-1029), never a Positive reply: no outcome.
+    expect(await report()).toMatchObject({ status: "pending", outcomeStatus: null });
     expect((await declareDuePositiveReplies()).due).toBe(0);
     expect(declarations).toHaveLength(0);
   });

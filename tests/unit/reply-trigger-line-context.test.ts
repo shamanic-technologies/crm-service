@@ -1,42 +1,28 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   answeringLine,
-  burstForCopilot,
+  burstInWords,
   threadAcrossLines,
   type BrandLine,
-  copilotAnswersOn,
-  copilotHandoffBody,
+  lineContextOf,
   knownEmailsOf,
   threadBeforeBurst,
-  HANDOFF_THREAD_MAX,
+  THREAD_MAX,
+  THREAD_TEXT_MAX,
   KNOWN_EMAILS_MAX,
-} from "../../src/lib/reply-trigger/copilot.js";
+} from "../../src/lib/reply-trigger/line-context.js";
 import type { MatrixEvent } from "../../src/lib/matrix/client.js";
 
 const ORG = "bbbbbbbb-7777-4777-8777-000000000001";
-const BRAND = "bbbbbbbb-7777-4777-8777-000000000002";
 const OWN = "@crm_sophie:hs";
 const GHOST = "@whatsapp_lid-1:hs";
 
 const msg = (id: string, sender: string, ts: number, body: string, extra: Record<string, unknown> = {}): MatrixEvent =>
   ({ event_id: id, type: "m.room.message", sender, origin_server_ts: ts, content: { msgtype: "m.text", body, ...extra } }) as MatrixEvent;
 
-describe("the Copilot's line (SOPHIE-COPILOT-WA-1018)", () => {
-  afterEach(() => {
-    delete process.env.COPILOT_UNIBOX_ORG_ID;
-    delete process.env.COPILOT_UNIBOX_BRAND_ID;
-  });
-
-  it("is only the automation-on account of the (org, brand) the Copilot serves", () => {
-    process.env.COPILOT_UNIBOX_ORG_ID = ORG;
-    process.env.COPILOT_UNIBOX_BRAND_ID = BRAND;
-    expect(copilotAnswersOn({ orgId: ORG, brandId: BRAND }, true)).toBe(true);
-    expect(copilotAnswersOn({ orgId: ORG, brandId: BRAND }, false)).toBe(false);
-    expect(copilotAnswersOn({ orgId: "bbbbbbbb-7777-4777-8777-000000000009", brandId: BRAND }, true)).toBe(false);
-    expect(copilotAnswersOn({ orgId: ORG, brandId: "bbbbbbbb-7777-4777-8777-000000000009" }, true)).toBe(false);
-    delete process.env.COPILOT_UNIBOX_BRAND_ID;
-    expect(copilotAnswersOn({ orgId: ORG, brandId: BRAND }, true)).toBe(false);
-  });
+describe("what a Lead event occurrence knows about the line and the person (ONE-AI-CONVERSES-1029)", () => {
+  const sophie = { account: "+77776879632", accountType: "pro_ai" as const, persona: { name: "Sophie", role: "Assistant", instructions: "Be warm." } };
+  const founder = { account: "+33680478702", accountType: "pro_human" as const, persona: null };
 
   it("the thread is what came before the burst, oldest first, human words only, the latest 30", () => {
     const events = [
@@ -52,55 +38,28 @@ describe("the Copilot's line (SOPHIE-COPILOT-WA-1018)", () => {
     ]);
     const many = Array.from({ length: 40 }, (_, i) => msg(`$m${i}`, GHOST, 1000 + i, `m${i}`));
     const thread = threadBeforeBurst(many, OWN, "$x", new Date(10_000).toISOString());
-    expect(thread).toHaveLength(HANDOFF_THREAD_MAX);
+    expect(thread).toHaveLength(THREAD_MAX);
     expect(thread[0].text).toBe("m10");
   });
 
-  it("the body joins the burst, carries the persona and the last message's time", () => {
-    const body = copilotHandoffBody({
-      messageId: "$a",
-      orgId: ORG,
-      brandId: BRAND,
-      accountUserId: "bbbbbbbb-7777-4777-8777-0000000000aa",
-      fromAccount: "+77776879632",
-      persona: null,
-      sender: { phone: "+33680478702", name: null },
-      messages: [
-        { eventId: "$a", at: "2026-10-18T10:00:00.000Z", text: "one" },
-        { eventId: "$b", at: "2026-10-18T10:01:00.000Z", text: "two" },
-      ],
-      thread: [],
+  it("names the line written to and the line answering, with its persona (the founder line hands it to Sophie's)", () => {
+    const ctx = lineContextOf({ received: founder, answering: sophie, sender: { phone: "+33600000001", name: null }, thread: [] });
+    expect(ctx.line).toEqual({
+      receivedOn: { account: "+33680478702", accountType: "pro_human", name: null, role: null, instructions: null },
+      answeringLine: { account: "+77776879632", accountType: "pro_ai", name: "Sophie", role: "Assistant", instructions: "Be warm." },
     });
-    expect(body).toMatchObject({
-      channel: "whatsapp",
-      messageId: "$a",
-      text: "one\ntwo",
-      at: "2026-10-18T10:01:00.000Z",
-      assistant: { name: null, role: null, instructions: null },
-      thread: [],
-    });
+    expect(ctx.thread).toEqual([]);
   });
 
-  it("carries sender.linkedBy only when the number is linked in Integrations", () => {
-    const base = {
-      messageId: "$a",
-      orgId: ORG,
-      brandId: BRAND,
-      accountUserId: "bbbbbbbb-7777-4777-8777-0000000000aa",
-      fromAccount: "+77776879632",
-      persona: null,
-      messages: [{ eventId: "$a", at: "2026-10-18T10:00:00.000Z", text: "one" }],
-      thread: [],
-    };
+  it("carries sender.linkedBy only when the number is linked in Integrations, absent values omitted", () => {
     const linkedBy = { orgId: ORG, userId: "bbbbbbbb-7777-4777-8777-0000000000bb" };
-    expect(copilotHandoffBody({ ...base, sender: { phone: "+33680478702", name: null, linkedBy } }).sender).toEqual({
+    expect(lineContextOf({ received: sophie, answering: sophie, sender: { phone: "+33680478702", name: null, linkedBy }, thread: [] }).sender).toEqual({
       phone: "+33680478702",
-      name: null,
       linkedBy,
     });
-    const unlinked = copilotHandoffBody({ ...base, sender: { phone: "+33600000001", name: "Ann", linkedBy: null } }).sender;
+    const unlinked = lineContextOf({ received: sophie, answering: sophie, sender: { phone: "+33600000001", name: "Ann", linkedBy: null }, thread: [] }).sender;
     expect(unlinked).toEqual({ phone: "+33600000001", name: "Ann" });
-    expect("linkedBy" in (unlinked as object)).toBe(false);
+    expect(lineContextOf({ received: sophie, answering: sophie, sender: { phone: null, name: null }, thread: [] }).sender).toEqual({});
   });
 
   // The bridge's REAL incoming-call event (prod matrix_raw_events, 2026-10-25 06:15, mautrix-whatsapp `convertCallStart`).
@@ -143,9 +102,9 @@ describe("the Copilot's line (SOPHIE-COPILOT-WA-1018)", () => {
     ]);
   });
 
-  it("a call inside the burst reaches the Copilot as the call, never the bridge's instruction text", () => {
+  it("a call inside the burst reaches the writer as the call, never the bridge's instruction text", () => {
     const events = [incomingCall("$c", 2000), msg("$m", GHOST, 2100, "call me back")];
-    const burst = burstForCopilot(
+    const burst = burstInWords(
       [
         { eventId: "$c", at: new Date(2000).toISOString(), text: "Incoming call. Use the WhatsApp app to answer." },
         { eventId: "$m", at: new Date(2100).toISOString(), text: "call me back" },
@@ -168,22 +127,12 @@ describe("the Copilot's line (SOPHIE-COPILOT-WA-1018)", () => {
     expect(knownEmailsOf(many)).toHaveLength(KNOWN_EMAILS_MAX);
   });
 
-  it("the body carries sender.knownEmails when we know the person, never an empty list", () => {
-    const base = {
-      messageId: "$a",
-      orgId: ORG,
-      brandId: BRAND,
-      accountUserId: "bbbbbbbb-7777-4777-8777-0000000000aa",
-      fromAccount: "+33770657585",
-      persona: null,
-      messages: [{ eventId: "$a", at: "2026-10-27T14:26:02.000Z", text: "Sorry I can't take calls at this moment" }],
-      thread: [],
-    };
+  it("carries sender.knownEmails when we know the person, never an empty list", () => {
     expect(
-      copilotHandoffBody({ ...base, sender: { phone: "+2349135497828", name: "fanice (WA)", knownEmails: ["fanoikijoshua@gmail.com"] } }).sender,
+      lineContextOf({ received: sophie, answering: sophie, sender: { phone: "+2349135497828", name: "fanice (WA)", knownEmails: ["fanoikijoshua@gmail.com"] }, thread: [] }).sender,
     ).toEqual({ phone: "+2349135497828", name: "fanice (WA)", knownEmails: ["fanoikijoshua@gmail.com"] });
-    const unknown = copilotHandoffBody({ ...base, sender: { phone: "+2349135497828", name: null, knownEmails: [] } }).sender;
-    expect("knownEmails" in (unknown as object)).toBe(false);
+    const unknown = lineContextOf({ received: sophie, answering: sophie, sender: { phone: "+2349135497828", name: null, knownEmails: [] }, thread: [] }).sender;
+    expect("knownEmails" in unknown).toBe(false);
   });
 });
 
@@ -223,6 +172,8 @@ describe("Sophie answers from her line (SOPHIE-ANSWERS-FROM-HER-LINE-1029)", () 
       { at: new Date(2000).toISOString(), direction: "inbound", kind: "message", text: "tell me more", account: "+33680478702" },
       { at: new Date(3000).toISOString(), direction: "outbound", kind: "message", text: "Sophie here" },
     ]);
+    const long = [{ account: "+77776879632", ownMxid: OWN, events: [msg("$l", GHOST, 1000, "x".repeat(THREAD_TEXT_MAX + 50)), msg("$b", GHOST, 4000, "burst")] }];
+    expect(threadAcrossLines(long, "+77776879632", "$b", new Date(4000).toISOString())[0].text).toHaveLength(THREAD_TEXT_MAX);
     const one = [rooms[1]];
     expect(threadAcrossLines(one, "+77776879632", "$b", new Date(4000).toISOString())).toEqual(threadBeforeBurst(one[0].events, OWN, "$b", new Date(4000).toISOString()));
   });

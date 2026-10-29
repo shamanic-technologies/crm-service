@@ -1457,52 +1457,34 @@ kind `reported`, reportedBy crm-service, fromStep `lead_found`), within ~1 min. 
 REPLY-ANY-LEAD-1015 (owner 2026-10-15, « NE CRÉE PLUS JAMAIS DES CAS PARTICULIERS »; replaces WA-RESPONDER-1012's
 campaign-thread gate): every human burst in ANY one-to-one thread (a campaign opened it, or the person wrote first; one
 a human of the brand typed in is theirs, skipped `human_in_conversation`, HUMAN-IN-THREAD-1016) is reported to campaign-service's trigger door as
-`positive_reply_received`. WHO is answered is the answering pipe's strategy there (lead-service refuses a non-lead:
+`positive_reply_received` (Jev reads it positive) or `message_received` (anything else: "ok", "?", a code, a "no thanks",
+Jev down), both members of "Lead event" (ONE-AI-CONVERSES-1029, owner 2026-10-29 « Quand un lead nous écrit c'est un lead
+event non ? »): ONE Lead event per burst, the Lead event writer decides whether and how to answer. `message_received`
+("Message Received", kind `reported`, reportedBy crm-service) is catalogue DATA in features-service. WHO is answered is the answering pipe's strategy there (lead-service refuses a non-lead:
 skip `person_not_admitted`), never filtered here. Same door as the form trigger (`lib/trigger-door.ts`).
 
 - **Our own automated send is never a person writing** (`own-automated.ts`, SOPHIE-BOT-LOOP-1023): a message received on a
   WhatsApp account whose number + exact text match a `whatsapp_sends` row (sent/sending, -15 min..+2 min) is the echo
   of our send from another linked account: `skipped / own_automated_send`, no hand-off, no trigger, re-checked at
   hand-off time. Two linked Copilot lines ping-ponged ~10 s/turn for 3 days without it. Hand-typed = no send row = answered.
-- **The Copilot's line = no trigger** (`copilot.ts`, SOPHIE-COPILOT-WA-1018, owner 2026-10-18: « Le copilot devient
-  Sophie »): on a linked account with automation allowed whose (org, brand) is the Copilot's scope
-  (`COPILOT_UNIBOX_ORG_ID` + `_BRAND_ID`, no brand literal), EVERY burst is handed to chat-service `POST
-  /internal/copilot/channel-messages` (`messageId` = first event id, reused on retry; thread = last 30 messages before
-  the burst; 202 accepted / 200 duplicate, anything else retried 1→60 min for 24h). No Jev, no `own_team` /
-  `not_positive` skip (staff test from their own numbers); kept: `before_watch`, `human_in_conversation`. A message
-  added before the answer is its own hand-off. Statuses `handoff_pending` → `handed_off` (`copilot`) | `handoff_failed`
-  (`copilot_unreachable`) | `skipped` (on this line no row ends the burst, a skip included: each later message is
-  decided again, so a skip recorded under older rules never swallows the unanswered thread) (`copilot_phone_unknown`: a LID ghost with no known number). A sender whose number is a WhatsApp
-  account LINKED in crm (any org / brand, status linked; most recently linked wins) carries `sender.linkedBy {orgId,
-  userId}` = that link's org + who linked it (`linkedByOf`): chat-service answers with THAT user's access (owner
-  2026-10-18 « FAUX j'ai intégré ces deux nums »); absent when linked nowhere. The brand's own linked numbers are
-  resolved like CRM phones (each asked from ANOTHER connected account), so a linked account writing to the Copilot's
-  line as a LID ghost has its number. chat-service answers
-  via `POST /orgs/whatsapp/messages` (`copilot:<messageId>`, `skipIfReplied` false): a recorded send, so it ends the
-  burst and is never hand-typed. Campaign sends from the account are unchanged.
-  **Sophie answers from HER line** (SOPHIE-ANSWERS-FROM-HER-LINE-1029, owner 2026-10-29 « ok to have a hello message from
-  the founder, but the Sophie talk must be from her number »): a burst on a line NOT typed `pro_ai` (the founder's `pro_human`
-  hello line) is handed off with `fromAccount` + `assistant` = one of the brand's `pro_ai` lines (`answeringLine`: the one the
-  person talks with, else outreach default, else oldest) and `receivedOn {account, name, role}` = the line written to; never a
-  fallback to the founder line (a pro_ai line that cannot send is refused loud by the send). No pro_ai line = the line written
-  to, as before. `thread` = the person's rooms on EVERY line of the brand (by ghost / number, personal lines never), merged in
-  time order, a line on another number than `fromAccount` carrying `account`: Sophie sees the founder hello, and still does once
-  they write on her line. A pro_ai burst with no other line's history = byte-identical.
-  **What the hand-off knows** (COPILOT-WA-REPEAT-1027, Joshua 2026-10-27: asked 3 times for "the email you signed up with"
-  after our campaign wrote to him by name; read "can't take calls" as HIS ask): `sender.knownEmails` = emails our records tie
-  to the number for the brand (`whatsapp_sends` to that phone naming an email, newest first, then the person record; absent
-  when none). A call the bridge mirrored (`m.text` "Incoming call. Use the WhatsApp app to answer." marked
-  `com.beeper.action_message {type: "call"}`, `events.ts callNotice`) is a `thread[i].kind: "call"` line said in plain words
-  (in the burst too, never the bridge's instruction). The bridge sees INCOMING offers only, no outcome / duration; a call
-  placed FROM the linked phone reaches no linked device (no stanza in the bridge log): it cannot be shown.
-  `buildHandoff` = the body, nothing sent (dry read).
+- **One path for every line, the assistant's included** (ONE-AI-CONVERSES-1029, owner 2026-10-29 « tu veux faire un cas
+  particulier ? WTF »; retires SOPHIE-COPILOT-WA-1018's hand-off to chat-service `/internal/copilot/channel-messages` and its
+  retry loop; migration 0071 turned hand-offs still waiting into reports, older ones `skipped / copilot_retired`). No row ends
+  a burst: messages after the last recorded one, before an answer, are their own occurrence (`burstUntilNextReport`: carried
+  once). **Own team is no skip on a line** (staff test from their own numbers; who answers is the pipe's strategy, like the
+  phone trigger WA-GIVEN-PURE-FACT-1017); Gmail keeps `own_team` (a mailbox of the brand itself). Old statuses
+  `handoff_*` / `handed_off` = legacy rows only.
+  **What the occurrence carries about the line** (`line-context.ts` `readLineContext`, on `item`): `line {receivedOn,
+  answeringLine}` each `{account, accountType, name, role, instructions}` = the line written to and the line the answer
+  leaves from: a `pro_ai` line answers on itself, any other line hands it to one of the brand's `pro_ai` lines (the one the
+  person talks with, else outreach default, else oldest; none = the line written to; SOPHIE-ANSWERS-FROM-HER-LINE-1029 « the
+  Sophie talk must be from her number »); `sender {phone?, name?, linkedBy?, knownEmails?}` (`linkedBy {orgId, userId}` when
+  the number is a WhatsApp account linked in crm: answered with that user's access; `knownEmails` = our sends to that number
+  naming an email, then the person record, COPILOT-WA-REPEAT-1027); `thread` = the conversation before the burst on EVERY line
+  of the brand (personal lines never), latest 30, 2000 chars each, a line on another number than the answering one carrying
+  `account`, a mirrored call a `kind: "call"` line said in plain words (in `messages` too). The send route picks the same
+  pro_ai line by itself when no `fromAccount` is given.
 
-- **Only a POSITIVE answer is reported** (owner 2026-10-16): one Jev `choice` per burst over `REPLY_KINDS`
-  (`interested | info_requested | meeting_requested | not_interested | opt_out | wrong_person | neutral |
-  automated`), judged on every word since our last one; P(the first three) >= 0.5 = reported (the email
-  path's positive kinds, instantly-service `REPLY_KIND_CLASSIFICATION`), automated >= 0.75 =
-  `automated_reply`, else `not_positive` (a "no thanks", a stop, a plain "ok"). `not_positive` does not end
-  the burst: a later "actually, how much?" is judged again. Jev down = reported. WhatsApp and Gmail alike.
 - **Live** (`matrix/sync.ts` `startMatrixLiveWatch`, every `MATRIX_LIVE_INTERVAL_MS` 10s, first 60s after boot): per
   connection one `/sync`, bronze, silver of the rooms that moved, `detectReplies` on THOSE rooms, delivery if any. No
   lead reading (the 5-min pass reads every conversation whose lead is behind), no run unless Jev / brand-service is
@@ -1519,7 +1501,7 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   had no words. A connection linked after boot is read by the next live tick (connections re-read each tick); its first
   look is the never-history baseline; any brand
   send `sending` < 2 min holds the pass. Jev (`person|automated`, >= 0.75 silences; down = person) drops auto-replies.
-- **Own team = the org's members too** (`lib/org-members.ts`, OWN-TEAM-GMAIL-1016, owner 2026-10-16: his own pitch
+- **Gmail own team = the org's members too** (`lib/org-members.ts`, OWN-TEAM-GMAIL-1016, owner 2026-10-16: his own pitch
   from his personal gmail, brand mailbox in copy, rang an AI Instant Call): client-service `GET /internal/users?orgId=
   &allMembers=true` (Clerk members, staff who set the org up included), emails (Gmail) + phones (WhatsApp, phone
   trigger). Unreadable = the pass records nothing. **A phone is offered to campaign-service only when DIALABLE**
@@ -1527,8 +1509,7 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   `invalid_number`).
 - **Never history**: `reply_watch_since` (campaign threads, since 2026-10-12) / `open_reply_watch_since` (every other
   thread, since REPLY-ANY-LEAD-1015), set at first look; only messages mirrored after them are reported, the rest is
-  `before_watch` (does not block a later message of the same burst). The brand's own team (`own-team.ts`: linked
-  WhatsApp numbers, brand-service sales rep phone) = `own_team`: identity, not targeting.
+  `before_watch` (does not block a later message of the same burst).
 - **Offer** (`resolveReplyOffer`, `offer_basis`): last campaign that wrote in the thread (`GET /campaigns/{id}`) >
   the offer Jev tagged the conversation about (`conversation_verdicts`, highest score) > the brand's stated
   offer for every form > its only active offer (`resolveOffer`) > `offer_unknown` (retried, loud).
@@ -1536,8 +1517,8 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   none = named by E.164 phone + name, REPLY-PHONE-ONLY-1015: most WhatsApp writers hold no email, campaign-service
   v0.75.81 accepts it; neither = `no_email_or_phone`, older rows `no_email`. ONE rule for every trigger:
   `trigger-door.ts` `doorPersonKey`; never an email made up from a phone) + `item {kind: "reply", source, channel, campaignId (null = no campaign wrote), openedBy
-  campaign|not_campaign, personId, conversationId, roomId, firstMessageAt, lastMessageAt, messages}` (latest 10,
-  2000 chars each). Delivery waits until `people` hold the conversation (`person_not_built` → rebuild → deliver).
+  campaign|not_campaign, personId, conversationId, roomId, firstMessageAt, lastMessageAt, messages, line, sender, thread}`
+  (latest 10, 2000 chars each). Delivery waits until `people` hold the conversation (`person_not_built` → rebuild → deliver).
   Retries 1→60 min for 24h; 400/422 final. Read: `GET /orgs/matrix/reply-triggers?brandId=`.
 - **Gmail** (`gmail.ts` + pure `email-thread.ts`, GMAIL-REPLY-ANY-LEAD-1015): same rules on the org's connected
   mailbox, read from OUR Gmail store (`people_message_texts` source gmail, one conversation per (scope, address)),

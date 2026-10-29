@@ -491,6 +491,13 @@
       "when": 1792740000000,
       "tag": "0070_matrix_link_account_type",
       "breakpoints": true
+    },
+    {
+      "idx": 71,
+      "version": "7",
+      "when": 1792750000000,
+      "tag": "0071_retire_copilot_handoff",
+      "breakpoints": true
     }
   ]
 }

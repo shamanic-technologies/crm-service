@@ -150,7 +150,7 @@ describe.skipIf(!RUN)("Gmail reply trigger", () => {
     await cleanup();
   });
 
-  it("a new mail is ONE trigger event, once; a second mail of the same burst does not double it", async () => {
+  it("a new mail is ONE trigger event, once; a second mail detected with it does not double it, a later one is its own", async () => {
     await mail(scope.id, "m-history", min(-60), "an old mail, before the watch");
     scope = await startWatch(scope);
     await mail(scope.id, "m1", min(1), "Hi, I saw your email, how much is it?");
@@ -179,12 +179,13 @@ describe.skipIf(!RUN)("Gmail reply trigger", () => {
     const messages = (call.body.item as { messages: { messageId: string }[] }).messages.map((m) => m.messageId);
     expect(messages).toEqual(["m1", "m2"]); // never the history before the watch
 
-    // A third mail in the same burst, after the report: still the same burst, nothing more.
+    // A third mail after the recorded ones, before an answer: its own occurrence (ONE-AI-CONVERSES-1029), carried once.
     await mail(scope.id, "m3", min(3), "Hello?");
-    expect((await detectGmailReplies(scope, run1)).detected).toBe(0);
+    expect((await detectGmailReplies(scope, run1)).detected).toBe(1);
     await deliverDueGmailReplies();
-    expect(campaignCalls).toHaveLength(1);
-    const [row] = await reports();
+    expect(campaignCalls).toHaveLength(2);
+    expect((campaignCalls[1].body.item as { messages: { messageId: string }[] }).messages.map((m) => m.messageId)).toEqual(["m3"]);
+    const [row] = (await reports()).filter((r) => r.anchorEventId === "m1");
     expect(row).toMatchObject({ status: "reported", source: "gmail", channel: "email", address: PERSON, email: PERSON, offerBasis: "only_offer" });
   });
 

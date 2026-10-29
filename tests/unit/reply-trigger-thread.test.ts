@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { readThreadForReply, type RoomSend } from "../../src/lib/reply-trigger/thread.js";
-import { idempotencyKeyFor, nextAttemptDue, pickTaggedOffer, replyOccurrenceBody } from "../../src/lib/reply-trigger/watch.js";
+import { burstUntilNextReport, idempotencyKeyFor, nextAttemptDue, pickTaggedOffer, replyOccurrenceBody } from "../../src/lib/reply-trigger/watch.js";
 import type { MatrixEvent } from "../../src/lib/matrix/client.js";
 import { ASSISTANT_PING_SKIPS, classifyAssistantEvent } from "../../src/lib/assistant-pings.js";
 
@@ -116,6 +116,7 @@ describe("readThreadForReply", () => {
 describe("replyOccurrenceBody", () => {
   it("names a WhatsApp writer with no email by phone + name, no email key (REPLY-PHONE-ONLY-1015)", () => {
     const body = replyOccurrenceBody({
+      triggerId: "positive_reply_received",
       brandId: "b",
       offerId: "of",
       report: { anchorEventId: "$p", channel: "whatsapp", campaignId: null, conversationId: "c1", roomId: "!r", source: "matrix" },
@@ -128,6 +129,7 @@ describe("replyOccurrenceBody", () => {
 
   it("is campaign-service's strict body: positive_reply_received, person by email, the burst as item", () => {
     const body = replyOccurrenceBody({
+      triggerId: "positive_reply_received",
       brandId: "f4d73dab-1f9d-49b2-b16e-63ecde76a5eb",
       offerId: "5a2868bb-ac88-42f6-a00a-e49b89b04079",
       report: { anchorEventId: "$a", channel: "whatsapp", campaignId: CAMPAIGN, conversationId: "c1", roomId: "!r", source: "matrix" },
@@ -161,6 +163,7 @@ describe("replyOccurrenceBody", () => {
   it("carries the latest 10 messages of a long burst, and openedBy not_campaign when no campaign wrote", () => {
     const messages = Array.from({ length: 14 }, (_, i) => ({ eventId: `$${i}`, at: new Date(at(i)).toISOString(), text: `m${i}` }));
     const body = replyOccurrenceBody({
+      triggerId: "positive_reply_received",
       brandId: "f4d73dab-1f9d-49b2-b16e-63ecde76a5eb",
       offerId: "5a2868bb-ac88-42f6-a00a-e49b89b04079",
       report: { anchorEventId: "$0", channel: "whatsapp", campaignId: null, conversationId: "c1", roomId: "!r", source: "matrix" },
@@ -171,6 +174,35 @@ describe("replyOccurrenceBody", () => {
     expect(item.messages.map((m) => m.text)).toEqual(["m4", "m5", "m6", "m7", "m8", "m9", "m10", "m11", "m12", "m13"]);
     expect(item).toMatchObject({ openedBy: "not_campaign", campaignId: null });
     expect(body.idempotencyKey).toBe("crm:matrix:reply:$0");
+  });
+
+  it("a non-positive burst names message_received; the line context travels in the item (ONE-AI-CONVERSES-1029)", () => {
+    const context = {
+      line: {
+        receivedOn: { account: "+33680478702", accountType: "pro_human" as const, name: null, role: null, instructions: null },
+        answeringLine: { account: "+77776879632", accountType: "pro_ai" as const, name: "Sophie", role: "Assistant", instructions: null },
+      },
+      sender: { phone: "+918750414064", knownEmails: ["a@b.com"] },
+      thread: [{ at: "2026-10-29T08:00:00.000Z", direction: "outbound" as const, kind: "message" as const, text: "Hello from Kevin" }],
+    };
+    const body = replyOccurrenceBody({
+      triggerId: "message_received",
+      brandId: "b",
+      offerId: "of",
+      report: { anchorEventId: "$q", channel: "whatsapp", campaignId: null, conversationId: "c1", roomId: "!r", source: "matrix" },
+      person: { email: null, name: null, phone: "+918750414064", personId: "p1" },
+      messages: [{ eventId: "$q", at: "2026-10-29T08:05:00.000Z", text: "?" }],
+      context,
+    });
+    expect(body.triggerId).toBe("message_received");
+    expect(body.item).toMatchObject({ kind: "reply", line: context.line, sender: context.sender, thread: context.thread });
+  });
+
+  it("a later message recorded as its own occurrence is never carried twice", () => {
+    const b = ["$1", "$2", "$3"].map((eventId, i) => ({ eventId, at: new Date(at(i)).toISOString(), text: eventId }));
+    expect(burstUntilNextReport(b, new Set(["$3"])).map((m) => m.eventId)).toEqual(["$1", "$2"]);
+    expect(burstUntilNextReport(b, new Set()).map((m) => m.eventId)).toEqual(["$1", "$2", "$3"]);
+    expect(burstUntilNextReport(b, new Set(["$1"])).map((m) => m.eventId)).toEqual(["$1", "$2", "$3"]);
   });
 
   it("picks the offer Jev is most sure the conversation is about", () => {

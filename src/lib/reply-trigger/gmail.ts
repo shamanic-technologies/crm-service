@@ -1,7 +1,9 @@
 /**
  * THE REPLY TRIGGER ON GMAIL (GMAIL-REPLY-ANY-LEAD-1015): a person who writes to
  * the brand's connected Gmail is reported to campaign-service's trigger door as
- * `positive_reply_received`, exactly like a WhatsApp answer (watch.ts). Who is
+ * `positive_reply_received` (Jev reads it positive) or `message_received` (any
+ * other words), exactly like a WhatsApp answer (watch.ts): both are "Lead event"
+ * members (ONE-AI-CONVERSES-1029). Who is
  * answered is the answering pipe's strategy at lead-service / campaign-service,
  * never filtered here (owner 2026-10-15, « NE CRÉE PLUS JAMAIS DES CAS
  * PARTICULIERS »). What stays here is FACT: a human wrote it, one report per
@@ -44,7 +46,7 @@
  *    conversation most about (conversation_verdicts), else the oldest scope.
  *    Never fanned to every brand of the org.
  */
-import { and, eq, gte, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, gt, gte, inArray, isNull, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import {
   people,
@@ -76,8 +78,7 @@ import {
   dueReports,
   judgeBurst,
   MAX_REPORT_MESSAGES,
-  PASS_THROUGH_REASONS,
-  POSITIVE_REPLY_TRIGGER,
+  triggerOfJudgment,
   rebuildBrandPeople,
   REPLY_LOOKBACK_MS,
   REPLY_REASONS,
@@ -269,7 +270,8 @@ export async function decideGmailBurst(
     reason: verdict.report ? null : verdict.reason,
     judgment,
     judged: judgment.status === "ok",
-    reported: verdict.report,
+    // Only a POSITIVE reply produces the `conversation` outcome; every reported burst is a Lead event (ONE-AI-CONVERSES-1029).
+    reported: verdict.report && verdict.positive,
     emailPathAnswer,
   };
 }
@@ -344,7 +346,8 @@ async function detectGmailRepliesOn(
     out.threadsRead += 1;
     if (reading.kind !== "unanswered") continue;
 
-    // What of this burst is already recorded: any row ends it, except an auto-reply or history.
+    // What of this burst is already recorded. No row ends it (ONE-AI-CONVERSES-1029): mail after the last recorded
+    // one, before an answer, is its own occurrence.
     const existing = await db
       .select()
       .from(replyTriggerReports)
@@ -355,7 +358,6 @@ async function detectGmailRepliesOn(
           inArray(replyTriggerReports.anchorEventId, reading.burst.map((m) => m.messageId)),
         ),
       );
-    if (existing.some((r) => !PASS_THROUGH_REASONS.includes(r.reason ?? ""))) continue;
     const coveredThrough = Math.max(0, ...existing.map((r) => r.lastMessageAt.getTime()));
     const uncovered = reading.burst.filter((m) => Date.parse(m.at) > coveredThrough);
     if (uncovered.length === 0) continue;
@@ -429,11 +431,21 @@ async function currentGmailBurst(r: ReplyTriggerReport): Promise<EmailBurstMessa
   const reading = readEmailThreadForReply(await storedConversation(r.scopeId!, r.address!));
   const burst = reading.kind === "unanswered" ? reading.burst : [];
   const from = burst.findIndex((m) => m.messageId === r.anchorEventId);
-  return from >= 0 ? burst.slice(from) : (r.messages as EmailBurstMessage[]);
+  if (from < 0) return r.messages as EmailBurstMessage[];
+  // A later mail recorded as its own occurrence is that occurrence's, never carried twice.
+  const later = await db
+    .select({ anchor: replyTriggerReports.anchorEventId })
+    .from(replyTriggerReports)
+    .where(and(eq(replyTriggerReports.scopeId, r.scopeId!), eq(replyTriggerReports.address, r.address!), gt(replyTriggerReports.firstMessageAt, r.firstMessageAt)));
+  const anchors = new Set(later.map((x) => x.anchor));
+  const cut = burst.findIndex((m, i) => i > from && anchors.has(m.messageId));
+  return burst.slice(from, cut > from ? cut : undefined);
 }
 
 /** PURE: the door's body for a Gmail burst (campaign-service `RecordTriggerEventBody`). Absent values OMITTED. */
 export function gmailReplyBody(input: {
+  /** `positive_reply_received` or `message_received` (`triggerOfJudgment`): both are "Lead event" members. */
+  triggerId: string;
   brandId: string;
   offerId: string;
   anchorMessageId: string;
@@ -447,7 +459,7 @@ export function gmailReplyBody(input: {
   const first = messages[0];
   const last = messages[messages.length - 1];
   return {
-    triggerId: POSITIVE_REPLY_TRIGGER,
+    triggerId: input.triggerId,
     brandId: input.brandId,
     offerId: input.offerId,
     idempotencyKey: gmailIdempotencyKey(input.brandId, input.anchorMessageId),
@@ -507,6 +519,7 @@ export async function deliverGmailReply(r: ReplyTriggerReport, identity: DoorIde
 
   const messages = await currentGmailBurst(r);
   const body = gmailReplyBody({
+    triggerId: triggerOfJudgment(r.judgment as Judgment | null),
     brandId: r.brandId,
     offerId,
     anchorMessageId: r.anchorEventId,
