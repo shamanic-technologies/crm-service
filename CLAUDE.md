@@ -1162,7 +1162,9 @@ owner had written to. A recorded fact, never an address-shape guess.
   (`POST /internal/people/sync {scopeId}`) and check the `unavailable` count.
 - **Materialized, rebuilt whole.** `people_scopes` (one per (org, brand),
   carries `created_by_user_id` for the cron's org run) → `people` replaced in
-  ONE transaction per build. `source_reads` keeps per source `not_connected |
+  ONE transaction per build, writing ONLY the rows that moved (`write.ts`, BOX-DISK-FULL-1029: next state in a
+  TEMP table, a changed / gone row deleted, a row with no identical twin inserted; a whole delete + insert per
+  build was the box's fastest grower, ~868k row writes/h on 67k rows, the day the disk filled). `source_reads` keeps per source `not_connected |
   ok | failed`, presences read, and the source's OWN count for reconciliation.
   A sibling failure marks that source `failed` and the build continues; only a
   crm-service failure fails the build. lead-service answers are cached in

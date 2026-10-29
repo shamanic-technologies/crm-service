@@ -26,6 +26,7 @@ import {
   presenceFallbackKey,
 } from "./identity.js";
 import { mapLimit, type SiblingIdentity } from "./siblings.js";
+import { replaceScopePeople } from "./write.js";
 import {
   cachedAnswerIsCurrent,
   lookupLeadStanding,
@@ -768,10 +769,8 @@ async function buildScopePeopleOn(
         relations: personRelations(personId, readingsOf.get(r.personKey) ?? [], pointCompanies.answers, correctionsByPerson.get(r.personKey) ?? []),
       };
     });
-    await tx.delete(people).where(eq(people.scopeId, scope.id));
-    for (let i = 0; i < withIds.length; i += 500) {
-      await tx.insert(people).values(withIds.slice(i, i + 500));
-    }
+    // Only what moved is written (BOX-DISK-FULL-1029): a whole delete + insert per build was the box's fastest grower.
+    await replaceScopePeople(tx, scope.id, withIds);
     await tx
       .update(peopleScopes)
       .set({ status: "built", sourceReads: summary, lastError: null, lastBuiltAt: new Date(), lastRunId: runId })
