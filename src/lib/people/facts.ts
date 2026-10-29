@@ -46,6 +46,7 @@
  * scope moving, not only after a whole people build (UNIBOX-FACT-LAG-1028).
  */
 
+import { ownSenderSql } from "../matrix/own-senders.js";
 import { createHash } from "node:crypto";
 import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { and, asc, eq, getTableColumns, gt, inArray, sql, type SQL } from "drizzle-orm";
@@ -663,12 +664,14 @@ async function matrixCandidates(orgId: string, brandId: string): Promise<Candida
     channel_handle: string;
     full_name: string | null;
     own_mxid: string;
+    own_sent: boolean;
     voice_status: string | null;
     voice_text: string | null;
   }>(sql`
     SELECT e.event_id, e.room_id, e.sender, e.origin_server_ts,
            e.payload->'content'->>'body' AS body, e.payload->'content'->>'msgtype' AS msgtype,
            v.channel, c.id AS contact_id, c.channel_handle, c.full_name, mc.matrix_user_id AS own_mxid,
+           ${ownSenderSql(sql`e.sender`, sql`e.connection_id`)} AS own_sent,
            t.status AS voice_status, t.text AS voice_text
     FROM matrix_raw_events e
     JOIN conversations v ON v.connection_id = e.connection_id AND v.room_id = e.room_id
@@ -680,7 +683,7 @@ async function matrixCandidates(orgId: string, brandId: string): Promise<Candida
   return events.map((e) => ({
     naturalKey: `matrix|${e.event_id}`,
     family: "matrix_message" as const,
-    type: e.sender === e.own_mxid ? ("message_out" as const) : ("message_in" as const),
+    type: e.own_sent ? ("message_out" as const) : ("message_in" as const),
     source: "matrix" as const,
     sourceRef: e.event_id,
     sourceContactId: e.channel_handle,

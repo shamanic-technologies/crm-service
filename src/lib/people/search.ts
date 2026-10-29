@@ -14,6 +14,7 @@
  * timeline does.
  */
 
+import { ownSenderSql } from "../matrix/own-senders.js";
 import { and, eq, inArray, sql, type SQL } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import {
@@ -868,7 +869,7 @@ export async function messageHitsFor(
         sender: matrixRawEvents.sender,
         at: matrixRawEvents.originServerTs,
         body: sql<string>`${matrixRawEvents.payload}->'content'->>'body'`,
-        ownMxid: sql<string>`(SELECT matrix_user_id FROM matrix_connections mc WHERE mc.id = ${conversations.connectionId})`,
+        ownSent: sql<boolean>`${ownSenderSql(sql`${matrixRawEvents.sender}`, sql`${conversations.connectionId}`)}`,
       })
       .from(conversations)
       .innerJoin(
@@ -888,7 +889,7 @@ export async function messageHitsFor(
         address: null,
         conversationId: r.conversationId,
         at: r.at,
-        direction: r.sender === r.ownMxid ? "outbound" : "inbound",
+        direction: r.ownSent ? "outbound" : "inbound",
         subject: null,
         body: r.body,
         ref: { eventId: r.eventId, roomId: r.roomId, conversationId: r.conversationId, channel: r.channel },

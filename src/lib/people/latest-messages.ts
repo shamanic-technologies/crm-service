@@ -26,6 +26,7 @@
  *   unreadable  no message found AND some thread could not be read / was never read (`gaps`)
  *   unknown     the key is not a relation of this (org, brand) (`reason`)
  */
+import { ownSenderSql } from "../matrix/own-senders.js";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { apiCalls, copilotMessages, people, transactionalEmails, peopleMessageUnits, peopleScopes, personIdAliases, type Person } from "../../db/schema.js";
@@ -292,6 +293,8 @@ interface MatrixRow {
   group_room_id: string | null;
   channel: string;
   own_mxid: string | null;
+  /** The sender is the connection's account or its self-ghost (OLIVE-TG-SELF-GHOST-1029); null in a group read. */
+  own_sent: boolean | null;
   event_id: string;
   room_id: string;
   sender: string;
@@ -305,6 +308,7 @@ async function latestOfConversations(conversationIds: string[]): Promise<Map<str
   for (const part of chunks(conversationIds, 1000)) {
     const rows = (await db.execute(sql`
       SELECT c.id AS conversation_id, NULL AS group_room_id, c.channel, m.matrix_user_id AS own_mxid,
+             ${ownSenderSql(sql`e.sender`, sql`c.connection_id`)} AS own_sent,
              e.event_id, e.room_id, e.sender, e.origin_server_ts, e.payload->'content'->'body' AS body
       FROM conversations c
       JOIN matrix_connections m ON m.id = c.connection_id
@@ -327,7 +331,7 @@ async function latestInGroups(pairs: { roomId: string; handle: string; channel: 
   const out = new Map<string, MatrixRow>();
   for (const part of chunks(pairs, 500)) {
     const rows = (await db.execute(sql`
-      SELECT NULL AS conversation_id, p.room_id AS group_room_id, p.channel, NULL AS own_mxid,
+      SELECT NULL AS conversation_id, p.room_id AS group_room_id, p.channel, NULL AS own_mxid, NULL::boolean AS own_sent,
              e.event_id, e.room_id, e.sender, e.origin_server_ts, e.payload->'content'->'body' AS body
       FROM (VALUES ${sql.join(part.map((p) => sql`(${p.roomId}, ${p.handle}, ${p.channel})`), sql`, `)}) AS p(room_id, handle, channel)
       CROSS JOIN LATERAL (
@@ -363,7 +367,7 @@ async function automatedSends(orgId: string, brandId: string, rows: MatrixRow[])
 }
 
 function matrixCandidate(r: MatrixRow, subject: string | null, auto: Set<string>, voice: Map<string, string>): Candidate {
-  const outbound = r.own_mxid !== null && r.sender === r.own_mxid;
+  const outbound = r.own_sent === true;
   const raw = typeof r.body === "string" ? r.body : null;
   const words = raw && raw.trim() ? raw : (voice.get(r.event_id) ?? raw);
   const clipped = clipText(words);
@@ -604,7 +608,7 @@ export async function readLatestMessages(orgId: string, brandId: string, relatio
   ]);
 
   const matrixRows = [...dms.values(), ...groups.values()];
-  const outbound = matrixRows.filter((r) => r.own_mxid !== null && r.sender === r.own_mxid);
+  const outbound = matrixRows.filter((r) => r.own_sent === true);
   const silent = matrixRows.filter((r) => !(typeof r.body === "string" && r.body.trim()));
   const [auto, transcripts] = await Promise.all([automatedSends(orgId, brandId, outbound), readVoiceTranscripts(silent.map((r) => r.event_id))]);
   const voice = new Map([...transcripts].map(([id, t]) => [id, voiceNoteText(t)]));

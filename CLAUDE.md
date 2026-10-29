@@ -533,7 +533,10 @@ unresolvable from bronze and would break "gold is rebuildable from bronze".
 Deterministic, **zero per-row LLM** — knowing who wrote to you needs no model.
 
 - Counterpart resolution is STATE-EVENT work, not guesswork: `m.room.member`
-  events, minus the connection's own MXID, keep the member in the bridge ghost
+  events, minus the connection's own MXID AND its self-ghost (`lib/matrix/own-senders.ts`:
+  `<prefix><matrix_links.remote_login_id>`, also counted outbound by every direction
+  reader; a bridge without double puppeting invites it FIRST, Sepehr's Telegram DM sat
+  on Kevin's own account, 2026-10-29), keep the member in the bridge ghost
   namespace still in the room; the ghost that joined FIRST is the counterpart and
   stays so (its latest event names it, so a rename is picked up). WhatsApp can put
   a SECOND ghost into a DM: "latest wins" moved a whole campaign thread onto an
