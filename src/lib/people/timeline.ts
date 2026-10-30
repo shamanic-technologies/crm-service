@@ -88,6 +88,7 @@ import {
 } from "../api-calls/calls.js";
 import { siblingGetOk } from "./siblings.js";
 import { readTxEmailThread, TX_EMAIL_CHANNEL, TX_EMAIL_SENDER_NAME } from "../transactional/sent-emails.js";
+import { ACTIVITY_CHANNEL, activityLine, readActivityThread } from "../account-activity/line.js";
 import { deferApiAnswer } from "./item-fill.js";
 import { ACCOUNT_CHANNEL, creditDateBasis, creditEventText } from "../credit-events/rules.js";
 import { readVoiceTranscripts, voiceNoteText } from "../matrix/voice-notes.js";
@@ -635,6 +636,49 @@ export async function billingItems(person: Pick<Person, "orgId" | "brandId" | "e
   return { status: items.length ? "ok" : "empty", items, error: null, asked: emails };
 }
 
+// ─── what the client DID on their account (CLIENT-ACTIVITY-1030) ────────────
+
+/**
+ * Each action the person took on their account with us (a campaign created / edited / paused / resumed, a budget
+ * changed...), reported by the service that performed it (lib/account-activity/), matched on their addresses, read on
+ * the spot. One event per fact, `text` = the line (who, what, the campaign, before to after). Staff Unibox scope only.
+ */
+export async function activityItems(person: Pick<Person, "orgId" | "brandId" | "emails">): Promise<SourceResult> {
+  if (!isCopilotDestination(person.orgId, person.brandId)) return notConnected();
+  const emails = person.emails as string[];
+  const rows = await readActivityThread(emails);
+  const items = rows.map(
+    (a): TimelineItem => ({
+      at: a.occurredAt.toISOString(),
+      source: "activity",
+      channel: ACTIVITY_CHANNEL,
+      kind: "event",
+      direction: null,
+      subject: null,
+      text: activityLine({ title: a.title, subject: a.subject, changes: a.changes, actorName: a.actorName }),
+      from: null,
+      to: [],
+      ref: { activityId: a.activityId, producer: a.producer, accountOrgId: a.accountOrgId, accountBrandId: a.accountBrandId },
+      textClean: null,
+      outreachFact: null,
+      event: {
+        step: a.type,
+        dateBasis: "occurred_at",
+        detail: {
+          title: a.title,
+          subject: a.subject,
+          changes: a.changes,
+          via: a.via,
+          actorName: a.actorName,
+          accountOrgId: a.accountOrgId,
+          accountBrandId: a.accountBrandId,
+        },
+      },
+    }),
+  );
+  return { status: items.length ? "ok" : "empty", items, error: null, asked: emails };
+}
+
 // ─── what the client set up with us (ONBOARDING-FICHE-1027) ────────────────
 
 /**
@@ -1064,7 +1108,7 @@ export async function readTimeline(
   const fromStore = (pick: (t: StoredTimeline) => StoredTimeline["gmail"]) =>
     storedRead.then((t): SourceResult => pick(t)).catch((e) => toFailed(e, emails));
 
-  const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional, onboarding, csv] = await Promise.all([
+  const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional, onboarding, csv, activity] = await Promise.all([
     connected("gmail") ? fromStore((t) => t.gmail) : Promise.resolve(notConnected()),
     fromStore((t) => t.instantly),
     connected("matrix") ? matrixItems(of("matrix")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
@@ -1080,8 +1124,9 @@ export async function readTimeline(
     transactionalItems(person).catch((e) => toFailed(e, emails)),
     onboardingItems(person, identity).catch((e) => toFailed(e, emails)),
     csvRead,
+    activityItems(person).catch((e) => toFailed(e, emails)),
   ]);
-  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional, onboarding, csv };
+  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional, onboarding, csv, activity };
   // A Gmail copy of a transactional email we sent (a staff mailbox holds it) is that email: shown once, as ours.
   if (bySource.gmail.items.length && bySource.transactional.status === "ok") {
     bySource.gmail = { ...bySource.gmail, items: withoutTransactionalCopies(bySource.gmail.items, await transactionalSends(bySource.gmail.items)) };

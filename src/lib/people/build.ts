@@ -51,6 +51,7 @@ import {
   readBilling,
   readTransactional,
   readOnboarding,
+  readActivity,
   readManualContacts,
   isGroupOnly,
   withoutOwnAddresses,
@@ -403,7 +404,7 @@ async function buildScopePeopleOn(
     return { status: "failed" as const, error: (err as Error).message };
   });
 
-  const [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, rawClerk, rawCopilot, rawApi, rawBilling, rawTransactional, rawOnboarding, rawManual, own] = await Promise.all([
+  const [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, rawClerk, rawCopilot, rawApi, rawBilling, rawTransactional, rawOnboarding, rawManual, rawActivity, own] = await Promise.all([
     readGmail(identity),
     readInstantly(identity),
     readMatrix(scope.orgId, scope.brandId),
@@ -417,9 +418,10 @@ async function buildScopePeopleOn(
     readTransactional(scope.orgId, scope.brandId),
     readOnboarding(scope.orgId, scope.brandId),
     readManualContacts(scope.orgId, scope.brandId),
+    readActivity(scope.orgId, scope.brandId),
     readOwnAddresses(identity),
   ]);
-  const filtered = [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, rawClerk, rawCopilot, rawApi, rawBilling, rawTransactional, rawOnboarding, rawManual].map((r) => withoutOwnAddresses(r, own));
+  const filtered = [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, rawClerk, rawCopilot, rawApi, rawBilling, rawTransactional, rawOnboarding, rawManual, rawActivity].map((r) => withoutOwnAddresses(r, own));
   const reads: SourceRead[] = filtered.map((f) => f.read);
   const [gmail, , , gohighlevel, , stripe] = reads;
 
