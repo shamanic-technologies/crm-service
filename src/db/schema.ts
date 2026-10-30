@@ -2945,3 +2945,49 @@ export const formSubmittedDeclarations = pgTable(
   ],
 );
 export type FormSubmittedDeclaration = typeof formSubmittedDeclarations.$inferSelect;
+
+/**
+ * CLIENT-ACTIVITY-1030: what a client DID on their account with us (a campaign created / edited / paused / resumed,
+ * a campaign budget changed...), reported by the service that performed it (`POST /internal/account-activity`),
+ * one row per (producer, activity id), insert-only for the fact. Filed under no scope: the staff Unibox reads it
+ * by the actor's address (lib/account-activity/activity.ts). `status`: pending (actor not resolved yet) | filed (on
+ * the actor's staff Unibox thread + one owner Telegram) | skipped (`reason`: staff | staff_org | no_actor |
+ * actor_unknown). `ping_status`: null (not pinged yet) | sending | sent | failed | unconfigured | skipped.
+ */
+export const accountActivities = pgTable(
+  "account_activities",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    producer: text("producer").notNull(),
+    activityId: text("activity_id").notNull(),
+    type: text("type").notNull(),
+    title: text("title").notNull(),
+    subject: jsonb("subject").$type<{ kind: string; id: string | null; name: string | null } | null>(),
+    changes: jsonb("changes").$type<{ label: string; before: string | null; after: string | null }[]>().notNull().default([]),
+    via: text("via"),
+    accountOrgId: uuid("account_org_id").notNull(),
+    accountBrandId: uuid("account_brand_id"),
+    actorUserId: uuid("actor_user_id"),
+    actorEmail: text("actor_email"),
+    actorName: text("actor_name"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    status: text("status").notNull().default("pending"),
+    reason: text("reason"),
+    attempts: integer("attempts").notNull().default(0),
+    lastError: text("last_error"),
+    pingStatus: text("ping_status"),
+    pingText: text("ping_text"),
+    pingError: text("ping_error"),
+    telegramMessageId: integer("telegram_message_id"),
+    pingedAt: timestamp("pinged_at", { withTimezone: true }),
+    runId: text("run_id"),
+    receivedAt: timestamp("received_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("account_activities_producer_activity_uq").on(table.producer, table.activityId),
+    index("account_activities_filed_email_idx").on(table.actorEmail, table.occurredAt).where(sql`${table.status} = 'filed'`),
+    index("account_activities_pending_idx").on(table.receivedAt).where(sql`${table.status} = 'pending' OR (${table.status} = 'filed' AND ${table.pingStatus} IS NULL)`),
+  ],
+);
+export type AccountActivity = typeof accountActivities.$inferSelect;

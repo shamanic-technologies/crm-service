@@ -18,6 +18,7 @@ feed the same registry, both layered bronze/silver/gold:
 | `api` | PUSHED | each call a client made to our API / MCP server with their own key (request + answer), pushed by api-service, filed ONLY under the staff Unibox scope | NEVER |
 | `google_calendar` | MIRROR | the org's connected Google Calendar (google-service reads it): meetings, attendees, Meet participants; each external attendee a `contacts` row | NEVER |
 | `transactional` | READ | every email the platform SENT a client (transactional-email-service sent-emails feed), shown ONLY on the staff Unibox thread | NEVER |
+| `activity` | PUSHED | each action a client took on their account (campaign created / edited / paused / resumed, budget changed), reported by the service that performed it, filed ONLY under the staff Unibox scope | NEVER |
 
 As a CSV lead-provider it is a sibling of `apollo-service` / `apify-service`.
 
@@ -2094,6 +2095,30 @@ created / stopped, reply forwards...) shows on the recipient's thread as an outb
   timeline items (`ref {emailId, eventType, messageSource, billedOrgId}`; `text` = text part, else the HTML's words,
   computed at write) + latest-message preview (`sentBy: automation`). NO presence (a recipient only we wrote to is nobody
   new), NO fact, not in the search index. No template is special. `POST /internal/transactional-emails/watch` = a pass now.
+
+## What a client DID on their account, on their staff Unibox thread + one owner Telegram (`src/lib/account-activity/`, CLIENT-ACTIVITY-1030)
+
+Owner 2026-10-30: « ajouter une ligne quand un client update les budgets d'une de ses campagnes, édite / crée une campagne ?
+Aussi envoie un message TG quand une de ces choses arrive ». ONE generic intake, no per-producer / per-type code:
+**Contract:** `POST /internal/account-activity` (`x-api-key`; forward the request's identity: `x-org-id` REQUIRED = the client
+org, `x-user-id` = who acted, `x-email` optional), body `{producer, activityId, type (snake_case, e.g. campaign_created |
+campaign_updated | campaign_paused | campaign_resumed | campaign_budget_changed), title ("Campaign created", "Budget changed"),
+subject? {kind, id?, name?}, changes? [{label, before, after}] (display strings, "$20/day"), via? ("AI Copilot" | "Dashboard" |
+"API" | "MCP"), brandId?, occurredAt}` → 200 `{id, stored, duplicate}` at once (400 / 401 / 502 runs down / 503 scope unset).
+Called fire-and-forget by the producer after its write committed (campaign-service, billing-service; a new producer or type
+needs no crm change). Bronze `account_activities` UNIQUE (producer, activityId).
+- After the answer (never awaited): actor = `x-user-id` (none = `skipped / no_actor`), email + name from `x-email` else
+  client-service `/internal/users/{id}`; staff (`isStaffActor`: staff address, kevin@pressbeat.io, a user id ever seen with one)
+  = `skipped / staff`; the staff org itself = `skipped / staff_org`; client-service down = `pending`, retried every 60 s for 24 h
+  (`ACCOUNT_ACTIVITY_WATCH=off`, `POST /internal/account-activity/watch` = a pass now). Else `filed`.
+- Filed = an item on the actor's staff Unibox thread (matched by address, like the Copilot: same thread), source `activity`,
+  channel `account`, kind `event`, `event.step` = type, `text` = `Chaim Tesser · Budget changed: "ABA Owners Meetings" · Daily
+  budget: $20/day to $50/day` (`line.ts activityLine`, em / en dashes stripped), `event.detail` = the structured fact. Thread
+  events only, no presence, staff Unibox scope only. ⚠️ The dashboard renders an event's `text` only for PostHog events:
+  showing this line needs the Unibox to render `text` for source `activity`.
+- One owner Telegram per filed fact (`composeActivityPing`: the line, Who, Org, Brand, Via, Thread link), claimed on the row
+  (`ping_status` null → sending) BEFORE the send: a duplicate report / a retry pass never pings twice; a fact older than 24 h
+  when filed = `ping_status skipped` (never history). `GET /internal/account-activity` = what was reported, filed, pinged.
 
 ## What a client set up with us, on their staff Unibox thread (`src/lib/onboarding/record.ts`, ONBOARDING-FICHE-1027)
 

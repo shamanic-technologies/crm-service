@@ -498,6 +498,13 @@
       "when": 1792750000000,
       "tag": "0071_retire_copilot_handoff",
       "breakpoints": true
+    },
+    {
+      "idx": 72,
+      "version": "7",
+      "when": 1792760000000,
+      "tag": "0072_account_activities",
+      "breakpoints": true
     }
   ]
 }

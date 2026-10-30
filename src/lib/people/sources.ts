@@ -29,6 +29,7 @@ import { handleOf } from "../matrix/events.js";
 import type { GhlDeal, LeadCompanyTags, LeadDisqualification, LeadHumanTags, LeadStanding } from "./state.js";
 import { copilotPresences, isCopilotDestination, readCopilotRows } from "../copilot/messages.js";
 import { apiCallPresences, readApiCallPresenceRows } from "../api-calls/calls.js";
+import { countFiledActivities } from "../account-activity/line.js";
 
 export const SOURCE_STATUSES = ["not_connected", "ok", "failed"] as const;
 export type SourceStatus = (typeof SOURCE_STATUSES)[number];
@@ -820,6 +821,25 @@ export async function readTransactional(orgId: string, brandId: string): Promise
   }
   const [{ n }] = await db.select({ n: sql<number>`count(*)::int` }).from(transactionalEmails);
   return { ...base, status: "ok", presences: [], sourceCount: n, error: null };
+}
+
+// ─── what a client DID on their account (staff Unibox only) ────────────────
+
+/**
+ * CLIENT-ACTIVITY-1030: each action a client took on their account (campaign created / edited / paused / resumed,
+ * budget changed...), reported by the producer (lib/account-activity/activity.ts): thread events only, never a
+ * presence. Only the staff Unibox scope reads them; every other (org, brand) is `not_connected`.
+ */
+export async function readActivity(orgId: string, brandId: string): Promise<SourceRead> {
+  const base = {
+    source: "activity" as const,
+    scope: "brand" as const,
+    sourceCountBasis: "crm-service account actions reported by the services that performed them (staff Unibox only; thread events, no presences)",
+  };
+  if (!isCopilotDestination(orgId, brandId)) {
+    return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
+  }
+  return { ...base, status: "ok", presences: [], sourceCount: await countFiledActivities(), error: null };
 }
 
 // ─── what a client set up with us (staff Unibox only) ──────────────────────

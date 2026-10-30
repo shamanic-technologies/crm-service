@@ -34,7 +34,7 @@
  * client stating "this person matters to my business". A contact of an uploaded FILE is no presence (merge evidence
  * and its `added_to_crm` date only): a file is a list of people to reach, they enter once they act or we write.
  */
-export const PEOPLE_SOURCES = ["gmail", "instantly", "matrix", "gohighlevel", "posthog", "stripe", "clerk", "copilot", "api", "billing", "transactional", "onboarding", "csv"] as const;
+export const PEOPLE_SOURCES = ["gmail", "instantly", "matrix", "gohighlevel", "posthog", "stripe", "clerk", "copilot", "api", "billing", "transactional", "onboarding", "csv", "activity"] as const;
 export type PeopleSource = (typeof PEOPLE_SOURCES)[number];
 
 export function normalizeEmail(raw: string | null | undefined): string | null {

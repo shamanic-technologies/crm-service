@@ -769,6 +769,94 @@ registry.registerPath({
   },
 });
 
+// ─── Account activity (what a client DID on their account, the staff Unibox) ─
+
+export const AccountActivityRequestSchema = z
+  .object({
+    producer: z.string().min(1).max(100).openapi({ description: "The service that performed the action (e.g. `campaign-service`, `billing-service`). With activityId, the idempotency key." }),
+    activityId: z.string().min(1).max(300).openapi({ description: "The producer's own id for this fact (an event / audit row id). A fact reported twice (same producer + activityId) is stored, shown and pinged ONCE." }),
+    type: z
+      .string()
+      .regex(/^[a-z][a-z0-9_]*$/)
+      .max(100)
+      .openapi({ description: "Machine word for the action, snake_case, the producer's own vocabulary (e.g. `campaign_created`, `campaign_updated`, `campaign_paused`, `campaign_resumed`, `campaign_budget_changed`). Served as the timeline item's `event.step`; crm-service has no list of types." }),
+    title: z.string().min(1).max(200).openapi({ description: "What happened, plain English, as the owner reads it (e.g. `Campaign created`, `Budget changed`, `Campaign paused`). No em / en dash (stripped)." }),
+    subject: z
+      .object({
+        kind: z.string().min(1).max(100).openapi({ description: "What was acted on (e.g. `campaign`)." }),
+        id: z.string().max(200).nullable().optional(),
+        name: z.string().max(500).nullable().optional().openapi({ description: "Its name as the client sees it (e.g. `ABA Owners Meetings`): quoted in the line." }),
+      })
+      .nullable()
+      .optional(),
+    changes: z
+      .array(
+        z.object({
+          label: z.string().min(1).max(200).openapi({ description: "What changed, plain English (e.g. `Daily budget`)." }),
+          before: z.string().max(500).nullable().openapi({ description: "The value before, formatted as the client reads it (e.g. `$20/day`); null = none." }),
+          after: z.string().max(500).nullable().openapi({ description: "The value after (e.g. `$50/day`); null = none." }),
+        }),
+      )
+      .max(20)
+      .optional()
+      .openapi({ description: "Each change, shown `label: before to after`. Omit for a create / pause / resume." }),
+    via: z.string().max(100).nullable().optional().openapi({ description: "How the client acted, when the producer knows (e.g. `AI Copilot`, `Dashboard`, `API`, `MCP`). Shown on the ping." }),
+    brandId: z.string().uuid().nullable().optional().openapi({ description: "The client brand the action was on (internal uuid), when one." }),
+    occurredAt: z.string().datetime({ offset: true }).openapi({ description: "When the action committed (ISO 8601). Older than 24 h when filed = shown on the thread, never pinged." }),
+  })
+  .openapi("AccountActivityRequest");
+
+const AccountActivityResponseSchema = z
+  .object({
+    id: z.string().uuid().openapi({ description: "crm-service's row id for the fact." }),
+    stored: z.boolean().openapi({ description: "true = first report of this fact." }),
+    duplicate: z.boolean().openapi({ description: "true = already reported (same producer + activityId): nothing new stored, nothing pinged." }),
+  })
+  .openapi("AccountActivityResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/account-activity",
+  summary: "Report one action a client took on their account (staff Unibox line + one owner Telegram)",
+  description:
+    "Called fire-and-forget by the service that performed a client's action, after its write committed (campaign created / edited / paused / resumed, a campaign budget changed, any later account action: no crm-service change per producer or type). " +
+    "Forward the request's identity headers: `x-org-id` (REQUIRED, the client org), `x-user-id` (who acted; absent = stored, filed nowhere), `x-email` (optional, else read from client-service). " +
+    "The fact is filed ONLY under the staff Unibox scope (COPILOT_UNIBOX_ORG_ID + COPILOT_UNIBOX_BRAND_ID), on the actor's thread (matched by address, like the Copilot): `GET /orgs/people/timeline` item source `activity`, channel `account`, kind `event`, `event.step` = type, " +
+    "`text` = `<name> · <title>: \"<subject name>\" · <label>: <before> to <after>`. One owner Telegram per fact (thread link). " +
+    "Staff (a staff address, a user id ever seen with one, kevin@pressbeat.io) or the staff org = stored `skipped`, no line, no Telegram. " +
+    "Answers at once; filing and the ping run after the answer (retried for 24 h if client-service is down). Idempotent on (producer, activityId). No cost.",
+  request: {
+    headers: z.object({
+      "x-org-id": z.string().uuid().openapi({ description: "The client org the action happened in (internal uuid)." }),
+      "x-user-id": z.string().uuid().optional().openapi({ description: "Who acted (internal uuid). A client acting through the AI Copilot is the client." }),
+      "x-email": z.string().optional().openapi({ description: "The actor's email, when the producer holds it." }),
+    }),
+    body: { content: { "application/json": { schema: AccountActivityRequestSchema } }, required: true },
+  },
+  responses: {
+    200: { description: "Stored (or already stored)", content: { "application/json": { schema: AccountActivityResponseSchema } } },
+    400: { description: "Validation error (body, or a missing / malformed x-org-id)" },
+    401: { description: "Missing or wrong x-api-key" },
+    502: { description: "Run tracking unavailable (nothing stored; retry)" },
+    503: { description: "The staff Unibox scope is not configured on crm-service (nothing stored)" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/account-activity",
+  summary: "Every reported account action, newest first: where it was filed and its owner ping",
+  request: { query: z.object({ limit: z.string().optional() }) },
+  responses: { 200: { description: "Reported account actions" }, 401: { description: "Missing or wrong x-api-key" } },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/account-activity/watch",
+  summary: "Retry now every account action still waiting to be filed or pinged (the loop runs every minute)",
+  responses: { 200: { description: "Pass done" }, 401: { description: "Missing or wrong x-api-key" }, 502: { description: "Run tracking unavailable" } },
+});
+
 // ─── API / MCP calls (the staff Unibox's API source) ─────────────────────────
 
 const ApiCallSchema = z
