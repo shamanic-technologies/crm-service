@@ -13,7 +13,7 @@
 
 import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { authConnections, contacts, ghlConnections, matrixConnections, posthogConnections, stripeConnections, personMerges, transactionalEmails, whatsappSends, creditEvents } from "../../db/schema.js";
+import { authConnections, contacts, ghlConnections, matrixConnections, posthogConnections, stripeConnections, personMerges, personContactHandles, transactionalEmails, whatsappSends, creditEvents } from "../../db/schema.js";
 import { GHL_SOURCE } from "../gohighlevel/records.js";
 import { POSTHOG_SOURCE } from "../posthog/records.js";
 import { STRIPE_SOURCE } from "../stripe/records.js";
@@ -983,6 +983,51 @@ export async function readStatedMergeEvidence(orgId: string, brandId: string): P
         keys,
         sides: [side(r.keysA as string[]), side(r.keysB as string[])],
         judgedBy: `person:${r.statedBy}`,
+      };
+    }),
+  };
+}
+
+/**
+ * Every ACTIVE stated handle (`person_contact_handles`, CONTACT-REDIRECT-1101) ties
+ * every key the person held when it was stated to the handle (a phone, an email):
+ * the person said it is theirs. A judgment like a stated merge (human-service link).
+ */
+export async function readStatedHandleEvidence(orgId: string, brandId: string): Promise<EvidenceRead> {
+  const rows = await db
+    .select()
+    .from(personContactHandles)
+    .where(and(eq(personContactHandles.orgId, orgId), eq(personContactHandles.brandId, brandId), isNull(personContactHandles.undoneAt)));
+  const side = (ks: string[]) => ({
+    emails: ks.filter((k) => k.startsWith("email:")).map((k) => k.slice(6)),
+    phones: ks.filter((k) => k.startsWith("phone:")).map((k) => k.slice(6)),
+    handles: ks.filter((k) => k.startsWith("msg:")),
+  });
+  return {
+    kind: "stated_handle",
+    status: "ok",
+    error: null,
+    evidence: rows.map((r) => {
+      const personKeys = r.personKeys as string[];
+      const keys = [...new Set([...personKeys, r.handleKey])].sort();
+      const { handles: _h, ...flat } = side(keys);
+      return {
+        kind: "stated_handle" as const,
+        ref: r.id,
+        displayName: null,
+        company: null,
+        ...flat,
+        keys,
+        sides: [side(personKeys), side([r.handleKey])] as [{ emails: string[]; phones: string[] }, { emails: string[]; phones: string[] }],
+        judgedBy: `person:${r.statedByUserId}`,
+        statement: {
+          handleId: r.id,
+          kind: r.handleKind as "phone" | "email",
+          handle: r.handle,
+          preferred: r.preferred,
+          channel: r.channel,
+          statedAt: r.createdAt.toISOString(),
+        },
       };
     }),
   };

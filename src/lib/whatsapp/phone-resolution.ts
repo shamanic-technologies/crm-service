@@ -145,3 +145,44 @@ export async function resolveBrandWhatsappPhones(orgId: string, brandId: string)
   }
   return result;
 }
+
+export interface OnePhoneResolution {
+  status: "found" | "not_on_whatsapp" | "invalid_number" | "not_connected" | "failed";
+  ghostMxid: string | null;
+  contactsUpdated: number;
+  error: string | null;
+}
+
+/**
+ * Ask the bridge NOW who one number is on WhatsApp (CONTACT-REDIRECT-1101: a person
+ * just said "reach me on this number"), so the room the brand holds with it (if any)
+ * carries the phone and merges into the person on the next build instead of waiting
+ * for the build's own pass. Same recording as the pass; never throws: the outcome is
+ * returned (the build asks again later when this one could not).
+ */
+export async function resolveOneWhatsappPhone(orgId: string, brandId: string, phone: string): Promise<OnePhoneResolution> {
+  const linked = await linkedWhatsappAccounts(orgId, brandId);
+  const connected = linked.length > 0 ? await connectedOnly(linked) : [];
+  const account = connected.find((a) => `+${a.loginId.replace(/\D/g, "")}` !== phone);
+  if (!account) return { status: "not_connected", ghostMxid: null, contactsUpdated: 0, error: null };
+  try {
+    const who = await resolveIdentifier("whatsapp", account.matrixUserId, account.loginId, phone);
+    await db
+      .insert(whatsappPhoneLookups)
+      .values({ phone, ghostMxid: who.mxid, outcome: "found" })
+      .onConflictDoUpdate({ target: whatsappPhoneLookups.phone, set: { ghostMxid: who.mxid, outcome: "found", lookedUpAt: new Date() } });
+    const contactsUpdated = await recordGhostPhone(who.mxid, phone, orgId, brandId);
+    return { status: "found", ghostMxid: who.mxid, contactsUpdated, error: null };
+  } catch (err) {
+    const outcome = bridgeSaysNoSuchNumber(err, phone);
+    if (outcome) {
+      await db
+        .insert(whatsappPhoneLookups)
+        .values({ phone, ghostMxid: null, outcome })
+        .onConflictDoUpdate({ target: whatsappPhoneLookups.phone, set: { ghostMxid: null, outcome, lookedUpAt: new Date() } });
+      return { status: outcome, ghostMxid: null, contactsUpdated: 0, error: null };
+    }
+    console.error(`[crm-service][whatsapp] resolving ${phone} for a stated handle failed:`, err);
+    return { status: "failed", ghostMxid: null, contactsUpdated: 0, error: err instanceof Error ? err.message : String(err) };
+  }
+}

@@ -28,6 +28,8 @@ import { readFacts } from "../lib/people/facts.js";
 import { findPersonById } from "../lib/people/person-id.js";
 import { listTwinVerdicts, rejectTwinVerdict, twinVerdictView } from "../lib/people/name-twins.js";
 import { listMerges, mergeApplied, mergeView, stateMerge, undoMerge } from "../lib/people/merges.js";
+import { handleView, listHandles, preferredContactOf, stateHandle, undoHandle } from "../lib/people/handles.js";
+import { resolveOneWhatsappPhone } from "../lib/whatsapp/phone-resolution.js";
 import {
   CampaignReachUnavailable,
   cachedOutcomeInputs,
@@ -212,6 +214,8 @@ function personView(row: typeof people.$inferSelect) {
     offerIds: row.offerIds as string[],
     relevance: row.relevance as PersonRelevance["relevance"],
     possibleLeads: row.possibleLeads as PossibleLead[],
+    // CONTACT-REDIRECT-1101: where the person said they want to be reached (latest preferred stated handle per kind).
+    preferredContact: preferredContactOf(row.mergeEvidence as unknown[]),
   };
 }
 
@@ -874,6 +878,132 @@ router.post(
       }
       if (!outcome.duplicate) await kickRebuild(req, body.data.brandId);
       res.json({ merge: mergeView(outcome.merge), duplicate: outcome.duplicate, rebuild: outcome.duplicate ? "not_needed" : "started" });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+// ─── Stated contact handles: "reach me on this other number" (CONTACT-REDIRECT-1101) ─
+
+const handleBodySchema = z
+  .object({
+    brandId: brandIdSchema,
+    personId: z.string().uuid().optional(),
+    personKey: z.string().trim().min(3).max(400).optional(),
+    phone: z.string().trim().min(1).max(40).optional(),
+    email: z.string().trim().min(1).max(320).optional(),
+    preferred: z.boolean().optional(),
+    channel: z.string().trim().min(1).max(40).optional(),
+    reason: z.string().trim().min(1).max(1000).optional(),
+    evidence: z
+      .object({
+        source: z.string().trim().min(1).max(80),
+        channel: z.string().max(40).optional(),
+        roomId: z.string().max(300).optional(),
+        eventId: z.string().max(300).optional(),
+        conversationId: z.string().max(300).optional(),
+        text: z.string().max(4000).optional(),
+      })
+      .strict()
+      .optional(),
+  })
+  .refine((b) => (b.phone ? 1 : 0) + (b.email ? 1 : 0) === 1, { message: "exactly one of phone / email" })
+  .refine((b) => (b.personId ? 1 : 0) + (b.personKey ? 1 : 0) === 1, { message: "exactly one of personId / personKey" });
+
+/**
+ * State that a person of the brand also holds a phone / email, and (preferred, the
+ * default) wants to be reached there from now on (people/handles.ts). The handle joins
+ * the person at the rebuild that starts now; a phone is looked up on WhatsApp at once.
+ */
+router.post(
+  "/orgs/people/handles",
+  apiKeyAuth,
+  requireOrgAndUser("people.handle"),
+  async (req: AuthenticatedRequest, res, next) => {
+    const parsed = handleBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({ type: "validation", error: `invalid body: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")}` });
+    }
+    const b = parsed.data;
+    try {
+      const outcome = await stateHandle({
+        orgId: req.orgId!,
+        brandId: b.brandId,
+        personId: b.personId ?? null,
+        personKey: b.personKey ?? null,
+        phone: b.phone ?? null,
+        email: b.email ?? null,
+        preferred: b.preferred ?? true,
+        channel: b.channel ?? null,
+        reason: b.reason ?? null,
+        evidence: b.evidence ?? null,
+        userId: req.userId!,
+        runId: req.runId ?? null,
+      });
+      if (!outcome.ok) {
+        const { status, ...body } = outcome.refusal;
+        return res.status(status).json({ type: "refused", ...body });
+      }
+      const whatsapp = outcome.handle.handleKind === "phone" ? await resolveOneWhatsappPhone(req.orgId!, b.brandId, outcome.handle.handle) : null;
+      if (!outcome.duplicate || (whatsapp?.contactsUpdated ?? 0) > 0) await kickRebuild(req, b.brandId);
+      res.status(outcome.duplicate ? 200 : 201).json({
+        handle: handleView(outcome.handle),
+        duplicate: outcome.duplicate,
+        personId: outcome.person.personId,
+        whatsapp: whatsapp && { status: whatsapp.status, threadsJoined: whatsapp.contactsUpdated, error: whatsapp.error },
+        rebuild: !outcome.duplicate || (whatsapp?.contactsUpdated ?? 0) > 0 ? "started" : "not_needed",
+      });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+/** Every stated handle of the brand (or of one person), newest first, undone ones included. */
+router.get(
+  "/orgs/people/handles",
+  apiKeyAuth,
+  requireOrgAndUser("people.handles.list"),
+  async (req: AuthenticatedRequest, res, next) => {
+    const parsed = z.object({ brandId: brandIdSchema, personId: z.string().uuid().optional() }).safeParse(req.query);
+    if (!parsed.success) {
+      return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required; personId must be a uuid" });
+    }
+    try {
+      let keys: string[] | undefined;
+      if (parsed.data.personId) {
+        const person = await findPersonById(req.orgId!, parsed.data.brandId, parsed.data.personId);
+        if (!person) return res.status(404).json({ type: "refused", reason: "person_not_found", error: `no person ${parsed.data.personId} in this brand` });
+        keys = person.identityKeys as string[];
+      }
+      const rows = await listHandles(req.orgId!, parsed.data.brandId, keys);
+      res.json({ brandId: parsed.data.brandId, handles: rows.map(handleView) });
+    } catch (err) {
+      next(err);
+    }
+  },
+);
+
+/** Take a stated handle back: it no longer joins the person nor is preferred; a rebuild starts now. */
+router.post(
+  "/orgs/people/handles/:handleId/undo",
+  apiKeyAuth,
+  requireOrgAndUser("people.handle.undo"),
+  async (req: AuthenticatedRequest, res, next) => {
+    const handleId = z.string().uuid().safeParse(req.params.handleId);
+    const body = z.object({ brandId: brandIdSchema }).safeParse(req.body ?? {});
+    if (!handleId.success || !body.success) {
+      return res.status(400).json({ type: "validation", error: "handleId (uuid) path param and brandId (uuid) body are required" });
+    }
+    try {
+      const outcome = await undoHandle({ orgId: req.orgId!, brandId: body.data.brandId, handleId: handleId.data, userId: req.userId!, runId: req.runId ?? null });
+      if (!outcome.ok) {
+        const { status, ...rest } = outcome.refusal;
+        return res.status(status).json({ type: "refused", ...rest });
+      }
+      if (!outcome.duplicate) await kickRebuild(req, body.data.brandId);
+      res.json({ handle: handleView(outcome.handle), duplicate: outcome.duplicate, rebuild: outcome.duplicate ? "not_needed" : "started" });
     } catch (err) {
       next(err);
     }

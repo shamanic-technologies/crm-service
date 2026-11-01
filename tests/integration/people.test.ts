@@ -450,7 +450,7 @@ async function retryOnDeadlock(fn: () => Promise<unknown>): Promise<void> {
 }
 
 async function wipe() {
-  await retryOnDeadlock(() => db.execute(sql`TRUNCATE sender_verdicts, conversation_verdicts, domain_verdicts, company_keys, people_corrections, people_scopes, people, person_ids, person_id_aliases, person_merges, contact_uploads, lead_standing_observations, matrix_raw_events, conversations, matrix_leads, matrix_connections, ghl_opportunities, ghl_connections, contacts CASCADE`));
+  await retryOnDeadlock(() => db.execute(sql`TRUNCATE sender_verdicts, conversation_verdicts, domain_verdicts, company_keys, people_corrections, people_scopes, people, person_ids, person_id_aliases, person_merges, person_contact_handles, contact_uploads, lead_standing_observations, matrix_raw_events, conversations, matrix_leads, matrix_connections, ghl_opportunities, ghl_connections, contacts CASCADE`));
 }
 
 /** Alice in GoHighLevel (email + phone, a won deal) and on WhatsApp (phone only). */
@@ -1385,6 +1385,82 @@ describe.skipIf(!RUN)("person layer", () => {
       expect((await merge({ brandId: BRAND, personIds: [emailId] })).status).toBe(400);
       expect((await undo("bbbbbbbb-1111-4111-8111-00000000dead")).status).toBe(404);
       expect((await listMergesReq()).body.merges).toEqual([]);
+    });
+  });
+
+  describe("stated handles: \"reach me on this other number\" (CONTACT-REDIRECT-1101)", () => {
+    const H = (r: request.Test) => r.set("x-api-key", API_KEY).set("x-org-id", ORG).set("x-user-id", USER);
+    const stateH = (body: unknown) => H(request(app()).post("/orgs/people/handles")).send(body);
+    async function buildAfterKick() {
+      const { scope } = await ensureScope(ORG, BRAND, USER);
+      for (let i = 0; i < 100; i++) {
+        const r = await runScopeBuild(scope);
+        expect(r.ok).toBe(true);
+        if (!r.skipped) return;
+        await new Promise((ok) => setTimeout(ok, 20));
+      }
+      throw new Error("the kicked build never finished");
+    }
+
+    it("the new number joins the person (one thread), is their preferred contact, and undo splits it back", async () => {
+      // Carol in cold email (carol@z.com) and a WhatsApp chat with +33699999999: two people, nothing ties them.
+      await seedLocalSources();
+      const [mx] = await db.select().from(matrixConnections);
+      const [wa] = await db
+        .insert(contacts)
+        .values({ orgId: ORG, brandId: BRAND, source: "matrix", channel: "whatsapp", channelHandle: "@whatsapp_33699999999:hs", phoneE164: "+33699999999", rawAttributes: {}, sourceConnectionId: mx.id })
+        .returning();
+      await db.insert(conversations).values({
+        orgId: ORG, brandId: BRAND, connectionId: mx.id, contactId: wa.id, channel: "whatsapp", roomId: "!carol-new",
+        firstMessageAt: new Date("2026-09-06T12:00:00Z"), lastMessageAt: new Date("2026-09-06T12:00:00Z"),
+        messageCount: 1, inboundCount: 1, outboundCount: 0, lastEventId: "$c1",
+      });
+      extraWritten = [{ ...WRITTEN[1], campaignId: "camp-3", leadEmail: "carol@z.com", engaged: false, clicked: false, firstClickedAt: null }];
+      await buildNow();
+      expect(await db.select().from(people).where(sql`${people.identityKeys} @> '["phone:+33699999999"]'::jsonb`)).toHaveLength(1);
+      const carolId = (await db.select().from(people).where(eq(people.personKey, "email:carol@z.com")))[0].personId!;
+
+      // Refusals first: no such person, a national number, both handles at once.
+      expect((await stateH({ brandId: BRAND, personKey: "email:nobody@z.com", phone: "+33699999999" })).body).toMatchObject({ type: "refused", reason: "person_not_found" });
+      expect((await stateH({ brandId: BRAND, personId: carolId, phone: "06 99 99 99 99" })).body.reason).toBe("invalid_handle");
+      expect((await stateH({ brandId: BRAND, personId: carolId, phone: "+33699999999", email: "c@z.com" })).status).toBe(400);
+      expect((await stateH({ brandId: BRAND, phone: "+33699999999" })).status).toBe(400);
+
+      const res = await stateH({
+        brandId: BRAND,
+        personKey: "email:carol@z.com",
+        phone: "+33 6 99 99 99 99",
+        channel: "whatsapp",
+        evidence: { source: "assistant", channel: "whatsapp", roomId: "!carol-old", text: "please don't message me here, reach me on +33 6 99 99 99 99" },
+      });
+      expect(res.status).toBe(201);
+      expect(res.body).toMatchObject({ duplicate: false, personId: carolId, rebuild: "started", whatsapp: { status: "not_connected", threadsJoined: 0 } });
+      expect(res.body.handle).toMatchObject({ kind: "phone", handle: "+33699999999", preferred: true, channel: "whatsapp", personKeys: ["email:carol@z.com"], active: true, statedByUserId: USER });
+      const handleId = res.body.handle.handleId;
+
+      await buildAfterKick();
+      const one = await db.select().from(people).where(sql`${people.identityKeys} @> '["phone:+33699999999"]'::jsonb`);
+      expect(one).toHaveLength(1);
+      expect(one[0].personKey).toBe("email:carol@z.com");
+      expect(one[0].sources).toEqual(["instantly", "matrix"]);
+      const thread = await H(request(app()).get(`/orgs/people/timeline?brandId=${BRAND}&personKey=${encodeURIComponent("phone:+33699999999")}`));
+      expect(thread.status).toBe(200);
+      expect(thread.body.person.sources).toEqual(["instantly", "matrix"]);
+      expect(thread.body.person.preferredContact).toMatchObject({ phone: { handleId, handle: "+33699999999", preferred: true, channel: "whatsapp" }, email: null });
+
+      // Idempotent; listed on the person.
+      const again = await stateH({ brandId: BRAND, personId: one[0].personId, phone: "+33699999999" });
+      expect(again.status).toBe(200);
+      expect(again.body).toMatchObject({ duplicate: true, handle: { handleId } });
+      const listed = await H(request(app()).get(`/orgs/people/handles?brandId=${BRAND}&personId=${one[0].personId}`));
+      expect(listed.body.handles.map((h: { handleId: string }) => h.handleId)).toEqual([handleId]);
+
+      // Undo: two people again.
+      const undone = await H(request(app()).post(`/orgs/people/handles/${handleId}/undo`)).send({ brandId: BRAND });
+      expect(undone.body).toMatchObject({ duplicate: false, rebuild: "started", handle: { active: false, undoneByUserId: USER } });
+      await buildAfterKick();
+      expect((await db.select().from(people).where(eq(people.personKey, "phone:+33699999999")))).toHaveLength(1);
+      expect((await H(request(app()).post(`/orgs/people/handles/${handleId}/undo`)).send({ brandId: BRAND })).body.duplicate).toBe(true);
     });
   });
 
