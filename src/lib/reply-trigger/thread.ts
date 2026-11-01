@@ -16,6 +16,12 @@
  *    account typed by hand on the phone (the person's next words are a new
  *    burst; that burst is then skipped `human_in_conversation` by the watch:
  *    a human of the brand took the conversation, HUMAN-IN-THREAD-1016);
+ *  - but one of our sends answers only what was written BEFORE it was decided
+ *    (its `createdAt`, the moment the writer queued it): a multi-part answer is
+ *    queued at once and delivered a few seconds apart, so a message the person
+ *    writes between two parts lands before the later parts without them ever
+ *    having read it (WA-REPLY-DROPPED-1101: "Yes, send me the link" at 17:12:05
+ *    sat between parts queued at 17:11:58, read as answered, never reported);
  *  - only words a human wrote count (`humanText`): a bridge notice, an
  *    uncaptioned photo are not an answer. An edit is folded into the message
  *    it rewrites (`foldEdits`): no new word, but its words ARE the message's,
@@ -32,6 +38,8 @@ export interface RoomSend {
   campaignId: string | null;
   status: string;
   sentAt: Date | null;
+  /** When the writer queued the send (the row's creation). Unknown = it answers everything before its place. */
+  createdAt?: Date | null;
 }
 
 export interface BurstMessage {
@@ -60,8 +68,15 @@ export type ThreadReading =
 /** Max characters of one message carried forward (the door caps `item` at 20k). */
 export const MESSAGE_TEXT_CAP = 2000;
 
+/**
+ * A person message stamped up to this long BEFORE a send was queued still counts as unseen by it: WhatsApp stamps
+ * whole seconds (up to 1 s early) and the homeserver clock runs ~0.5 s off ours. No writer reads, decides and queues
+ * within 2 s, so nothing it did read falls in that window.
+ */
+export const SEND_DECIDED_SLACK_MS = 2_000;
+
 type Entry =
-  | { at: number; tie: string; kind: "ours"; campaignId: string | null }
+  | { at: number; tie: string; kind: "ours"; campaignId: string | null; decidedAt: number | null }
   | { at: number; tie: string; kind: "event"; event: MatrixEvent };
 
 export function readThreadForReply(events: MatrixEvent[], ownMxid: string, sends: RoomSend[]): ThreadReading {
@@ -79,7 +94,7 @@ export function readThreadForReply(events: MatrixEvent[], ownMxid: string, sends
     const mirrored = byId.get(s.eventId!);
     const at = mirrored ? mirrored.origin_server_ts : s.sentAt?.getTime();
     if (at === undefined) continue;
-    entries.push({ at, tie: s.eventId!, kind: "ours", campaignId: s.campaignId });
+    entries.push({ at, tie: s.eventId!, kind: "ours", campaignId: s.campaignId, decidedAt: s.createdAt?.getTime() ?? null });
   }
   for (const m of messages) {
     if (ourIds.has(m.event_id)) continue;
@@ -96,7 +111,9 @@ export function readThreadForReply(events: MatrixEvent[], ownMxid: string, sends
     if (e.kind === "ours") {
       if (e.campaignId) lastCampaignId = e.campaignId;
       wroteBefore = true;
-      burst = [];
+      // It answers only what the person wrote before it was queued; words written while it was on its way still wait.
+      const decidedAt = e.decidedAt;
+      burst = decidedAt === null ? [] : burst.filter((m) => Date.parse(m.at) > decidedAt - SEND_DECIDED_SLACK_MS);
       continue;
     }
     const ev = e.event;

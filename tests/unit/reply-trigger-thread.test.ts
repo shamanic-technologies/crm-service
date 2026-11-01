@@ -21,6 +21,45 @@ const sent = (eventId: string, min: number, campaignId: string | null = CAMPAIGN
 });
 
 describe("readThreadForReply", () => {
+  it("a message written while a multi-part answer is still landing is NOT answered by the parts queued before it (WA-REPLY-DROPPED-1101)", () => {
+    // Prod 2026-11-01: three parts queued at 17:11:57-58, delivered 17:11:58 / 17:12:05.1 / 17:12:11; the person wrote at 17:12:05.
+    const ts = (iso: string) => Date.parse(`2026-11-01T${iso}Z`);
+    const ev = (id: string, sender: string, iso: string, body: string) =>
+      ({ event_id: id, type: "m.room.message", sender, origin_server_ts: ts(iso), content: { msgtype: "m.text", body } }) as MatrixEvent;
+    const part = (id: string, queued: string, delivered: string): RoomSend => ({
+      eventId: id,
+      campaignId: CAMPAIGN,
+      status: "sent",
+      sentAt: new Date(ts(delivered)),
+      createdAt: new Date(ts(queued)),
+    });
+    const events = [
+      ev("$ask", GHOST, "17:09:44", "Yes, $10 a day is fine. How do I pay?"),
+      ev("$p1", OWN, "17:11:58.385", "By card, here in the chat."),
+      ev("$yes", GHOST, "17:12:05", "Yes, send me the link"),
+      ev("$p2", OWN, "17:12:05.093", "First payment is $10."),
+      ev("$p3", OWN, "17:12:11.122", "Say yes and I send the payment link."),
+    ];
+    const parts = [part("$p1", "17:11:57.043", "17:11:58.788"), part("$p2", "17:11:58.273", "17:12:05.127"), part("$p3", "17:11:58.296", "17:12:11.127")];
+    expect(readThreadForReply(events, OWN, parts)).toEqual({
+      kind: "unanswered",
+      campaignId: CAMPAIGN,
+      burst: [{ eventId: "$yes", at: new Date(ts("17:12:05")).toISOString(), text: "Yes, send me the link" }],
+      wroteBefore: true,
+    });
+    // A send queued AFTER the message (the next answer) does answer it.
+    const answer = part("$p4", "17:30:04.805", "17:30:05.569");
+    expect(readThreadForReply([...events, ev("$p4", OWN, "17:30:05.482", "Here is the link.")], OWN, [...parts, answer])).toEqual({ kind: "answered" });
+    // WhatsApp stamps whole seconds: a message stamped just before the queue time is still unseen by that send.
+    const edge = [ev("$q", GHOST, "17:11:57", "and the link?"), ev("$p1", OWN, "17:11:58.385", "By card.")];
+    expect(readThreadForReply(edge, OWN, [part("$p1", "17:11:57.900", "17:11:58.788")])).toMatchObject({ kind: "unanswered" });
+    // A message well before the queue time is what the send answers.
+    const seen = [ev("$q", GHOST, "17:11:30", "how do I pay?"), ev("$p1", OWN, "17:11:58.385", "By card.")];
+    expect(readThreadForReply(seen, OWN, [part("$p1", "17:11:57.043", "17:11:58.788")])).toEqual({ kind: "answered" });
+    // A send with no known queue time keeps the old rule: it answers everything before its place.
+    expect(readThreadForReply(events, OWN, parts.map((p) => ({ ...p, createdAt: null })))).toEqual({ kind: "answered" });
+  });
+
   it("reads every thread: one nobody of ours opened (the person wrote first) is an unanswered burst", () => {
     const events = [msg("$1", GHOST, 0, "hey, do you have references?")];
     expect(readThreadForReply(events, OWN, [])).toEqual({

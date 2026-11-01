@@ -1502,7 +1502,8 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   (`withConnectionLock`, the cursor is shared); `MATRIX_LIVE_WATCH=off` stops it.
 - **Rules = `thread.ts`, pure**: threads = `conversations` rows (a group is no conversation, never read); the person's
   human words since our last outbound = ONE burst = ONE row (`reply_trigger_reports`, UNIQUE on its first message,
-  `idempotencyKey crm:matrix:reply:<event>`); ANY outbound ends it: one of our sends OR a message typed by hand on the
+  `idempotencyKey crm:matrix:reply:<event>`); ANY outbound ends it: one of our sends (only for words written before it was
+  QUEUED, `createdAt` − 2 s: a word typed between the parts of a multi-part answer still waits, WA-REPLY-DROPPED-1101) OR a message typed by hand on the
   account (it ends the burst; the person's later bursts are then skipped `human_in_conversation`: a human took it, see "Human takeover"); bridge notices / uncaptioned media are no answer; an edit is
   FOLDED into the message it rewrites (`foldEdits`, events.ts, same sender only): WhatsApp delivers a message the bridge
   could not decrypt yet (common right after a relink) as an `m.notice` placeholder then the words as an EDIT of it; read
