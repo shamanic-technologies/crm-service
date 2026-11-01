@@ -14,6 +14,7 @@ import {
   matrixRawEvents,
   people,
   peopleScopes,
+  personContactHandles,
   staffAlerts,
   whatsappSends,
 } from "../../src/db/schema.js";
@@ -173,6 +174,7 @@ async function wipe() {
   await db.delete(contactServes).where(eq(contactServes.orgId, ORG));
   await db.delete(contacts).where(eq(contacts.orgId, ORG));
   await db.delete(people).where(eq(people.orgId, ORG));
+  await db.delete(personContactHandles).where(eq(personContactHandles.orgId, ORG));
   await db.delete(peopleScopes).where(eq(peopleScopes.orgId, ORG));
   await db.delete(matrixGhostPhones).where(inArray(matrixGhostPhones.ghostMxid, ["@whatsapp_lid-1:matrix.test", "@whatsapp_lid-2:matrix.test", "@whatsapp_lid-pro:matrix.test"]));
 }
@@ -1074,5 +1076,72 @@ describe.skipIf(!RUN)("WhatsApp reach check (DB)", () => {
     const res = await reach({ phone: "0612345678" });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe("invalid_request");
+  });
+  it("a person who said \"reach me on this other number\" is written to there, from the line they talk with, until they write from the old one again (CONTACT-REDIRECT-1101)", async () => {
+    // personal is the oldest line (the fallback); the person talks with the brand on pro, on their OLD number.
+    await linkAccount(ACCOUNT, { linkedAt: new Date("2026-10-01T00:00:00Z") });
+    const pro = await linkAccount(ACCOUNT_PRO, { linkedAt: new Date("2026-10-02T00:00:00Z") });
+    await mirroredThread(pro.connectionId, "@whatsapp_lid-1:matrix.test", 4);
+    await seedPeople([
+      {
+        key: "email:ann@x.com",
+        phones: ["+33600000001"],
+        presences: [clerk(["+33600000001"]), { source: "matrix", detail: { channelHandle: "@whatsapp_lid-1:matrix.test" } }],
+        at: "2026-09-01T00:00:00Z",
+      },
+    ]);
+    const [stated] = await db
+      .insert(personContactHandles)
+      .values({
+        orgId: ORG,
+        brandId: BRAND,
+        personId: "babababa-1111-4111-8111-0000000000aa",
+        personKeys: ["email:ann@x.com", "phone:+33600000001"],
+        handleKind: "phone",
+        handle: "+33600000002",
+        handleKey: "phone:+33600000002",
+        preferred: true,
+        channel: "whatsapp",
+        statedByUserId: USER,
+        createdAt: new Date("2026-10-05T00:00:00Z"),
+      })
+      .returning();
+
+    // By email: the preferred number, from pro (where the person talks), into a fresh DM.
+    const byEmail = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, email: "ann@x.com", text: "Hi Ann", idempotencyKey: "k-redirect-1" });
+    expect(byEmail.status).toBe(200);
+    expect(byEmail.body).toMatchObject({ to: "+33600000002", phoneSource: `stated_handle:${stated.id}`, fromAccount: "+33622222222", roomId: "!dm-33600000002:matrix.test" });
+
+    // Asked on the number they left: still the new one.
+    const byOld = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000001", text: "Hi again", idempotencyKey: "k-redirect-2" });
+    expect(byOld.body).toMatchObject({ to: "+33600000002", phoneSource: `stated_handle:${stated.id}` });
+
+    // A number that is not theirs is never redirected.
+    const other = await request(app())
+      .post("/orgs/whatsapp/reach")
+      .set(headers)
+      .send({ brandId: BRAND, email: "ann@x.com", phone: "+33622222222" });
+    expect(other.body).toMatchObject({ reachable: true, to: "+33622222222", phoneSource: "request" });
+
+    // They write again from the old number after the statement: that number may be answered on.
+    await db.insert(matrixRawEvents).values({
+      orgId: ORG, brandId: BRAND, connectionId: pro.connectionId, eventId: "$back-on-old", roomId: `!room-${pro.connectionId}`,
+      sender: "@whatsapp_lid-1:matrix.test", eventType: "m.room.message", originServerTs: new Date("2026-10-06T00:00:00Z"),
+      payload: { event_id: "$back-on-old", type: "m.room.message", sender: "@whatsapp_lid-1:matrix.test", origin_server_ts: Date.parse("2026-10-06T00:00:00Z"), content: { msgtype: "m.text", body: "actually here is fine" } },
+    });
+    const back = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000001", text: "Sure", idempotencyKey: "k-redirect-3" });
+    expect(back.body).toMatchObject({ to: "+33600000001", phoneSource: "request" });
+    // Without a number, the preferred one still wins.
+    const noPhone = await request(app()).post("/orgs/whatsapp/reach").set(headers).send({ brandId: BRAND, email: "ann@x.com" });
+    expect(noPhone.body).toMatchObject({ to: "+33600000002" });
   });
 });

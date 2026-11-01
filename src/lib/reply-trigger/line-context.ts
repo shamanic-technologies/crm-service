@@ -269,7 +269,7 @@ export function lineContextOf(input: {
 async function senderOf(
   r: Pick<ReplyTriggerReport, "orgId" | "brandId" | "roomId" | "conversationId">,
   conn: MatrixConnection,
-): Promise<{ phone: string | null; name: string | null; personEmails: string[]; ghost: string | null }> {
+): Promise<{ phone: string | null; name: string | null; personEmails: string[]; ghost: string | null; personPhones: string[]; personHandles: string[] }> {
   const [row] = await db
     .select({ phone: contacts.phoneE164, ghost: contacts.channelHandle, name: contacts.fullName })
     .from(conversations)
@@ -282,9 +282,10 @@ async function senderOf(
   let personName: string | null = null;
   let personPhones: string[] = [];
   let personEmails: string[] = [];
+  let personHandles: string[] = [];
   if (r.conversationId) {
     const [p] = await db
-      .select({ name: people.displayName, phones: people.phones, emails: people.emails })
+      .select({ name: people.displayName, phones: people.phones, emails: people.emails, presences: people.presences })
       .from(people)
       .where(
         and(
@@ -297,6 +298,10 @@ async function senderOf(
     personName = p?.name ?? null;
     personPhones = (p?.phones as string[] | undefined) ?? [];
     personEmails = (p?.emails as string[] | undefined) ?? [];
+    // Every bridge thread of the person (CONTACT-REDIRECT-1101: a number they moved to is the same history).
+    personHandles = ((p?.presences as { source: string; detail?: { channelHandle?: unknown } }[] | undefined) ?? [])
+      .filter((x) => x.source === "matrix" && typeof x.detail?.channelHandle === "string")
+      .map((x) => x.detail!.channelHandle as string);
   }
   const phone = dialablePhone([
     row?.phone,
@@ -304,7 +309,7 @@ async function senderOf(
     ghost ? phoneFromMxid(ghost, conn.counterpartPrefix) : null,
     ...personPhones,
   ]);
-  return { phone, name: row?.name ?? personName, personEmails, ghost };
+  return { phone, name: row?.name ?? personName, personEmails, ghost, personPhones, personHandles };
 }
 
 /**
@@ -373,10 +378,12 @@ async function brandLines(conn: MatrixConnection): Promise<BrandLine[]> {
   }));
 }
 
-/** Every bridge ghost known to be this person: the thread's own, and every ghost resolved to their number. */
-async function personGhosts(ghost: string | null, phone: string): Promise<string[]> {
-  const resolved = await db.select({ ghost: matrixGhostPhones.ghostMxid }).from(matrixGhostPhones).where(eq(matrixGhostPhones.phone, phone));
-  return [...new Set([...(ghost ? [ghost] : []), ...resolved.map((x) => x.ghost)])];
+/** Every bridge ghost known to be this person: the thread's own, every ghost of their threads, and every ghost resolved to one of their numbers. */
+async function personGhosts(ghost: string | null, phones: string[], handles: string[] = []): Promise<string[]> {
+  const resolved = phones.length > 0
+    ? await db.select({ ghost: matrixGhostPhones.ghostMxid }).from(matrixGhostPhones).where(inArray(matrixGhostPhones.phone, phones))
+    : [];
+  return [...new Set([...(ghost ? [ghost] : []), ...handles, ...resolved.map((x) => x.ghost)])];
 }
 
 /** The person's one-to-one conversations on the brand's lines (by ghost or number), latest activity first. */
@@ -430,7 +437,8 @@ export async function readLineContext(
     linkedAt: null,
     persona: null,
   };
-  const ghosts = sender.phone ? await personGhosts(sender.ghost, sender.phone) : sender.ghost ? [sender.ghost] : [];
+  const phones = [...new Set([...(sender.phone ? [sender.phone] : []), ...sender.personPhones])];
+  const ghosts = await personGhosts(sender.ghost, phones, sender.personHandles);
   const talks = await personConversations(lines, ghosts, sender.phone);
   const answering = answeringLine(received, lines, talks.map((t) => t.connectionId));
   // Personal lines never: their chats are the person's own, not the brand's (and never written from).

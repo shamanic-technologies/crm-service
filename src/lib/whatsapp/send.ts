@@ -27,13 +27,14 @@ import { BridgeError, createDm, resolveIdentifier } from "../matrix/bridge.js";
 import { bridgeSaysNoSuchNumber } from "./number-validity.js";
 import { alertRefusal } from "./staff-alert.js";
 import { describeLoggedOut, linkedWhatsappAccounts, sendReadiness, personaOf, type SenderPersona, type WhatsappAccount } from "./accounts.js";
-import { recordGhostPhone } from "./phone-resolution.js";
+import { recordGhostPhone, resolveOneWhatsappPhone } from "./phone-resolution.js";
 import { automationOn, narrowByType, type SendingAccountType } from "../matrix/account-types.js";
 import { humanTypedTo } from "../matrix/human-takeover.js";
 import { joinRoom, readRoomBridgeInfo, sendText, setTyping } from "../matrix/client.js";
 import { expectedChannelIds, roomDeliversTo } from "./room-check.js";
 import { emailKey, normalizeEmail, normalizePhone, phoneKey, type Presence } from "../people/identity.js";
 import { personReplied } from "../people/conversation.js";
+import { preferredHandleOf, wroteFromPhoneSince } from "../people/handles.js";
 
 export const SEND_REFUSAL_CODES = [
   /** The brand has no linked WhatsApp account (or not the one `fromAccount` names). */
@@ -208,6 +209,7 @@ async function finish(id: string, set: Partial<SendRow>): Promise<SendRow> {
 }
 
 interface PersonView {
+  identityKeys: string[];
   phones: string[];
   presences: Presence[];
 }
@@ -216,11 +218,11 @@ interface PersonView {
 async function findPersonByKeys(orgId: string, brandId: string, keys: string[]): Promise<PersonView | null> {
   for (const key of keys) {
     const [row] = await db
-      .select({ phones: people.phones, presences: people.presences })
+      .select({ identityKeys: people.identityKeys, phones: people.phones, presences: people.presences })
       .from(people)
       .where(and(eq(people.orgId, orgId), eq(people.brandId, brandId), sql`${people.identityKeys} @> ${JSON.stringify([key])}::jsonb`))
       .limit(1);
-    if (row) return { phones: row.phones as string[], presences: row.presences as Presence[] };
+    if (row) return { identityKeys: row.identityKeys as string[], phones: row.phones as string[], presences: row.presences as Presence[] };
   }
   return null;
 }
@@ -308,13 +310,16 @@ async function sendableAccounts(req: ReachRequest): Promise<WhatsappAccount[]> {
  * new thread from an allowed one.
  * A DM room with no message (WhatsApp opens some on its own) is not a conversation.
  */
-export async function chooseAccount(accounts: WhatsappAccount[], ghostMxid: string): Promise<WhatsappAccount> {
+export async function chooseAccount(accounts: WhatsappAccount[], ghostMxid: string, personGhosts: string[] = []): Promise<WhatsappAccount> {
   const ids = sql.join(accounts.map((a) => sql`${a.connectionId}::uuid`), sql`, `);
+  // The person's thread with THIS number first; else the account they talk with on another of
+  // their numbers (CONTACT-REDIRECT-1101: they asked to be reached on a new number, same line).
+  const ghosts = [ghostMxid, ...personGhosts.filter((g) => g !== ghostMxid)];
   const [talking] = (await db.execute(sql`
     SELECT v.connection_id FROM conversations v
     JOIN contacts c ON c.id = v.contact_id
-    WHERE c.channel_handle = ${ghostMxid} AND v.connection_id IN (${ids}) AND v.message_count > 0
-    ORDER BY v.last_message_at DESC NULLS LAST, v.id
+    WHERE c.channel_handle IN (${sql.join(ghosts.map((g) => sql`${g}`), sql`, `)}) AND v.connection_id IN (${ids}) AND v.message_count > 0
+    ORDER BY (c.channel_handle = ${ghostMxid}) DESC, v.last_message_at DESC NULLS LAST, v.id
     LIMIT 1
   `)) as unknown as { connection_id: string }[];
   return (
@@ -413,6 +418,26 @@ interface Reach {
   phoneSource: string;
   accounts: WhatsappAccount[];
   who: Awaited<ReturnType<typeof resolveIdentifier>>;
+  /** Every Matrix ghost the person holds (all their numbers), for the account pick. */
+  personGhosts: string[];
+}
+
+/** Whether WhatsApp's ghost for this number is known (a lookup or a send recorded it). */
+async function ghostKnownFor(phone: string): Promise<boolean> {
+  const rows = (await db.execute(sql`SELECT 1 FROM matrix_ghost_phones WHERE phone = ${phone} LIMIT 1`)) as unknown as unknown[];
+  return rows.length > 0;
+}
+
+/** The ghosts of the person's mirrored WhatsApp / bridge threads. */
+function ghostsOfPerson(person: PersonView | null): string[] {
+  if (!person) return [];
+  return [
+    ...new Set(
+      person.presences
+        .filter((p) => p.source === "matrix" && typeof p.detail.channelHandle === "string")
+        .map((p) => p.detail.channelHandle as string),
+    ),
+  ];
 }
 
 /**
@@ -435,6 +460,19 @@ async function resolveReach(req: ReachRequest, onPhone?: (phone: string, source:
   ]);
   let phone = askedPhone;
   let phoneSource = "request";
+  // CONTACT-REDIRECT-1101: the person said where they want to be reached. Their preferred
+  // number wins over any other number of theirs, the one asked included, until they write
+  // again from that other number (then it is theirs to be answered on).
+  const preferred = person ? await preferredHandleOf(req.orgId, req.brandId, person.identityKeys, "phone") : null;
+  if (preferred && preferred.handle !== phone) {
+    const askedIsTheirs = !!phone && person!.identityKeys.includes(phoneKey(phone));
+    // Whether they wrote back from the asked number is read off its ghost: ask WhatsApp once when none is known yet.
+    if (askedIsTheirs && !(await ghostKnownFor(phone!))) await resolveOneWhatsappPhone(req.orgId, req.brandId, phone!);
+    if (!phone || (askedIsTheirs && !(await wroteFromPhoneSince(req.orgId, req.brandId, phone, preferred.createdAt)))) {
+      phone = preferred.handle;
+      phoneSource = `stated_handle:${preferred.id}`;
+    }
+  }
   if (!phone && person) {
     phone = person.phones.map((p) => normalizePhone(p)).find((p): p is string => !!p) ?? null;
     if (phone) phoneSource = phoneSourceOf(person, phone);
@@ -485,7 +523,7 @@ async function resolveReach(req: ReachRequest, onPhone?: (phone: string, source:
       `Someone of the brand wrote to ${phone} by hand on WhatsApp (last on ${human.at}): the conversation is theirs, no automated message is sent.`,
     );
   }
-  return { phone, phoneSource, accounts, who };
+  return { phone, phoneSource, accounts, who, personGhosts: ghostsOfPerson(person) };
 }
 
 export interface ReachResult {
@@ -514,10 +552,10 @@ export interface ReachResult {
  * transient bridge failure.
  */
 export async function reachWhatsApp(req: ReachRequest): Promise<ReachResult> {
-  const { phone, phoneSource, accounts, who } = await resolveReach(req);
-  const account = await chooseAccount(accounts, who.mxid);
+  const { phone, phoneSource, accounts, who, personGhosts } = await resolveReach(req);
+  const account = await chooseAccount(accounts, who.mxid, personGhosts);
   const ai = (await linkedWhatsappAccounts(req.orgId, req.brandId)).filter((a) => a.accountType === "pro_ai" && automationOn(a));
-  const assistant = ai.length > 0 ? await chooseAccount(ai, who.mxid) : null;
+  const assistant = ai.length > 0 ? await chooseAccount(ai, who.mxid, personGhosts) : null;
   return {
     reachable: true,
     to: phone,
@@ -537,8 +575,9 @@ async function openRoom(
   accounts: WhatsappAccount[],
   who: Reach["who"],
   phone: string,
+  personGhosts: string[] = [],
 ): Promise<{ account: WhatsappAccount; roomId: string; ghost: string }> {
-  const account = await chooseAccount(accounts, who.mxid);
+  const account = await chooseAccount(accounts, who.mxid, personGhosts);
   const onAccount =
     account === accounts[0] ? who : await resolveIdentifier("whatsapp", account.matrixUserId, account.loginId, phone);
   let roomId = onAccount.dmRoomId;
@@ -566,9 +605,9 @@ export async function sendWhatsApp(req: SendRequest): Promise<SendResult> {
   try {
     // 1-4. Who, at which number, and who that number is on WhatsApp: the
     //      SAME checks the reach check answers (reachWhatsApp).
-    const { phone, phoneSource, accounts, who } = await resolveReach(req, (p, src) => finish(row.id, { phone: p, phoneSource: src }));
+    const { phone, phoneSource, accounts, who, personGhosts } = await resolveReach(req, (p, src) => finish(row.id, { phone: p, phoneSource: src }));
 
-    const { account, roomId, ghost } = await openRoom(accounts, who, phone);
+    const { account, roomId, ghost } = await openRoom(accounts, who, phone, personGhosts);
 
     // 6. Send.
     const eventId = await sendText(account.accessToken, roomId, txnIdFor(req.orgId, req.brandId, req.idempotencyKey), req.text);
@@ -711,7 +750,7 @@ export async function sendWhatsAppBubbles(
     const row = lead.row;
     try {
       const reach = await resolveReach(req, (p, src) => finish(row.id, { phone: p, phoneSource: src }));
-      const room = await openRoom(reach.accounts, reach.who, reach.phone);
+      const room = await openRoom(reach.accounts, reach.who, reach.phone, reach.personGhosts);
       target = { ...room, phone: reach.phone, phoneSource: reach.phoneSource };
     } catch (err) {
       await recordUnsent([row], err, req);

@@ -35,6 +35,7 @@ import {
   readCsvEvidence,
   readWhatsappSendEvidence,
   readStatedMergeEvidence,
+  readStatedHandleEvidence,
   readGmail,
   readGoHighLevel,
   readGoogleContactEvidence,
@@ -432,6 +433,7 @@ async function buildScopePeopleOn(
     await readCsvEvidence(scope.orgId, scope.brandId),
     await readWhatsappSendEvidence(scope.orgId, scope.brandId),
     await readStatedMergeEvidence(scope.orgId, scope.brandId),
+    await readStatedHandleEvidence(scope.orgId, scope.brandId),
     await readNameTwinEvidence(scope.orgId, scope.brandId),
   ];
   if (gmail.status !== "not_connected") evidenceReads.push(await readGoogleContactEvidence(identity));
@@ -485,6 +487,8 @@ async function buildScopePeopleOn(
     evidence:
       e.kind === "stated_merge"
         ? `Stated in the brand's CRM (crm-service person merge ${e.ref}) that two people are one human`
+        : e.kind === "stated_handle"
+          ? `The person said this ${e.statement?.kind ?? "handle"} is theirs (crm-service stated handle ${e.ref})`
         : e.kind === "name_twin"
           ? `Jev judged two contacts of the brand sharing a full name to be one human (crm-service same-person verdict ${e.ref})`
           : `lead-service paired the brand's CRM contact ${e.ref} with one of its leads`,
@@ -508,7 +512,7 @@ async function buildScopePeopleOn(
   ];
   const kindsRead = new Set<Judgment["kind"]>(
     evidenceReads
-      .filter((e) => e.status === "ok" && (e.kind === "stated_merge" || e.kind === "lead_pairing" || e.kind === "name_twin"))
+      .filter((e) => e.status === "ok" && (e.kind === "stated_merge" || e.kind === "stated_handle" || e.kind === "lead_pairing" || e.kind === "name_twin"))
       .map((e) => e.kind as Judgment["kind"]),
   );
   const humans = await resolveScopeHumans(scope, records, judgments, kindsRead);
@@ -676,7 +680,8 @@ async function buildScopePeopleOn(
         emails: e.emails,
         phones: e.phones,
         ...(e.keys ? { keys: e.keys } : {}),
-        ...(e.kind === "stated_merge" || e.kind === "lead_pairing" || e.kind === "name_twin" ? { heldBy: heldEvidence.includes(e) ? "human-service" : "crm-service" } : {}),
+        ...(e.kind === "stated_merge" || e.kind === "stated_handle" || e.kind === "lead_pairing" || e.kind === "name_twin" ? { heldBy: heldEvidence.includes(e) ? "human-service" : "crm-service" } : {}),
+        ...(e.statement ? { statement: e.statement } : {}),
       })),
       firstActivityAt: (() => {
         const d = minDate(c.presences.map((p) => p.firstActivityAt));

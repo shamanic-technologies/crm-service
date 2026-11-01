@@ -65,6 +65,7 @@ import {
   copilotMessages,
   apiCalls,
   personMerges,
+  personContactHandles,
   formTriggerReports,
   formOfferMappings,
   leadIdentifiedDeclarations,
@@ -134,6 +135,8 @@ export const TRANSFER_TABLES: PgTable[] = [
   apiCalls,
   // Stated merges (two people said to be one) follow the people they tie.
   personMerges,
+  // Stated handles ("reach me on this other number", CONTACT-REDIRECT-1101) follow their person.
+  personContactHandles,
   // Users' corrections (tags, companies, domains) follow the people they correct.
   peopleCorrections,
   // Which company each contact point speaks for (PERSON-RELATIONS-1017).

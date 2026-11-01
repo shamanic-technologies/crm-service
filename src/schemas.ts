@@ -2207,6 +2207,15 @@ const LeadDisqualificationSchema = z
   })
   .nullable();
 
+const HandleStatementSchema = z.object({
+  handleId: z.string().uuid(),
+  kind: z.enum(["phone", "email"]),
+  handle: z.string().openapi({ description: "+<digits> or a lower-cased address." }),
+  preferred: z.boolean(),
+  channel: z.string().nullable().openapi({ description: "The channel they want to be reached on there (whatsapp, email, ...); null = unsaid." }),
+  statedAt: z.string(),
+});
+
 const PersonPresenceSchema = z
   .object({
     source: PeopleSourceSchema,
@@ -2287,6 +2296,13 @@ const PersonSchema = registry.register(
             "lead-service's HUMAN block for the lead the state was read from, relayed verbatim (its `human` on the lead row): what holds for the human wherever they work, whichever evidence decided the state (an unsubscribe under this brand reads state opted_out AND optedOut true). Null = the person is not one of our leads, or lead-service could not resolve the standing (never read as false). Never derived here.",
         }),
       presences: z.array(PersonPresenceSchema),
+      preferredContact: z
+        .object({ phone: HandleStatementSchema.nullable(), email: HandleStatementSchema.nullable() })
+        .nullable()
+        .openapi({
+          description:
+            "Where the person said they want to be reached (POST /orgs/people/handles, preferred): the latest preferred phone and email, from the last build. Null = nothing stated. A WhatsApp send to the person goes to `phone.handle`.",
+        }),
       mergeEvidence: z.array(z.unknown()).openapi({
         description: "The records that tied two keys of this person together (a Google / GoHighLevel / Stripe / CSV contact holding both, a CONFIDENT lead-service pairing: signal, judgment at or above its pair threshold, or human acceptance). Empty when the person rests on a single key.",
       }),
@@ -3137,6 +3153,121 @@ registry.registerPath({
       content: { "application/json": { schema: z.object({ merge: PersonMergeSchema, duplicate: z.boolean(), rebuild: z.enum(["started", "not_needed"]) }) } },
     },
     404: { description: "merge_not_found", content: { "application/json": { schema: MergeRefusalSchema } } },
+  },
+});
+
+// ─── Stated contact handles: "reach me on this other number" (CONTACT-REDIRECT-1101) ─
+
+const PersonHandleSchema = registry.register(
+  "PersonContactHandle",
+  z.object({
+    handleId: z.string().uuid(),
+    brandId: z.string().uuid(),
+    personId: z.string().uuid().openapi({ description: "The person id as stated (after a later merge it may be retired: it still opens the person)." }),
+    kind: z.enum(["phone", "email"]),
+    handle: z.string().openapi({ description: "Normalised: +<digits> for a phone, lower-cased for an email." }),
+    preferred: z.boolean().openapi({ description: "true = the person wants to be reached there from now on." }),
+    channel: z.string().nullable(),
+    reason: z.string().nullable(),
+    evidence: z
+      .object({ source: z.string(), channel: z.string().optional(), roomId: z.string().optional(), eventId: z.string().optional(), conversationId: z.string().optional(), text: z.string().optional() })
+      .nullable()
+      .openapi({ description: "Where it was said (the message the person wrote it in)." }),
+    personKeys: z.array(z.string()).openapi({ description: "Every identity key the person held when it was stated; each rebuild ties them to the handle." }),
+    statedByUserId: z.string(),
+    statedAt: z.string(),
+    runId: z.string().nullable(),
+    active: z.boolean(),
+    undoneAt: z.string().nullable(),
+    undoneByUserId: z.string().nullable(),
+  }),
+);
+
+const HandleRefusalSchema = z.object({
+  type: z.literal("refused"),
+  reason: z.enum(["person_not_found", "invalid_handle", "handle_not_found"]),
+  personId: z.string().optional(),
+  error: z.string(),
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/people/handles",
+  summary: "Record another phone / email of a person (and reach them there from now on)",
+  description:
+    "Use it when a person says \"don't message me here, reach me on +X (WhatsApp)\" or \"my other address is ...\". The phone / email JOINS the same person (one person, one history: a WhatsApp chat with the new number shows on the person's thread with the earlier messages, and a message they send from it is the same person's Lead event), recorded with who stated it, when and where it was said (evidence). preferred (default true) = that is where they want to be reached from now on: a WhatsApp send to the person (POST /orgs/whatsapp/messages by email or by their old number) goes to this number, from the line the person already talks with; their old number is written to again only once they write from it after this statement. A phone is looked up on WhatsApp at once (whatsapp.status: found, not_on_whatsapp, invalid_number, not_connected, failed; the next people build asks again when it could not). A rebuild starts at once: GET /orgs/people shows the handle on the person within about a minute (phones / emails, and preferredContact). Idempotent: the same handle stated again for the same person answers the existing statement (200, duplicate: true). Undo: POST /orgs/people/handles/{handleId}/undo. Any channel, any brand.",
+  request: {
+    headers: IDENTITY_HEADERS,
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            brandId: z.string().uuid(),
+            personId: z.string().uuid().optional().openapi({ description: "The person's personId (GET /orgs/people, or item.personId of the Lead event). Exactly one of personId / personKey." }),
+            personKey: z.string().optional().openapi({ description: "Any identity key the person holds, like GET /orgs/people/timeline: `phone:+<digits>` (the number they wrote from), `email:<address>`." }),
+            phone: z.string().optional().openapi({ description: "International number (+ and country code). Exactly one of phone / email." }),
+            email: z.string().optional(),
+            preferred: z.boolean().optional().openapi({ description: "Default true: reach them there from now on. false = only record that it is theirs." }),
+            channel: z.string().optional().openapi({ description: "Where they want to be reached on it (whatsapp, email, telegram ...)." }),
+            reason: z.string().max(1000).optional(),
+            evidence: z
+              .object({ source: z.string().openapi({ description: "Who read it: assistant, staff, mcp ..." }), channel: z.string().optional(), roomId: z.string().optional(), eventId: z.string().optional(), conversationId: z.string().optional(), text: z.string().max(4000).optional().openapi({ description: "The person's own words." }) })
+              .optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    201: {
+      description: "Stated; rebuild started",
+      content: {
+        "application/json": {
+          schema: z.object({
+            handle: PersonHandleSchema,
+            duplicate: z.boolean(),
+            personId: z.string().uuid().nullable(),
+            whatsapp: z
+              .object({ status: z.enum(["found", "not_on_whatsapp", "invalid_number", "not_connected", "failed"]), threadsJoined: z.number().int(), error: z.string().nullable() })
+              .nullable()
+              .openapi({ description: "Phone only: WhatsApp's answer for the number now. threadsJoined = the brand's mirrored chats with it that now carry the number (they join the person at this rebuild)." }),
+            rebuild: z.enum(["started", "not_needed"]),
+          }),
+        },
+      },
+    },
+    200: { description: "Already stated (duplicate: true), same body" },
+    400: { description: "Invalid body (exactly one of phone / email, exactly one of personId / personKey)" },
+    404: { description: "person_not_found", content: { "application/json": { schema: HandleRefusalSchema } } },
+    422: { description: "invalid_handle (a national number, a malformed address)", content: { "application/json": { schema: HandleRefusalSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/people/handles",
+  summary: "List the phones / emails stated on a brand's people",
+  description: "Every handle stated on the brand (or on one person with personId), newest first, undone ones included.",
+  request: { headers: IDENTITY_HEADERS, query: z.object({ brandId: z.string().uuid(), personId: z.string().uuid().optional() }) },
+  responses: {
+    200: { description: "The statements", content: { "application/json": { schema: z.object({ brandId: z.string().uuid(), handles: z.array(PersonHandleSchema) }) } } },
+    404: { description: "person_not_found", content: { "application/json": { schema: HandleRefusalSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/people/handles/{handleId}/undo",
+  summary: "Take back a stated phone / email",
+  description: "The handle no longer joins the person nor is preferred, from the rebuild that starts now (unless a source record ties it on its own). The statement stays listed with who undid it. Idempotent.",
+  request: {
+    headers: IDENTITY_HEADERS,
+    params: z.object({ handleId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: z.object({ brandId: z.string().uuid() }) } } },
+  },
+  responses: {
+    200: { description: "Undone", content: { "application/json": { schema: z.object({ handle: PersonHandleSchema, duplicate: z.boolean(), rebuild: z.enum(["started", "not_needed"]) }) } } },
+    404: { description: "handle_not_found", content: { "application/json": { schema: HandleRefusalSchema } } },
   },
 });
 

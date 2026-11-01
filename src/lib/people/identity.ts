@@ -101,6 +101,8 @@ export const EVIDENCE_KINDS = [
   "stripe_customer",
   "whatsapp_send",
   "stated_merge",
+  // Someone said the person also holds this phone / email (people/handles.ts, CONTACT-REDIRECT-1101).
+  "stated_handle",
   // Jev judged two people sharing a full name to be one human (people/name-twins.ts).
   "name_twin",
   // human-service says these keys are ONE human (people/humans.ts).
@@ -121,6 +123,8 @@ export interface Evidence {
   /** A JUDGMENT (stated merge, lead-service pairing): the two records it says are one, and who judged. */
   sides?: [{ emails: string[]; phones: string[] }, { emails: string[]; phones: string[] }];
   judgedBy?: string;
+  /** A stated handle's statement (people/handles.ts): kept on the person's `mergeEvidence`. */
+  statement?: { handleId: string; kind: "phone" | "email"; handle: string; preferred: boolean; channel: string | null; statedAt: string };
 }
 
 /** The keys a record states. A record with neither email nor phone gets its own. */

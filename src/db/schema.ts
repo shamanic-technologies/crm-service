@@ -1309,6 +1309,51 @@ export const personMerges = pgTable(
 export type PersonMerge = typeof personMerges.$inferSelect;
 
 /**
+ * A STATED contact handle (CONTACT-REDIRECT-1101): someone who knows (the person
+ * themself, read by our assistant in their conversation; staff; an agent through
+ * the MCP) says person X of a brand also holds handle H (a phone, an email), and
+ * whether that is where X wants to be reached from now on (`preferred`).
+ *
+ * The builder honours every ACTIVE row as evidence (`stated_handle`): every key the
+ * person held when it was stated is tied to H, so H's threads (a WhatsApp room on
+ * the new number) join the person on every rebuild. A send to the person goes to the
+ * latest preferred handle; the old one is written to again only once the person
+ * writes there after the statement. Undo sets `undone_at` (the row stays).
+ */
+export const personContactHandles = pgTable(
+  "person_contact_handles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    personId: uuid("person_id").notNull(),
+    personKeys: jsonb("person_keys").notNull(),
+    // 'phone' | 'email'
+    handleKind: text("handle_kind").notNull(),
+    handle: text("handle").notNull(),
+    handleKey: text("handle_key").notNull(),
+    preferred: boolean("preferred").notNull().default(true),
+    // The channel the person wants to be reached on there ('whatsapp', 'email', ...); null = unsaid.
+    channel: text("channel"),
+    reason: text("reason"),
+    // Where it was said: {source, channel?, roomId?, eventId?, conversationId?, text?}.
+    evidence: jsonb("evidence"),
+    statedByUserId: text("stated_by_user_id").notNull(),
+    runId: text("run_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    undoneAt: timestamp("undone_at", { withTimezone: true }),
+    undoneByUserId: text("undone_by_user_id"),
+    undoRunId: text("undo_run_id"),
+  },
+  (table) => [
+    index("person_contact_handles_org_brand_idx").on(table.orgId, table.brandId),
+    index("person_contact_handles_handle_key_idx").on(table.orgId, table.brandId, table.handleKey),
+  ],
+);
+
+export type PersonContactHandle = typeof personContactHandles.$inferSelect;
+
+/**
  * FORM TRIGGER — one row per NEW form submission the watch saw in a brand's CRM,
  * and what became of reporting it to campaign-service as a `form_submitted`
  * trigger occurrence (lib/form-trigger/). Keyed on the vendor's submission id, so

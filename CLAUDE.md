@@ -1090,6 +1090,21 @@ owner had written to. A recorded fact, never an address-shape guess.
   aliases, rebuilds: two people with their old ids. Idempotent both ways; refusals 404
   `person_not_found`, 422 `different_brand` | `same_person`, 409 `already_one_person`,
   404 `merge_not_found`. `GET /orgs/people/merges?brandId=` lists with `applied`.
+- **Stated handles: "reach me on this other number"** (`lib/people/handles.ts`, `person_contact_handles`, CONTACT-REDIRECT-1101,
+  owner 2026-11-01: Tahmid asked to be reached on +8801952666418, nothing could act on it). `POST /orgs/people/handles
+  {brandId, personId | personKey, phone | email, preferred? (default true), channel?, reason?, evidence? {source, channel,
+  roomId, eventId, conversationId, text}}` (x-user-id) → 201 `{handle, duplicate, personId, whatsapp {status, threadsJoined,
+  error} | null, rebuild}`; `GET ?brandId=[&personId=]`; `POST /:handleId/undo {brandId}`. Every build reads an active row as
+  evidence `stated_handle` (person keys at statement + the handle key; a JUDGMENT stated to human-service like a stated merge,
+  sides carry `msg:` handles so a WhatsApp-only person is statable). A phone is looked up on WhatsApp at once
+  (`resolveOneWhatsappPhone`): the brand's room with the new number gets the phone and joins the person at the kicked rebuild.
+  Served on the person: `preferredContact {phone, email}` (latest preferred per kind, from `mergeEvidence[].statement`).
+  **Sends follow it** (`send.ts resolveReach`): the latest preferred phone replaces any other number OF THE PERSON (none
+  asked, or asked an old one of theirs) until they write FROM that other number after the statement (`wroteFromPhoneSince`
+  over its ghosts; an unknown ghost is looked up first); a number not theirs is never redirected; `phoneSource =
+  stated_handle:<id>`. The account pick (`chooseAccount`) falls back to the line the person talks with on ANY of their
+  ghosts. The Lead event's thread (`line-context.ts personGhosts`) reads every ghost of the person (all phones + every
+  Matrix presence), so old room + new room are one history.
 - **Same full name = asked to Jev once** (`name-twins.ts`, SAME-HUMAN-TWO-LEADS-1022: Lukas Stankevicius was two leads, a
   work address and his personal Gmail, same meeting): at the START of each build, two people of the PREVIOUS build sharing
   a full name (2+ words, any record; a name > 5 people carry is skipped) and not one human yet get ONE Jev `choice`
