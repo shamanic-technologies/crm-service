@@ -413,6 +413,7 @@ async function detectRepliesOn(
       campaignId: whatsappSends.campaignId,
       status: whatsappSends.status,
       sentAt: whatsappSends.sentAt,
+      createdAt: whatsappSends.createdAt,
       phone: whatsappSends.phone,
     })
     .from(whatsappSends)
@@ -641,7 +642,7 @@ async function currentBurst(r: MatrixReport, ownMxid: string): Promise<BurstMess
       ),
     );
   const sends = await db
-    .select({ eventId: whatsappSends.eventId, campaignId: whatsappSends.campaignId, status: whatsappSends.status, sentAt: whatsappSends.sentAt })
+    .select({ eventId: whatsappSends.eventId, campaignId: whatsappSends.campaignId, status: whatsappSends.status, sentAt: whatsappSends.sentAt, createdAt: whatsappSends.createdAt })
     .from(whatsappSends)
     .where(and(eq(whatsappSends.connectionId, r.connectionId), eq(whatsappSends.roomId, r.roomId)));
   const reading = readThreadForReply(await overlayVoiceTranscripts(rows.map((x) => x.payload as unknown as MatrixEvent)), ownMxid, sends);
