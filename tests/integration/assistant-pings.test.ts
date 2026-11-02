@@ -181,17 +181,16 @@ describe.skipIf(!RUN)("owner Telegram ping per message with our assistant", () =
     }, 30_000);
 
     it("the push route answers first; the assistant is named from the linked account's persona", async () => {
-      // The owner's own line (its number = the sales rep phone) carries a persona too: it names nothing (PERSO-TG-PING-1023).
-      salesRepPhone = "+33 7 70 00 00 01";
+      // The owner's pro line (pro_human) carries a persona and automation too: it names nothing (SOPHIE-ONLY-TG-1102).
       await db.insert(matrixLinks).values({
-        orgId: STAFF_ORG, brandId: BRAND, channel: "whatsapp", createdByUserId: "u", status: "linked", method: "qr", personaName: "Kevin", automationAllowed: true,
+        orgId: STAFF_ORG, brandId: BRAND, channel: "whatsapp", createdByUserId: "u", status: "linked", method: "qr", personaName: "Kevin", automationAllowed: true, accountType: "pro_human",
         remoteLoginId: "33770000001",
         connectionId: (
           await db.insert(matrixConnections).values({ orgId: STAFF_ORG, brandId: BRAND, channel: "whatsapp", matrixUserId: "@crm_kevin:hs", counterpartPrefix: "@whatsapp_", createdByUserId: "u" }).returning()
         )[0].id,
       });
       await db.insert(matrixLinks).values({
-        orgId: STAFF_ORG, brandId: BRAND, channel: "whatsapp", createdByUserId: "u", status: "linked", method: "qr", personaName: "Sophie", automationAllowed: true,
+        orgId: STAFF_ORG, brandId: BRAND, channel: "whatsapp", createdByUserId: "u", status: "linked", method: "qr", personaName: "Sophie", automationAllowed: true, accountType: "pro_ai",
         connectionId: (
           await db.insert(matrixConnections).values({ orgId: STAFF_ORG, brandId: BRAND, channel: "whatsapp", matrixUserId: OWN, counterpartPrefix: "@whatsapp_", createdByUserId: "u" }).returning()
         )[0].id,
@@ -219,7 +218,7 @@ describe.skipIf(!RUN)("owner Telegram ping per message with our assistant", () =
         .returning();
       await db.insert(matrixLinks).values({
         orgId: STAFF_ORG, brandId: BRAND, channel: "whatsapp", createdByUserId: "u", status: "linked", method: "qr",
-        personaName: "Sophie", automationAllowed: true, connectionId: conn.id,
+        personaName: "Sophie", automationAllowed: true, accountType: "pro_ai", connectionId: conn.id,
       });
       const [contact] = await db
         .insert(contacts)
@@ -322,16 +321,13 @@ describe.skipIf(!RUN)("owner Telegram ping per message with our assistant", () =
       ]);
     }, 30_000);
 
-    it("a person's own line (its number = the sales rep's or a member's) pings nothing, pro or personal thread (PERSO-TG-PING-1023)", async () => {
-      // The assistant line with a number of its own that is nobody's on the team: pings as before.
-      await db.update(matrixLinks).set({ remoteLoginId: "77776879632" }).where(eq(matrixLinks.connectionId, conn.id));
+    it("a human's line (pro_human or personal_human, automation on, a persona) pings nothing, both ways (SOPHIE-ONLY-TG-1102)", async () => {
       await event("$sp-line-1", GHOST, "Hi Sophie, is it free?");
       expect(await announceAssistantMatrixMessages(conn)).toBe(1);
       expect(sent).toHaveLength(1);
 
-      // The same account is the owner's line once its number is the sales rep phone: a friend's message, a
-      // prospect's message and the line's own outbound are each recorded, none sent.
-      salesRepPhone = "+7 777 687 9632";
+      // The same account typed as the owner's PRO line: a prospect's message and the line's own outbound are recorded, none sent.
+      await db.update(matrixLinks).set({ accountType: "pro_human", personaName: "Kevin" }).where(eq(matrixLinks.connectionId, conn.id));
       await event("$sp-line-2", GHOST, "notre séjour a été raccourci");
       await db.insert(whatsappSends).values({
         orgId: STAFF_ORG, brandId: BRAND, idempotencyKey: "sp-send-line", phone: "+15550101018", text: "Happy to help.", status: "sent",
@@ -341,10 +337,12 @@ describe.skipIf(!RUN)("owner Telegram ping per message with our assistant", () =
       expect(await announceAssistantMatrixMessages(conn)).toBe(0);
       expect(sent).toHaveLength(1);
 
-      // Or a member's phone (the org's members, client-service).
-      salesRepPhone = null;
-      memberPhones = ["+77776879632"];
+      // Typed personal, or untyped (a type is never inferred): same.
+      await db.update(matrixLinks).set({ accountType: "personal_human", automationAllowed: false }).where(eq(matrixLinks.connectionId, conn.id));
       await event("$sp-line-4", GHOST, "how much for 3 months?");
+      expect(await announceAssistantMatrixMessages(conn)).toBe(0);
+      await db.update(matrixLinks).set({ accountType: null, automationAllowed: true }).where(eq(matrixLinks.connectionId, conn.id));
+      await event("$sp-line-5", GHOST, "still there?");
       expect(await announceAssistantMatrixMessages(conn)).toBe(0);
       expect(sent).toHaveLength(1);
       const rows = await db.select().from(assistantMessagePings).where(eq(assistantMessagePings.connectionId, conn.id));
@@ -353,7 +351,21 @@ describe.skipIf(!RUN)("owner Telegram ping per message with our assistant", () =
         ["$sp-line-2", "skipped", "own_line", "inbound"],
         ["$sp-line-3", "skipped", "own_line", "outbound"],
         ["$sp-line-4", "skipped", "own_line", "inbound"],
+        ["$sp-line-5", "skipped", "own_line", "inbound"],
       ]);
+    }, 30_000);
+
+    it("a long message is pinged whole, over several Telegram messages, never clipped", async () => {
+      const long = Array.from({ length: 600 }, (_, i) => `word${i}x`).join(" ") + " " + "y".repeat(1500);
+      expect([...long].length).toBeGreaterThan(6000);
+      await event("$sp-long", GHOST, long);
+      expect(await announceAssistantMatrixMessages(conn)).toBe(1);
+      expect(sent).toHaveLength(2);
+      expect(sent.join(" ")).toContain(long);
+      expect(sent.join("")).not.toContain("…");
+      const [row] = await db.select().from(assistantMessagePings).where(eq(assistantMessagePings.messageRef, "$sp-long"));
+      expect(row.status).toBe("sent");
+      expect(row.telegramMessageId).toBe(2001);
     }, 30_000);
 
     it("own team unreadable: nothing decided, the next pass pings", async () => {
@@ -366,10 +378,7 @@ describe.skipIf(!RUN)("owner Telegram ping per message with our assistant", () =
       expect(sent).toHaveLength(1);
     }, 30_000);
 
-    it("an account with automation off, or of another brand, is not the assistant", async () => {
-      await db.update(matrixLinks).set({ automationAllowed: false }).where(eq(matrixLinks.connectionId, conn.id));
-      await event("$sp-in-4", GHOST, "hi");
-      expect(await announceAssistantMatrixMessages(conn)).toBe(0);
+    it("an account of another brand is not the assistant", async () => {
       const [other] = await db
         .insert(matrixConnections)
         .values({ orgId: STAFF_ORG, brandId: OTHER_BRAND, channel: "whatsapp", matrixUserId: "@crm_other:hs", counterpartPrefix: "@whatsapp_", createdByUserId: "u" })

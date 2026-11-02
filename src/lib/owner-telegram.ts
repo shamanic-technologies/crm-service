@@ -1,5 +1,5 @@
 /**
- * One short Telegram message to the owner. Same bot and chat as the other owner
+ * A Telegram message to the owner (split in parts when longer than Telegram allows). Same bot and chat as the other owner
  * alerts of the fleet (client-service signup steps, billing-service payments,
  * the landing chat): `TELEGRAM_BOT_TOKEN` + `TELEGRAM_OWNER_CHAT_ID` in this
  * service's env file.
@@ -35,7 +35,36 @@ export type OwnerTelegramResult =
   | { status: "unconfigured"; error: string }
   | { status: "failed"; error: string };
 
-/** The whole delivery, awaited. Never throws. */
+/** Telegram refuses a message over 4096 characters. */
+export const TELEGRAM_MESSAGE_MAX = 4096;
+
+/**
+ * PURE: the text cut into Telegram-sized parts, nothing dropped (SOPHIE-ONLY-TG-1102:
+ * « arrête de tronquer les messages, je veux tout lire »). Each cut falls on the
+ * last line break, else the last space, of the part; a word longer than a part is
+ * cut on code points. Joining the parts back (with the separator each cut ate)
+ * gives the text.
+ */
+export function splitTelegramText(text: string, max = TELEGRAM_MESSAGE_MAX): string[] {
+  const parts: string[] = [];
+  let rest = [...text];
+  while (rest.length > max) {
+    const window = rest.slice(0, max);
+    let cut = window.lastIndexOf("\n");
+    if (cut < max / 2) cut = window.lastIndexOf(" ");
+    if (cut < max / 2) cut = max;
+    parts.push(rest.slice(0, cut).join(""));
+    rest = rest.slice(cut < max && (rest[cut] === "\n" || rest[cut] === " ") ? cut + 1 : cut);
+  }
+  parts.push(rest.join(""));
+  return parts;
+}
+
+/**
+ * The whole delivery, awaited. Never throws. A text over one Telegram message
+ * goes out as several in a row, in order; the result names the FIRST message,
+ * or the first part that failed (the parts after it are not sent).
+ */
 export async function sendOwnerTelegram(text: string): Promise<OwnerTelegramResult> {
   const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
   const chatId = process.env.TELEGRAM_OWNER_CHAT_ID?.trim();
@@ -44,6 +73,17 @@ export async function sendOwnerTelegram(text: string): Promise<OwnerTelegramResu
     console.error(`[crm-service] ${error}: owner NOT told: ${text}`);
     return { status: "unconfigured", error };
   }
+  const parts = splitTelegramText(text);
+  let first: number | null = null;
+  for (const [i, part] of parts.entries()) {
+    const r = await sendOne(token, chatId, part);
+    if (r.status !== "sent") return parts.length > 1 ? { status: "failed", error: `part ${i + 1}/${parts.length}: ${r.error}` } : r;
+    first ??= r.messageId;
+  }
+  return { status: "sent", messageId: first! };
+}
+
+async function sendOne(token: string, chatId: string, text: string): Promise<OwnerTelegramResult> {
   try {
     const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
