@@ -9,15 +9,19 @@
  * scope (`COPILOT_UNIBOX_ORG_ID` + `COPILOT_UNIBOX_BRAND_ID`, the same scope the
  * conversation-start pings call "a conversation with us"):
  *  - the web Copilot (chat-service pushes each turn, `copilot/messages.ts`);
- *  - every linked messaging account of that scope with automation ON
- *    (`matrix_links.automation_allowed`): a message in one of its one-to-one
- *    threads. Its name = the account's persona name (SOPHIE-WA-1016).
- *    EXCEPT a person's own line (PERSO-TG-PING-1023, owner 2026-10-23: « je n'ai
- *    pas besoin de notif TG des messages qui arrivent sur mon WA perso et PRO.
- *    Seulement Sophie »): an account whose own number is the brand's sales rep
- *    phone or an org member's phone is that person's WhatsApp, whatever its
- *    automation flag or persona; every message on it is recorded `own_line`,
- *    never sent. Read from data (brand-service, client-service), never a name.
+ *  - every linked messaging account of that scope TYPED as the AI's
+ *    (`matrix_links.account_type = 'pro_ai'`, ACCOUNT-TYPES-1028): a message in
+ *    one of its one-to-one threads. Its name = the account's persona name.
+ *    Every other linked account of the scope is a HUMAN's line (`pro_human`,
+ *    `personal_human`, or untyped: a type is never inferred), whatever its
+ *    automation flag or persona: every message on it is recorded `own_line`,
+ *    never sent (SOPHIE-ONLY-TG-1102, owner 2026-11-02: « arrête d'envoyer un
+ *    message TG quand je reçois un message sur mon WA perso ou Pro car je le
+ *    sais. Par contre sur le WA de Sophie je ne les vois pas »; PERSO-TG-PING-1023
+ *    read the line's number against the sales rep / members and missed his pro
+ *    number: 38 pings in 3 days).
+ *  - the WHOLE message, never clipped (« je veux tout lire »): a ping longer than
+ *    one Telegram message goes out as several in a row (`sendOwnerTelegram`).
  *
  * Fleet rules, as the conversation-start pings:
  *  - never the owner's own actions: a staff address, a user id ever seen with
@@ -48,12 +52,11 @@ import { editTarget, humanText, phoneFromMxid } from "./matrix/events.js";
 import { isVoiceNote, withVoiceTranscripts } from "./matrix/voice-notes.js";
 import { normalizeEmail } from "./people/identity.js";
 import type { SiblingIdentity } from "./people/siblings.js";
-import { ownTeamMatch, phoneDigits, readOwnTeam, readTeamPeoplePhones, type OwnTeam } from "./reply-trigger/own-team.js";
+import { ownTeamMatch, readOwnTeam } from "./reply-trigger/own-team.js";
 import { createRun, updateRun } from "./runs-client.js";
 import { isStaffEmail, sendOwnerTelegram } from "./owner-telegram.js";
 
 const SERVICE_NAME = "crm-service";
-const MESSAGE_MAX = 500;
 /** A mirrored message older than this is never pinged (the scan stays bounded). */
 export const ASSISTANT_PING_LOOKBACK_MS = 24 * 3_600_000;
 /** How long a voice note's ping waits for its transcript before it is decided without words. */
@@ -76,12 +79,6 @@ const CHANNEL_LABEL: Record<string, string> = {
 };
 
 // ─── pure ───────────────────────────────────────────────────────────────────
-
-const clip = (s: string, max: number) => {
-  const flat = s.replace(/\s+/g, " ").trim();
-  const chars = [...flat];
-  return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : flat;
-};
 
 export interface AssistantPingContent {
   channel: string;
@@ -111,7 +108,7 @@ export function composeAssistantPingText(c: AssistantPingContent): string {
   const who = [c.name, c.phone, c.email].filter((x): x is string => !!x);
   if (who.length > 0) lines.push(`Who: ${who.join(", ")}`);
   if (c.orgName) lines.push(`Org: ${c.orgName}`);
-  lines.push(`Message: "${clip(c.text, MESSAGE_MAX)}"`);
+  lines.push(`Message: "${c.text.trim()}"`);
   if (c.threadUrl) lines.push(`Thread: ${c.threadUrl}`);
   return lines.join("\n");
 }
@@ -220,42 +217,33 @@ async function threadUrlFor(dest: CopilotDestination, identityKey: string, perso
   return id ? uniboxThreadUrl(staffOrg.externalId, dest.brandId, id) : null;
 }
 
-interface AssistantAccount {
+interface LinkedAccount {
   personaName: string | null;
-  /** The account's own number as the bridge names its login (WhatsApp: phone digits), else null. */
-  remoteLoginId: string | null;
+  /** The account is the AI's (`pro_ai`); any other type, or none, is a human's line. */
+  assistant: boolean;
 }
 
-/** PURE: the account is a person's own line: its own number is one of the brand's people's (sales rep, member). */
-export function isPersonLine(account: Pick<AssistantAccount, "remoteLoginId">, teamPeople: OwnTeam): boolean {
-  const d = /^\+?\d{6,20}$/.test(account.remoteLoginId ?? "") ? phoneDigits(account.remoteLoginId) : null;
-  return !!d && teamPeople.has(d);
+/** PURE: the account's stated type makes it the assistant. Only `pro_ai`; never inferred from a number or a name. */
+export function isAssistantAccountType(accountType: string | null | undefined): boolean {
+  return accountType === "pro_ai";
 }
 
-/** The assistant accounts of the staff scope: linked, automation on. Keyed on their connection. */
-async function assistantAccounts(dest: CopilotDestination): Promise<Map<string, AssistantAccount>> {
+/** Every linked account of the staff scope, keyed on its connection, the assistant ones marked. */
+async function linkedAccounts(dest: CopilotDestination): Promise<Map<string, LinkedAccount>> {
   const rows = await db
-    .select({ connectionId: matrixLinks.connectionId, personaName: matrixLinks.personaName, remoteLoginId: matrixLinks.remoteLoginId })
+    .select({ connectionId: matrixLinks.connectionId, personaName: matrixLinks.personaName, accountType: matrixLinks.accountType })
     .from(matrixLinks)
-    .where(
-      and(
-        eq(matrixLinks.orgId, dest.orgId),
-        eq(matrixLinks.brandId, dest.brandId),
-        eq(matrixLinks.status, "linked"),
-        eq(matrixLinks.automationAllowed, true),
-        // A personal line is nobody's assistant (ACCOUNT-TYPES-1028).
-        sql`${matrixLinks.accountType} IS DISTINCT FROM 'personal_human'`,
-      ),
-    );
-  const out = new Map<string, AssistantAccount>();
-  for (const r of rows) if (r.connectionId) out.set(r.connectionId, { personaName: r.personaName?.trim() || null, remoteLoginId: r.remoteLoginId });
+    .where(and(eq(matrixLinks.orgId, dest.orgId), eq(matrixLinks.brandId, dest.brandId), eq(matrixLinks.status, "linked")));
+  const out = new Map<string, LinkedAccount>();
+  for (const r of rows) {
+    if (r.connectionId) out.set(r.connectionId, { personaName: r.personaName?.trim() || null, assistant: isAssistantAccountType(r.accountType) });
+  }
   return out;
 }
 
-/** The web Copilot's name: the persona the scope's assistant accounts (a person's own line excluded) share, else "AI Copilot". */
-async function copilotName(dest: CopilotDestination, identity: SiblingIdentity): Promise<string> {
-  const teamPeople = await readTeamPeoplePhones(identity);
-  const accounts = [...(await assistantAccounts(dest)).values()].filter((a) => !isPersonLine(a, teamPeople));
+/** The web Copilot's name: the persona the scope's assistant accounts share, else "AI Copilot". */
+async function copilotName(dest: CopilotDestination): Promise<string> {
+  const accounts = [...(await linkedAccounts(dest)).values()].filter((a) => a.assistant);
   const names = new Set(accounts.map((a) => a.personaName).filter((n): n is string => !!n));
   return names.size === 1 ? [...names][0] : COPILOT_SENDER_NAME;
 }
@@ -299,7 +287,7 @@ export async function announceCopilotMessages(turn: CopilotPushed, newMessageIds
       attempt("chatting org", () => readOrg(turn.orgId, identity)),
       turn.displayName?.trim() ? Promise.resolve(turn.displayName.trim()) : attempt("chatting user", () => readUserName(turn.userId, identity)),
       threadUrlFor(dest, `email:${email}`, null, identity),
-      attempt("assistant name", () => copilotName(dest, identity)),
+      attempt("assistant name", () => copilotName(dest)),
     ]);
     const ordered = [...claimed].sort((a, b) => Date.parse(a.message.at) - Date.parse(b.message.at));
     for (const { id, message } of ordered) {
@@ -372,7 +360,7 @@ export async function announceAssistantMatrixMessages(conn: MatrixConnection, no
   try {
     const dest = copilotDestination();
     if (!dest || conn.orgId !== dest.orgId || conn.brandId !== dest.brandId) return 0;
-    const account = (await assistantAccounts(dest)).get(conn.id);
+    const account = (await linkedAccounts(dest)).get(conn.id);
     if (!account) return 0;
     const since = await watchSince(conn);
     const floor = new Date(Math.max(since.getTime(), now - ASSISTANT_PING_LOOKBACK_MS));
@@ -421,8 +409,8 @@ export async function announceAssistantMatrixMessages(conn: MatrixConnection, no
     let ownTeam: Awaited<ReturnType<typeof readOwnTeam>> | null = null;
     let pinged = 0;
     try {
-      // A person's own line pings nothing (PERSO-TG-PING-1023). Unreadable = throws: nothing decided, next pass.
-      if (isPersonLine(account, await readTeamPeoplePhones(await identity()))) {
+      // A human's line pings nothing (SOPHIE-ONLY-TG-1102): only the AI's account does.
+      if (!account.assistant) {
         for (const c of candidates) {
           await claim({
             source: "matrix", messageRef: c.event_id, channel: conn.channel, connectionId: conn.id, messageAt: new Date(c.origin_server_ts),

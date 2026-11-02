@@ -79,8 +79,7 @@ export async function readOwnTeam(identity: SiblingIdentity): Promise<OwnTeam> {
 
 /**
  * The numbers of the brand's PEOPLE (its sales rep, the org's members), without
- * its linked accounts: a linked account whose own number is one of these is that
- * person's own line, never an assistant line (PERSO-TG-PING-1023). Throws like
+ * its linked accounts. Throws like
  * `readOwnTeam` when either owner cannot answer.
  */
 export async function readTeamPeoplePhones(identity: SiblingIdentity): Promise<OwnTeam> {

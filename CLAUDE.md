@@ -2158,10 +2158,11 @@ showed his welcome twice (labelled OWNER by writers) and Joshua's welcome too.
 
 SOPHIE-TG-PING-1018 (owner 2026-10-18: « Quand il y a une communication entre Sophie et un user, dans un sens ou
 dans l'autre, tu peux me notifier sur Telegram »): one ping per MESSAGE, both directions. Assistant = the web Copilot
-(each new message of a pushed turn, both roles) + every linked account of the staff Unibox scope with automation on
-(`matrix_links.automation_allowed`, read from data; its name = the link's persona, the web Copilot takes the persona
-the scope's assistant accounts share, else "AI Copilot"). Ping = `<from> → <to> (<channel>)`, Who (name, number,
-email), Org (web), Message (500 chars), Thread (staff Unibox link; an unbuilt person's id minted on `email:` /
+(each new message of a pushed turn, both roles) + every linked account of the staff Unibox scope TYPED `pro_ai`
+(`matrix_links.account_type`, read from data; its name = the link's persona, the web Copilot takes the persona
+the scope's `pro_ai` accounts share, else "AI Copilot"). Ping = `<from> → <to> (<channel>)`, Who (name, number,
+email), Org (web), Message (WHOLE, never clipped; over 4096 chars = several Telegram messages in a row,
+`owner-telegram.ts splitTelegramText`), Thread (staff Unibox link; an unbuilt person's id minted on `email:` /
 `matrix:<contact id>` as the build would). Matrix: run after each mirror (live watch + 5-min pass), never awaited,
 on the account's one-to-one threads only (a group = `not_conversation`); outbound counts only when it is one of our
 sends (`whatsapp_sends` event id / text: the ONE send path), else `hand_typed` (a person of ours). Never staff:
@@ -2170,12 +2171,11 @@ numbers, sales rep, org members; unreadable = nothing decided, next pass). `assi
 (source, message ref), written BEFORE the send (skips recorded with their reason); never history:
 `matrix_connections.assistant_ping_since`, 24 h lookback. The Copilot is no longer in the conversation-start pings.
 ⚠️ A Copilot WhatsApp turn pushed ALSO to `/internal/copilot/messages` would ping twice (once mirrored, once pushed).
-**A person's own line never pings** (PERSO-TG-PING-1023, owner 2026-10-23 « je n'ai pas besoin de notif TG des messages
-qui arrivent sur mon WA perso et PRO. Seulement Sophie »): a linked account whose own number (`remote_login_id`) is the
-brand's sales rep phone or an org member's phone (`readTeamPeoplePhones`) is that person's WhatsApp, whatever its
-automation flag / persona: every message recorded `own_line`, never sent, and its persona never names the web Copilot.
-Team unreadable = nothing recorded, next pass. Prod: the owner's line (= the staff brand's sales rep phone) sent 44
-pings of friends' chats in 1 day.
+**A human's line never pings** (SOPHIE-ONLY-TG-1102, owner 2026-11-02 « arrête d'envoyer un message TG quand je reçois
+un message sur mon WA perso ou Pro car je le sais. Par contre sur le WA de Sophie je ne les vois pas »): every linked account
+NOT typed `pro_ai` (pro_human, personal_human, untyped: never inferred), whatever its automation flag / persona: every
+message recorded `own_line`, never sent. PERSO-TG-PING-1023 (10-23) read the line's NUMBER against the sales rep / members
+and missed his pro line (+33680478702, pro_human, automation on): 38 pings in 3 days.
 
 ## Owner Telegram ping at each conversation START (`src/lib/conversation-pings.ts`)
 
