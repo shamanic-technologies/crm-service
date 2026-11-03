@@ -82,6 +82,7 @@ import {
   contactEmailLookups,
   whatsappLineSpans,
   whatsappLineDays,
+  ghlBookings,
 } from "../db/schema.js";
 
 export const TRANSFER_TABLES: PgTable[] = [
@@ -111,6 +112,8 @@ export const TRANSFER_TABLES: PgTable[] = [
   ghlFormSubmissions,
   ghlOpportunityHistory,
   ghlStageMeanings,
+  // Meetings booked for prospects on the brand's calendar (AUTO-BOOK-1103).
+  ghlBookings,
   crmLabelVerdicts,
   peopleScopes,
   people,

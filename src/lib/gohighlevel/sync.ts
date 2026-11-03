@@ -18,6 +18,7 @@
  * `rebuildFromBronze` reproduces it with no call to GoHighLevel.
  */
 
+import { BOOKING_ACCESS_RECHECK_MS, checkBookingAccess } from "./booking.js";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import {
@@ -773,6 +774,14 @@ export async function syncConnection(conn: GhlConnection): Promise<ConnectionSyn
       form_submission: mirrored.form_submission.changed,
     });
     const { stageMeaningsDecided, labelVerdictsDecided } = await decideCrmLabels(conn, run.id);
+    // Can the connection book meetings (AUTO-BOOK-1103)? Re-asked every 6 h: the
+    // customer can widen or narrow the token's scopes in GoHighLevel any time.
+    if (
+      !conn.bookingAccessCheckedAt ||
+      Date.now() - conn.bookingAccessCheckedAt.getTime() > BOOKING_ACCESS_RECHECK_MS
+    ) {
+      await checkBookingAccess(conn.id, token);
+    }
 
     await db
       .update(ghlConnections)
