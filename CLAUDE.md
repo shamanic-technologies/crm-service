@@ -368,6 +368,19 @@ stored thread failed or was never read: `gaps`) / `unknown` (`reason`), never an
 The store pick is TWO steps (winner ids on narrow columns, then the winners' items): one step detoasted every item,
 392 addresses = 1.95 s on prod; two steps, 1,000 = 1.4 s cold. Keep it that way.
 
+### Did the brand write to this person after T? `POST /internal/people/sent-after` (UNSENT-ANSWERED-ELSEWHERE-1103)
+
+campaign-service's Monitoring "Unsent answers" card asks it, so an occurrence the AI line / the team answered outside a
+campaign is never red (Senthil 2026-11-02: Sophie answered 15:08, the card listed him unsent). `src/lib/people/sent-after.ts`.
+Body `{orgId, brandId, people: [{ref?, relationKey?, personId?, humanId?, email?, phone?, after}]}` (1..200, at least one
+name, every name of an ask unioned): a relation key is read for its PERSON id (a rebuilt relation / a merged person via
+`person_id_aliases` still resolves), a phone also via `matrix_ghost_phones` (a LID-only WhatsApp person). Outbound after T,
+any sender: message store (gmail when connected, instantly), every Matrix DM of the person (own account / self-ghost, no
+edit, no `m.notice`), our `whatsapp_sends`, Copilot / API / transactional on the staff scope. Per ask `status` `sent`
+(`firstSent {at, source, channel, sentBy, from, text, ref}`, `lastSentAt`, `bySource`) | `nothing_sent` | `unreadable`
+(`gaps`: store unit failed / never read, Matrix mirror `mirror_stale` > 30 min or not active) | `unknown` (`scope_not_built`
+| `not_a_relation_key` | `person_not_found`). Stored data only: no sibling, no model, no cost, platform run.
+
 ### Reachability (`reachableBy`) — a serve FOR a pipe never burns whom it cannot reach
 
 `serve-next` body / `serve-stats` query `reachableBy: "phone" | "email" | [both]` (owner

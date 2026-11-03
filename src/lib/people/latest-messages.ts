@@ -169,7 +169,7 @@ interface Resolved {
 }
 
 /** The people holding these person ids (a retired id follows its aliases, like `findPersonById`). */
-async function peopleByIds(orgId: string, brandId: string, ids: string[]): Promise<Map<string, Person>> {
+export async function peopleByIds(orgId: string, brandId: string, ids: string[]): Promise<Map<string, Person>> {
   const out = new Map<string, Person>();
   if (ids.length === 0) return out;
   // asked id -> id being looked up now
@@ -288,7 +288,7 @@ function storeCandidate(r: StoreRow): Candidate {
   };
 }
 
-interface MatrixRow {
+export interface MatrixRow {
   conversation_id: string | null;
   group_room_id: string | null;
   channel: string;
@@ -348,7 +348,7 @@ async function latestInGroups(pairs: { roomId: string; handle: string; channel: 
 }
 
 /** Which of these outbound events are our automated WhatsApp sends (by event id, else same room + text). */
-async function automatedSends(orgId: string, brandId: string, rows: MatrixRow[]): Promise<Set<string>> {
+export async function automatedSends(orgId: string, brandId: string, rows: MatrixRow[]): Promise<Set<string>> {
   const auto = new Set<string>();
   if (rows.length === 0) return auto;
   const sends = (await db.execute(sql`

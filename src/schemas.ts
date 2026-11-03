@@ -22,6 +22,7 @@ import {
   TEXT_BASES,
   UNKNOWN_REASONS,
 } from "./lib/people/latest-messages.js";
+import { SENT_AFTER_GAP_REASONS, SENT_AFTER_MAX_PEOPLE, SENT_AFTER_STATUSES, SENT_AFTER_UNKNOWN_REASONS } from "./lib/people/sent-after.js";
 
 extendZodWithOpenApi(z);
 
@@ -4470,6 +4471,94 @@ registry.registerPath({
   request: { body: { content: { "application/json": { schema: LatestMessagesRequestSchema } } } },
   responses: {
     200: { description: "One answer per relation", content: { "application/json": { schema: LatestMessagesResponseSchema } } },
+    400: { description: "Invalid body" },
+    502: { description: "Run tracking unavailable" },
+  },
+});
+
+// ─── POST /internal/people/sent-after (UNSENT-ANSWERED-ELSEWHERE-1103) ──────
+
+export const SentAfterRequestSchema = z
+  .object({
+    orgId: z.string().uuid(),
+    brandId: z.string().uuid(),
+    people: z
+      .array(
+        z
+          .object({
+            ref: z.string().max(200).optional().openapi({ description: "The caller's own id for this ask (an occurrence id), echoed back." }),
+            relationKey: z.string().min(3).max(200).optional().openapi({ description: "A relation key we served (`rel:<personId>:...`): resolves even when the relation was rebuilt or the person merged since." }),
+            personId: z.string().uuid().optional(),
+            humanId: z.string().uuid().optional().openapi({ description: "human-service's id, as served on facts / people rows." }),
+            email: z.string().max(320).optional(),
+            phone: z.string().max(40).optional().openapi({ description: "E.164." }),
+            after: z.string().datetime({ offset: true }).openapi({ description: "T: only messages sent strictly after it count." }),
+          })
+          .strict()
+          .refine((p) => !!(p.relationKey || p.personId || p.humanId || p.email || p.phone), { message: "name the person: relationKey, personId, humanId, email or phone" }),
+      )
+      .min(1)
+      .max(SENT_AFTER_MAX_PEOPLE),
+  })
+  .strict();
+
+const SentMessageSchema = z.object({
+  at: z.string(),
+  source: z.enum(["gmail", "instantly", "matrix", "copilot", "api", "transactional"]),
+  channel: z.string().openapi({ description: "email | whatsapp | telegram | linkedin | chat | api | mcp ..." }),
+  sentBy: z.enum(["automation", "person"]).nullable().openapi({ description: "automation = one of our machines (a campaign send, the AI line, the Copilot); person = a human of the brand typed it; null = the source does not say (a Gmail send)." }),
+  from: z.string().nullable(),
+  text: z.string().nullable(),
+  ref: z.record(z.string(), z.string().nullable()),
+});
+
+const SentAfterResponseSchema = z.object({
+  orgId: z.string().uuid(),
+  brandId: z.string().uuid(),
+  scope: z.object({ id: z.string().uuid(), status: z.string(), lastBuiltAt: z.string().nullable() }).nullable(),
+  counts: z.record(z.enum(SENT_AFTER_STATUSES), z.number().int()),
+  people: z.array(
+    z.object({
+      index: z.number().int().openapi({ description: "Position of the ask in the request." }),
+      ref: z.string().nullable(),
+      after: z.string(),
+      status: z.enum(SENT_AFTER_STATUSES).openapi({
+        description:
+          "sent = the brand sent the person a message after T (firstSent, lastSentAt, bySource); nothing_sent = every thread of the person was read and holds nothing after T; " +
+          "unreadable = nothing found AND a thread could not be read / was never read / its mirror is stale (gaps); unknown = no name of the ask is a person of this org + brand (reason).",
+      }),
+      reason: z.string().nullable().openapi({ description: `unknown: ${SENT_AFTER_UNKNOWN_REASONS.join(" | ")}; unreadable: source_unreadable; else null.` }),
+      personIds: z.array(z.string()),
+      firstSent: SentMessageSchema.nullable(),
+      lastSentAt: z.string().nullable(),
+      bySource: z.array(z.object({ source: z.string(), channel: z.string(), firstAt: z.string(), lastAt: z.string() })),
+      gaps: z.array(
+        z.object({
+          source: z.enum(["gmail", "instantly", "matrix"]),
+          address: z.string().nullable(),
+          connectionId: z.string().nullable(),
+          reason: z.enum(SENT_AFTER_GAP_REASONS),
+          error: z.string().nullable(),
+        }),
+      ),
+    }),
+  ),
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/people/sent-after",
+  summary: "Did the brand write to each person after T? Any channel, any sender",
+  description:
+    "For one org + brand and up to " +
+    SENT_AFTER_MAX_PEOPLE +
+    " people (each named by a relation key, person id, human id, email and / or E.164 phone, each with its own T): whether the brand sent that person " +
+    "ANY message after T and when: Gmail and cold email from our message store, WhatsApp / Telegram / LinkedIn DMs from our Matrix mirror (the AI line, " +
+    "a campaign, the team typing by hand) and our WhatsApp send rows, Copilot / API / transactional emails on the staff Unibox scope. Stored data only " +
+    "(lags a few minutes at most): no sibling call, no model, no cost. One answer per ask, in the order asked; never an empty answer posing as nothing sent.",
+  request: { body: { content: { "application/json": { schema: SentAfterRequestSchema } } } },
+  responses: {
+    200: { description: "One answer per ask", content: { "application/json": { schema: SentAfterResponseSchema } } },
     400: { description: "Invalid body" },
     502: { description: "Run tracking unavailable" },
   },

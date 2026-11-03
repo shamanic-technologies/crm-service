@@ -41,7 +41,8 @@ import {
 } from "../lib/people/outcomes.js";
 import { LEG_STEPS, ServedUnavailable, listLegReachBrands, parseLegStep, readLegReach } from "../lib/people/leg-reach.js";
 import { readLatestMessages } from "../lib/people/latest-messages.js";
-import { LatestMessagesRequestSchema } from "../schemas.js";
+import { LatestMessagesRequestSchema, SentAfterRequestSchema } from "../schemas.js";
+import { readSentAfter } from "../lib/people/sent-after.js";
 import { familyOf, LEAD_FAMILIES, readBrandFamilies, type FamilyVerdict, type LeadFamily } from "../lib/people/families.js";
 import {
   matchesOf,
@@ -1321,6 +1322,24 @@ router.post("/internal/people/relations/latest-messages", apiKeyAuth, async (req
   await withPlatformRun(res, "people.latest-messages.read", async () => {
     const { orgId, brandId, relationKeys } = parsed.data;
     const out = await readLatestMessages(orgId, brandId, relationKeys);
+    res.json({ orgId, brandId, ...out });
+  });
+});
+
+// ─── POST /internal/people/sent-after (campaign-service: Monitoring "Unsent answers") ──
+
+/**
+ * Did the brand write to each person after their T, any channel, any sender (people/sent-after.ts).
+ * DB-only: no sibling call, no model, no cost. UNSENT-ANSWERED-ELSEWHERE-1103.
+ */
+router.post("/internal/people/sent-after", apiKeyAuth, async (req, res) => {
+  const parsed = SentAfterRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ type: "validation", error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+  }
+  await withPlatformRun(res, "people.sent-after.read", async () => {
+    const { orgId, brandId, people: asks } = parsed.data;
+    const out = await readSentAfter(orgId, brandId, asks);
     res.json({ orgId, brandId, ...out });
   });
 });
