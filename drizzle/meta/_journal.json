@@ -519,6 +519,13 @@
       "when": 1792780000000,
       "tag": "0074_payment_refusal_reports",
       "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1792790000000,
+      "tag": "0075_ghl_bookings",
+      "breakpoints": true
     }
   ]
 }

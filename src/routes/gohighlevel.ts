@@ -20,6 +20,7 @@ import { readFunnelReach } from "../lib/gohighlevel/funnel-reach.js";
 import { STAGE_MEANING_MIN_CONFIDENCE } from "../lib/gohighlevel/stage-meanings.js";
 import { LABEL_VERDICT_MIN_CONFIDENCE, readLabelVerdicts } from "../lib/gohighlevel/label-verdicts.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
+import { bookingView, bookMeeting, checkBookingAccess, GHL_SCOPES } from "../lib/gohighlevel/booking.js";
 
 const router = Router();
 
@@ -37,6 +38,8 @@ function toConnectionView(row: typeof ghlConnections.$inferSelect) {
     lastError: row.lastError,
     lastRunId: row.lastRunId,
     createdAt: row.createdAt,
+    /** Can this connection book a meeting for a prospect (AUTO-BOOK-1103)? */
+    booking: bookingView(row),
   };
 }
 
@@ -125,7 +128,114 @@ router.post(
       })
       .returning();
 
+    // Can it also book meetings? An empty-body write probe, nothing created.
+    await checkBookingAccess(row.id, token);
+    const [checked] = await db.select().from(ghlConnections).where(eq(ghlConnections.id, row.id));
+
+    res.json({ connection: toConnectionView(checked ?? row) });
+  },
+);
+
+// ─── POST /orgs/gohighlevel/connections/:id/booking-access ───────────────────
+
+/** Ask GoHighLevel again whether the brand's token can book (after a token change). */
+router.post(
+  "/orgs/gohighlevel/connections/:id/booking-access",
+  apiKeyAuth,
+  requireOrg("gohighlevel.connections.booking-access"),
+  async (req: AuthenticatedRequest, res) => {
+    const idParse = z.string().uuid().safeParse(req.params.id);
+    if (!idParse.success) {
+      return res.status(400).json({ type: "validation", error: "connection id must be a uuid" });
+    }
+    const [conn] = await db
+      .select()
+      .from(ghlConnections)
+      .where(and(eq(ghlConnections.id, idParse.data), eq(ghlConnections.orgId, req.orgId!)));
+    if (!conn) return res.status(404).json({ type: "not_found", error: "connection not found" });
+
+    let token: string;
+    try {
+      token = await resolveGhlToken(conn.brandId, {
+        orgId: conn.orgId,
+        userId: req.userId ?? conn.createdByUserId,
+        runId: req.runId,
+      });
+    } catch (err) {
+      if (err instanceof CredentialError) {
+        return res
+          .status(err.status)
+          .json({ type: err.kind === "missing" ? "validation" : "upstream", error: err.message });
+      }
+      throw err;
+    }
+    await checkBookingAccess(conn.id, token);
+    const [row] = await db.select().from(ghlConnections).where(eq(ghlConnections.id, conn.id));
     res.json({ connection: toConnectionView(row) });
+  },
+);
+
+// ─── GET /orgs/gohighlevel/scopes ────────────────────────────────────────────
+
+/** The token scopes the customer grants: `mirror` to read their CRM, `booking` to book meetings. */
+router.get("/orgs/gohighlevel/scopes", apiKeyAuth, requireOrg("gohighlevel.scopes"), (_req, res) => {
+  res.json({ scopes: { mirror: [...GHL_SCOPES.mirror], booking: [...GHL_SCOPES.booking] } });
+});
+
+// ─── POST /orgs/gohighlevel/bookings ─────────────────────────────────────────
+
+const bookingBodySchema = z
+  .object({
+    brandId: z.string().uuid(),
+    /** One per answered occurrence: the same key again answers the first answer. */
+    idempotencyKey: z.string().min(1).max(500),
+    /** The offer's booking page the slot was read off. */
+    bookingPageUrl: z.string().url().optional(),
+    /** The calendar id the page inlines, when the caller read it there. */
+    calendarId: z.string().min(1).optional(),
+    /** The exact slot, an ISO instant WITH its offset, as the page showed it. */
+    startTime: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})$/, "ISO instant with offset"),
+    person: z.object({
+      email: z.string().email(),
+      phone: z.string().min(4).optional(),
+      name: z.string().min(1).optional(),
+      firstName: z.string().min(1).optional(),
+      lastName: z.string().min(1).optional(),
+    }),
+  })
+  .refine((b) => b.bookingPageUrl || b.calendarId, { message: "bookingPageUrl or calendarId is required" });
+
+/**
+ * Book a prospect on the brand's GoHighLevel calendar (AUTO-BOOK-1103).
+ * 200 booked | 422 refused {code} | 409 in progress | 502 failed (retry with the same key).
+ */
+router.post(
+  "/orgs/gohighlevel/bookings",
+  apiKeyAuth,
+  requireOrg("gohighlevel.bookings.create"),
+  async (req: AuthenticatedRequest, res) => {
+    const parsed = bookingBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        type: "validation",
+        code: "invalid_request",
+        error: parsed.error.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`).join("; "),
+      });
+    }
+    const outcome = await bookMeeting({
+      orgId: req.orgId!,
+      userId: req.userId,
+      runId: req.runId,
+      request: parsed.data,
+    });
+    if (outcome.kind === "booked") return res.json(outcome.answer);
+    if (outcome.kind === "refused") return res.status(422).json({ type: "refused", ...outcome.answer });
+    if (outcome.kind === "in_progress") {
+      return res.status(409).json({ type: "conflict", code: "booking_in_progress", ...outcome.answer });
+    }
+    return res.status(502).json({ type: "upstream", code: "booking_failed", ...outcome.answer });
   },
 );
 

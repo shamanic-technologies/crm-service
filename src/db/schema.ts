@@ -713,6 +713,14 @@ export const ghlConnections = pgTable(
     // made before it is history, never reported (lib/form-trigger/watch.ts).
     formWatchSince: timestamp("form_watch_since", { withTimezone: true }),
 
+    // Can this connection BOOK a meeting (AUTO-BOOK-1103, lib/gohighlevel/booking.ts)?
+    // 'granted' | 'missing' | 'unknown' (null = never checked). Learnt from an
+    // empty-body write probe (GoHighLevel checks the scope before the body) and
+    // from every real booking's answer. `booking_access_error` = GoHighLevel's words.
+    bookingAccess: text("booking_access"),
+    bookingAccessCheckedAt: timestamp("booking_access_checked_at", { withTimezone: true }),
+    bookingAccessError: text("booking_access_error"),
+
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
@@ -3071,3 +3079,44 @@ export const accountActivities = pgTable(
   ],
 );
 export type AccountActivity = typeof accountActivities.$inferSelect;
+
+/**
+ * A meeting booked (or refused) for a prospect on the brand's GoHighLevel
+ * calendar, through the brand's own connection (AUTO-BOOK-1103,
+ * lib/gohighlevel/booking.ts). One row per caller idempotency key: a
+ * redelivery of the same occurrence never books twice and gets back the FIRST
+ * answer. `status`: booking | booked | refused | failed (failed / a `booking`
+ * stuck 2 min = retried under the same key).
+ */
+export const ghlBookings = pgTable(
+  "ghl_bookings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    connectionId: uuid("connection_id"),
+    locationId: text("location_id"),
+    calendarId: text("calendar_id"),
+    bookingPageUrl: text("booking_page_url"),
+    requestedStart: text("requested_start").notNull(),
+    email: text("email").notNull(),
+    phone: text("phone"),
+    fullName: text("full_name"),
+    status: text("status").notNull(),
+    code: text("code"),
+    error: text("error"),
+    vendorStatus: integer("vendor_status"),
+    vendorError: text("vendor_error"),
+    ghlContactId: text("ghl_contact_id"),
+    appointmentId: text("appointment_id"),
+    answer: jsonb("answer"),
+    attempts: integer("attempts").notNull().default(0),
+    runId: text("run_id"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("ghl_bookings_org_brand_key_uq").on(table.orgId, table.brandId, table.idempotencyKey),
+  ],
+);

@@ -698,8 +698,35 @@ A customer runs their business on GoHighLevel. They paste their credential once
 and the dashboard shows them their own CRM — contacts and sales pipeline —
 read-only, kept up to date on its own.
 
-**There is no write path to GoHighLevel, ever, by design.**
-`src/lib/gohighlevel/client.ts` exposes reads and nothing else. Do not add one.
+**The mirror never writes to GoHighLevel.** `src/lib/gohighlevel/client.ts` exposes reads and
+nothing else. The ONE exception is booking a meeting for a prospect (below, AUTO-BOOK-1103, owner
+2026-11-03): its two writes live in `booking-client.ts`, imported by `booking.ts` only (pinned by
+`tests/unit/ghl-booking.test.ts`). Do not add another write.
+
+### Booking a prospect on the brand's calendar (`src/lib/gohighlevel/booking.ts`, AUTO-BOOK-1103)
+
+workflow-service's meeting-booking reply workflows ask `POST /orgs/gohighlevel/bookings {brandId, idempotencyKey,
+bookingPageUrl? | calendarId?, startTime (ISO with offset), person {email, name?|firstName?/lastName?, phone?}}`
+(service key + run identity). The public booking page refuses machines (429 + captcha, 2026-11-03), so the brand's
+OWN connection books through GoHighLevel's API: the brand's (org, brand) connection + key-service token (no
+fallback) → the calendar the page shows (path / query token = a calendar id or widget slug, or `calendarId`), ONLY
+among the connection location's calendars read live (`calendar_not_of_brand`) → the instant must equal a free slot
+GoHighLevel serves now (`slot_not_open` + `openSlotsNearby`, nothing written) → `POST /contacts/upsert` (as a page
+booking) → `POST /calendars/events/appointments` (`ignoreFreeSlotValidation: false`, `toNotify: true`, end = the
+calendar's slot duration). 200 `booked` only with GoHighLevel's appointment id; 422 refusals `no_gohighlevel_connection
+| connection_paused | no_gohighlevel_credential | calendar_not_of_brand | slot_not_open | no_write_access (401 scope,
+GoHighLevel's words) | vendor_refused` (other 4xx); 409 `booking_in_progress`; 502 `booking_failed` (429 / 5xx /
+transport: retry with the same key). Ledger `ghl_bookings` UNIQUE (org, brand, key): booked / refused replay the FIRST
+answer (`duplicate: true`); failed or a claim stuck 2 min is retried and first ADOPTS an appointment of the same contact
+at the same start (a lost answer never books twice). The 15-min sync mirrors the appointment: `meeting_booked` like a
+self-booked one (proved in `tests/integration/ghl-booking.test.ts`). No cost (GoHighLevel API is free to us).
+**Can the connection book?** `booking {canBook, access granted|missing|unknown|unchecked, checkedAt, vendorError,
+requiredScopes}` on every connection view: an EMPTY-body POST on both write routes (GoHighLevel answers 401 "The token is
+not authorized for this scope." BEFORE reading the body, measured 2026-11-03 on Doc Dinners' read-only token; 400 / 422 =
+scope present; nothing can be created) at connect, every 6 h in the sync, `POST /orgs/gohighlevel/connections/:id/
+booking-access` now, and every real booking's answer. `GET /orgs/gohighlevel/scopes` = the token scopes to grant (`mirror`
+reads, `booking` = `contacts.write`, `calendars/events.write`). The dashboard's connect help named no scope (2026-11-03).
+⚠️ Never test a booking on a client's calendar: tests stub GoHighLevel; a live proof needs a STAFF location (none yet).
 
 ### The credential lives in key-service, not here
 

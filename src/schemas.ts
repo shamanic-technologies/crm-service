@@ -1547,8 +1547,100 @@ export const GhlConnectionSchema = registry.register(
         .openapi({ description: "Why the last sync failed, verbatim. Null when healthy." }),
       lastRunId: z.string().nullable(),
       createdAt: z.string(),
+      booking: z
+        .object({
+          canBook: z.boolean().nullable().openapi({
+            description:
+              "True = the token holds the write scopes booking needs; false = it does not (show " +
+              "'Reconnect with write access'); null = not known yet / GoHighLevel did not say.",
+          }),
+          access: z.enum(["granted", "missing", "unknown", "unchecked"]),
+          checkedAt: z.string().nullable(),
+          vendorError: z.string().nullable().openapi({ description: "GoHighLevel's own words when it refused." }),
+          requiredScopes: z.array(z.string()).openapi({
+            description: "The Private Integration Token scopes booking needs (contacts.write, calendars/events.write).",
+          }),
+        })
+        .openapi({ description: "Can this connection book meetings for prospects (AUTO-BOOK-1103)." }),
     })
     .openapi("GhlConnection"),
+);
+
+export const GhlBookingRequestSchema = registry.register(
+  "GhlBookingRequest",
+  z
+    .object({
+      brandId: z.string().uuid(),
+      idempotencyKey: z.string().openapi({
+        description: "One per answered occurrence. The same key again never books twice and answers the FIRST answer.",
+      }),
+      bookingPageUrl: z.string().url().optional().openapi({
+        description: "The offer's booking page. Its calendar (by id or widget slug) must be one of the brand's location's calendars.",
+      }),
+      calendarId: z.string().optional().openapi({
+        description: "The calendar id the page inlines, when read there. Wins over the URL; still checked against the location.",
+      }),
+      startTime: z.string().openapi({
+        description: "The exact slot, ISO instant WITH offset, e.g. 2026-11-05T13:00:00-05:00. Must still be open.",
+      }),
+      person: z.object({
+        email: z.string().email(),
+        phone: z.string().optional(),
+        name: z.string().optional(),
+        firstName: z.string().optional(),
+        lastName: z.string().optional(),
+      }),
+    })
+    .openapi("GhlBookingRequest"),
+);
+
+export const GhlBookingBookedSchema = registry.register(
+  "GhlBookingBooked",
+  z
+    .object({
+      status: z.literal("booked"),
+      bookingId: z.string().uuid(),
+      duplicate: z.boolean().openapi({ description: "True when this key had already booked: nothing new was created." }),
+      adoptedEarlierAttempt: z.boolean(),
+      appointmentId: z.string(),
+      appointmentStatus: z.string().nullable(),
+      calendarId: z.string(),
+      calendarName: z.string().nullable(),
+      locationId: z.string(),
+      contactId: z.string().openapi({ description: "The prospect's GoHighLevel contact id." }),
+      startTime: z.string().openapi({ description: "GoHighLevel's own slot string, in the calendar's zone." }),
+      startTimeUtc: z.string(),
+      endTime: z.string().nullable(),
+      utcOffset: z.string().nullable(),
+    })
+    .openapi("GhlBookingBooked"),
+);
+
+export const GhlBookingRefusedSchema = registry.register(
+  "GhlBookingRefused",
+  z
+    .object({
+      type: z.literal("refused"),
+      status: z.literal("refused"),
+      bookingId: z.string().uuid(),
+      duplicate: z.boolean().optional(),
+      code: z.enum([
+        "no_gohighlevel_connection",
+        "connection_paused",
+        "no_gohighlevel_credential",
+        "calendar_not_of_brand",
+        "slot_not_open",
+        "no_write_access",
+        "vendor_refused",
+      ]),
+      error: z.string(),
+      vendorStatus: z.number().nullable(),
+      vendorError: z.string().nullable().openapi({ description: "GoHighLevel's own words, verbatim." }),
+      openSlotsNearby: z.array(z.string()).optional().openapi({
+        description: "slot_not_open: the calendar's open slots within 36 h of the asked one.",
+      }),
+    })
+    .openapi("GhlBookingRefused"),
 );
 
 export const GhlConnectionRequestSchema = registry.register(
@@ -2005,6 +2097,56 @@ registry.registerPath({
     200: {
       description: "Connections",
       content: { "application/json": { schema: GhlConnectionsListResponseSchema } },
+    },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/gohighlevel/bookings",
+  summary: "Book a meeting for a prospect on the brand's GoHighLevel calendar (AUTO-BOOK-1103)",
+  description:
+    "Books the asked slot on the calendar behind the offer's booking page, through the brand's own " +
+    "GoHighLevel connection: the calendar must belong to the connection's location, the slot must still " +
+    "be open on it, the prospect's contact is created or matched like a page booking, then the " +
+    "appointment is created (GoHighLevel sends its own invite). Idempotent on idempotencyKey: the same " +
+    "key answers its first answer, a failed attempt is retried and adopts an appointment the earlier " +
+    "attempt made. 'booked' only once GoHighLevel confirmed the appointment. x-api-key + x-org-id " +
+    "(+ x-user-id, x-run-id).",
+  request: { body: { content: { "application/json": { schema: GhlBookingRequestSchema } } } },
+  responses: {
+    200: { description: "Booked", content: { "application/json": { schema: GhlBookingBookedSchema } } },
+    400: { description: "Invalid request", content: { "application/json": { schema: ErrorResponseSchema } } },
+    409: { description: "booking_in_progress: the same key is being booked right now", content: { "application/json": { schema: ErrorResponseSchema } } },
+    422: { description: "A named refusal, nothing booked", content: { "application/json": { schema: GhlBookingRefusedSchema } } },
+    502: { description: "booking_failed: GoHighLevel / key-service unreachable or 5xx; retry with the same key", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/gohighlevel/connections/{id}/booking-access",
+  summary: "Ask GoHighLevel again whether the brand's token can book meetings",
+  description: "An empty-body write probe (nothing created). Run after the customer changed the token's scopes.",
+  request: { params: z.object({ id: z.string().uuid() }) },
+  responses: {
+    200: { description: "Connection", content: { "application/json": { schema: GhlConnectionResponseSchema } } },
+    404: { description: "Not found", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/gohighlevel/scopes",
+  summary: "The GoHighLevel token scopes to grant: mirror (read the CRM) and booking (book meetings)",
+  responses: {
+    200: {
+      description: "Scopes",
+      content: {
+        "application/json": {
+          schema: z.object({ scopes: z.object({ mirror: z.array(z.string()), booking: z.array(z.string()) }) }),
+        },
+      },
     },
   },
 });
