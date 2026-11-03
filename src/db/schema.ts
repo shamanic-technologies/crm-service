@@ -2924,6 +2924,41 @@ export const creditEventReports = pgTable(
   },
   (table) => [uniqueIndex("credit_event_reports_event_email_uq").on(table.eventId, table.email)],
 );
+/**
+ * REFUSED-CARD-LEAD-EVENT-1103: each refused charge on a brand's Stripe reported ONCE to campaign-service as an
+ * `account_event` (Lead event) for the person who paid (lib/payment-refusals/). One row per (connection, charge);
+ * only charges dated after the connection was made and less than 24 h old are ever recorded (never history).
+ */
+export const paymentRefusalReports = pgTable(
+  "payment_refusal_reports",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    connectionId: uuid("connection_id").notNull(),
+    chargeId: text("charge_id").notNull(),
+    chargedAt: timestamp("charged_at", { withTimezone: true }).notNull(),
+    email: text("email"),
+    phone: text("phone"),
+    fullName: text("full_name"),
+    // 'pending' | 'reported' | 'skipped' | 'failed'
+    status: text("status").notNull(),
+    reason: text("reason"),
+    attempts: integer("attempts").notNull().default(0),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    offerIds: jsonb("offer_ids").$type<string[]>(),
+    campaignEvents: jsonb("campaign_events").$type<{ offerId: string; eventId: string; replayed: boolean }[]>(),
+    runId: text("run_id"),
+    reportedAt: timestamp("reported_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("payment_refusal_reports_connection_charge_uq").on(table.connectionId, table.chargeId),
+    index("payment_refusal_reports_status_idx").on(table.status),
+  ],
+);
+export type PaymentRefusalReport = typeof paymentRefusalReports.$inferSelect;
 export type CreditEvent = typeof creditEvents.$inferSelect;
 export type CreditEventReport = typeof creditEventReports.$inferSelect;
 

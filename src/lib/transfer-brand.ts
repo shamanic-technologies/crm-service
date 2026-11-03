@@ -75,6 +75,7 @@ import {
   humanLinkStatements,
   humanFactStatements,
   phoneGivenReports,
+  paymentRefusalReports,
   phoneWatchArtifacts,
   peopleCorrections,
   contactPointOrgVerdicts,
@@ -159,6 +160,8 @@ export const TRANSFER_TABLES: PgTable[] = [
   // Phone numbers the brand learned ("WhatsApp number given") and the sources the watch looked at.
   phoneGivenReports,
   phoneWatchArtifacts,
+  // Refused Stripe charges reported as Lead events (REFUSED-CARD-LEAD-EVENT-1103).
+  paymentRefusalReports,
   // What the brand's voice notes said (SOPHIE-VOICE-1019), beside the bronze events they read.
   voiceNoteTranscripts,
   // Who each calendar attendee is among the brand's people, and who joined the Meet call (GOOGLE-CALENDAR-MEETING-FACTS-1021).

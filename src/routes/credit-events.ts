@@ -2,11 +2,14 @@
  * billing-service's credit events on the staff Unibox (lib/credit-events/, CREDIT-RAN-OUT-UNIBOX-EVENT-1024):
  *  - POST /internal/credit-events/watch  run one pass now (the in-process loop runs every minute);
  *  - GET  /internal/credit-events        what was mirrored: each event, the people it is about, their Lead event report.
+ * And a refused charge on a brand's Stripe as a Lead event (lib/payment-refusals/, REFUSED-CARD-LEAD-EVENT-1103):
+ *  - POST /internal/payment-refusals/watch  run one pass now (the in-process loop runs every minute).
  */
 import { Router } from "express";
 import { desc, inArray } from "drizzle-orm";
 import { apiKeyAuth } from "../middleware/auth.js";
 import { creditWatchNow } from "../lib/credit-events/feed.js";
+import { refusalWatchNow } from "../lib/payment-refusals/watch.js";
 import { db } from "../db/index.js";
 import { creditEventReports, creditEvents } from "../db/schema.js";
 
@@ -18,6 +21,15 @@ router.post("/internal/credit-events/watch", apiKeyAuth, async (_req, res) => {
   } catch (err) {
     console.error("[crm-service][credit] manual pass failed:", err);
     res.status(502).json({ type: "upstream", error: (err as Error).message });
+  }
+});
+
+router.post("/internal/payment-refusals/watch", apiKeyAuth, async (_req, res) => {
+  try {
+    res.json(await refusalWatchNow());
+  } catch (err) {
+    console.error("[crm-service][payment-refused] manual pass failed:", err);
+    res.status(502).json({ type: "internal", error: (err as Error).message });
   }
 });
 

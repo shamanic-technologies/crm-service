@@ -154,6 +154,9 @@ async function seedBrand(org: string, brand: string, tag: string) {
     INSERT INTO phone_given_reports (org_id, brand_id, phone, source, status)
     VALUES (${org}, ${brand}, ${"+4477009" + String(Math.floor(Math.random() * 1e5)).padStart(5, "0")}, 'clerk', 'reported')`);
   await db.execute(sql`
+    INSERT INTO payment_refusal_reports (org_id, brand_id, connection_id, charge_id, charged_at, email, status)
+    VALUES (${org}, ${brand}, gen_random_uuid(), ${"ch_ref_" + tag}, now(), 'payer@example.com', 'reported')`);
+  await db.execute(sql`
     INSERT INTO phone_watch_artifacts (org_id, brand_id, artifact_id, source)
     VALUES (${org}, ${brand}, gen_random_uuid(), 'clerk')`);
   await db.execute(sql`

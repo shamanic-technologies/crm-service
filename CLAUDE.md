@@ -2115,6 +2115,23 @@ se déclenche »); NO credit-specific trigger (« non »); the dunning emails st
   `billing_feed_cursors.watch_since` (the first pass) = `skipped before_watch`, older than 24 h when reported = `stale`; so the
   backlog (open episodes at ship time included) shows and is stated, never fires. Retries 1 → 60 min for 24 h; 400/422 final.
 
+## A refused card on a brand's Stripe = a Lead event for the payer (`src/lib/payment-refusals/`, REFUSED-CARD-LEAD-EVENT-1103)
+
+Owner 2026-11-03: « chacun de ces events doit être ajouté à l'unibox, et doit déclencher sur la brand distribute.you Sophie
+sur la campagne actuelle lead event qui se demande si elle écrit ou postpone la date followup ». The Unibox half is
+UNIBOX-PAYMENT-REFUSED-1028 (`payment_refused` on the thread); this is the trigger half, ANY brand with a Stripe connected.
+- Loop every 60 s (first 60 s after boot, `PAYMENT_REFUSED_WATCH=off`): every `stripe_transactions` payment with status
+  `failed` dated after its connection was made AND < 24 h old (never history; the first pass after deploy = the last 24 h)
+  gets ONE row in `payment_refusal_reports` (UNIQUE connection x charge: a re-read records nothing). Person = the charge's
+  Stripe customer (`contacts` row: email, else dialable phone); staff = `skipped / staff`; nobody named = `no_email_or_phone`.
+- Delivered on ONE org run per (org, brand), filed under the connection's creator, through the trigger door as the GENERIC
+  `account_event` (member of `lead_event`, like a credit running out): `item {kind: "payment_refused", text (the timeline's
+  words), chargeId, amount, amountMinor, currency, reason, description, stripeAccountId, at}`; offers = the person's tagged
+  active offers, else every active offer (`reportOffers`); key `crm:account_event:stripe_charge:<charge>:<sha16(who)>:<offer>`.
+  Several refusals of one person due together (Stripe retries hourly) = the LATEST reported, the others `superseded`.
+  Retries 1 -> 60 min for 24 h; 400 / 422 final. Nothing here writes a message: the Lead event workflow decides.
+- Monitoring: trigger `payment_refused` on `GET /internal/ops/trigger-reports`. A pass now: `POST /internal/payment-refusals/watch`.
+
 ## Transactional emails — what the platform emailed a client, on their staff Unibox thread (`src/lib/transactional/sent-emails.ts`)
 
 TX-EMAIL-IN-UNIBOX-1024 (owner 2026-10-24: « ça n'annule pas le transactionnel. Mais le transactionnel envoyé doit aussi
