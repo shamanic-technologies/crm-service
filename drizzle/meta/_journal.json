@@ -512,6 +512,13 @@
       "when": 1792770000000,
       "tag": "0073_person_contact_handles",
       "breakpoints": true
+    },
+    {
+      "idx": 74,
+      "version": "7",
+      "when": 1792780000000,
+      "tag": "0074_payment_refusal_reports",
+      "breakpoints": true
     }
   ]
 }

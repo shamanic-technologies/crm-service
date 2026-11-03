@@ -35,6 +35,7 @@ import { startPhoneWatch } from "./lib/phone-trigger/watch.js";
 import { startMatrixLiveWatch } from "./lib/matrix/sync.js";
 import { startCalendarWatch } from "./lib/calendar/feed.js";
 import { startCreditWatch } from "./lib/credit-events/feed.js";
+import { startRefusalWatch } from "./lib/payment-refusals/watch.js";
 import { startTxEmailWatch } from "./lib/transactional/sent-emails.js";
 import { startActivityWatch } from "./lib/account-activity/activity.js";
 import { startLineWatch } from "./lib/whatsapp/line-health.js";
@@ -145,6 +146,8 @@ if (process.env.NODE_ENV !== "test") {
         startCalendarWatch();
         // Mirrors billing-service's credit events: "Credit ran out" / "Credit restored" on the client's staff Unibox thread.
         startCreditWatch();
+        // Reports each refused charge on a brand's Stripe as a Lead event for the person who paid.
+        startRefusalWatch();
         // Mirrors transactional-email-service's sent emails onto each client's staff Unibox thread.
         startTxEmailWatch();
         // Retries a client's reported account action (campaign / budget) still waiting to be filed or pinged.
