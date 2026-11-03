@@ -1009,6 +1009,12 @@ owner had written to. A recorded fact, never an address-shape guess.
   unless `includeAutomated=true` (`automatedHidden` counts them). Jev down =
   nobody hidden, `senderVerdicts.status=failed`, retried next build. Source
   data stays whole.
+  **Chat accounts too** (OWN-BOT-HOT-LEAD-1103: our own Telegram alert bot, 330 visit recaps / daily briefs into
+  the owner's bridged Telegram, judged "about the brand", hot lead 11+ times): a person known ONLY from one-to-one
+  Matrix threads is asked once per thread counterpart (key `matrix:<contactId>` in `sender_verdicts`; input = its
+  latest words + the owner's to it, from our mirror); every thread automated >= 0.75 = `automated` (phone or not):
+  relevance not asked, tag `professional_not_to_brand` only (lead-service's lead rule drops it), and the reply
+  trigger skips its bursts `automated_reply` with no Jev. A group member or a person any other source knows is never asked.
 - **RETIRED as a visibility gate (RELATIONSHIP-TAGS-1014, owner 2026-10-14: « TU NE DEVRAIT JAMAIS
   ASSUME QUE JE NE LES CONNAIS PAS »):** the Unibox list, the search and the fact feed ignore
   `people.not_business` (nobody hidden, no fact held, `notBusinessHidden` = 0). Who a person is to the

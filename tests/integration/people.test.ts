@@ -1675,6 +1675,91 @@ describe.skipIf(!RUN)("person layer", () => {
     });
   });
 
+  describe("automated chat accounts (OWN-BOT-HOT-LEAD-1103)", () => {
+    /** One linked Telegram account; a one-to-one thread per counterpart, `inbound` messages from them. */
+    async function seedTelegramThread(handle: string, name: string, texts: string[], ownerTexts: string[] = []) {
+      let [mx] = await db.select().from(matrixConnections).where(eq(matrixConnections.channel, "telegram"));
+      if (!mx) {
+        [mx] = await db
+          .insert(matrixConnections)
+          .values({ orgId: ORG, brandId: BRAND, channel: "telegram", matrixUserId: "@me-tg:hs", counterpartPrefix: "@telegram_", createdByUserId: USER })
+          .returning();
+      }
+      const [contact] = await db
+        .insert(contacts)
+        .values({ orgId: ORG, brandId: BRAND, source: "matrix", channel: "telegram", channelHandle: handle, fullName: name, rawAttributes: {}, sourceConnectionId: mx.id })
+        .returning();
+      const room = `!${handle}`;
+      const events = [
+        ...texts.map((body, i) => ({ sender: handle, body, at: new Date(Date.UTC(2026, 9, 30, 8, i)) })),
+        ...ownerTexts.map((body, i) => ({ sender: "@me-tg:hs", body, at: new Date(Date.UTC(2026, 9, 30, 9, i)) })),
+      ];
+      await db.insert(conversations).values({
+        orgId: ORG, brandId: BRAND, connectionId: mx.id, contactId: contact.id, channel: "telegram", roomId: room,
+        firstMessageAt: events[0].at, lastMessageAt: events[events.length - 1].at,
+        messageCount: events.length, inboundCount: texts.length, outboundCount: ownerTexts.length, lastEventId: `$${handle}-${events.length - 1}`,
+      });
+      await db.insert(matrixRawEvents).values(
+        events.map((e, i) => ({
+          orgId: ORG, brandId: BRAND, connectionId: mx.id, eventId: `$${handle}-${i}`, roomId: room, sender: e.sender,
+          eventType: "m.room.message", originServerTs: e.at,
+          payload: { type: "m.room.message", event_id: `$${handle}-${i}`, sender: e.sender, origin_server_ts: e.at.getTime(), content: { msgtype: "m.text", body: e.body } },
+        })),
+      );
+      return contact.id;
+    }
+
+    it("a bot posting alerts is judged once, hidden, never a lead; a person writing on Telegram stays a lead", async () => {
+      const bot = await seedTelegramThread("@telegram_8817736793:hs", "Distribute.you", [
+        "☀️ 7 active clients",
+        "➡️ Visitor (no account yet) · dwaar.ai · 4/11 Pick who to write to · IN",
+      ]);
+      const human = await seedTelegramThread("@telegram_4242:hs", "Marie Prospect", ["Hi, can you book me meetings with CFOs?"], ["Sure, what market?"]);
+      automatedEmails = new Map([[`matrix:${bot}`, 0.97]]);
+
+      const summary = await buildNow();
+      expect(summary.senderVerdicts).toMatchObject({ status: "ok", pending: 0, automatedPeople: 1 });
+      // Both chat accounts asked once, with their own words and what the owner wrote them.
+      const asked = jevRequests.flatMap((r) => Object.values(r.body.state.senders)) as unknown as {
+        email: string; chatChannel: string; recentMessages: { snippet: string }[]; messagesOwnerSent: { snippet: string }[];
+      }[];
+      const botInput = asked.find((a) => a.email === `matrix:${bot}`)!;
+      expect(botInput.chatChannel).toBe("telegram");
+      expect(botInput.recentMessages.map((m) => m.snippet)).toEqual([
+        "➡️ Visitor (no account yet) · dwaar.ai · 4/11 Pick who to write to · IN",
+        "☀️ 7 active clients",
+      ]);
+      expect(botInput.messagesOwnerSent).toEqual([]);
+      expect(asked.find((a) => a.email === `matrix:${human}`)!.messagesOwnerSent.map((m) => m.snippet)).toEqual(["Sure, what market?"]);
+
+      const rows = await db.select().from(people);
+      const botRow = rows.find((r) => r.personKey === `matrix:${bot}`)!;
+      const humanRow = rows.find((r) => r.personKey === `matrix:${human}`)!;
+      // The bot: automated, never judged "about the brand", no professional_to_brand tag (lead-service's lead rule).
+      expect(botRow.automated).toBe(true);
+      expect(botRow.automatedVerdict).toEqual([{ email: `matrix:${bot}`, verdict: "automated", confidence: 0.97 }]);
+      expect((botRow.connectionTags as { tag: string }[]).map((t) => t.tag)).toEqual(["professional_not_to_brand"]);
+      expect(relevanceRequests.some((r) => JSON.stringify(r.body).includes("dwaar.ai"))).toBe(false);
+      // The person: unchanged, a lead of the brand.
+      expect(humanRow.automated).toBe(false);
+      expect((humanRow.connectionTags as { tag: string }[]).map((t) => t.tag)).toContain("professional_to_brand");
+
+      // A rebuild reads the record: no new judgment.
+      jevRequests.length = 0;
+      await buildNow();
+      expect(jevRequests).toHaveLength(0);
+    });
+
+    it("a hesitant 'automated' verdict on a chat account does not hide the person", async () => {
+      const contact = await seedTelegramThread("@telegram_5555:hs", "Paul", ["ok", "thanks"]);
+      automatedEmails = new Map([[`matrix:${contact}`, 0.6]]);
+      await buildNow();
+      const [row] = await db.select().from(people).where(eq(people.personKey, `matrix:${contact}`));
+      expect(row.automated).toBe(false);
+      expect((row.connectionTags as { tag: string }[]).map((t) => t.tag)).toContain("professional_to_brand");
+    });
+  });
+
   describe("business only (personal-channel conversations judged by Jev)", () => {
     const listPeople = (query = "") =>
       request(app())

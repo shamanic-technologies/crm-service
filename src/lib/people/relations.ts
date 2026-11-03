@@ -337,8 +337,8 @@ export function readPoints(
   for (const p of presences) {
     const id = presenceStableKey(p);
     let tags = presenceConnectionTags(p, x);
-    // An automated sender's address is a machine of a company, never a friend.
-    if (x.automated && p.source === "gmail" && tags.length === 0) {
+    // An automated sender's address (or chat account: OWN-BOT-HOT-LEAD-1103) is a machine of a company, never a friend.
+    if (x.automated && (p.source === "gmail" || p.source === "matrix") && tags.length === 0) {
       tags = [{ tag: "professional_not_to_brand", userIds: [], brandId: x.brandId, basis: [{ kind: "automated_sender", ref: "sender_verdicts", probability: null }] }];
     }
     const capacity = capacityOf(tags.map((t) => t.tag));
