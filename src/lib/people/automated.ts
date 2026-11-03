@@ -28,11 +28,25 @@
  * phone, and Gmail is their only source. An address never judged (Jev failed,
  * its sample could not be read) is a human until judged — nobody disappears
  * without Jev saying so.
+ *
+ * A CHAT account is judged the same way (OWN-BOT-HOT-LEAD-1103, 2026-11-03: our
+ * own Telegram alert bot posted 330 visit recaps / daily briefs into the
+ * owner's bridged Telegram, was judged "about the brand" and became a hot lead
+ * 11+ times). A person known ONLY from one-to-one Matrix threads (WhatsApp,
+ * Telegram, LinkedIn...) is asked once per thread counterpart, key
+ * `matrix:<contactId>` in `sender_verdicts` (the column is named `email` for
+ * history; it holds the sender key), input = the latest messages the account
+ * sent and the latest the owner sent it, read from our own mirror. Every
+ * thread automated >= AUTOMATED_MIN_CONFIDENCE = automated (a phone held by
+ * the thread's own ghost does not save it: it is the bot's number). A group
+ * member, or anyone another source knows, is never asked.
  */
 
-import { and, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { senderVerdicts } from "../../db/schema.js";
+import { contacts, conversations, matrixRawEvents, senderVerdicts } from "../../db/schema.js";
+import { foldEdits, humanText } from "../matrix/events.js";
+import type { MatrixEvent } from "../matrix/client.js";
 import type { ChatTrackingHeaders } from "../chat-client.js";
 import { judgeChoices, type ChoiceQuestion } from "../judgments-client.js";
 import type { PersonCluster } from "./identity.js";
@@ -68,7 +82,9 @@ const CRITERIA: Record<SenderVerdict, string> = {
   automated:
     "the address belongs to a machine sending on its own, with nobody behind it to talk to: notification or digest emails (\"X just messaged you\", " +
     "\"new comment\"), receipts and invoices, account and security alerts, calendar or booking notifications, " +
-    "no-reply addresses, newsletters and marketing blasts, ticket-system auto-acknowledgements.",
+    "no-reply addresses, newsletters and marketing blasts, ticket-system auto-acknowledgements. On a chat app " +
+    "(WhatsApp, Telegram, LinkedIn): a bot or alert line posting reports, recaps, briefs, visit or event " +
+    "notifications on its own, that nobody types and nobody answers.",
 };
 
 export interface SenderSample {
@@ -77,9 +93,12 @@ export interface SenderSample {
   direction: string;
 }
 
-/** What Jev is shown about one address. */
+/** What Jev is shown about one address (or one chat account). */
 export interface SenderInput {
+  /** The sender key: the email address, or `matrix:<contactId>` for a chat account. */
   email: string;
+  /** A chat account: its network (whatsapp, telegram, linkedin...). Absent for an email address. */
+  chatChannel?: string;
   names: string[];
   /** Where the address appears, with message counts when the source has them. */
   appearsOn: { source: string; inbound: number | null; outbound: number | null }[];
@@ -153,13 +172,43 @@ export function isGmailOnly(person: { presences: { source: string }[] }): boolea
   return person.presences.length > 0 && person.presences.every((p) => p.source === "gmail");
 }
 
+/** The `sender_verdicts` key of a chat account (one Matrix contact = one counterpart on one linked account). */
+export const matrixSenderKey = (contactId: string) => `matrix:${contactId}`;
+
+type PresenceLike = { source: string; inboundCount?: number | null; detail: Record<string, unknown> };
+
+/** A person Jev may judge on chat: known from one-to-one Matrix threads ALONE (never a group member, never another source). */
+export function isMatrixDmOnly(person: { presences: PresenceLike[] }): boolean {
+  return person.presences.length > 0 && person.presences.every((p) => p.source === "matrix" && p.detail.kind === "dm");
+}
+
+/** PURE: the sender keys of a Matrix-only person's threads in which the account WROTE. */
+export function matrixSenderKeys(person: { presences: PresenceLike[] }): string[] {
+  if (!isMatrixDmOnly(person)) return [];
+  return person.presences
+    .filter((p) => (p.inboundCount ?? 0) > 0 && typeof p.detail.contactId === "string")
+    .map((p) => matrixSenderKey(p.detail.contactId as string));
+}
+
 /**
  * What Jev is shown about each address to judge (no sample fetched yet): the
- * addresses of Gmail-only people that sent the mailbox at least one message.
+ * addresses of Gmail-only people that sent the mailbox at least one message,
+ * and the chat accounts of Matrix-only people that wrote at least once.
  */
 export function senderInputs(clusters: PersonCluster[]): Map<string, SenderInput> {
   const inputs = new Map<string, SenderInput>();
   for (const c of clusters) {
+    for (const p of c.presences) {
+      if (!isMatrixDmOnly(c) || (p.inboundCount ?? 0) === 0 || typeof p.detail.contactId !== "string") continue;
+      const key = matrixSenderKey(p.detail.contactId);
+      inputs.set(key, {
+        email: key,
+        chatChannel: typeof p.detail.channel === "string" ? p.detail.channel : "chat",
+        names: p.displayName ? [p.displayName] : [],
+        appearsOn: [{ source: `${typeof p.detail.channel === "string" ? p.detail.channel : "chat"} (one-to-one thread)`, inbound: p.inboundCount, outbound: p.outboundCount }],
+        recentMessages: [],
+      });
+    }
     if (!isGmailOnly(c)) continue;
     for (const email of c.emails) {
       const wrote = c.presences.some((p) => p.emails.includes(email) && (p.inboundCount ?? 0) > 0);
@@ -176,6 +225,45 @@ export function senderInputs(clusters: PersonCluster[]): Map<string, SenderInput
   return inputs;
 }
 
+/**
+ * The latest messages a chat account sent in its thread, and the latest the owner sent it, from our own mirror
+ * (edits folded, human words only). Same shape as the Gmail sample.
+ */
+async function matrixSample(contactId: string): Promise<{ sent: SenderSample[]; ownerSent: SenderSample[] }> {
+  const [thread] = await db
+    .select({ connectionId: conversations.connectionId, roomId: conversations.roomId, ghost: contacts.channelHandle })
+    .from(conversations)
+    .innerJoin(contacts, eq(contacts.id, conversations.contactId))
+    .where(eq(conversations.contactId, contactId));
+  if (!thread) return { sent: [], ownerSent: [] };
+  const rows = await db
+    .select({ eventId: matrixRawEvents.eventId, sender: matrixRawEvents.sender, at: matrixRawEvents.originServerTs, payload: matrixRawEvents.payload })
+    .from(matrixRawEvents)
+    .where(and(eq(matrixRawEvents.connectionId, thread.connectionId), eq(matrixRawEvents.roomId, thread.roomId), eq(matrixRawEvents.eventType, "m.room.message")))
+    .orderBy(desc(matrixRawEvents.originServerTs))
+    .limit(60);
+  const events = rows.map(
+    (r) =>
+      ({
+        event_id: r.eventId,
+        sender: r.sender,
+        type: "m.room.message",
+        origin_server_ts: r.at.getTime(),
+        content: ((r.payload as { content?: Record<string, unknown> }).content ?? {}) as Record<string, unknown>,
+      }) as MatrixEvent,
+  );
+  const words = foldEdits(events)
+    .map((e) => ({ sender: e.sender, at: e.origin_server_ts, text: humanText(e.content) }))
+    .filter((m) => m.text)
+    .sort((a, b) => b.at - a.at);
+  const sample = (ms: typeof words, direction: string) =>
+    ms.slice(0, SAMPLE_MESSAGES).map((m) => ({ subject: null, snippet: m.text.slice(0, SNIPPET_CHARS), direction }));
+  return {
+    sent: sample(words.filter((m) => m.sender === thread.ghost), "inbound"),
+    ownerSent: sample(words.filter((m) => m.sender !== thread.ghost), "outbound"),
+  };
+}
+
 /** One judgments call: one `choice` question per address. Fails loud on a malformed answer. */
 export async function judgeSenders(
   inputs: SenderInput[],
@@ -187,10 +275,13 @@ export async function judgeSenders(
     senders[`a${i}`] = input;
     questions[`a${i}`] = {
       type: "choice",
-      instructions:
-        `Read senders.a${i} in the state: the address ${input.email}, the names it signs with, where it appears, ` +
-        "the latest messages it sent and the latest the owner sent to it. Judge WHO OWNS the address, not the form of one message: is it a " +
-        "real human the brand owner is in conversation with, or an automated sender?",
+      instructions: input.chatChannel
+        ? `Read senders.a${i} in the state: a ${input.chatChannel} account, the names it shows, where it appears, ` +
+          "the latest messages it sent and the latest the owner sent to it. Judge WHO IS BEHIND the account, not the form of one message: is it a " +
+          "real human the brand owner is in conversation with, or an automated sender (a bot, an alert line)?"
+        : `Read senders.a${i} in the state: the address ${input.email}, the names it signs with, where it appears, ` +
+          "the latest messages it sent and the latest the owner sent to it. Judge WHO OWNS the address, not the form of one message: is it a " +
+          "real human the brand owner is in conversation with, or an automated sender?",
       criteria: CRITERIA,
     };
   });
@@ -247,9 +338,9 @@ export async function resolveSenderVerdicts(
   const ready: SenderInput[] = [];
   await mapLimit(toJudge, SAMPLE_CONCURRENCY, async (email) => {
     const input = inputs.get(email)!;
-    if (!gmailReadable) return; // judged on a later build, once its mail can be read
+    if (!input.chatChannel && !gmailReadable) return; // judged on a later build, once its mail can be read
     try {
-      const sample = await gmailSample(identity, email);
+      const sample = input.chatChannel ? await matrixSample(email.slice("matrix:".length)) : await gmailSample(identity, email);
       input.recentMessages = sample.sent;
       input.messagesOwnerSent = sample.ownerSent;
     } catch (err) {
@@ -313,16 +404,24 @@ export async function resolveSenderVerdicts(
   };
 }
 
-/** True when the person is Gmail-only, holds no phone, and Jev judged every address automated, confidently. */
+/**
+ * True when the person is Gmail-only, holds no phone, and Jev judged every address automated, confidently;
+ * or Matrix-DM-only and Jev judged every thread they wrote in automated, confidently.
+ */
 export function isAutomatedPerson(
-  person: { emails: string[]; phones: string[]; presences: { source: string }[] },
+  person: { emails: string[]; phones: string[]; presences: PresenceLike[] },
   verdicts: Map<string, RecordedVerdict>,
 ): boolean {
-  if (person.emails.length === 0 || person.phones.length > 0 || !isGmailOnly(person)) return false;
-  return person.emails.every((e) => {
-    const v = verdicts.get(e);
+  const confident = (key: string) => {
+    const v = verdicts.get(key);
     return v?.verdict === "automated" && v.confidence >= AUTOMATED_MIN_CONFIDENCE;
-  });
+  };
+  if (isMatrixDmOnly(person)) {
+    const keys = matrixSenderKeys(person);
+    return keys.length > 0 && keys.every(confident);
+  }
+  if (person.emails.length === 0 || person.phones.length > 0 || !isGmailOnly(person)) return false;
+  return person.emails.every(confident);
 }
 
 /** The verdicts that decided a person, stored on the person row. */

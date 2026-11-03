@@ -62,6 +62,8 @@ import {
 } from "./sources.js";
 import {
   isAutomatedPerson,
+  isMatrixDmOnly,
+  matrixSenderKeys,
   personVerdicts,
   resolveSenderVerdicts,
   type SenderVerdictSummary,
@@ -695,7 +697,11 @@ async function buildScopePeopleOn(
       stateSource: state.stateSource,
       stateDetail: state.stateDetail,
       automated: automated.get(c.personKey)!,
-      automatedVerdict: c.emails.length ? personVerdicts(c.emails, senders.verdicts) : null,
+      automatedVerdict: isMatrixDmOnly(c)
+        ? personVerdicts(matrixSenderKeys(c), senders.verdicts)
+        : c.emails.length
+          ? personVerdicts(c.emails, senders.verdicts)
+          : null,
       // RELATIONSHIP-TAGS-1014: `notBusiness` hides NOBODY any more (list, search,
       // fact feed all ignore it); who a person is to the brand is lead-service's
       // relationship tag. It only keeps today's serve (no relationship policy)

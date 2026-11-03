@@ -11,6 +11,7 @@ import {
   people,
   peopleScopes,
   replyTriggerReports,
+  senderVerdicts,
   voiceNoteTranscripts,
   whatsappSends,
   type MatrixConnection,
@@ -401,6 +402,28 @@ describe.skipIf(!RUN)("reply trigger", () => {
     await deliverDueReplies();
     expect(campaignCalls).toHaveLength(1);
     expect(campaignCalls[0].body.idempotencyKey).toBe("crm:matrix:reply:$real");
+  });
+
+  it("a chat account the people build judged automated (a bot, an alert line) is no Lead event, no Jev; a person is (OWN-BOT-HOT-LEAD-1103)", async () => {
+    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
+    conn = await fresh();
+    await buildPerson();
+    const [{ contactId }] = await db.select({ contactId: conversations.contactId }).from(conversations).where(eq(conversations.id, conversationId));
+    await db.insert(senderVerdicts).values({
+      orgId: ORG, email: `matrix:${contactId}`, verdict: "automated", confidence: 0.97, probabilities: {}, input: {}, model: "jev-test", runId: "r",
+    });
+    try {
+      await event("$bot", GHOST, min(1), "Visitor (no account yet) · acme.io · 4/11 Pick who to write to · IN");
+      expect((await detectReplies(conn, run1)).skipped).toEqual([{ reason: "automated_reply", roomId: ROOM }]);
+      expect(jevCalls).toBe(0);
+      await deliverDueReplies();
+      expect(campaignCalls).toHaveLength(0);
+    } finally {
+      await db.delete(senderVerdicts).where(eq(senderVerdicts.orgId, ORG));
+    }
+    // Judged human (or never judged): the same thread is a Lead event as before.
+    await event("$human", GHOST, min(5), "Hi, tell me more about your offer");
+    expect((await detectReplies(conn, run1)).detected).toBe(1);
   });
 
   it("a person with no email is reported by phone + name (REPLY-PHONE-ONLY-1015); neither = skipped, named in the log; a person not built yet waits for the rebuild", async () => {

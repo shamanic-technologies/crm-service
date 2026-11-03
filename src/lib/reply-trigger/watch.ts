@@ -59,6 +59,7 @@ import {
   people,
   peopleScopes,
   replyTriggerReports,
+  senderVerdicts,
   whatsappSends,
   type MatrixConnection,
   type ReplyTriggerReport,
@@ -87,6 +88,7 @@ import { HANDOFF_STATUS, readLineContext, type LineContext } from "./line-contex
 import { automationOn, isAccountType } from "../matrix/account-types.js";
 import { ourAutomatedEchoesOn } from "./own-automated.js";
 import { lazyJudgeRun, outcomeAtDetection } from "./outcome.js";
+import { matrixSenderKey } from "../people/automated.js";
 
 const SERVICE_NAME = "crm-service";
 const SOURCE = "matrix";
@@ -312,6 +314,15 @@ export interface BurstJudgeIdentity {
  * watch started), so a later "actually, tell me more" after a "no" is read in
  * its context; the latest words decide.
  */
+/** The recorded sender verdict of a chat account says automated, confidently (people/automated.ts). */
+async function isAutomatedChatSender(orgId: string, contactId: string): Promise<boolean> {
+  const [v] = await db
+    .select({ verdict: senderVerdicts.verdict, confidence: senderVerdicts.confidence })
+    .from(senderVerdicts)
+    .where(and(eq(senderVerdicts.orgId, orgId), eq(senderVerdicts.email, matrixSenderKey(contactId))));
+  return v?.verdict === "automated" && v.confidence >= AUTOMATED_MIN_CONFIDENCE;
+}
+
 export async function judgeBurst(who: BurstJudgeIdentity, runId: () => Promise<string>, burst: BurstMessage[]): Promise<Judgment> {
   try {
     const result = await judgeChoices(
@@ -502,7 +513,7 @@ async function detectRepliesOn(
     const onlyEchoes = words.length === 0;
     const burst = onlyEchoes ? uncovered : fresh.length > 0 ? fresh : words;
     const [conversation] = await db
-      .select({ id: conversations.id, contactPhone: contacts.phoneE164, ghost: contacts.channelHandle })
+      .select({ id: conversations.id, contactId: conversations.contactId, contactPhone: contacts.phoneE164, ghost: contacts.channelHandle })
       .from(conversations)
       .leftJoin(contacts, eq(contacts.id, conversations.contactId))
       .where(and(eq(conversations.connectionId, conn.id), eq(conversations.roomId, roomId)));
@@ -531,6 +542,10 @@ async function detectRepliesOn(
     ) {
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.HUMAN_IN_CONVERSATION;
+    } else if (conversation && (await isAutomatedChatSender(conn.orgId, conversation.contactId))) {
+      // A chat account the people build judged automated (a bot, an alert line) writes no Lead event (OWN-BOT-HOT-LEAD-1103).
+      status = REPLY_STATUS.SKIPPED;
+      reason = REPLY_REASONS.AUTOMATED_REPLY;
     } else {
       judgment = await judgeBurst(
         { orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId, channel: conn.channel, where: `connection ${conn.id}` },
