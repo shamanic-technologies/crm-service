@@ -23,6 +23,15 @@
  *  - "Not the same person" (`rejectTwinVerdict`) rejects it for good: the next build withdraws the link and the
  *    two are two people again.
  *
+ * SAME COMPANY, TWO NAMES (ZARINA-CLIENT-AS-PROSPECT-1104, owner 2026-11-04 « catastrophique »): a client wrote from
+ * her company mailbox (info@livingvital.ch, "Aronia Vital", signed "Zarina Birnbacher, LivingVital") and signed up,
+ * paid and chatted on WhatsApp as "Living Vital" (a Gmail). Two names, two addresses, no record stating both: the
+ * writer read the paying client as a cold prospect. So a second retrieval feeds the SAME question: two people linked
+ * to the same ORGANIZATION (people.organizations, a company domain Jev judged an organization) when at most
+ * `MAX_TWIN_GROUP` people of the brand are (a small company: a bigger one is colleagues, never asked). The card shows
+ * each side's company domains and its latest stored messages, Gmail AND WhatsApp / chat threads (a signature, the
+ * same campaign discussed), so Jev judges on what the brand holds; same verdict table, same evidence, same undo.
+ *
  * Fail-soft: Jev / chat-service down = nothing judged this build (`status: failed`), retried next build; the
  * people build never fails on it.
  */
@@ -33,6 +42,7 @@ import { db } from "../../db/index.js";
 import { people, peopleMessageTexts, samePersonVerdicts, type PeopleScope, type SamePersonVerdict } from "../../db/schema.js";
 import type { ChatTrackingHeaders } from "../chat-client.js";
 import { judgeChoices, type ChoiceAnswer, type ChoiceQuestion } from "../judgments-client.js";
+import { matrixConversationInput } from "./relevance.js";
 import type { Evidence } from "./identity.js";
 import { mapLimit, siblingGetOk, type SiblingIdentity } from "./siblings.js";
 
@@ -57,6 +67,10 @@ export interface TwinPerson {
   sources: string[];
   /** Every name a record of this person states. */
   presenceNames: string[];
+  /** The organizations the person speaks for (people.organizations). */
+  companies: { companyId: string; domain: string }[];
+  /** Their one-to-one Matrix conversations (WhatsApp, LinkedIn...). */
+  conversationIds: string[];
   automated: boolean;
   groupOnly: boolean;
   firstActivityAt: string | null;
@@ -64,6 +78,9 @@ export interface TwinPerson {
 }
 
 export interface TwinPair {
+  /** Why the two are asked: a shared full name, or a shared (small) company. */
+  basis: "name" | "company";
+  /** The shared full name, or `company:<domain>`. */
   name: string;
   /** `a.personKey` < `b.personKey`. */
   a: TwinPerson;
@@ -80,7 +97,11 @@ export interface TwinMessage {
 export interface NameTwinSummary {
   status: "ok" | "failed";
   candidates: number;
+  /** Of `candidates`, the pairs sharing a company (and no full name). */
+  companyCandidates: number;
   commonNamesSkipped: number;
+  /** Companies more than `MAX_TWIN_GROUP` people speak for: colleagues, never asked. */
+  largeCompaniesSkipped: number;
   judged: number;
   reused: number;
   /** Pairs left for the next build (per-build cap). */
@@ -132,11 +153,56 @@ export function nameTwinPairs(pool: TwinPerson[]): { pairs: TwinPair[]; commonNa
         const id = `${a.personKey}|${b.personKey}`;
         if (seen.has(id)) continue;
         seen.add(id);
-        pairs.push({ name, a, b });
+        pairs.push({ basis: "name", name, a, b });
       }
     }
   }
   return { pairs, commonNamesSkipped };
+}
+
+/**
+ * PURE: every pair of people speaking for the same organization, not one human yet, in a company at most
+ * `MAX_TWIN_GROUP` people of the brand speak for. A pair `nameTwinPairs` already asks is left to it.
+ */
+export function companyTwinPairs(pool: TwinPerson[], asked: Set<string> = new Set()): { pairs: TwinPair[]; largeCompaniesSkipped: number } {
+  const byCompany = new Map<string, { domain: string; members: Map<string, TwinPerson> }>();
+  for (const p of pool) {
+    if (p.automated || p.groupOnly) continue;
+    for (const c of p.companies) {
+      const group = byCompany.get(c.companyId) ?? { domain: c.domain, members: new Map<string, TwinPerson>() };
+      group.members.set(p.personKey, p);
+      byCompany.set(c.companyId, group);
+    }
+  }
+  const pairs: TwinPair[] = [];
+  const seen = new Set(asked);
+  let largeCompaniesSkipped = 0;
+  for (const [, group] of [...byCompany.entries()].sort(([x], [y]) => (x < y ? -1 : 1))) {
+    if (group.members.size < 2) continue;
+    if (group.members.size > MAX_TWIN_GROUP) {
+      largeCompaniesSkipped++;
+      continue;
+    }
+    const members = [...group.members.values()].sort((x, y) => (x.personKey < y.personKey ? -1 : 1));
+    for (let i = 0; i < members.length; i++) {
+      for (let j = i + 1; j < members.length; j++) {
+        const [a, b] = [members[i], members[j]];
+        if (a.humanId && a.humanId === b.humanId) continue;
+        const id = `${a.personKey}|${b.personKey}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        pairs.push({ basis: "company", name: `company:${group.domain}`, a, b });
+      }
+    }
+  }
+  return { pairs, largeCompaniesSkipped };
+}
+
+/** PURE: every pair to ask, name twins first, then company twins not already asked by name. */
+export function twinPairs(pool: TwinPerson[]): { pairs: TwinPair[]; commonNamesSkipped: number; largeCompaniesSkipped: number } {
+  const byName = nameTwinPairs(pool);
+  const byCompany = companyTwinPairs(pool, new Set(byName.pairs.map((p) => `${p.a.personKey}|${p.b.personKey}`)));
+  return { pairs: [...byName.pairs, ...byCompany.pairs], commonNamesSkipped: byName.commonNamesSkipped, largeCompaniesSkipped: byCompany.largeCompaniesSkipped };
 }
 
 const sha = (v: unknown) => createHash("sha256").update(JSON.stringify(v)).digest("hex");
@@ -146,6 +212,7 @@ const card = (p: TwinPerson, messages: TwinMessage[]) => ({
   addresses: p.emails,
   phones: p.phones,
   company: p.company,
+  companyDomains: p.companies.map((c) => c.domain),
   seenOn: p.sources,
   firstActivity: p.firstActivityAt,
   lastActivity: p.lastActivityAt,
@@ -158,6 +225,30 @@ export function sameHumanQuestion(
   messages: { a: TwinMessage[]; b: TwinMessage[] },
   brandName: string | null,
 ): { state: unknown; question: ChoiceQuestion; hash: string } {
+  const hash = sha({ v: 1, name: pair.name, a: [...pair.a.identityKeys].sort(), b: [...pair.b.identityKeys].sort() });
+  if (pair.basis === "company") {
+    const domain = pair.name.slice("company:".length);
+    return {
+      state: { business: brandName, sharedCompany: domain, personA: card(pair.a, messages.a), personB: card(pair.b, messages.b) },
+      question: {
+        type: "choice",
+        instructions:
+          `The business below knows two contacts, A and B, both tied to the same small company (${domain}), under ` +
+          "different names or addresses. Are they the SAME HUMAN reaching the business from two places (very common " +
+          "in a small company: the founder writes from the company mailbox, info@ or contact@, and signs up, pays or " +
+          "chats from a personal Gmail or phone; an account named after the company rather than the person), or two " +
+          "different people of that company (colleagues)? Judge on the person: a signature naming the other side's " +
+          "name or company, the same project, campaign, payment or meeting discussed with both, one continuing what " +
+          "the other started, matching timing. Two clearly different first names signing are two people. Messages " +
+          "direction: inbound = the contact wrote to the business, outbound = the business wrote to them.",
+        criteria: {
+          same_human: "A and B are one person reaching the business from two addresses, accounts or channels",
+          different_humans: "A and B are two different people of the same company",
+        },
+      },
+      hash,
+    };
+  }
   return {
     state: { business: brandName, sharedName: pair.name, personA: card(pair.a, messages.a), personB: card(pair.b, messages.b) },
     question: {
@@ -174,7 +265,7 @@ export function sameHumanQuestion(
         different_humans: "A and B are two different people who happen to share a name",
       },
     },
-    hash: sha({ v: 1, name: pair.name, a: [...pair.a.identityKeys].sort(), b: [...pair.b.identityKeys].sort() }),
+    hash,
   };
 }
 
@@ -220,6 +311,8 @@ async function previousPeople(scope: PeopleScope): Promise<TwinPerson[]> {
       sources: people.sources,
       // Only the names of its records (a person's presences can be large).
       presenceNames: sql<(string | null)[]>`jsonb_path_query_array(${people.presences}, '$[*].displayName')`,
+      companies: sql<{ companyId: string; domain: string }[]>`(SELECT coalesce(jsonb_agg(jsonb_build_object('companyId', o->>'companyId', 'domain', o->>'domain')), '[]'::jsonb) FROM jsonb_array_elements(${people.organizations}) o WHERE o->>'companyId' IS NOT NULL)`,
+      conversationIds: sql<(string | null)[]>`jsonb_path_query_array(${people.presences}, '$[*] ? (@.source == "matrix" && @.detail.kind == "dm").detail.conversationId')`,
       automated: people.automated,
       groupOnly: people.groupOnly,
       firstActivityAt: people.firstActivityAt,
@@ -237,6 +330,8 @@ async function previousPeople(scope: PeopleScope): Promise<TwinPerson[]> {
     phones: r.phones as string[],
     sources: r.sources as string[],
     presenceNames: (r.presenceNames ?? []).filter((n): n is string => typeof n === "string" && n.length > 0),
+    companies: r.companies ?? [],
+    conversationIds: (r.conversationIds ?? []).filter((n): n is string => typeof n === "string" && n.length > 0),
     automated: r.automated,
     groupOnly: r.groupOnly,
     firstActivityAt: r.firstActivityAt?.toISOString() ?? null,
@@ -244,8 +339,34 @@ async function previousPeople(scope: PeopleScope): Promise<TwinPerson[]> {
   }));
 }
 
+/** PURE: a side's latest messages over every channel, newest first, `MESSAGES_PER_SIDE` at most. */
+export function newestMessages(lists: TwinMessage[][]): TwinMessage[] {
+  return lists
+    .flat()
+    .sort((x, y) => (y.at ?? "").localeCompare(x.at ?? ""))
+    .slice(0, MESSAGES_PER_SIDE);
+}
+
+/** The latest messages of a person: stored Gmail / cold email of their addresses + their chat threads (our mirror, no sibling call). */
+async function latestMessages(scopeId: string, person: TwinPerson): Promise<TwinMessage[]> {
+  const chats: TwinMessage[][] = [];
+  for (const id of person.conversationIds.slice(0, 5)) {
+    const input = await matrixConversationInput(id);
+    if (!input) continue;
+    chats.push(
+      input.messages.slice(-MESSAGES_PER_SIDE).map((m) => ({
+        at: m.at,
+        direction: m.direction,
+        subject: null,
+        text: [...(m.text ?? "")].slice(0, MESSAGE_CHARS).join(""),
+      })),
+    );
+  }
+  return newestMessages([...chats, await storedMessages(scopeId, person.emails)]);
+}
+
 /** The latest stored Gmail / cold email messages of a person's addresses (our store, no sibling call). */
-async function latestMessages(scopeId: string, emails: string[]): Promise<TwinMessage[]> {
+async function storedMessages(scopeId: string, emails: string[]): Promise<TwinMessage[]> {
   if (emails.length === 0) return [];
   const rows = await db
     .select({ at: peopleMessageTexts.at, direction: peopleMessageTexts.direction, subject: peopleMessageTexts.subject, body: peopleMessageTexts.body })
@@ -271,11 +392,13 @@ export async function judgeNameTwins(
   /** The run the same-human judgments ride (LEDGER-CRM-UNDECLARED-1027: identity work, a support child of the build). */
   judgeRunId: () => Promise<string>,
 ): Promise<NameTwinSummary> {
-  const summary: NameTwinSummary = { status: "ok", candidates: 0, commonNamesSkipped: 0, judged: 0, reused: 0, pending: 0, same: 0, error: null };
+  const summary: NameTwinSummary = { status: "ok", candidates: 0, companyCandidates: 0, commonNamesSkipped: 0, largeCompaniesSkipped: 0, judged: 0, reused: 0, pending: 0, same: 0, error: null };
   try {
-    const { pairs, commonNamesSkipped } = nameTwinPairs(await previousPeople(scope));
+    const { pairs, commonNamesSkipped, largeCompaniesSkipped } = twinPairs(await previousPeople(scope));
     summary.candidates = pairs.length;
+    summary.companyCandidates = pairs.filter((p) => p.basis === "company").length;
     summary.commonNamesSkipped = commonNamesSkipped;
+    summary.largeCompaniesSkipped = largeCompaniesSkipped;
     if (pairs.length === 0) return summary;
     const recorded = await db
       .select()
@@ -300,7 +423,7 @@ export async function judgeNameTwins(
     let firstError: string | null = null;
     await mapLimit(batch, CONCURRENCY, async (pair) => {
       try {
-        const messages = { a: await latestMessages(scope.id, pair.a.emails), b: await latestMessages(scope.id, pair.b.emails) };
+        const messages = { a: await latestMessages(scope.id, pair.a), b: await latestMessages(scope.id, pair.b) };
         const { state, question, hash } = sameHumanQuestion(pair, messages, brand.brand.name);
         const result = await judgeChoices(state, { same: question }, tracking);
         const answer = result.answers.same;

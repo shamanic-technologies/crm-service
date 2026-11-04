@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
 import {
   MAX_TWIN_GROUP,
+  companyTwinPairs,
   nameTwinPairs,
+  newestMessages,
+  twinPairs,
   sameHumanQuestion,
   twinEvidence,
   twinName,
@@ -18,6 +21,8 @@ const person = (over: Partial<TwinPerson> & { personKey: string }): TwinPerson =
   phones: [],
   sources: ["gmail"],
   presenceNames: [],
+  companies: [],
+  conversationIds: [],
   automated: false,
   groupOnly: false,
   firstActivityAt: null,
@@ -124,5 +129,73 @@ describe("twinEvidence: a same verdict ties every key both people held", () => {
         { emails: ["lukstan14@gmail.com"], phones: [] },
       ],
     });
+  });
+});
+
+describe("companyTwinPairs: one human, two names, the same small company (ZARINA-CLIENT-AS-PROSPECT-1104)", () => {
+  const living = { companyId: "c-living", domain: "livingvital.ch" };
+  // Her company mailbox, signed "Zarina Birnbacher, LivingVital".
+  const mailbox = person({ personKey: "email:info@livingvital.ch", humanId: "h1", displayName: "Aronia Vital", companies: [living] });
+  // Her signup + payment + WhatsApp, a Gmail; company from the Clerk organization she created.
+  const account = person({
+    personKey: "email:marketingaronia@gmail.com",
+    humanId: "h2",
+    displayName: "Living Vital",
+    phones: ["+41799389795"],
+    sources: ["matrix", "posthog", "stripe", "clerk"],
+    companies: [living],
+    conversationIds: ["conv-wa"],
+  });
+
+  it("different names, different addresses, one company: asked once", () => {
+    const { pairs } = companyTwinPairs([account, mailbox]);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0]).toMatchObject({ basis: "company", name: "company:livingvital.ch" });
+    expect(pairs[0].a.personKey).toBe("email:info@livingvital.ch");
+  });
+
+  it("already one human, no company, automated or group-only = no question", () => {
+    expect(companyTwinPairs([mailbox, { ...account, humanId: "h1" }]).pairs).toHaveLength(0);
+    expect(companyTwinPairs([mailbox, { ...account, companies: [] }]).pairs).toHaveLength(0);
+    expect(companyTwinPairs([mailbox, { ...account, automated: true }]).pairs).toHaveLength(0);
+  });
+
+  it("a company more than MAX_TWIN_GROUP people speak for is colleagues: never asked", () => {
+    const staff = Array.from({ length: MAX_TWIN_GROUP + 1 }, (_, i) => person({ personKey: `email:p${i}@acme.com`, companies: [{ companyId: "c-acme", domain: "acme.com" }] }));
+    expect(companyTwinPairs(staff)).toEqual({ pairs: [], largeCompaniesSkipped: 1 });
+  });
+
+  it("a pair sharing a full name AND a company is asked once, as a name twin", () => {
+    const a = person({ personKey: "email:jo@acme.com", presenceNames: ["Jo Smith"], companies: [{ companyId: "c", domain: "acme.com" }] });
+    const b = person({ personKey: "email:jo.smith@gmail.com", presenceNames: ["Jo Smith"], companies: [{ companyId: "c", domain: "acme.com" }] });
+    const { pairs } = twinPairs([a, b]);
+    expect(pairs.map((p) => p.basis)).toEqual(["name"]);
+  });
+
+  it("Jev sees the shared company, each side's company domains, sources and its chat messages", () => {
+    const [pair] = companyTwinPairs([account, mailbox]).pairs;
+    const messages = {
+      a: [{ at: "2026-10-20T10:00:00Z", direction: "inbound", subject: "Campaign", text: "Thanks!\nZarina Birnbacher\nLivingVital\nwww.livingvital.ch" }],
+      b: [{ at: "2026-10-14T09:42:00Z", direction: "inbound", subject: null, text: "I added the $400 credits" }],
+    };
+    const { state, question, hash } = sameHumanQuestion(pair, messages, "distribute.you");
+    const s = state as { sharedCompany: string; personA: Record<string, unknown>; personB: Record<string, unknown> };
+    expect(s.sharedCompany).toBe("livingvital.ch");
+    expect(s.personA).toMatchObject({ names: ["Aronia Vital"], addresses: [], companyDomains: ["livingvital.ch"], latestMessages: messages.a });
+    expect(s.personB).toMatchObject({ names: ["Living Vital"], seenOn: ["matrix", "posthog", "stripe", "clerk"], latestMessages: messages.b });
+    expect(question.type).toBe("choice");
+    expect(Object.keys((question as { criteria: object }).criteria)).toEqual(["same_human", "different_humans"]);
+    expect(question.instructions).toContain("livingvital.ch");
+    // The verdict is keyed on who the two are, never on their messages.
+    expect(sameHumanQuestion(pair, { a: [], b: [] }, null).hash).toBe(hash);
+  });
+
+  it("newestMessages: Gmail and chat merged, newest first, 3 at most", () => {
+    const m = (at: string) => ({ at, direction: "inbound", subject: null, text: at });
+    expect(newestMessages([[m("2026-01-01"), m("2026-03-01")], [m("2026-02-01"), m("2026-04-01")]]).map((x) => x.at)).toEqual([
+      "2026-04-01",
+      "2026-03-01",
+      "2026-02-01",
+    ]);
   });
 });

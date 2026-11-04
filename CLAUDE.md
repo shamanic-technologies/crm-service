@@ -1160,6 +1160,13 @@ owner had written to. A recorded fact, never an address-shape guess.
   evidence `name_twin` of the SAME build, stated as an org link like a stated merge. "Not the same person" =
   `POST /orgs/people/same-person-verdicts/:id/reject` (never asked again, link withdrawn next build); `GET` lists.
   Prod 2026-10-22: 47 pairs fleet-wide (Distribute.you 5/5 real), ~$0.03 once. Summary `nameTwins`.
+  **Same small company, two names** (ZARINA-CLIENT-AS-PROSPECT-1104: a paying client was "Aronia Vital" on
+  info@livingvital.ch and "Living Vital" on a Gmail with Clerk / Stripe / WhatsApp; the writer pitched her as a cold
+  prospect): the SAME question also asks two people sharing an organization (`people.organizations` companyId) that
+  at most 5 people of the brand speak for (bigger = colleagues, never asked; `largeCompaniesSkipped`), name
+  `company:<domain>`, instructions about a founder writing from info@ and paying from a Gmail. Every card (both kinds)
+  carries `companyDomains` and the latest 3 messages over Gmail store AND the person's one-to-one Matrix threads.
+  Summary `companyCandidates`.
 - **"Same HUMAN?" is human-service's call** (`lib/people/humans.ts`, LEAD-REFONTE-1013, human-service
   `/internal/human-identities/*`). Each build states, before clustering: every record's email + phone
   keys TOGETHER (`resolve`, create; proof = fleet-wide merge there), cached per key set in
@@ -2014,6 +2021,10 @@ fact source literal (`"clerk"`) is the one per-provider line in `identity.ts` /
   emitted and live ones are withdrawn (`signup_stated_by_auth_provider`); PostHog keeps its visits.
   Our own brand counts its signups through THIS connector like any client (2026-10-13: a read of
   client-service, #124, was retired the same day: `RETIRED_FAMILIES` withdraws its facts as `source_retired`).
+- **The organization a user CREATED, named after a website, is company evidence** (`createdOrganizationWebsite`,
+  ZARINA-CLIENT-AS-PROSPECT-1104): distribute.you's onboarding names the Clerk organization after the brand's site
+  (`www.livingvital.ch`), so the clerk contact's `website` = that host name; a plain name ("Acme Inc") or an org
+  someone else created states nothing. Organizations.ts judges the domain like any record's website.
 - People: source `clerk`, presence `userIds = [Clerk user id]`. Fact: `signup`,
   dateBasis `user_created_at`, family `clerk_user` (snapshot) — the vocabulary
   PostHog signups use; lead-service reads `source` as a free string.

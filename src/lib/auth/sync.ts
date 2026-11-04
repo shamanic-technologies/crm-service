@@ -31,7 +31,7 @@ import { resolveBrandCredential } from "../gohighlevel/credentials.js";
 import { canonicalHash } from "../gohighlevel/records.js";
 import { normalizePhone } from "../people/identity.js";
 import { isStaffEmail } from "../owner-telegram.js";
-import { isSignup, type AuthProviderAdapter, type DerivedAuthMembership, type SignupContext } from "./provider.js";
+import { createdOrganizationWebsite, isSignup, type AuthProviderAdapter, type DerivedAuthMembership, type SignupContext } from "./provider.js";
 import { AUTH_PROVIDERS, isAuthProvider } from "./providers.js";
 
 export interface AuthSyncResult {
@@ -154,6 +154,8 @@ async function deriveContacts(conn: AuthConnection, externalIds?: string[]): Pro
       fullName: u.fullName,
       firstName: u.firstName,
       lastName: u.lastName,
+      // The organization the user created, named after its website: company evidence (organizations.ts).
+      website: createdOrganizationWebsite(u.externalId, byUser.get(u.externalId) ?? []),
       rawAttributes: {
         emails: u.emails,
         phones: u.phones,
