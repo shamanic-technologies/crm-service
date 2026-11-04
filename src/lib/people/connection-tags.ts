@@ -41,6 +41,18 @@ export const CONNECTION_TAGS = [
 ] as const;
 export type ConnectionTag = (typeof CONNECTION_TAGS)[number];
 
+/**
+ * The tag a stated one contradicts: "to brand" vs "not to brand", "to user" vs "not to user".
+ * A human stating one outranks the automatic answer holding the other, on the person, its company
+ * links AND each of its contact points (people/corrections.ts, people/relations.ts).
+ */
+export const OPPOSITE_TAG: Record<ConnectionTag, ConnectionTag> = {
+  personal_to_user: "personal_not_to_user",
+  personal_not_to_user: "personal_to_user",
+  professional_to_brand: "professional_not_to_brand",
+  professional_not_to_brand: "professional_to_brand",
+};
+
 /** A tag holds when Jev's yes-probability reaches this. */
 export const TAG_MIN_PROBABILITY = 0.5;
 

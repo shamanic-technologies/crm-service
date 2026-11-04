@@ -82,6 +82,7 @@ import {
 import { lazyJudgeRun, outcomeAtDetection } from "./outcome.js";
 import { askEmailPath, type EmailPathAnswer } from "./email-path.js";
 import { readEmailThreadForReply, type EmailBurstMessage, type StoredEmail } from "./email-thread.js";
+import { emailKeys, statedNotToBrand } from "../people/stated-not-to-brand.js";
 import {
   AUTOMATED_MIN_CONFIDENCE,
   burstVerdict,
@@ -291,6 +292,8 @@ export async function decideGmailBurst(
   }
 
   if (!(await gmailOwnerBrands(scope.orgId, address)).has(scope.brandId)) return { kind: "not_owner" };
+  // The brand said this person is not someone of theirs (DUALIST-WA-SILENCE-1104): never a Lead event.
+  if (await statedNotToBrand(scope.orgId, scope.brandId, emailKeys([address]))) return skip(REPLY_REASONS.STATED_NOT_TO_BRAND, { emailPathAnswer });
   const [sender] = await db
     .select({ verdict: senderVerdicts.verdict, confidence: senderVerdicts.confidence })
     .from(senderVerdicts)
@@ -541,6 +544,10 @@ export async function deliverGmailReply(r: ReplyTriggerReport, identity: DoorIde
       runId: identity.runId,
     });
     return { status: REPLY_STATUS.FAILED, reason: REPLY_REASONS.PERSON_NOT_BUILT };
+  }
+  if (await statedNotToBrand(r.orgId, r.brandId, emailKeys([address]))) {
+    await settle(r, now, { personId: person.personId, status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.STATED_NOT_TO_BRAND, lastError: null, runId: identity.runId });
+    return { status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.STATED_NOT_TO_BRAND };
   }
   const phone = dialablePhone(person.phones as string[]);
   const who = { personId: person.personId, fullName: person.displayName, email: address, phone };

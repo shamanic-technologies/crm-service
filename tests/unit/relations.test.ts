@@ -103,6 +103,15 @@ describe("personRelations (PERSON-RELATIONS-1017)", () => {
     expect(keysOf(rels).personal).toBeUndefined();
     expect(keysOf(rels).pro).toContain("matrix:k-wa");
   });
+
+  it("a person stated NOT to brand loses Jev's 'to brand' on every point: no lead relation left (DUALIST-WA-SILENCE-1104)", () => {
+    const corrected = correctPointTags(readings, [corr("tag_add", { tag: "professional_not_to_brand" })], "brand-1");
+    expect(corrected.some((r) => r.tags.some((t) => t.tag === "professional_to_brand"))).toBe(false);
+    const rels = personRelations(PID, corrected, new Map(), []);
+    expect(rels.some((r) => r.tags.some((t) => t.tag === "professional_to_brand"))).toBe(false);
+    // The personal chat stays personal: only the contradicted tag goes.
+    expect(keysOf(rels).personal).toEqual(["matrix:k-wa"]);
+  });
 });
 
 // WA-SPLIT-RELATION-1026 (prod 2026-10-26): Noah Lucia, noah@daybookhealthcare.com + a WhatsApp chat about the offer

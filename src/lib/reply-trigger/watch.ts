@@ -89,6 +89,7 @@ import { automationOn, isAccountType } from "../matrix/account-types.js";
 import { ourAutomatedEchoesOn } from "./own-automated.js";
 import { lazyJudgeRun, outcomeAtDetection } from "./outcome.js";
 import { matrixSenderKey } from "../people/automated.js";
+import { matrixContactKeys, statedNotToBrand } from "../people/stated-not-to-brand.js";
 
 const SERVICE_NAME = "crm-service";
 const SOURCE = "matrix";
@@ -179,6 +180,11 @@ export const REPLY_REASONS = {
    * the conversation is theirs, never answered automatically.
    */
   HUMAN_IN_CONVERSATION: "human_in_conversation",
+  /**
+   * The brand's user stated this person is not someone of the brand (a `tag_add professional_not_to_brand`
+   * correction, DUALIST-WA-SILENCE-1104, people/stated-not-to-brand.ts): never answered, never a Lead event.
+   */
+  STATED_NOT_TO_BRAND: "stated_not_to_brand",
   /**
    * The person holds no email AND no international phone: the door cannot name them
    * (REPLY-PHONE-ONLY-1015; a phone-only writer is reported by phone). Older rows say `no_email`.
@@ -467,11 +473,30 @@ async function detectRepliesOn(
         ),
       );
     out.threadsRead += 1;
+    const [conversation] = await db
+      .select({ id: conversations.id, contactId: conversations.contactId, contactPhone: contacts.phoneE164, ghost: contacts.channelHandle })
+      .from(conversations)
+      .leftJoin(contacts, eq(contacts.id, conversations.contactId))
+      .where(and(eq(conversations.connectionId, conn.id), eq(conversations.roomId, roomId)));
+    // The brand said this person is not someone of theirs (DUALIST-WA-SILENCE-1104): nothing of ours reads, pays or answers.
+    const notToBrand = conversation
+      ? await statedNotToBrand(
+          conn.orgId,
+          conn.brandId,
+          matrixContactKeys({
+            contactId: conversation.contactId,
+            channel: conn.channel,
+            channelHandle: conversation.ghost,
+            counterpartPrefix: conn.counterpartPrefix,
+            phone: conversation.contactPhone,
+          }),
+        )
+      : null;
     // Voice notes (SOPHIE-VOICE-1019): stored transcripts are read as the person's words; a voice note of the
     // burst an automation is about to read, mirrored since the watch started, is transcribed first (once).
     const raw = rows.map((r) => r.payload as unknown as MatrixEvent);
     let events = await overlayVoiceTranscripts(raw);
-    if (automationAllowed) {
+    if (automationAllowed && !notToBrand) {
       const mirroredAt = new Map(rows.map((r) => [r.eventId, r.ingestedAt.getTime()]));
       const unheard = untranscribedVoiceNotesInBurst(events, conn.matrixUserId, roomSends).filter(
         (e) => (mirroredAt.get(e.event_id) ?? 0) >= since,
@@ -512,12 +537,6 @@ async function detectRepliesOn(
     const fresh = words.filter((m) => (ingested.get(m.eventId) ?? 0) >= since);
     const onlyEchoes = words.length === 0;
     const burst = onlyEchoes ? uncovered : fresh.length > 0 ? fresh : words;
-    const [conversation] = await db
-      .select({ id: conversations.id, contactId: conversations.contactId, contactPhone: contacts.phoneE164, ghost: contacts.channelHandle })
-      .from(conversations)
-      .leftJoin(contacts, eq(contacts.id, conversations.contactId))
-      .where(and(eq(conversations.connectionId, conn.id), eq(conversations.roomId, roomId)));
-
 
     let status: string = REPLY_STATUS.PENDING;
     let reason: string | null = null;
@@ -532,6 +551,9 @@ async function detectRepliesOn(
     } else if (!automationAllowed) {
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.AUTOMATION_NOT_ALLOWED;
+    } else if (notToBrand) {
+      status = REPLY_STATUS.SKIPPED;
+      reason = REPLY_REASONS.STATED_NOT_TO_BRAND;
     } else if (
       await humanTypedTo({
         orgId: conn.orgId,
@@ -613,6 +635,7 @@ interface PersonRow {
   emails: string[];
   phones: string[];
   presences: Presence[];
+  identityKeys: string[];
 }
 
 /** The brand's merged person holding this mirrored conversation, or null when not built yet. */
@@ -624,6 +647,7 @@ async function personOfConversation(orgId: string, brandId: string, conversation
       emails: people.emails,
       phones: people.phones,
       presences: people.presences,
+      identityKeys: people.identityKeys,
     })
     .from(people)
     .where(
@@ -641,6 +665,7 @@ async function personOfConversation(orgId: string, brandId: string, conversation
     emails: row.emails as string[],
     phones: row.phones as string[],
     presences: row.presences as Presence[],
+    identityKeys: row.identityKeys as string[],
   };
 }
 
@@ -833,6 +858,11 @@ export async function deliverReply(
       runId: identity.runId,
     });
     return { status: REPLY_STATUS.FAILED, reason: REPLY_REASONS.PERSON_NOT_BUILT };
+  }
+  // Stated since detection, or found only once the build joined this thread to the person (DUALIST-WA-SILENCE-1104).
+  if (await statedNotToBrand(r.orgId, r.brandId, person.identityKeys)) {
+    await settle(r, now, { personId: person.personId, status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.STATED_NOT_TO_BRAND, lastError: null, conversationId: r.conversationId, runId: identity.runId });
+    return { status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.STATED_NOT_TO_BRAND };
   }
 
   // The address the campaign wrote to, when the person holds it; else the person's first.

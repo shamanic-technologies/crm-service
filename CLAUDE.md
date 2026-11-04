@@ -84,6 +84,13 @@ statement always wins over Jev. A stated tag also drops the tag it contradicts (
 not to brand, to user / not to user), on the person and on their company links (replaced there by the
 stated one); undone, the automatic tag comes back (drmorley 2026-10-21 carried both, lead-service read a lead). An add takes back an active remove of the same thing (and back).
 Same person = stated merges (`/orgs/people/merges`); not the same person (split) is not built yet.
+**"Not to brand" stated = silence** (`lib/people/stated-not-to-brand.ts`, DUALIST-WA-SILENCE-1104, owner 2026-11-04: Thierry
+Matin writes on Sophie's number, which a device of Kevin's other product answers): an active person-level `tag_add
+professional_not_to_brand` makes every path of ours skip the person for that brand, found by any key the caller holds
+(email, phone, `matrix:`, the `msg:` WhatsApp handle) + every key the built person holding one carries (a new thread on
+another line is caught before any build): reply trigger Matrix + Gmail (`skipped / stated_not_to_brand`, no Jev, no voice
+transcription; at delivery too), assistant pings, phone trigger, WhatsApp send / reach (422 `stated_not_to_brand`). Jev's
+own "not to brand" never silences. On contact points too, a stated tag drops the one it contradicts (`correctPointTags`).
 A route that states something kicks a rebuild with `followUp` (a running build is followed by one
 more; before, the kick was silently skipped until the next cron).
 

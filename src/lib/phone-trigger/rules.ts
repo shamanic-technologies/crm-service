@@ -33,6 +33,8 @@ export const PHONE_REASONS = {
   OWN_TEAM: "own_team",
   /** A number nobody can be reached on (impossible under its country's plan): never offered. */
   INVALID_NUMBER: "invalid_number",
+  /** The brand stated the person holding this number is not someone of theirs (DUALIST-WA-SILENCE-1104): never offered. */
+  STATED_NOT_TO_BRAND: "stated_not_to_brand",
   OFFER_UNKNOWN: "offer_unknown",
   /** The owner said never send this one (an owner door, WA-GREETING-OFFER-1027): final. */
   WITHHELD: "withheld",

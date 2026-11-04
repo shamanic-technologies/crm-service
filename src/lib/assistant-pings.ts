@@ -53,6 +53,7 @@ import { isVoiceNote, withVoiceTranscripts } from "./matrix/voice-notes.js";
 import { normalizeEmail } from "./people/identity.js";
 import type { SiblingIdentity } from "./people/siblings.js";
 import { ownTeamMatch, readOwnTeam } from "./reply-trigger/own-team.js";
+import { emailKeys, matrixContactKeys, statedNotToBrand } from "./people/stated-not-to-brand.js";
 import { createRun, updateRun } from "./runs-client.js";
 import { isStaffEmail, sendOwnerTelegram } from "./owner-telegram.js";
 
@@ -68,6 +69,8 @@ export const ASSISTANT_PING_SKIPS = {
   notConversation: "not_conversation",
   noText: "no_text",
   ownLine: "own_line",
+  /** The brand stated this person is not someone of theirs (DUALIST-WA-SILENCE-1104): their words are no business of ours. */
+  notToBrand: "stated_not_to_brand",
 } as const;
 
 const CHANNEL_LABEL: Record<string, string> = {
@@ -438,6 +441,20 @@ export async function announceAssistantMatrixMessages(conn: MatrixConnection, no
           continue;
         }
 
+        const notToBrand = await statedNotToBrand(conn.orgId, conn.brandId, [
+          ...matrixContactKeys({
+            contactId: thread.contact_id,
+            channel: conn.channel,
+            channelHandle: thread.channel_handle,
+            counterpartPrefix: conn.counterpartPrefix,
+            phone: thread.phone_e164,
+          }),
+          ...emailKeys([thread.primary_email]),
+        ]);
+        if (notToBrand) {
+          await claim({ ...base, direction: kind.direction, status: "skipped", reason: ASSISTANT_PING_SKIPS.notToBrand });
+          continue;
+        }
         const person = await personOfConversation(conn.orgId, conn.brandId, thread.conversation_id);
         const phone =
           thread.phone_e164 ?? (thread.channel_handle ? phoneFromMxid(thread.channel_handle, conn.counterpartPrefix) : null) ?? person?.phones[0] ?? null;
