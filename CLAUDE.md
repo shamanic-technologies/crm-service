@@ -89,7 +89,9 @@ Matin writes on Sophie's number, which a device of Kevin's other product answers
 professional_not_to_brand` makes every path of ours skip the person for that brand, found by any key the caller holds
 (email, phone, `matrix:`, the `msg:` WhatsApp handle) + every key the built person holding one carries (a new thread on
 another line is caught before any build): reply trigger Matrix + Gmail (`skipped / stated_not_to_brand`, no Jev, no voice
-transcription; at delivery too), assistant pings, phone trigger, WhatsApp send / reach (422 `stated_not_to_brand`). Jev's
+transcription; at delivery too), assistant pings, phone + form triggers, WhatsApp send / reach (422 `stated_not_to_brand`); EMAIL
+senders ask `POST /internal/people/stated-not-to-brand` {orgId, brandIds, emails} (batch, DUALIST-WA-SILENCE-EMAIL:
+instantly-service refuses send / reply / status 409 `stated_not_to_brand`). Jev's
 own "not to brand" never silences. On contact points too, a stated tag drops the one it contradicts (`correctPointTags`).
 A route that states something kicks a rebuild with `followUp` (a running build is followed by one
 more; before, the kick was silently skipped until the next cron).
