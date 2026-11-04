@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { clerk, deriveClerkUser } from "../../src/lib/auth/clerk.js";
+import { createdOrganizationWebsite } from "../../src/lib/auth/provider.js";
 import { clusterPeople, type Presence } from "../../src/lib/people/identity.js";
 import { isUnnamedPosthogOnly } from "../../src/lib/people/build.js";
 
@@ -92,5 +93,37 @@ describe("Clerk phones the product stored on the profile", () => {
     const u = deriveClerkUser({ id: "user_2", public_metadata: { plan: "pro" } })!;
     expect(u.phones).toEqual([]);
     expect(u.phoneSources).toEqual([]);
+  });
+});
+
+describe("createdOrganizationWebsite: the organization a user created, named after its site (ZARINA-CLIENT-AS-PROSPECT-1104)", () => {
+  const m = (orgCreatedBy: string | null, orgName: string | null, joinedAt: number | null = 1) => ({ orgCreatedBy, orgName, joinedAt });
+
+  it("reads the membership Clerk serves: org name + creator", () => {
+    const d = clerk.memberships!.derive({
+      id: "orgmem_1",
+      created_at: 1788116076508,
+      organization: { id: "org_1", name: "www.livingvital.ch", created_by: "user_1" },
+      public_user_data: { user_id: "user_1" },
+    });
+    expect(d).toMatchObject({ orgId: "org_1", orgCreatedBy: "user_1", orgName: "www.livingvital.ch" });
+    expect(createdOrganizationWebsite("user_1", [d!])).toBe("www.livingvital.ch");
+  });
+
+  it.each(["acme.com", "https://acme.co.uk/", "WWW.Acme.io"])("%s is a website", (name) =>
+    expect(createdOrganizationWebsite("u", [m("u", name)])).toBe(name.toLowerCase()),
+  );
+
+  it.each(["Acme Inc", "Acme", "John's team", "", null])("%s states no domain", (name) =>
+    expect(createdOrganizationWebsite("u", [m("u", name)])).toBeNull(),
+  );
+
+  it("an organization someone else created states nothing about the invited user", () => {
+    expect(createdOrganizationWebsite("u", [m("other", "acme.com")])).toBeNull();
+    expect(createdOrganizationWebsite("u", [m("other", "acme.com"), m("u", "mine.org", 5)])).toBe("mine.org");
+  });
+
+  it("the first organization the user created wins", () => {
+    expect(createdOrganizationWebsite("u", [m("u", "second.com", 9), m("u", "first.com", 2)])).toBe("first.com");
   });
 });

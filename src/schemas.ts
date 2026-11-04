@@ -3432,7 +3432,7 @@ registry.registerPath({
   path: "/orgs/people/same-person-verdicts",
   summary: "List the automatic same-person checks of a brand",
   description:
-    "Two people of a brand carrying the same full name (a work address and a personal Gmail, a CRM record and a chat) are asked once to Jev: one human or two. `same` ones show as ONE person (merge evidence kind `name_twin`, ref = verdictId, on GET /orgs/people). Newest first, rejected ones included.",
+    "Two people of a brand carrying the same full name (a work address and a personal Gmail, a CRM record and a chat), or speaking for the same small company under two names (name `company:<domain>`), are asked once to Jev: one human or two. `same` ones show as ONE person (merge evidence kind `name_twin`, ref = verdictId, on GET /orgs/people). Newest first, rejected ones included.",
   request: { headers: IDENTITY_HEADERS, query: z.object({ brandId: z.string().uuid() }) },
   responses: {
     200: { description: "The brand's verdicts", content: { "application/json": { schema: z.object({ brandId: z.string().uuid(), verdicts: z.array(SamePersonVerdictSchema) }) } } },

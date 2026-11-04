@@ -51,6 +51,8 @@ export interface DerivedAuthMembership {
   orgId: string;
   /** The user who created the organization; null when the provider names nobody. */
   orgCreatedBy: string | null;
+  /** The organization's name as the provider states it (a product often names it after the company's website). */
+  orgName?: string | null;
   /** When the user joined it (ms); null when the provider gives no date. */
   joinedAt: number | null;
 }
@@ -84,6 +86,26 @@ export function isSignup(
       m.orgCreatedBy === userId ||
       (ctx.isTeam(m.orgCreatedBy) && ctx.firstOutsider(m.orgId) === userId),
   );
+}
+
+/**
+ * PURE: the website a user stated by CREATING an organization named after it (ZARINA-CLIENT-AS-PROSPECT-1104:
+ * distribute.you's onboarding names the Clerk organization after the brand's site, `www.livingvital.ch`; the
+ * signup's own address was a Gmail, so nothing tied her to her company's mailbox). Only an organization the user
+ * created (an invited teammate states nothing), only a name that IS a host name (`acme.com`, `www.acme.co.uk`,
+ * `https://acme.com/`): a plain company name ("Acme Inc") states no domain. Whether the domain is a company's or a
+ * mailbox provider's stays Jev's call (organizations.ts), like any website a record states.
+ */
+export function createdOrganizationWebsite(
+  userId: string,
+  memberships: Pick<DerivedAuthMembership, "orgCreatedBy" | "orgName" | "joinedAt">[],
+): string | null {
+  const hosts = memberships
+    .filter((m) => m.orgCreatedBy === userId && typeof m.orgName === "string")
+    .sort((a, b) => (a.joinedAt ?? Infinity) - (b.joinedAt ?? Infinity))
+    .map((m) => m.orgName!.trim().toLowerCase())
+    .filter((name) => /^(https?:\/\/)?([a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}\/?$/.test(name));
+  return hosts[0] ?? null;
 }
 
 export interface AuthProviderAdapter {
