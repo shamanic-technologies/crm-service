@@ -1163,7 +1163,8 @@ owner had written to. A recorded fact, never an address-shape guess.
   **Same small company, two names** (ZARINA-CLIENT-AS-PROSPECT-1104: a paying client was "Aronia Vital" on
   info@livingvital.ch and "Living Vital" on a Gmail with Clerk / Stripe / WhatsApp; the writer pitched her as a cold
   prospect): the SAME question also asks two people sharing an organization (`people.organizations` companyId) that
-  at most 5 people of the brand speak for (bigger = colleagues, never asked; `largeCompaniesSkipped`), name
+  at most 5 people of the brand speak for (bigger = colleagues, never asked; `largeCompaniesSkipped`) AND at least one
+  of the two holds no address on its domain (two @acme.com = colleagues; prod: 6,600 pairs without this, 6 with), name
   `company:<domain>`, instructions about a founder writing from info@ and paying from a Gmail. Every card (both kinds)
   carries `companyDomains` and the latest 3 messages over Gmail store AND the person's one-to-one Matrix threads.
   Summary `companyCandidates`.

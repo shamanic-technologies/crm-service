@@ -28,7 +28,10 @@
  * paid and chatted on WhatsApp as "Living Vital" (a Gmail). Two names, two addresses, no record stating both: the
  * writer read the paying client as a cold prospect. So a second retrieval feeds the SAME question: two people linked
  * to the same ORGANIZATION (people.organizations, a company domain Jev judged an organization) when at most
- * `MAX_TWIN_GROUP` people of the brand are (a small company: a bigger one is colleagues, never asked). The card shows
+ * `MAX_TWIN_GROUP` people of the brand are (a small company: a bigger one is colleagues, never asked), and at least
+ * one of the two is tied to it WITHOUT an address on its domain (a Gmail + the website they typed / the organization
+ * they created): two @acme.com addresses are colleagues, never asked (prod 2026-11-04: 6,600 pairs fleet-wide
+ * without that rule, 6 with it, all of the Gmail-vs-company-mailbox shape). The card shows
  * each side's company domains and its latest stored messages, Gmail AND WhatsApp / chat threads (a signature, the
  * same campaign discussed), so Jev judges on what the brand holds; same verdict table, same evidence, same undo.
  *
@@ -67,8 +70,8 @@ export interface TwinPerson {
   sources: string[];
   /** Every name a record of this person states. */
   presenceNames: string[];
-  /** The organizations the person speaks for (people.organizations). */
-  companies: { companyId: string; domain: string }[];
+  /** The organizations the person speaks for (people.organizations); `byAddress` = one of their addresses is on its domain. */
+  companies: { companyId: string; domain: string; byAddress: boolean }[];
   /** Their one-to-one Matrix conversations (WhatsApp, LinkedIn...). */
   conversationIds: string[];
   automated: boolean;
@@ -165,12 +168,13 @@ export function nameTwinPairs(pool: TwinPerson[]): { pairs: TwinPair[]; commonNa
  * `MAX_TWIN_GROUP` people of the brand speak for. A pair `nameTwinPairs` already asks is left to it.
  */
 export function companyTwinPairs(pool: TwinPerson[], asked: Set<string> = new Set()): { pairs: TwinPair[]; largeCompaniesSkipped: number } {
-  const byCompany = new Map<string, { domain: string; members: Map<string, TwinPerson> }>();
+  const byCompany = new Map<string, { domain: string; members: Map<string, TwinPerson>; byAddress: Map<string, boolean> }>();
   for (const p of pool) {
     if (p.automated || p.groupOnly) continue;
     for (const c of p.companies) {
-      const group = byCompany.get(c.companyId) ?? { domain: c.domain, members: new Map<string, TwinPerson>() };
+      const group = byCompany.get(c.companyId) ?? { domain: c.domain, members: new Map<string, TwinPerson>(), byAddress: new Map<string, boolean>() };
       group.members.set(p.personKey, p);
+      group.byAddress.set(p.personKey, (group.byAddress.get(p.personKey) ?? false) || c.byAddress);
       byCompany.set(c.companyId, group);
     }
   }
@@ -188,6 +192,8 @@ export function companyTwinPairs(pool: TwinPerson[], asked: Set<string> = new Se
       for (let j = i + 1; j < members.length; j++) {
         const [a, b] = [members[i], members[j]];
         if (a.humanId && a.humanId === b.humanId) continue;
+        // Both on the company's own domain = colleagues (each has their own work address).
+        if (group.byAddress.get(a.personKey) && group.byAddress.get(b.personKey)) continue;
         const id = `${a.personKey}|${b.personKey}`;
         if (seen.has(id)) continue;
         seen.add(id);
@@ -311,7 +317,7 @@ async function previousPeople(scope: PeopleScope): Promise<TwinPerson[]> {
       sources: people.sources,
       // Only the names of its records (a person's presences can be large).
       presenceNames: sql<(string | null)[]>`jsonb_path_query_array(${people.presences}, '$[*].displayName')`,
-      companies: sql<{ companyId: string; domain: string }[]>`(SELECT coalesce(jsonb_agg(jsonb_build_object('companyId', o->>'companyId', 'domain', o->>'domain')), '[]'::jsonb) FROM jsonb_array_elements(${people.organizations}) o WHERE o->>'companyId' IS NOT NULL)`,
+      companies: sql<{ companyId: string; domain: string; byAddress: boolean }[]>`(SELECT coalesce(jsonb_agg(jsonb_build_object('companyId', o->>'companyId', 'domain', o->>'domain', 'byAddress', EXISTS (SELECT 1 FROM jsonb_array_elements(coalesce(o->'evidence', '[]'::jsonb)) e WHERE e->>'kind' = 'email'))), '[]'::jsonb) FROM jsonb_array_elements(${people.organizations}) o WHERE o->>'companyId' IS NOT NULL)`,
       conversationIds: sql<(string | null)[]>`jsonb_path_query_array(${people.presences}, '$[*] ? (@.source == "matrix" && @.detail.kind == "dm").detail.conversationId')`,
       automated: people.automated,
       groupOnly: people.groupOnly,

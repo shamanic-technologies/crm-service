@@ -133,7 +133,7 @@ describe("twinEvidence: a same verdict ties every key both people held", () => {
 });
 
 describe("companyTwinPairs: one human, two names, the same small company (ZARINA-CLIENT-AS-PROSPECT-1104)", () => {
-  const living = { companyId: "c-living", domain: "livingvital.ch" };
+  const living = { companyId: "c-living", domain: "livingvital.ch", byAddress: true };
   // Her company mailbox, signed "Zarina Birnbacher, LivingVital".
   const mailbox = person({ personKey: "email:info@livingvital.ch", humanId: "h1", displayName: "Aronia Vital", companies: [living] });
   // Her signup + payment + WhatsApp, a Gmail; company from the Clerk organization she created.
@@ -143,7 +143,7 @@ describe("companyTwinPairs: one human, two names, the same small company (ZARINA
     displayName: "Living Vital",
     phones: ["+41799389795"],
     sources: ["matrix", "posthog", "stripe", "clerk"],
-    companies: [living],
+    companies: [{ ...living, byAddress: false }],
     conversationIds: ["conv-wa"],
   });
 
@@ -160,14 +160,24 @@ describe("companyTwinPairs: one human, two names, the same small company (ZARINA
     expect(companyTwinPairs([mailbox, { ...account, automated: true }]).pairs).toHaveLength(0);
   });
 
+  it("two people each on the company's own domain are colleagues: never asked", () => {
+    const colleague = person({ personKey: "email:anna@livingvital.ch", displayName: "Anna", companies: [living] });
+    expect(companyTwinPairs([mailbox, colleague]).pairs).toHaveLength(0);
+    expect(companyTwinPairs([mailbox, colleague, account]).pairs.map((p) => `${p.a.personKey}|${p.b.personKey}`)).toEqual([
+      "email:anna@livingvital.ch|email:marketingaronia@gmail.com",
+      "email:info@livingvital.ch|email:marketingaronia@gmail.com",
+    ]);
+    expect(companyTwinPairs([mailbox, { ...account, automated: true }]).pairs).toHaveLength(0);
+  });
+
   it("a company more than MAX_TWIN_GROUP people speak for is colleagues: never asked", () => {
-    const staff = Array.from({ length: MAX_TWIN_GROUP + 1 }, (_, i) => person({ personKey: `email:p${i}@acme.com`, companies: [{ companyId: "c-acme", domain: "acme.com" }] }));
+    const staff = Array.from({ length: MAX_TWIN_GROUP + 1 }, (_, i) => person({ personKey: `email:p${i}@gmail.com`, companies: [{ companyId: "c-acme", domain: "acme.com", byAddress: false }] }));
     expect(companyTwinPairs(staff)).toEqual({ pairs: [], largeCompaniesSkipped: 1 });
   });
 
   it("a pair sharing a full name AND a company is asked once, as a name twin", () => {
-    const a = person({ personKey: "email:jo@acme.com", presenceNames: ["Jo Smith"], companies: [{ companyId: "c", domain: "acme.com" }] });
-    const b = person({ personKey: "email:jo.smith@gmail.com", presenceNames: ["Jo Smith"], companies: [{ companyId: "c", domain: "acme.com" }] });
+    const a = person({ personKey: "email:jo@acme.com", presenceNames: ["Jo Smith"], companies: [{ companyId: "c", domain: "acme.com", byAddress: true }] });
+    const b = person({ personKey: "email:jo.smith@gmail.com", presenceNames: ["Jo Smith"], companies: [{ companyId: "c", domain: "acme.com", byAddress: false }] });
     const { pairs } = twinPairs([a, b]);
     expect(pairs.map((p) => p.basis)).toEqual(["name"]);
   });
