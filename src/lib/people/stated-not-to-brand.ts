@@ -13,11 +13,11 @@
  * handle) AND every key the built person holding one of them carries, so a new thread on another linked account
  * (same WhatsApp LID, a contact row the build has not merged yet) is recognised at once.
  */
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { people, peopleCorrections } from "../../db/schema.js";
 import { handleOf } from "../matrix/events.js";
-import { emailKey, handleKey, phoneKey } from "./identity.js";
+import { emailKey, handleKey, normalizeEmail, phoneKey } from "./identity.js";
 
 export const NOT_TO_BRAND_TARGET = "tag_add:professional_not_to_brand";
 
@@ -75,4 +75,67 @@ export async function statedNotToBrand(orgId: string, brandId: string, keys: str
   const all = new Set([...asked, ...held.flatMap((p) => p.identityKeys as string[])]);
   const hit = statements.find((s) => (s.personKeys as string[]).some((k) => all.has(k)));
   return hit ? { correctionId: hit.id, reason: hit.reason, statedByUserId: hit.statedByUserId } : null;
+}
+
+export interface StatedNotToBrandByEmail extends NotToBrandStatement {
+  brandId: string;
+}
+
+/**
+ * DUALIST-WA-SILENCE-EMAIL (owner 2026-11-04): the EMAIL senders' question, many addresses and brands at once (an
+ * email send names its brands; instantly-service's status read asks for a whole batch). Per address, the first
+ * active statement on one of the brands, matched exactly like `statedNotToBrand` (the address + every key of the
+ * brand's built person holding it, so a statement made on their phone or WhatsApp handle silences their email too).
+ * Keyed by the NORMALIZED address; an address that is not one is never stated. DB-only, fail loud.
+ */
+export async function statedNotToBrandByEmail(
+  orgId: string,
+  brandIds: string[],
+  emails: string[],
+): Promise<Map<string, StatedNotToBrandByEmail>> {
+  const out = new Map<string, StatedNotToBrandByEmail>();
+  const brands = [...new Set(brandIds.filter(Boolean))];
+  const addresses = [...new Set(emails.map((e) => normalizeEmail(e)).filter((e): e is string => !!e))];
+  if (brands.length === 0 || addresses.length === 0) return out;
+  const statements = await db
+    .select({
+      id: peopleCorrections.id,
+      brandId: peopleCorrections.brandId,
+      personKeys: peopleCorrections.personKeys,
+      reason: peopleCorrections.reason,
+      statedByUserId: peopleCorrections.statedByUserId,
+    })
+    .from(peopleCorrections)
+    .where(
+      and(
+        eq(peopleCorrections.orgId, orgId),
+        inArray(peopleCorrections.brandId, brands),
+        eq(peopleCorrections.targetKey, NOT_TO_BRAND_TARGET),
+        isNull(peopleCorrections.undoneAt),
+      ),
+    )
+    .orderBy(asc(peopleCorrections.createdAt), asc(peopleCorrections.id));
+  if (statements.length === 0) return out;
+  const asked = addresses.map((a) => emailKey(a));
+  const held = await db
+    .select({ brandId: people.brandId, identityKeys: people.identityKeys })
+    .from(people)
+    .where(
+      and(
+        eq(people.orgId, orgId),
+        inArray(people.brandId, [...new Set(statements.map((s) => s.brandId))]),
+        sql`${people.identityKeys} ?| ARRAY[${sql.join(asked.map((k) => sql`${k}`), sql`, `)}]::text[]`,
+      ),
+    );
+  for (const address of addresses) {
+    const key = emailKey(address);
+    for (const s of statements) {
+      const keys = new Set([key, ...held.filter((p) => p.brandId === s.brandId && (p.identityKeys as string[]).includes(key)).flatMap((p) => p.identityKeys as string[])]);
+      if ((s.personKeys as string[]).some((k) => keys.has(k))) {
+        out.set(address, { correctionId: s.id, brandId: s.brandId, reason: s.reason, statedByUserId: s.statedByUserId });
+        break;
+      }
+    }
+  }
+  return out;
 }

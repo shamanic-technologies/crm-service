@@ -52,6 +52,8 @@ import { resolveGhlToken } from "../gohighlevel/credentials.js";
 import { deriveFormSubmission } from "../gohighlevel/records.js";
 import { runSyncPass } from "../gohighlevel/sync.js";
 import { runScopeBuild } from "../people/build.js";
+import { emailKeys, statedNotToBrand } from "../people/stated-not-to-brand.js";
+import { phoneKey } from "../people/identity.js";
 import { createRun, updateRun } from "../runs-client.js";
 import {
   CampaignRefusal,
@@ -80,6 +82,8 @@ export const REPORT_REASONS = {
   CONNECTION_GONE: "connection_gone",
   /** Neither an email nor an international phone: the door cannot name the person (a phone-only fill IS sent). */
   NO_EMAIL_OR_PHONE,
+  /** The brand stated this person is not someone of theirs (people/stated-not-to-brand.ts): never answered. */
+  STATED_NOT_TO_BRAND: "stated_not_to_brand",
 } as const;
 
 
@@ -312,6 +316,11 @@ export async function deliverOne(
   identity: { orgId: string; brandId: string; userId: string; runId: string },
   now: number,
 ): Promise<{ status: string; reason: string | null }> {
+  // DUALIST-WA-SILENCE-EMAIL: a person the brand stated is not theirs gets no AI answer (it emails first), a quiet skip.
+  if (await statedNotToBrand(r.orgId, r.brandId, [...emailKeys([r.email]), ...(r.phone ? [phoneKey(r.phone)] : [])])) {
+    await settle(r, now, { status: REPORT_STATUS.SKIPPED, reason: REPORT_REASONS.STATED_NOT_TO_BRAND, runId: identity.runId });
+    return { status: REPORT_STATUS.SKIPPED, reason: REPORT_REASONS.STATED_NOT_TO_BRAND };
+  }
   const offer = await resolveOffer(identity, r.formId);
   if (offer.offerId === null) {
     console.warn(`[crm-service][form-trigger] submission ${r.submissionId} (brand ${r.brandId}) not reported: ${offer.detail}`);

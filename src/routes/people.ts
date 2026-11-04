@@ -41,7 +41,8 @@ import {
 } from "../lib/people/outcomes.js";
 import { LEG_STEPS, ServedUnavailable, listLegReachBrands, parseLegStep, readLegReach } from "../lib/people/leg-reach.js";
 import { readLatestMessages } from "../lib/people/latest-messages.js";
-import { LatestMessagesRequestSchema, SentAfterRequestSchema } from "../schemas.js";
+import { LatestMessagesRequestSchema, SentAfterRequestSchema, StatedNotToBrandRequestSchema } from "../schemas.js";
+import { statedNotToBrandByEmail } from "../lib/people/stated-not-to-brand.js";
 import { readSentAfter } from "../lib/people/sent-after.js";
 import { familyOf, LEAD_FAMILIES, readBrandFamilies, type FamilyVerdict, type LeadFamily } from "../lib/people/families.js";
 import {
@@ -1341,6 +1342,30 @@ router.post("/internal/people/sent-after", apiKeyAuth, async (req, res) => {
     const { orgId, brandId, people: asks } = parsed.data;
     const out = await readSentAfter(orgId, brandId, asks);
     res.json({ orgId, brandId, ...out });
+  });
+});
+
+// ─── POST /internal/people/stated-not-to-brand (instantly-service: the email send gate + status read) ──
+
+/**
+ * Per address, whether the brand stated this person is not someone of theirs (people/stated-not-to-brand.ts,
+ * DUALIST-WA-SILENCE-EMAIL): the email senders refuse `stated_not_to_brand`. DB-only: no sibling call, no model, no cost.
+ */
+router.post("/internal/people/stated-not-to-brand", apiKeyAuth, async (req, res) => {
+  const parsed = StatedNotToBrandRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ type: "validation", error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+  }
+  await withPlatformRun(res, "people.stated-not-to-brand.read", async () => {
+    const { orgId, brandIds, emails } = parsed.data;
+    const stated = await statedNotToBrandByEmail(orgId, brandIds, emails);
+    res.json({
+      orgId,
+      results: emails.map((email) => {
+        const hit = stated.get(email.trim().toLowerCase());
+        return { email, stated: !!hit, brandId: hit?.brandId ?? null, correctionId: hit?.correctionId ?? null };
+      }),
+    });
   });
 });
 

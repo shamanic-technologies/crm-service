@@ -4146,7 +4146,7 @@ const FormTriggerReportSchema = z.object({
   }),
   answers: z.array(z.object({ key: z.string(), label: z.string().nullable(), value: z.unknown() })),
   status: z.enum(["pending", "reported", "skipped", "failed"]),
-  reason: z.string().nullable().describe("calendar_booking_form | no_email_or_phone (neither an email nor an E.164 phone; older rows no_email) | offer_unknown | campaign_refused | campaign_unreachable | connection_gone"),
+  reason: z.string().nullable().describe("calendar_booking_form | no_email_or_phone (neither an email nor an E.164 phone; older rows no_email) | offer_unknown | campaign_refused | campaign_unreachable | connection_gone | stated_not_to_brand (the brand stated the person is not theirs: never answered)"),
   lastError: z.string().nullable(),
   attempts: z.number().int(),
   offerId: z.string().nullable(),
@@ -4717,6 +4717,50 @@ registry.registerPath({
   request: { body: { content: { "application/json": { schema: SentAfterRequestSchema } } } },
   responses: {
     200: { description: "One answer per ask", content: { "application/json": { schema: SentAfterResponseSchema } } },
+    400: { description: "Invalid body" },
+    502: { description: "Run tracking unavailable" },
+  },
+});
+
+// ─── Stated not to brand: the email senders' question (DUALIST-WA-SILENCE-EMAIL) ──
+
+export const STATED_NOT_TO_BRAND_MAX_EMAILS = 1000;
+
+export const StatedNotToBrandRequestSchema = z
+  .object({
+    orgId: z.string().uuid(),
+    brandIds: z.array(z.string().uuid()).min(1).max(50).openapi({ description: "The brands of the send: a statement on any one of them answers." }),
+    emails: z.array(z.string().max(320)).min(1).max(STATED_NOT_TO_BRAND_MAX_EMAILS).openapi({ description: "Addresses as the caller holds them (case-insensitive)." }),
+  })
+  .strict();
+
+export const StatedNotToBrandResponseSchema = z.object({
+  orgId: z.string(),
+  results: z.array(
+    z.object({
+      email: z.string().openapi({ description: "As asked." }),
+      stated: z.boolean().openapi({ description: "true = the brand's user stated this person is not someone of the brand: send them no automated email." }),
+      brandId: z.string().nullable(),
+      correctionId: z.string().nullable().openapi({ description: "The statement (`/orgs/people/corrections`); undoing it lifts the refusal." }),
+    }),
+  ),
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/people/stated-not-to-brand",
+  summary: "Has the brand stated each person is NOT someone of theirs? (the email senders' refusal)",
+  description:
+    "For one org, the brands of a send and up to " +
+    STATED_NOT_TO_BRAND_MAX_EMAILS +
+    " addresses: whether an active person-level correction `tag_add professional_not_to_brand` (a human statement, never Jev's own tag) " +
+    "covers each person on one of those brands. A person is matched by the address AND every identity key of the brand's built person " +
+    "holding it, so a statement made on their phone or WhatsApp handle answers for their email too. Senders refuse an automated email to a " +
+    "stated person with code `stated_not_to_brand` (the same code crm-service's WhatsApp send answers). One answer per address, in the order asked. " +
+    "DB-only: no sibling call, no model, no cost.",
+  request: { body: { content: { "application/json": { schema: StatedNotToBrandRequestSchema } } } },
+  responses: {
+    200: { description: "One answer per address", content: { "application/json": { schema: StatedNotToBrandResponseSchema } } },
     400: { description: "Invalid body" },
     502: { description: "Run tracking unavailable" },
   },

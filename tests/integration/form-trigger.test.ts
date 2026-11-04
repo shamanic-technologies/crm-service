@@ -3,7 +3,7 @@ import express from "express";
 import request from "supertest";
 import { eq, inArray } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
-import { formOfferMappings, formTriggerReports, ghlConnections, ghlRawRecords } from "../../src/db/schema.js";
+import { formOfferMappings, formTriggerReports, ghlConnections, ghlRawRecords, peopleCorrections } from "../../src/db/schema.js";
 import formTriggerRoutes from "../../src/routes/form-triggers.js";
 import { runFormWatchPass } from "../../src/lib/form-trigger/watch.js";
 
@@ -253,6 +253,29 @@ describe.skipIf(!RUN)("form trigger watch", () => {
     const rows = await reports();
     expect(rows.find((r) => r.submissionId === "phone-only")).toMatchObject({ status: "reported", email: null, phone: "+12126647665" });
     expect(rows.find((r) => r.submissionId === "nobody")).toMatchObject({ status: "skipped", reason: "no_email_or_phone" });
+  });
+
+  it("a person the brand stated is not theirs is never reported (no AI answer, it emails first); undone, the next fill is (DUALIST-WA-SILENCE-EMAIL)", async () => {
+    const [stated] = await db
+      .insert(peopleCorrections)
+      .values({
+        orgId: ORG, brandId: BRAND, kind: "tag_add", personId: null, personKeys: ["email:silenced-1@example.com"],
+        target: { tag: "professional_not_to_brand" }, targetKey: "tag_add:professional_not_to_brand", reason: null, statedByUserId: USER,
+      })
+      .returning();
+    try {
+      await runFormWatchPass(T0);
+      submissions = [submission("silenced-1", new Date(min(1) + 5_000).toISOString()), submission("other-1", new Date(min(1) + 6_000).toISOString()), ...submissions];
+      await runFormWatchPass(min(2));
+      await runFormWatchPass(min(30));
+      // Only the untagged person is reported.
+      expect(campaignCalls.map((c) => (c.body.person as { email: string }).email)).toEqual(["other-1@example.com"]);
+      const rows = await reports();
+      expect(rows.find((r) => r.submissionId === "silenced-1")).toMatchObject({ status: "skipped", reason: "stated_not_to_brand" });
+      expect(rows.find((r) => r.submissionId === "other-1")).toMatchObject({ status: "reported" });
+    } finally {
+      await db.delete(peopleCorrections).where(eq(peopleCorrections.id, stated.id));
+    }
   });
 
   it("a paused connection is not watched", async () => {
