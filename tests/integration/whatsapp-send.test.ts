@@ -13,6 +13,7 @@ import {
   matrixLinks,
   matrixRawEvents,
   people,
+  peopleCorrections,
   peopleScopes,
   personContactHandles,
   staffAlerts,
@@ -174,6 +175,7 @@ async function wipe() {
   await db.delete(contactServes).where(eq(contactServes.orgId, ORG));
   await db.delete(contacts).where(eq(contacts.orgId, ORG));
   await db.delete(people).where(eq(people.orgId, ORG));
+  await db.delete(peopleCorrections).where(eq(peopleCorrections.orgId, ORG));
   await db.delete(personContactHandles).where(eq(personContactHandles.orgId, ORG));
   await db.delete(peopleScopes).where(eq(peopleScopes.orgId, ORG));
   await db.delete(matrixGhostPhones).where(inArray(matrixGhostPhones.ghostMxid, ["@whatsapp_lid-1:matrix.test", "@whatsapp_lid-2:matrix.test", "@whatsapp_lid-pro:matrix.test"]));
@@ -595,6 +597,43 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
       .send({ brandId: BRAND, phone: "+33600000002", text: "Welcome!", idempotencyKey: "k-new" });
     expect(newcomer.status).toBe(200);
     expect(sends).toHaveLength(2);
+  });
+
+  it("refuses stated_not_to_brand, nothing sent, when the brand stated the person is not someone of theirs, found by their WhatsApp handle; others unchanged (DUALIST-WA-SILENCE-1104)", async () => {
+    await linkAccount(ACCOUNT, { linkedAt: new Date("2026-10-01T00:00:00Z") });
+    const [stated] = await db
+      .insert(peopleCorrections)
+      .values({
+        orgId: ORG, brandId: BRAND, kind: "tag_add", personId: null, personKeys: [`msg:whatsapp:${jidOfLid("lid-1")}`],
+        target: { tag: "professional_not_to_brand" }, targetKey: "tag_add:professional_not_to_brand", reason: null, statedByUserId: USER,
+      })
+      .returning();
+    const res = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000001", text: "Hello", idempotencyKey: "k-silenced" });
+    expect(res.status).toBe(422);
+    expect(res.body).toMatchObject({ type: "refused", code: "stated_not_to_brand" });
+    expect(sends).toHaveLength(0);
+    expect(telegrams).toEqual([]);
+    const reach = await request(app()).post("/orgs/whatsapp/reach").set(headers).send({ brandId: BRAND, phone: "+33600000001" });
+    expect(reach.body).toMatchObject({ reachable: false, code: "stated_not_to_brand" });
+
+    // Anyone else is written to as before.
+    const other = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000002", text: "Welcome!", idempotencyKey: "k-other" });
+    expect(other.status).toBe(200);
+    expect(sends).toHaveLength(1);
+
+    // Undone: the person is written to again.
+    await db.update(peopleCorrections).set({ undoneAt: new Date(), undoneByUserId: USER }).where(eq(peopleCorrections.id, stated.id));
+    const again = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, phone: "+33600000001", text: "Hello", idempotencyKey: "k-silenced-2" });
+    expect(again.status).toBe(200);
   });
 
   it("a send to one of the brand's own linked numbers is never refused human_in_conversation, even after hand-typed messages (SOPHIE-COPILOT-WA-1018)", async () => {

@@ -32,7 +32,9 @@ import { automationOn, narrowByType, type SendingAccountType } from "../matrix/a
 import { humanTypedTo } from "../matrix/human-takeover.js";
 import { joinRoom, readRoomBridgeInfo, sendText, setTyping } from "../matrix/client.js";
 import { expectedChannelIds, roomDeliversTo } from "./room-check.js";
-import { emailKey, normalizeEmail, normalizePhone, phoneKey, type Presence } from "../people/identity.js";
+import { emailKey, handleKey, normalizeEmail, normalizePhone, phoneKey, type Presence } from "../people/identity.js";
+import { statedNotToBrand } from "../people/stated-not-to-brand.js";
+import { handleOf, WHATSAPP_GHOST_PREFIX } from "../matrix/events.js";
 import { personReplied } from "../people/conversation.js";
 import { preferredHandleOf, wroteFromPhoneSince } from "../people/handles.js";
 
@@ -61,6 +63,11 @@ export const SEND_REFUSAL_CODES = [
    * nothing is wrong with the number. Nothing is sent.
    */
   "human_in_conversation",
+  /**
+   * The brand's user stated this person is not someone of the brand (DUALIST-WA-SILENCE-1104,
+   * people/stated-not-to-brand.ts): nothing automated ever writes to them. Nothing is sent.
+   */
+  "stated_not_to_brand",
   /** Another call with the same idempotency key is sending right now. */
   "send_in_progress",
   /**
@@ -511,6 +518,14 @@ async function resolveReach(req: ReachRequest, onPhone?: (phone: string, source:
   const ghosts = (await db.execute(sql`
     SELECT ghost_mxid FROM matrix_ghost_phones WHERE phone = ${phone}
   `)) as unknown as { ghost_mxid: string }[];
+  // 6. The brand said this person is not someone of theirs: nothing automated writes to them (DUALIST-WA-SILENCE-1104).
+  const handles = [who.mxid, ...ghosts.map((g) => g.ghost_mxid)]
+    .map((g) => handleOf("whatsapp", g, WHATSAPP_GHOST_PREFIX))
+    .filter((h): h is { network: string; id: string } => !!h)
+    .map((h) => handleKey(h.network, h.id));
+  if (await statedNotToBrand(req.orgId, req.brandId, [...(person?.identityKeys ?? []), phoneKey(phone), ...(email ? [emailKey(email)] : []), ...handles])) {
+    throw new SendRefusal("stated_not_to_brand", `The brand stated that the person on ${phone} is not someone of theirs: no automated message is sent.`);
+  }
   const human = await humanTypedTo({
     orgId: req.orgId,
     brandId: req.brandId,

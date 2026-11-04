@@ -3042,7 +3042,9 @@ registry.registerPath({
     "`organization_add` {personId, domain (or website), tags? (professional tags; default = the person's)} / `organization_remove` {personId, companyId}; " +
     "`domain_kind` {domain, domainKind: mailbox_provider | organization} (overrides the domain verdict for this brand's people). A newer statement " +
     "on the same thing replaces the older; an add takes back an active remove of the same thing (and the other way). Same statement twice = 200 duplicate. " +
-    "A rebuild starts at once (~1 min). 404 person_not_found, 422 company_unresolved (brand-service names no company for the domain) | tags_required.",
+    "A rebuild starts at once (~1 min). 404 person_not_found, 422 company_unresolved (brand-service names no company for the domain) | tags_required. " +
+    "`tag_add professional_not_to_brand` on a person (no contactPoint) also SILENCES them for the brand at once (DUALIST-WA-SILENCE-1104): no " +
+    "automated reply, no Lead event, no owner ping, no number-given trigger, every WhatsApp send refused `stated_not_to_brand`; undo it to lift it.",
   request: {
     headers: IDENTITY_HEADERS,
     body: {
@@ -3909,11 +3911,12 @@ const WhatsappRefusalSchema = z.object({
     "not_on_whatsapp",
     "person_replied",
     "human_in_conversation",
+    "stated_not_to_brand",
     "send_in_progress",
     "wrong_room",
   ]).openapi({
     description:
-      "`human_in_conversation`: someone of the brand typed a message by hand to this person on WhatsApp (any linked account); the conversation is theirs and automation never writes into it. Brand-side, not the number's fault.",
+      "`human_in_conversation`: someone of the brand typed a message by hand to this person on WhatsApp (any linked account); the conversation is theirs and automation never writes into it. Brand-side, not the number's fault. `stated_not_to_brand`: the brand's user stated this person is not someone of the brand (a `tag_add professional_not_to_brand` correction on POST /orgs/people/corrections); nothing automated writes to them until it is undone.",
   }),
   error: z.string(),
 });
@@ -3975,7 +3978,7 @@ export const WhatsappReachResponseSchema = registry.register(
       }),
       z.object({
         reachable: z.literal(false),
-        code: z.enum(["whatsapp_not_linked", "whatsapp_not_connected", "automation_not_allowed", "no_phone_known", "not_on_whatsapp", "person_replied", "human_in_conversation"]).openapi({
+        code: z.enum(["whatsapp_not_linked", "whatsapp_not_connected", "automation_not_allowed", "no_phone_known", "not_on_whatsapp", "person_replied", "human_in_conversation", "stated_not_to_brand"]).openapi({
           description: "The refusal code POST /orgs/whatsapp/messages would answer for this person now.",
         }),
         error: z.string(),

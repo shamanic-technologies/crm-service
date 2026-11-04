@@ -29,7 +29,7 @@ import { db } from "../../db/index.js";
 import { contactPointOrgVerdicts, conversationVerdicts, type PeopleCorrection } from "../../db/schema.js";
 import type { ChatTrackingHeaders } from "../chat-client.js";
 import { judgeChoices, type ChoiceQuestion } from "../judgments-client.js";
-import { CONNECTION_TAGS, presenceConnectionTags, type ConnectionTag, type PersonConnectionTag, type TagLookups } from "./connection-tags.js";
+import { CONNECTION_TAGS, OPPOSITE_TAG, presenceConnectionTags, type ConnectionTag, type PersonConnectionTag, type TagLookups } from "./connection-tags.js";
 import { presenceStableKey } from "./facts.js";
 import type { Presence } from "./identity.js";
 import {
@@ -384,8 +384,14 @@ export function correctPointTags(readings: ContactPointReading[], corrections: P
     const tag = t.tag;
     for (const r of out) {
       if (t.contactPoint && r.id !== t.contactPoint) continue;
-      if (c.kind === "tag_remove") r.tags = r.tags.filter((x) => x.tag !== tag);
-      else if (!r.tags.some((x) => x.tag === tag)) {
+      if (c.kind === "tag_remove") {
+        r.tags = r.tags.filter((x) => x.tag !== tag);
+        continue;
+      }
+      // A stated tag drops the one it contradicts on the point too (DUALIST-WA-SILENCE-1104: a thread Jev read
+      // "to brand" stayed a lead relation under the user's "not to brand", as on the person before WHOLE-THREAD-JEV-1021).
+      r.tags = r.tags.filter((x) => x.tag !== OPPOSITE_TAG[tag]);
+      if (!r.tags.some((x) => x.tag === tag)) {
         r.tags.push({
           tag,
           userIds: PERSONAL.has(tag) ? [c.statedByUserId] : [],

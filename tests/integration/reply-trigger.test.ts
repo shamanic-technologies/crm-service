@@ -9,6 +9,7 @@ import {
   matrixLinks,
   matrixRawEvents,
   people,
+  peopleCorrections,
   peopleScopes,
   replyTriggerReports,
   senderVerdicts,
@@ -161,6 +162,7 @@ async function cleanup() {
   await db.delete(conversationVerdicts).where(eq(conversationVerdicts.brandId, BRAND));
   await db.delete(whatsappSends).where(eq(whatsappSends.brandId, BRAND));
   await db.delete(people).where(eq(people.brandId, BRAND));
+  await db.delete(peopleCorrections).where(eq(peopleCorrections.brandId, BRAND));
   await db.delete(matrixLinks).where(eq(matrixLinks.brandId, BRAND));
   await db.delete(peopleScopes).where(eq(peopleScopes.brandId, BRAND));
   await db.delete(matrixConnections).where(eq(matrixConnections.brandId, BRAND)); // cascades bronze + conversations
@@ -424,6 +426,46 @@ describe.skipIf(!RUN)("reply trigger", () => {
     // Judged human (or never judged): the same thread is a Lead event as before.
     await event("$human", GHOST, min(5), "Hi, tell me more about your offer");
     expect((await detectReplies(conn, run1)).detected).toBe(1);
+  });
+
+  it("a person the brand STATED not to brand is no Lead event, no Jev, by their handle before any build; undone, the next message is (DUALIST-WA-SILENCE-1104)", async () => {
+    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
+    conn = await fresh();
+    // Stated on the person as another line knows them: only their WhatsApp handle ties the two threads.
+    const [stated] = await db
+      .insert(peopleCorrections)
+      .values({
+        orgId: ORG, brandId: BRAND, kind: "tag_add", personId: null, personKeys: ["msg:whatsapp:777@lid"],
+        target: { tag: "professional_not_to_brand" }, targetKey: "tag_add:professional_not_to_brand", reason: "another product's client", statedByUserId: USER,
+      })
+      .returning();
+    await event("$friend", GHOST, min(1), "Hey, tell me more about your offer");
+    expect((await detectReplies(conn, run1)).skipped).toEqual([{ reason: "stated_not_to_brand", roomId: ROOM }]);
+    expect(jevCalls).toBe(0);
+    await deliverDueReplies(Date.now(), { rebuild: async () => buildPerson() });
+    expect(campaignCalls).toHaveLength(0);
+
+    // Undone: the person's next message is a Lead event as before.
+    await db.update(peopleCorrections).set({ undoneAt: new Date(), undoneByUserId: USER }).where(eq(peopleCorrections.id, stated.id));
+    await event("$friend2", GHOST, min(3), "Still there?");
+    expect((await detectReplies(conn, run1)).detected).toBe(1);
+    await deliverDueReplies(Date.now(), { rebuild: async () => buildPerson() });
+    expect(campaignCalls).toHaveLength(1);
+  });
+
+  it("stated not to brand AFTER detection: the pending report is never sent (DUALIST-WA-SILENCE-1104)", async () => {
+    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
+    conn = await fresh();
+    await buildPerson();
+    await event("$late", GHOST, min(1), "Hello, how much is it?");
+    expect((await detectReplies(conn, run1)).detected).toBe(1);
+    await db.insert(peopleCorrections).values({
+      orgId: ORG, brandId: BRAND, kind: "tag_add", personId: null, personKeys: [`email:${EMAIL}`],
+      target: { tag: "professional_not_to_brand" }, targetKey: "tag_add:professional_not_to_brand", reason: null, statedByUserId: USER,
+    });
+    await deliverDueReplies();
+    expect(campaignCalls).toHaveLength(0);
+    expect((await reports()).find((r) => r.anchorEventId === "$late")).toMatchObject({ status: "skipped", reason: "stated_not_to_brand" });
   });
 
   it("a person with no email is reported by phone + name (REPLY-PHONE-ONLY-1015); neither = skipped, named in the log; a person not built yet waits for the rebuild", async () => {

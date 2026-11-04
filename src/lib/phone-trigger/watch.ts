@@ -41,6 +41,8 @@ import { mirrorRecentPersons } from "../posthog/sync.js";
 import { mirrorRecentStripe } from "../stripe/sync.js";
 import { mirrorRecentlyUpdatedUsers } from "../auth/sync.js";
 import { runScopeBuild } from "../people/build.js";
+import { phoneKey } from "../people/identity.js";
+import { statedNotToBrand } from "../people/stated-not-to-brand.js";
 import { createRun, updateRun } from "../runs-client.js";
 import { resolveOffer, type OfferAnswer } from "../form-trigger/offer.js";
 import {
@@ -367,6 +369,10 @@ async function deliverOne(
   if (!dialablePhone([r.phone])) {
     await settle(r, now, { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.INVALID_NUMBER, runId: identity.runId });
     return { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.INVALID_NUMBER };
+  }
+  if (await statedNotToBrand(r.orgId, r.brandId, [phoneKey(r.phone)])) {
+    await settle(r, now, { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.STATED_NOT_TO_BRAND, runId: identity.runId });
+    return { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.STATED_NOT_TO_BRAND };
   }
   if (offer.offerId === null) {
     const detail = offer.detail.replace(/: state it with .*$/, "");
