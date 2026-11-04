@@ -171,7 +171,11 @@ const DEAL_ORDER: Record<string, (typeof DEAL_STATES)[number]> = {
 };
 
 export function resolvePersonState(input: StateInputs): PersonState {
-  const lead = input.leadObservations.find((o) => o.found === true);
+  // A person holding several leads (two addresses judged one human, ZARINA-CLIENT-AS-PROSPECT-1104): lead-service's
+  // `unresolved` (it could not say yet) never hides a sibling lead it did resolve (her company mailbox read
+  // `unresolved` while her Gmail lead was a paying `customer`). Otherwise email order, as before.
+  const leads = input.leadObservations.filter((o) => o.found === true);
+  const lead = leads.find((o) => o.found === true && o.standing.tag !== "unresolved") ?? leads[0];
   if (lead && lead.found === true) {
     return {
       state: lead.standing.tag,
