@@ -1356,16 +1356,30 @@ router.post("/internal/people/stated-not-to-brand", apiKeyAuth, async (req, res)
   if (!parsed.success) {
     return res.status(400).json({ type: "validation", error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   }
-  await withPlatformRun(res, "people.stated-not-to-brand.read", async () => {
-    const { orgId, brandIds, emails } = parsed.data;
-    const stated = await statedNotToBrandByEmail(orgId, brandIds, emails);
-    res.json({
-      orgId,
-      results: emails.map((email) => {
-        const hit = stated.get(email.trim().toLowerCase());
-        return { email, stated: !!hit, brandId: hit?.brandId ?? null, correctionId: hit?.correctionId ?? null };
-      }),
-    });
+  // Like the fact feed: a run only for an answer that silences someone. instantly-service asks on every status read
+  // (~10/s fleet-wide) and almost every answer is "nobody stated": a platform run each would flood runs-service.
+  const { orgId, brandIds, emails } = parsed.data;
+  let stated: Awaited<ReturnType<typeof statedNotToBrandByEmail>>;
+  try {
+    stated = await statedNotToBrandByEmail(orgId, brandIds, emails);
+  } catch (err) {
+    console.error("[crm-service] people.stated-not-to-brand.read failed:", err);
+    return res.status(500).json({ type: "internal", error: (err as Error).message });
+  }
+  if (stated.size > 0) {
+    try {
+      const run = await createPlatformRun({ serviceName: SERVICE_NAME, taskName: "people.stated-not-to-brand.read" });
+      await updatePlatformRun(run.id, "completed", SERVICE_NAME);
+    } catch (err) {
+      return res.status(502).json({ type: "upstream", error: `run tracking unavailable: ${(err as Error).message}` });
+    }
+  }
+  res.json({
+    orgId,
+    results: emails.map((email) => {
+      const hit = stated.get(email.trim().toLowerCase());
+      return { email, stated: !!hit, brandId: hit?.brandId ?? null, correctionId: hit?.correctionId ?? null };
+    }),
   });
 });
 

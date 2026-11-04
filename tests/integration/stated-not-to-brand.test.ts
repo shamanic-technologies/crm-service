@@ -59,11 +59,15 @@ async function state(orgId: string, brandId: string, personKeys: string[]) {
 }
 
 describe.skipIf(!RUN)("POST /internal/people/stated-not-to-brand (DUALIST-WA-SILENCE-EMAIL)", () => {
+  let runCalls = 0;
   beforeAll(() => {
     process.env.RUNS_SERVICE_URL = process.env.RUNS_SERVICE_URL || "http://runs.test";
     vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
-      if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) return json({ id: "run-" + Math.random().toString(16).slice(2) });
+      if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
+        runCalls++;
+        return json({ id: "run-" + Math.random().toString(16).slice(2) });
+      }
       throw new Error(`unexpected fetch ${url}`);
     });
   });
@@ -138,6 +142,15 @@ describe.skipIf(!RUN)("POST /internal/people/stated-not-to-brand (DUALIST-WA-SIL
     ]);
     const res = await post({ orgId: ORG, brandIds: [BRAND], emails: ["thierry@dualist.test"] });
     expect(res.body.results[0]).toMatchObject({ stated: false, correctionId: null });
+  });
+
+  it("opens no run for an answer where nobody is stated (asked on every status read); one when someone is", async () => {
+    runCalls = 0;
+    await post({ orgId: ORG, brandIds: [BRAND], emails: ["thierry@dualist.test"] });
+    expect(runCalls).toBe(0);
+    await state(ORG, BRAND, ["email:thierry@dualist.test"]);
+    await post({ orgId: ORG, brandIds: [BRAND], emails: ["thierry@dualist.test"] });
+    expect(runCalls).toBeGreaterThan(0);
   });
 
   it("refuses a body that names no brand or no address", async () => {
