@@ -159,6 +159,26 @@ describe("resolvePersonState precedence", () => {
     expect(s.stateSource).toBe("lead_service");
   });
 
+  it("two leads of one person: an `unresolved` lead never hides the one lead-service resolved (ZARINA-CLIENT-AS-PROSPECT-1104)", () => {
+    const obs = (email: string, tag: string, leadId: string) => ({
+      found: true as const,
+      email,
+      standing: { state: tag, tag, signal: "none" },
+      disqualification: null,
+      company: null,
+      human: null,
+      leadCampaignId: null,
+      leadId,
+      campaignId: null,
+      campaignIds: [],
+    });
+    const s = resolvePersonState({ ...empty, leadObservations: [obs("info@livingvital.ch", "unresolved", "l1"), obs("marketingaronia@gmail.com", "customer", "l2")] });
+    expect(s).toMatchObject({ state: "customer", stateSource: "lead_service", stateDetail: { leadId: "l2" } });
+    // Every lead unresolved: the first, as before.
+    const u = resolvePersonState({ ...empty, leadObservations: [obs("a@x.com", "unresolved", "l1"), obs("b@x.com", "unresolved", "l2")] });
+    expect(u.stateDetail).toMatchObject({ leadId: "l1" });
+  });
+
   it("the Unibox tag is lead-service's standing TAG, not its state (a click alone is a website visit)", () => {
     const s = resolvePersonState({
       ...empty,
