@@ -29,6 +29,7 @@ import { crmLabelVerdicts, ghlPipelines, type GhlConnection } from "../../db/sch
 import type { ChatTrackingHeaders } from "../chat-client.js";
 import { judgeChoices, type ChoiceQuestion } from "../judgments-client.js";
 import { GHL_SOURCE, type DerivedStage } from "./records.js";
+import { stageEntriesSql } from "./funnel-events.js";
 import { findConnectionStages } from "./stage-meanings.js";
 
 export const LABEL_VERDICTS = ["client", "former_client", "disqualified", "none"] as const;
@@ -244,31 +245,49 @@ export async function readLabelVerdicts(orgId: string, brandId: string) {
  * `client`, the serve's sale step included, is unchanged) and `former_client` (they stopped). A stage entry is dated by GoHighLevel's stage change date
  * (history, never withdrawn on absence like the other stage entries); a tag has
  * no date in GoHighLevel and is served undated while the contact carries it.
+ * DIGEST-SALES-ATTRIB-1105 (funnel-events.ts `stageEntriesSql`, same rule as the
+ * stage-meaning entries): a card CREATED in a client / former-client stage states
+ * the person was a client, never WHEN (undated); a step the card's previous stage
+ * already stated (client → client) is not stated again. A move from a client stage
+ * into a former-client stage still dates `former_client` (they stopped then).
  */
 /** The steps a verdict states: a former client was a client too. */
 const STEPS_OF_VERDICT = sql`CASE v.verdict WHEN 'former_client' THEN ARRAY['client', 'former_client'] ELSE ARRAY[v.verdict] END`;
+/** The steps the card's PREVIOUS stage already stated: re-entering one states nothing new. */
+const PREV_STEPS_OF_VERDICT = sql`CASE pv.verdict WHEN 'former_client' THEN ARRAY['client', 'former_client'] ELSE ARRAY[pv.verdict] END`;
 
 export function labelEventsQuery(orgId: string, brandId: string): SQL {
   return sql`
     SELECT c.id AS contact_id, c.external_id AS external_contact_id, c.full_name,
-           st.step, h.changed_at AS occurred_at, 'stage_entered_at' AS date_basis,
+           st.step,
+           CASE WHEN h.entered_at_creation AND st.step IN ('client', 'former_client')
+                THEN NULL ELSE h.changed_at END AS occurred_at,
+           'stage_entered_at' AS date_basis,
            'stage_label' AS source, h.opportunity_external_id AS source_id,
-           h.pipeline_name, h.stage_name, NULL::text AS tag, v.confidence, h.observed_at
-    FROM ghl_opportunity_history h
+           h.pipeline_name, h.stage_name, NULL::text AS tag, v.confidence, h.observed_at,
+           h.entered_at_creation,
+           CASE WHEN h.entered_at_creation THEN h.opportunity_created_at END AS opportunity_created_at
+    FROM (${stageEntriesSql(orgId, brandId)}) h
     JOIN crm_label_verdicts v
       ON v.connection_id = h.connection_id AND v.kind = 'stage'
      AND v.label_ref = h.value AND v.label = h.stage_name
+    LEFT JOIN crm_label_verdicts pv
+      ON pv.connection_id = h.connection_id AND pv.kind = 'stage'
+     AND pv.label_ref = h.prev_value AND pv.label = h.prev_stage_name
+     AND pv.verdict IN ('client', 'former_client', 'disqualified')
+     AND pv.confidence >= ${LABEL_VERDICT_MIN_CONFIDENCE}
     JOIN contacts c
       ON c.org_id = h.org_id AND c.brand_id = h.brand_id
      AND c.source = ${GHL_SOURCE} AND c.external_id = h.external_contact_id
     CROSS JOIN LATERAL unnest(${STEPS_OF_VERDICT}) AS st(step)
-    WHERE h.org_id = ${orgId} AND h.brand_id = ${brandId} AND h.kind = 'stage'
-      AND v.verdict IN ('client', 'former_client', 'disqualified') AND v.confidence >= ${LABEL_VERDICT_MIN_CONFIDENCE}
+    WHERE v.verdict IN ('client', 'former_client', 'disqualified') AND v.confidence >= ${LABEL_VERDICT_MIN_CONFIDENCE}
+      AND (pv.verdict IS NULL OR NOT (st.step = ANY(${PREV_STEPS_OF_VERDICT})))
     UNION ALL
     SELECT c.id, c.external_id, c.full_name,
            st.step, NULL::timestamptz, 'undated',
            'contact_tag', c.external_id,
-           NULL, NULL, v.label, v.confidence, NULL::timestamptz
+           NULL, NULL, v.label, v.confidence, NULL::timestamptz,
+           NULL::boolean, NULL::timestamptz
     FROM contacts c
     JOIN LATERAL (
       SELECT DISTINCT lower(btrim(t.tag)) AS key
@@ -296,4 +315,6 @@ export interface LabelEventRow {
   tag: string | null;
   confidence: number;
   observed_at: string | Date | null;
+  entered_at_creation: boolean | null;
+  opportunity_created_at: string | Date | null;
 }

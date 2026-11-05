@@ -511,6 +511,8 @@ async function ghlCandidates(orgId: string, brandId: string): Promise<CandidateF
     form_id: string | null;
     form_name: string | null;
     attribution_medium: string | null;
+    entered_at_creation: boolean | null;
+    opportunity_created_at: string | Date | null;
   }>(eventsQuery(orgId, brandId, null));
   for (const e of events) {
     const at = iso(e.occurred_at);
@@ -544,6 +546,12 @@ async function ghlCandidates(orgId: string, brandId: string): Promise<CandidateF
     };
     // The booking does not change when the meeting's outcome does: the outcome is its own fact.
     if (e.step === "meeting_booked") delete payload.appointmentStatus;
+    // A card created already in this stage (DIGEST-SALES-ATTRIB-1105): said only then, so every
+    // other fact's content hash is unchanged. Its creation is the latest the step can have happened.
+    if (e.entered_at_creation) {
+      payload.enteredAtCreation = true;
+      payload.opportunityCreatedAt = iso(e.opportunity_created_at);
+    }
     if (e.step === "meeting_not_held") payload.reason = e.appointment_status ?? e.stage_name;
     if (e.step === "sale") {
       // GoHighLevel states a deal's value with no currency; the minor amount
@@ -592,6 +600,9 @@ async function ghlCandidates(orgId: string, brandId: string): Promise<CandidateF
         tag: e.tag,
         verdictConfidence: Number(e.confidence),
         observedAt: iso(e.observed_at),
+        ...(e.entered_at_creation
+          ? { enteredAtCreation: true, opportunityCreatedAt: iso(e.opportunity_created_at) }
+          : {}),
       },
       subject: presenceSubject("gohighlevel", e.external_contact_id, e.full_name),
     });
