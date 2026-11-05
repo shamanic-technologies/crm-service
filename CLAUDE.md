@@ -957,7 +957,10 @@ customer's vocabulary.
   every stage reached only after buying (onboarding, launched, client event,
   inactive / former client) = `sale`; a former client is never `deal_lost`
   (v1 read Doc Dinners' "Ads launched" / "Onboarding Call" as meetings booked and
-  "INACTIVE CLIENT" as lost). An answer that
+  "INACTIVE CLIENT" as lost). v3 (DIGEST-SALES-ATTRIB-1105, 2026-11-05): a stage saying the customer is LEAVING
+  or GONE (off-boarding, inactive, churned) = `none`, never `sale` (entering it is no purchase; the CRM labels state
+  `former_client`): Doc Dinners' client « He off boarded » about a card moved into "Off Boarding", read as a sale;
+  replayed on its 53 stages: only its 4 leaving stages moved. An answer that
   skips a stage, invents a meaning or omits its confidence fails the sync loud.
 - **Form submissions** — bronze `kind='form'` + `kind='form_submission'`,
   silver `ghl_form_submissions` (form NAME resolved from the mirrored forms). Read
