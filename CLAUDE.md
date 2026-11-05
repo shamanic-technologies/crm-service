@@ -988,6 +988,16 @@ customer's vocabulary.
   date), `dateBasis` naming which date it is, `source`, and GoHighLevel's id.
   The same fact can be evidenced twice (a calendar booking AND a "Booked" stage)
   — both are served, with their sources; the consumer picks.
+- **What date a stage entry may claim** (`stageEntriesSql`, DIGEST-SALES-ATTRIB-1105, owner 2026-11-05): a card CREATED
+  already in a stage (no earlier stage observed, GoHighLevel's stage date = the card's creation, 5 s slack) dates only a
+  BOOKING (`STEPS_DATED_BY_CARD_CREATION`: 133 / 140 such cards sat within 1 h of a calendar booking); any later step
+  (sale, attended, lost) and the `client` / `former_client` labels are served UNDATED, payload `enteredAtCreation` +
+  `opportunityCreatedAt` (the latest it can have happened, never served as the date). An entry into a stage meaning
+  the SAME step as the stage the card left (Past Event Held -> Off Boarding, both sale; a label `client` -> `client`)
+  is not served: the step was reached at the earlier entry (`former_client` after `client` is still dated: they
+  stopped then). Doc Dinners 2026-11-03: 17 cards created straight into "Off Boarding" + 18 moved from "Past Event
+  Held" during a CRM cleanup read as 36 sales that day, the daily client email said "3 sales yesterday". Never a
+  stage name or a brand in code; the meanings stay Jev's.
 
 ### Funnel reach — whole-CRM step counts (`src/lib/gohighlevel/funnel-reach.ts`)
 

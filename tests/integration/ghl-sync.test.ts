@@ -1295,6 +1295,8 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
             formId: null,
             formName: null,
             attributionMedium: "form",
+            enteredAtCreation: null,
+            opportunityCreatedAt: null,
           },
         },
       ]);
