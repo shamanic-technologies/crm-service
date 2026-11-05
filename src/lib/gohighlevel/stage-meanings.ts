@@ -69,8 +69,16 @@ export const STAGE_MEANING_MIN_CONFIDENCE = 0.5;
  * Doc Dinners' "Ads launched" / "Onboarding Call" as meetings booked, "Past Event
  * Held" as a meeting attended, "INACTIVE CLIENT" as a lost deal and "Potential/ In
  * conversation" as a meeting attended.
+ * v3 (DIGEST-SALES-ATTRIB-1105, 2026-11-05): v2 filed every post-purchase stage, a LEAVING
+ * client's included, under `sale`, so a client moving a churned customer's card into
+ * "Off Boarding" stated a new sale (Doc Dinners 2026-11-03, the client: « He off boarded »).
+ * Entering a stage that says the customer is leaving or has left is no purchase: `none`
+ * here; the CRM labels (label-verdicts.ts) state them as a former client. Replayed on Doc
+ * Dinners' 53 stages before shipping: exactly its 4 leaving stages moved (Off Boarding 0.78,
+ * Off Borading completed 0.95, INACTIVE CLIENT 0.80, Inactive Clients > Nurture 0.87 -> none),
+ * every other stage kept its meaning (Closed Client sale 1.0, Event Scheduled sale 0.87).
  */
-export const STAGE_MEANING_CRITERIA_VERSION = 2;
+export const STAGE_MEANING_CRITERIA_VERSION = 3;
 
 /** The options every stage is judged against. */
 const MEANING_CRITERIA: Record<StageMeaning, string> = {
@@ -83,14 +91,16 @@ const MEANING_CRITERIA: Record<StageMeaning, string> = {
   meeting_not_held:
     "a scheduled sales meeting did not take place: no-show, cancelled, or needs rescheduling",
   sale:
-    "the person is or was a paying customer: deal won, signed, paid, closed client, and every stage a person " +
-    "only reaches AFTER buying (onboarding, launched, active, client event, off-boarding, inactive or former client)",
+    "the person bought and is a customer now: deal won, signed, paid, closed client, and every stage an ACTIVE " +
+    "customer goes through after buying (onboarding, launched, active client, an event scheduled or held " +
+    "for the client). Never a stage saying the customer is leaving or has left (off-boarding, inactive, " +
+    "churned, cancelled, former client): entering it is no purchase",
   deal_lost:
-    "a prospect who did not buy and the deal is over: lost, not interested. Never a former or inactive client " +
-    "(that is sale), never a disqualified or unqualified person (that is none)",
+    "a prospect who did not buy and the deal is over: lost, not interested. Never a customer who bought and " +
+    "later left (that is none), never a disqualified or unqualified person (that is none)",
   none:
     "none of these: a new lead, a form fill, in conversation, interested, nurturing, a free trial, " +
-    "unqualified, anything else",
+    "unqualified, a customer leaving or gone (off-boarding, inactive, churned, former client), anything else",
 };
 
 export interface StageDecision {
