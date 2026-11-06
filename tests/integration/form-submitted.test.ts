@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
 import { contacts, formSubmittedDeclarations, ghlConnections, ghlFormSubmissions, ghlRawRecords } from "../../src/db/schema.js";
-import { runFormSubmittedPass } from "../../src/lib/gohighlevel/form-submitted.js";
+import { runFormSubmittedPass, statePastPerformers } from "../../src/lib/gohighlevel/form-submitted.js";
 
 /**
  * CRM-FORM-SUBMITTED-LEDGER-1025 against a real database: every CRM form submission crm-service holds is declared ONCE
@@ -24,6 +24,12 @@ let resolves: Array<{ people: Array<Record<string, unknown>> }> = [];
 let runsOpened: string[] = [];
 let runsClosed: string[] = [];
 let bobIsLead = false;
+/** OUTCOME-PERFORMER-1106: the brand's CRM recorded the form. */
+const CRM = { kind: "crm", name: "gohighlevel" };
+/** What runs-service answers the batch door: a performer conflict on these runs, else success. */
+let conflictRuns: string[] = [];
+/** A runs-service not serving the performer yet: strips it, answers without performerStatedCount. */
+let runsKnowsPerformer = true;
 
 async function seed() {
   const [conn] = await db.insert(ghlConnections).values({ orgId: ORG, brandId: BRAND, locationId: "loc", createdByUserId: USER, lastSyncedAt: new Date() }).returning();
@@ -73,6 +79,8 @@ describe.skipIf(!RUN)("form_submitted declared for every CRM form submission crm
     runsOpened = [];
     runsClosed = [];
     bobIsLead = false;
+    conflictRuns = [];
+    runsKnowsPerformer = true;
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
       const body = init?.body ? JSON.parse(String(init.body)) : null;
@@ -95,7 +103,11 @@ describe.skipIf(!RUN)("form_submitted declared for every CRM form submission crm
       }
       if (url.pathname === "/v1/platform-runs/outcomes/batch") {
         batches.push(body);
-        return json({ allocationVersion: 1, recordedCount: body.runs.length, alreadyRecordedCount: 0, runs: [] }, 201);
+        const conflicts = body.runs.filter((r: { runId: string }) => conflictRuns.includes(r.runId));
+        if (conflicts.length > 0) {
+          return json({ error: "performer_conflict", conflicts: conflicts.map((r: { runId: string }) => ({ runId: r.runId, direction: "produced", outcomeKey: "form_submitted" })) }, 409);
+        }
+        return json({ allocationVersion: 1, recordedCount: body.runs.length, alreadyRecordedCount: 0, ...(runsKnowsPerformer && { performerStatedCount: 0 }), runs: [] }, 201);
       }
       throw new Error(`unexpected fetch ${init?.method} ${url}`);
     });
@@ -120,8 +132,8 @@ describe.skipIf(!RUN)("form_submitted declared for every CRM form submission crm
     expect(batches).toEqual([
       {
         runs: [
-          { runId: runsOpened[0], produced: [{ outcomeKey: "form_submitted", subjectService: "lead-service", subjectId: LEAD_ANN }], occurredAt: "2026-10-15T11:00:00.000Z" },
-          { runId: runsOpened[1], produced: [{ outcomeKey: "form_submitted", subjectService: "lead-service", subjectId: LEAD_CAT }], occurredAt: "2026-10-18T22:00:00.000Z" },
+          { runId: runsOpened[0], produced: [{ outcomeKey: "form_submitted", subjectService: "lead-service", subjectId: LEAD_ANN, performer: CRM }], occurredAt: "2026-10-15T11:00:00.000Z" },
+          { runId: runsOpened[1], produced: [{ outcomeKey: "form_submitted", subjectService: "lead-service", subjectId: LEAD_CAT, performer: CRM }], occurredAt: "2026-10-18T22:00:00.000Z" },
         ],
       },
     ]);
@@ -145,7 +157,7 @@ describe.skipIf(!RUN)("form_submitted declared for every CRM form submission crm
     const later = await runFormSubmittedPass(Date.now());
     expect(later).toMatchObject({ recorded: 0, due: 1, declared: 1 });
     expect(batches[0].runs).toEqual([
-      { runId: runsOpened[2], produced: [{ outcomeKey: "form_submitted", subjectService: "lead-service", subjectId: LEAD_BOB }], occurredAt: "2026-10-16T20:00:00.000Z" },
+      { runId: runsOpened[2], produced: [{ outcomeKey: "form_submitted", subjectService: "lead-service", subjectId: LEAD_BOB, performer: CRM }], occurredAt: "2026-10-16T20:00:00.000Z" },
     ]);
   });
 
@@ -158,5 +170,58 @@ describe.skipIf(!RUN)("form_submitted declared for every CRM form submission crm
     await runFormSubmittedPass(Date.now());
     expect(runsOpened).toHaveLength(opened);
     expect(batches[0].runs[0]).toMatchObject({ runId: ann.runId, occurredAt: "2026-10-15T11:00:00.000Z" });
+  });
+
+  it("every newly declared occurrence is stored with its performer stated: no past pass re-sends it (OUTCOME-PERFORMER-1106)", async () => {
+    const pass = await runFormSubmittedPass(Date.now());
+    expect(pass.performers).toMatchObject({ toState: 0, stated: 0 });
+    const rows = await db.select().from(formSubmittedDeclarations).where(eq(formSubmittedDeclarations.brandId, BRAND));
+    for (const r of rows.filter((x) => x.status === "declared")) expect(r.performerStatus).toBe("stated");
+    expect(rows.filter((x) => x.status !== "declared").every((x) => x.performerStatus === null)).toBe(true);
+  });
+
+  it("an occurrence declared before the performer existed states it ONCE, same run, subject and instant; a conflict is kept as theirs (OUTCOME-PERFORMER-1106)", async () => {
+    await runFormSubmittedPass(Date.now());
+    // As declared before this ship: no performer stated.
+    await db.update(formSubmittedDeclarations).set({ performerStatus: null, performerAt: null }).where(eq(formSubmittedDeclarations.brandId, BRAND));
+    const rows = await db.select().from(formSubmittedDeclarations).where(eq(formSubmittedDeclarations.brandId, BRAND));
+    const ann = rows.find((r) => r.submissionExternalId === "sub-ann")!;
+    const cat = rows.find((r) => r.submissionExternalId === "sub-cat")!;
+    batches = [];
+
+    const dry = await statePastPerformers(Date.now(), { dryRun: true });
+    expect(dry).toMatchObject({ toState: 2, stated: 0 });
+    expect(batches).toEqual([]);
+
+    conflictRuns = [cat.runId!];
+    const pass = await statePastPerformers(Date.now());
+    expect(pass).toMatchObject({ toState: 2, conflict: 1, failed: 0 });
+    expect(batches).toHaveLength(2);
+    expect(batches[1].runs).toEqual([
+      { runId: ann.runId, produced: [{ outcomeKey: "form_submitted", subjectService: "lead-service", subjectId: LEAD_ANN, performer: CRM }], occurredAt: "2026-10-15T11:00:00.000Z" },
+    ]);
+    const after = new Map((await db.select().from(formSubmittedDeclarations).where(eq(formSubmittedDeclarations.brandId, BRAND))).map((r) => [r.submissionExternalId, r]));
+    expect(after.get("sub-ann")!.performerStatus).toBe("stated");
+    expect(after.get("sub-cat")!.performerStatus).toBe("conflict");
+
+    batches = [];
+    const again = await runFormSubmittedPass(Date.now());
+    expect(again.performers.toState).toBe(0);
+    expect(batches).toEqual([]);
+  });
+
+  it("a runs-service that does not serve the performer yet leaves it unstated, then the next pass completes it once (OUTCOME-PERFORMER-1106)", async () => {
+    runsKnowsPerformer = false;
+    const first = await runFormSubmittedPass(Date.now());
+    expect(first).toMatchObject({ declared: 2 });
+    expect(first.performers).toMatchObject({ toState: 2, stated: 0, failed: 2 });
+    let rows = await db.select().from(formSubmittedDeclarations).where(eq(formSubmittedDeclarations.brandId, BRAND));
+    expect(rows.filter((r) => r.status === "declared").every((r) => r.performerStatus === null)).toBe(true);
+
+    runsKnowsPerformer = true;
+    const next = await runFormSubmittedPass(Date.now());
+    expect(next.performers).toMatchObject({ toState: 2, failed: 0 });
+    rows = await db.select().from(formSubmittedDeclarations).where(eq(formSubmittedDeclarations.brandId, BRAND));
+    expect(rows.filter((r) => r.status === "declared").every((r) => r.performerStatus === "stated")).toBe(true);
   });
 });
