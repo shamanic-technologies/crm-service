@@ -73,6 +73,7 @@ function installFetchStub() {
     if (url.host === "brand.test" && url.pathname === `/internal/brands/${CLIENT_BRAND}`) return json({ brand: { name: "ABA" } });
     if (url.host === "google.test") return json({ error: "none", reason: "no_google_account_connected" }, 404);
     if (url.host === "instantly.test") return json({ success: true, count: 0, leads: [] });
+    if (url.host === "lead.test" && url.pathname === "/orgs/leads/unibox") return json({ rows: [], nextCursor: null });
     if (url.host === "lead.test") return json({ leads: [] });
     throw new Error(`unexpected fetch ${url}`);
   });

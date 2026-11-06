@@ -21,7 +21,7 @@ import {
   senderVerdicts,
 } from "../../src/db/schema.js";
 import { ensureScope, runScopeBuild } from "../../src/lib/people/build.js";
-import { clearFamiliesCache } from "../../src/lib/people/families.js";
+import { clearLeadStatesCache } from "../../src/lib/people/lead-state.js";
 import { runFreshnessPass } from "../../src/lib/people/freshness.js";
 import peopleRoutes from "../../src/routes/people.js";
 
@@ -66,12 +66,31 @@ let gmailConnected = false;
 /** PERSON-ORGANIZATIONS-1017: domains Jev was asked about, domains brand-service resolved. */
 const domainQuestions: string[] = [];
 const companyResolves: string[] = [];
-/** features-service's lead families (won / hot / lost / cold) for the brand. */
-let leadFamilies: { leadId: string; email: string; family: string; lostReason: string | null }[] = [];
-let featuresDown = false;
-/** How many next features reads are REFUSED at connect (a container swap on deploy). */
-let featuresRefusals = 0;
-const featuresRequests: Record<string, string>[] = [];
+/** lead-service's Unibox rows (LEAD-GENERIC-1106): each lead id's verdict, else open. */
+const leadStateOf = (over: Record<string, unknown> = {}) => ({
+  lifecycle: { key: "contacted", rank: 2, label: "Contacted" },
+  won: false,
+  hot: false,
+  lost: null,
+  reachable: "contactable",
+  conversation: "waiting_on_them",
+  fit: "fit",
+  fitNote: null,
+  interest: "not_asked",
+  clientStatus: "prospect",
+  nextFollowupAt: null,
+  nextFollowupBasis: null,
+  ...over,
+});
+const HOT = { hot: true, interest: "interested", lifecycle: { key: "engaged", rank: 3, label: "Engaged" } };
+const WON = { won: true, clientStatus: "customer", lifecycle: { key: "paid_client", rank: 7, label: "Paid client" } };
+let uniboxRows: { humanId: string; companyKey: string; relationKey: string | null; leadIds: string[]; leadState: Record<string, unknown> }[] = [];
+const defaultUniboxRows = () => [
+  { humanId: "h-0", companyKey: "", relationKey: null, leadIds: ["l-0"], leadState: leadStateOf(WON) },
+  { humanId: "h-2", companyKey: "", relationKey: null, leadIds: ["l-2"], leadState: leadStateOf(HOT) },
+  { humanId: "h-3", companyKey: "", relationKey: null, leadIds: ["l-3"], leadState: leadStateOf() },
+  { humanId: "h-4", companyKey: "", relationKey: null, leadIds: ["l-4"], leadState: leadStateOf({ lost: { reasons: ["not_reachable"], reachable: "bounced", fit: null }, reachable: "bounced" }) },
+];
 let leadServiceDown = false;
 /** lead-service's CRM pairings for the brand (served on `?state=paired`, filtered like the real route). */
 let leadPairings: { crmContact: { id: string; email: string | null; phone: string | null; fullName: string | null; company: string | null }; pairing: { state: string; toConfirm: boolean; lead: { leadId?: string; email: string | null; fullName: string | null; company: string | null } | null } }[] = [];
@@ -310,17 +329,6 @@ function installFetchStub() {
         });
       }
     }
-    if (url.host === "features.test" && url.pathname === `/brands/${BRAND}/lead-families`) {
-      if (featuresRefusals > 0) {
-        featuresRefusals -= 1;
-        throw new TypeError("fetch failed", { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) });
-      }
-      featuresRequests.push(init!.headers as Record<string, string>);
-      if (featuresDown) return json({ error: "Failed to compute brand lead families" }, 502);
-      const counts = { won: 0, hot: 0, lost: 0, cold: 0 } as Record<string, number>;
-      for (const p of leadFamilies) counts[p.family] += 1;
-      return json({ brandId: BRAND, counts, lostBreakdown: { wentCold: 0, ruledOut: 0 }, offers: [], people: leadFamilies.map((p) => ({ ...p, campaignLeadIds: [], offerId: "o1" })) });
-    }
     if (url.host === "brand.test" && url.pathname === "/internal/companies/resolve") {
       const body = JSON.parse(String(init!.body)) as { companies: { ref: string; domain: string }[] };
       companyResolves.push(...body.companies.map((c) => c.domain));
@@ -402,6 +410,11 @@ function installFetchStub() {
     }
     if (url.host === "lead.test") {
       if (leadServiceDown) return json({ error: "down" }, 503);
+      if (url.pathname === "/orgs/leads/unibox") {
+        // Paged on an opaque cursor (here: the offset), 1 row per page: the walk follows it to the end.
+        const at = Number(url.searchParams.get("cursor") ?? "0");
+        return json({ rows: uniboxRows.slice(at, at + 1), total: uniboxRows.length, nextCursor: at + 1 < uniboxRows.length ? String(at + 1) : null });
+      }
       if (url.pathname === "/orgs/leads") {
         const q = url.searchParams.get("q");
         if (q === null) {
@@ -414,8 +427,8 @@ function installFetchStub() {
           return json({
             leads: [
               // A substring hit that is NOT bob, first in lead-service's order: must be ignored.
-              { id: "lc-0", leadId: "l-0", email: "jimbob@y.com", campaignId: "camp-9", standing: { state: "customer", tag: "customer" }, disqualification: null, company: null, human: null },
-              { id: "lc-2", leadId: "l-2", email: "bob@y.com", campaignId: "camp-2", standing: { state: "engaged", tag: "engaged", signal: "click" }, disqualification: { level: "lead", offerId: null, note: "Runs a construction company, we sell to supermarkets.", source: "manual", statedByUserId: "user-1", statedAt: "2026-10-13T09:00:00.000Z" }, company: { id: "c0c0c0c0-1111-4111-8111-000000000001", key: "c0c0c0c0-1111-4111-8111-000000000001", isClient: true, signedUp: true, disqualification: { level: "company", offerId: null, note: "Not our target.", source: "manual", statedByUserId: "user-1", statedAt: "2026-10-13T10:00:00.000Z" } }, human: { optedOut: true, doNotContact: false } },
+              { id: "lc-0", leadId: "l-0", email: "jimbob@y.com", campaignId: "camp-9", disqualification: null, company: null, human: null },
+              { id: "lc-2", leadId: "l-2", email: "bob@y.com", campaignId: "camp-2", disqualification: { level: "lead", offerId: null, note: "Runs a construction company, we sell to supermarkets.", source: "manual", statedByUserId: "user-1", statedAt: "2026-10-13T09:00:00.000Z" }, company: { id: "c0c0c0c0-1111-4111-8111-000000000001", key: "c0c0c0c0-1111-4111-8111-000000000001", isClient: true, signedUp: true, disqualification: { level: "company", offerId: null, note: "Not our target.", source: "manual", statedByUserId: "user-1", statedAt: "2026-10-13T10:00:00.000Z" } }, human: { optedOut: true, doNotContact: false } },
             ],
           });
         }
@@ -564,11 +577,8 @@ describe.skipIf(!RUN)("person layer", () => {
     writtenPageSize = 1000;
     leadList = [];
     delete process.env.PEOPLE_STANDING_WALK_MIN;
-    leadFamilies = [];
-    featuresDown = false;
-    featuresRefusals = 0;
-    featuresRequests.length = 0;
-    clearFamiliesCache();
+    uniboxRows = defaultUniboxRows();
+    clearLeadStatesCache();
     installFetchStub();
     await wipe();
   });
@@ -588,8 +598,9 @@ describe.skipIf(!RUN)("person layer", () => {
     // Not one of our leads → the CRM's deal states it.
     expect(alice).toMatchObject({ state: "deal_won", stateSource: "gohighlevel" });
 
-    // bob is a lead: lead-service's standing, of the EXACT address only.
-    expect(rows[1]).toMatchObject({ state: "engaged", stateSource: "lead_service" });
+    // bob is a lead: lead-service's lead state (its Unibox row holding his lead), of the EXACT address only.
+    expect(rows[1]).toMatchObject({ state: "hot", stateSource: "lead_service" });
+    expect((rows[1].stateDetail as { leadState: { lifecycle: { key: string } } }).leadState.lifecycle.key).toBe("engaged");
     expect((rows[1].stateDetail as { leadCampaignId: string }).leadCampaignId).toBe("lc-2");
 
     const bySource = Object.fromEntries(summary.sources.map((s) => [s.source, s]));
@@ -625,13 +636,13 @@ describe.skipIf(!RUN)("person layer", () => {
       written("erin@v.com", "camp-4", { replied: true, unsubscribed: true, firstRepliedAt: "2026-09-07T08:00:00.000Z", replyClassification: "negative" }),
     ];
     writtenPageSize = 1; // every row on its own page: the cursor is walked to the end
-    // The whole-brand walk answers lead-service's standing for every address at once.
+    // The whole-brand walk answers which lead every address is, at once.
     process.env.PEOPLE_STANDING_WALK_MIN = "1";
     leadList = [
-      { id: "lc-0", leadId: "l-0", email: "jimbob@y.com", campaignId: "camp-9", standing: { state: "customer", tag: "customer" }, disqualification: null, company: null, human: null },
-      { id: "lc-2", leadId: "l-2", email: "bob@y.com", campaignId: "camp-2", standing: { state: "engaged", tag: "engaged", signal: "click" }, disqualification: null, company: null, human: null },
-      { id: "lc-3", leadId: "l-3", email: "Dave@w.com", campaignId: "camp-3", standing: { state: "contacted", tag: "contacted" }, disqualification: null, company: null, human: null },
-      { id: "lc-4", leadId: "l-4", email: "dave@w.com", campaignId: "camp-5", standing: { state: "unresolved", tag: "unresolved" }, disqualification: null, company: null, human: null },
+      { id: "lc-0", leadId: "l-0", email: "jimbob@y.com", campaignId: "camp-9", disqualification: null, company: null, human: null },
+      { id: "lc-2", leadId: "l-2", email: "bob@y.com", campaignId: "camp-2", disqualification: null, company: null, human: null },
+      { id: "lc-3", leadId: "l-3", email: "Dave@w.com", campaignId: "camp-3", disqualification: null, company: null, human: null },
+      { id: "lc-4", leadId: "l-4", email: "dave@w.com", campaignId: "camp-5", disqualification: null, company: null, human: null },
     ];
     const summary = await buildNow();
 
@@ -640,10 +651,10 @@ describe.skipIf(!RUN)("person layer", () => {
     const [alice, bob, dave, erin] = rows;
     // The repliers are unchanged: alice (not a lead) replied, bob is lead-service's exact row.
     expect(alice).toMatchObject({ state: "replied", stateSource: "instantly" });
-    expect(bob).toMatchObject({ state: "engaged", stateSource: "lead_service" });
+    expect(bob).toMatchObject({ state: "hot", stateSource: "lead_service" });
     expect((bob.stateDetail as { leadCampaignId: string }).leadCampaignId).toBe("lc-2");
-    // dave: lead-service's FIRST row for his address in its own order.
-    expect(dave).toMatchObject({ state: "contacted", stateSource: "lead_service", sources: ["instantly"] });
+    // dave: lead-service's FIRST row for his address in its own order, its lead's Unibox verdict: open.
+    expect(dave).toMatchObject({ state: "open", stateSource: "lead_service", sources: ["instantly"] });
     expect((dave.stateDetail as { leadCampaignId: string }).leadCampaignId).toBe("lc-3");
     expect(dave.lastActivityAt!.toISOString()).toBe("2026-09-09T08:00:00.000Z");
     // A reply asking to stop is not an engagement: erin is in the list, stating no reply.
@@ -709,8 +720,8 @@ describe.skipIf(!RUN)("person layer", () => {
     expect(bob.identityKeys).toEqual(["email:aa.bob@gmail.com", "email:bob@y.com", "phone:+13529423443"]);
     // The address lead-service serves comes first, whatever the key order.
     expect(bob.emails).toEqual(["bob@y.com", "aa.bob@gmail.com"]);
-    // lead-service's standing outranks the CRM's open deal.
-    expect(bob).toMatchObject({ state: "engaged", stateSource: "lead_service", possibleLeads: [] });
+    // lead-service's lead state outranks the CRM's open deal.
+    expect(bob).toMatchObject({ state: "hot", stateSource: "lead_service", possibleLeads: [] });
     expect(bob.mergeEvidence).toContainEqual(expect.objectContaining({ kind: "lead_pairing", ref: bobCrm.id }));
 
     expect(rows[2]).toMatchObject({ sources: ["gohighlevel"], identityKeys: ["email:other@z.com"], possibleLeads: [] });
@@ -920,8 +931,9 @@ describe.skipIf(!RUN)("person layer", () => {
     expect(res.body.people[0].personKey).toBe("email:bob@y.com");
     // lead-service's Disqualified mark rides BESIDE the state, verbatim; the state is unchanged.
     expect(res.body.people[0]).toMatchObject({
-      state: "engaged",
+      state: "hot",
       stateSource: "lead_service",
+      leadState: { hot: true, won: false, lost: null, lifecycle: { key: "engaged", rank: 3, label: "Engaged" }, interest: "interested" },
       disqualification: { level: "lead", offerId: null, note: "Runs a construction company, we sell to supermarkets.", source: "manual", statedByUserId: "user-1", statedAt: "2026-10-13T09:00:00.000Z" },
       // Tags at THEIR level, relayed verbatim: the company's (client, signed up, not our target) and the human's opt-out.
       companyTags: {
@@ -946,7 +958,7 @@ describe.skipIf(!RUN)("person layer", () => {
     expect(filtered.body.people[0].personKey).toBe("email:alice@x.com");
   });
 
-  describe("family filters (Won / Hot / Lost / Cold)", () => {
+  describe("Won / Hot / Lost filters: lead-service's verdict (LEAD-GENERIC-1106)", () => {
     const listPeople = (query = "") =>
       request(app())
         .get(`/orgs/people?brandId=${BRAND}${query}`)
@@ -954,95 +966,54 @@ describe.skipIf(!RUN)("person layer", () => {
         .set("x-org-id", ORG)
         .set("x-user-id", USER);
 
-    beforeEach(() => {
-      gmailConnected = true;
-      leadFamilies = [
-        { leadId: "l-a", email: "alice@x.com", family: "won", lostReason: null },
-        { leadId: "l-b", email: "bob@y.com", family: "hot", lostReason: null },
-        // A lead who is not in the Unibox: counted by features, not by the list.
-        { leadId: "l-z", email: "zed@q.com", family: "hot", lostReason: null },
-        { leadId: "l-y", email: "yan@q.com", family: "cold", lostReason: null },
-      ];
-    });
-
-    it("each person carries features-service's family; counts cover the list; carol has none", async () => {
+    it("each person carries lead-service's verdict; counts cover the list; no cold", async () => {
       await seedLocalSources();
       await buildNow();
       const res = await listPeople();
       expect(res.status).toBe(200);
-      expect(res.body.total).toBe(3);
       const byKey = Object.fromEntries(res.body.people.map((p: { personKey: string; family: string | null }) => [p.personKey, p.family]));
-      expect(byKey).toEqual({ "email:alice@x.com": "won", "email:bob@y.com": "hot", "email:carol@z.com": null });
+      expect(byKey).toEqual({ "email:alice@x.com": null, "email:bob@y.com": "hot" });
       expect(res.body.families).toMatchObject({
         status: "ok",
         error: null,
         filter: null,
-        counts: { won: 1, hot: 1, lost: 0, cold: 0 },
-        withFamily: 2,
+        counts: { won: 0, hot: 1, lost: 0 },
+        withFamily: 1,
         withoutFamily: 1,
-        producerCounts: { won: 1, hot: 2, lost: 0, cold: 1 },
+        source: "lead_service",
       });
-      // Org-attributed read on this request's run.
-      expect(featuresRequests[0]).toMatchObject({ "x-api-key": "f", "x-org-id": ORG, "x-user-id": USER });
-      expect(featuresRequests[0]["x-run-id"]).toMatch(/^run-/);
+      expect((await listPeople("&family=cold")).status).toBe(400);
     });
 
-    it("family=hot returns only the hot people, pages them, and combines with search", async () => {
+    it("family=hot returns only the hot people and combines with search; lost carries its reason", async () => {
       await seedLocalSources();
+      uniboxRows = defaultUniboxRows().map((r) =>
+        r.leadIds.includes("l-2") ? { ...r, leadState: leadStateOf({ lost: { reasons: ["wrong_fit", "not_interested"], reachable: null, fit: "not_our_target" }, fit: "not_our_target" }) } : r,
+      );
       await buildNow();
-      const hot = await listPeople("&family=hot");
-      expect(hot.status).toBe(200);
-      expect(hot.body.total).toBe(1);
-      expect(hot.body.people.map((p: { personKey: string }) => p.personKey)).toEqual(["email:bob@y.com"]);
-      expect(hot.body.families.filter).toBe("hot");
-      // Counts stay the buttons' numbers, not the filtered page's.
-      expect(hot.body.families.counts).toEqual({ won: 1, hot: 1, lost: 0, cold: 0 });
-
-      const won = await listPeople("&family=won&limit=1");
-      expect(won.body.people.map((p: { personKey: string }) => p.personKey)).toEqual(["email:alice@x.com"]);
-
-      const none = await listPeople("&family=hot&q=alice");
-      expect(none.body.total).toBe(0);
-      expect(none.body.families.counts).toEqual({ won: 1, hot: 0, lost: 0, cold: 0 });
-      const both = await listPeople("&family=won&q=alice");
-      expect(both.body.total).toBe(1);
-      expect(both.body.people[0].matches.length).toBeGreaterThan(0);
-
-      // One shared read serves every list call.
-      expect(featuresRequests).toHaveLength(1);
+      const lost = await listPeople("&family=lost");
+      expect(lost.body.people.map((p: { personKey: string; familyLostReason: string }) => [p.personKey, p.familyLostReason])).toEqual([["email:bob@y.com", "wrong_fit"]]);
+      expect(lost.body.families).toMatchObject({ filter: "lost", counts: { won: 0, hot: 0, lost: 1 }, lostReasons: { wrong_fit: 1, not_interested: 1 } });
+      expect((await listPeople("&family=hot")).body.total).toBe(0);
+      expect((await listPeople("&family=lost&q=alice")).body.total).toBe(0);
     });
 
-    it("features-service refusing connections mid-deploy, then accepting: family=hot still lists", async () => {
+    it("lead-service's Unibox unreadable: its leads read unavailable, never a guess", async () => {
       await seedLocalSources();
-      await buildNow();
-      featuresRefusals = 2;
-      const hot = await listPeople("&family=hot");
-      expect(hot.status).toBe(200);
-      expect(hot.body.families.status).toBe("ok");
-      expect(hot.body.people.map((p: { personKey: string }) => p.personKey)).toEqual(["email:bob@y.com"]);
-      expect(featuresRefusals).toBe(0);
-    });
-
-    it("a failed features read is stated: All still lists, a family filter is a 502", async () => {
-      featuresDown = true;
-      await seedLocalSources();
-      await buildNow();
-      const all = await listPeople();
-      expect(all.status).toBe(200);
-      expect(all.body.total).toBe(3);
-      expect(all.body.families).toMatchObject({ status: "failed", counts: null, withFamily: null });
-      expect(all.body.families.error).toContain("returned 502");
-      expect(all.body.people.every((p: { family: string | null }) => p.family === null)).toBe(true);
-
-      const hot = await listPeople("&family=hot");
-      expect(hot.status).toBe(502);
-      expect(hot.body.reason).toBe("lead_families_unavailable");
-
-      // A failure is not cached: the next read asks again.
-      featuresDown = false;
-      const again = await listPeople("&family=hot");
-      expect(again.status).toBe(200);
-      expect(again.body.total).toBe(1);
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+        if (url.host === "lead.test" && url.pathname === "/orgs/leads/unibox") return json({ error: "down" }, 503);
+        return realFetch(input, init);
+      }) as typeof fetch;
+      try {
+        const summary = await buildNow();
+        expect(summary.leadStates).toMatchObject({ status: "failed" });
+        const [bob] = await db.select().from(people).where(eq(people.personKey, "email:bob@y.com"));
+        expect(bob).toMatchObject({ state: "unavailable", stateSource: "lead_service" });
+      } finally {
+        globalThis.fetch = realFetch;
+      }
     });
   });
 
@@ -1053,23 +1024,6 @@ describe.skipIf(!RUN)("person layer", () => {
     const second = await buildNow();
     expect(second.standing.reused).toBe(2);
     expect(await db.select().from(people)).toHaveLength(2);
-  });
-
-  it("a cached standing from before lead-service served a tag is re-asked, never served tagless", async () => {
-    await seedLocalSources();
-    await buildNow();
-    const cached = await db.select().from(leadStandingObservations);
-    for (const c of cached.filter((x) => x.found)) {
-      const payload = c.payload as { standing: Record<string, unknown> };
-      const { tag: _tag, ...standing } = payload.standing;
-      await db
-        .update(leadStandingObservations)
-        .set({ payload: { ...payload, standing } })
-        .where(eq(leadStandingObservations.id, c.id));
-    }
-    const again = await buildNow();
-    expect(again.standing.asked).toBe(1);
-    expect(again.standing.reused).toBe(1);
   });
 
   it("a cached standing from before lead-service served its Disqualified mark is re-asked, never read as not disqualified", async () => {

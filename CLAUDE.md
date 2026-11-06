@@ -1221,37 +1221,20 @@ owner had written to. A recorded fact, never an address-shape guess.
   is never an empty thread: GoHighLevel `added_to_crm` (`contact_created_at`),
   CSV `added_to_crm` (`uploaded_at`, item `source: "csv"`), PostHog `signup`,
   Stripe `stripe_customer_created`. No vendor date → no event (never build time).
-- **ONE state, read not graded** (`state.ts`): lead-service standing verbatim
-  (first exact-address row of its own `sort=activity` search; a failed read is
-  `unavailable`, never a guess; from `PEOPLE_STANDING_WALK_MIN` (200) addresses
-  to ask, ONE walk of the brand's whole lead list in the same order replaces the
-  per-address searches: 17.5k searches were ~15 min per build; the walk also
-  finds a lead lead-service SERVES under the address we emailed while its
-  search only indexes the identity address, 1 of 40 repliers on 2026-10-09) > GoHighLevel deal status (fixed vocabulary,
-  `deal_*`) > Matrix thread reading > Instantly `replied|clicked` >
-  `in_conversation`. The browser renders `state` + `stateSource`.
-  **Disqualified is NOT a state** (lead-service v0.83.59): lead-service's own
-  mark `disqualification` (null or `{offerId, note, source, statedByUserId,
-  statedAt}`) on the SAME row the standing came from, relayed verbatim into
-  `stateDetail.disqualification` and served as the person's `disqualification`
-  beside `state` (null when not a lead). Never derived here. A cached
-  observation missing the key is re-asked (like a tagless one); an absent or
-  malformed mark fails the address loud (`unavailable`).
-  **Tags at THEIR level** (LEAD-REFONTE-1013, lead-service v0.83.65): the mark
-  carries lead-service's `level` (`lead` = this person at this company, else
-  `company` = "not our target"; the lead's own answers first); the row's
-  `company` block (`{id, key, isClient, signedUp, disqualification}`, null = no
-  company) rides in `stateDetail.company`, served as `companyTags`; the row's
-  `human` block (`{optedOut, doNotContact}`, v0.83.67, whichever rung decided
-  the standing; null = standing unresolved, never false) rides in
-  `stateDetail.human`, served as `humanTags`. All verbatim, never derived here;
-  a cached answer missing `company`, `human` or the mark's `level` is re-asked
-  (`cachedAnswerIsCurrent`), an absent one fails the address loud.
-  ⚠️ Invalidating the cache re-asks EVERY address in one walk of lead-service's
-  list: a lead-service deploy (or its cold first pages) mid-walk makes the
-  whole brand `unavailable` until the next build (2026-10-13: 8,775 people for
-  ~3 min). Ship it when lead-service is settled, then force one rebuild
-  (`POST /internal/people/sync {scopeId}`) and check the `unavailable` count.
+- **ONE state, read not graded** (`state.ts`, LEAD-GENERIC-1106, owner 2026-11-06: the LEAD is described ONCE, by
+  lead-service). lead-service's `leadState` (Lifecycle on the one ladder, won / hot / lost + reasons, reachable,
+  conversation, fit, interest, client status, next follow-up) is READ off its Unibox (`lead-state.ts`: every page of
+  `GET /orgs/leads/unibox`, one shared walk per (org, brand), fresh 5 min / stale 30 min) and relayed verbatim:
+  person `state` = `won | hot | lost`, else `open` (lead-service's word), `stateSource: lead_service`, `leadState`
+  served on the person. Matched by the person's lead id (lead-service's lead list `GET /orgs/leads?view=basic`, one
+  walk from `PEOPLE_STANDING_WALK_MIN` (200) addresses, else one search per address; cached 1 h in
+  `lead_standing_observations`, a historical table name) else the human's first Unibox row. The lead row's own marks
+  ride beside it verbatim (`disqualification`, `company` -> `companyTags`, `human` -> `humanTags`, served only for
+  `lead_service`). The row's old `standing` / buckets / stage / "cold" are NEVER read: crm keeps no copy of
+  lead-service's vocabulary. A failed lead read or Unibox walk = `unavailable` (never a guess). Nobody lead-service
+  serves a lead state for falls to crm's OWN facts: stripe (`subscription_*` > `paid` > `refunded` >
+  `subscription_canceled`) > GoHighLevel deal status (`deal_*`) > Matrix thread reading > Instantly
+  `replied|clicked` > `in_conversation`.
 - **Materialized, rebuilt whole.** `people_scopes` (one per (org, brand),
   carries `created_by_user_id` for the cron's org run) → `people` replaced in
   ONE transaction per build, writing ONLY the rows that moved (`write.ts`, BOX-DISK-FULL-1029: next state in a
@@ -1712,20 +1695,10 @@ and the OLD code then wrote onto the NEW schema (0020, 2026-10-10).
   (scope, `last_built_at`, filters) without a search (`listBase`): `people` rows only change in a
   build. Families and relationships are stale-while-revalidate past their 60 s TTL (served up to 2x
   TTL while one re-read runs); a human lead-service holds no relationship for is remembered as such.
-- **Family filters (Unibox Won / Hot / Lost / Cold, `families.ts`)**: `GET /orgs/people?family=won|hot|lost|cold`
-  (combines with `q`, `source`, paging). Each person carries `family` + `familyLostReason`
-  = features-service's verdict (`GET /brands/{brandId}/lead-families`, read verbatim, matched on
-  email AND `humanId`; several matches → strongest, features' own union rule). Hot also holds every
-  person lead-service tags lead + wants business, any channel, campaign lead or not
-  (HOT-INBOUND-UNANSWERED-1016): a WhatsApp writer often has no email, only the human matches them. Null = not our lead.
-  `families.counts` = per family over the list's population with `family` NOT applied (the
-  buttons), sum = `withFamily`; `producerCounts` = features' own over ALL leads. One read
-  (~4 MB, ~1s warm / ~25s cold) shared 60s per (org, brand), failures not cached. Every sibling GET
-  (`siblings.ts`) retries a CONNECT failure (refused/reset, a sibling mid-deploy: ~2s) at
-  250/500/1000/2000 ms; an answered 4xx/5xx or our own timeout is never retried. Read fails →
-  `families.status=failed` + `error`, All still lists, `family=` answers 502
-  `lead_families_unavailable`. Env `FEATURES_SERVICE_URL` + `_API_KEY`. Moves with the list to
-  lead-service's conversation gold (#61).
+- **Won / Hot / Lost filter** (`GET /orgs/people?family=won|hot|lost`, LEAD-GENERIC-1106): the person's `state` when
+  `stateSource = lead_service` (lead-service's verdict, relayed at build), counts over the list's population
+  (`families.counts`, `lostReasons`); `familyLostReason` = lead-service's strongest lost reason. "Cold" does not exist.
+  No features-service read any more (its `lead-families` was a second copy of the verdict).
 - Cron on the box, every 15 min: `/root/distribute/people-sync-cron.sh` →
   `POST /internal/people/sync` (platform run = the trigger; one ORG run per
   scope). Env: `GOOGLE_/INSTANTLY_/LEAD_/BRAND_SERVICE_URL` + `_API_KEY`.

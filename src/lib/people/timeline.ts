@@ -72,7 +72,7 @@ import { PEOPLE_SOURCES, type PeopleSource, type Presence } from "./identity.js"
 import { LATE_JOIN_SOURCES, mirrorContactKeys, type LateJoinSource, type MirrorContactRow } from "./record-keys.js";
 import type { SiblingIdentity } from "./siblings.js";
 import { readStoredTimeline, type StoredReadOptions, type StoredTimeline } from "./search.js";
-import { lookupLeadStanding } from "./sources.js";
+import { lookupLead } from "./sources.js";
 import {
   COPILOT_CHANNEL,
   COPILOT_SENDER_NAME,
@@ -1095,7 +1095,7 @@ export async function readTimeline(
     identity,
     // Every campaign the address is a lead on, engaged or not — asked in the background only.
     async (email) => {
-      const lead = await lookupLeadStanding(identity, email);
+      const lead = await lookupLead(identity, email);
       return lead.found ? lead.campaignIds : [];
     },
     opts,

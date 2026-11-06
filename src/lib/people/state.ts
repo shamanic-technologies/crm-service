@@ -3,18 +3,16 @@
  * never graded here.
  *
  * Precedence, first that applies wins:
- *  1. `lead_service` — the person is one of our leads: lead-service's own
- *     standing TAG, verbatim (its `state` vocabulary `unresolved |
- *     not_contacted | contacted | engaged | sales_interest | customer |
- *     opted_out`, plus `website_visit`: a sales interest whose only interest
- *     is a visit — a click — is tagged as that, while its state stays
- *     `sales_interest` for the stats). lead-service owns the tag; the full
- *     standing rides in the detail. "Disqualified" is NOT a tag (lead-service
- *     v0.83.59): it is lead-service's own MARK beside the standing
- *     (`disqualification`), relayed verbatim in `stateDetail.disqualification`
- *     and served beside the state, never instead of it. When lead-service
- *     could not be asked, the state is `unavailable` with the error — never a
- *     guess from the other sources.
+ *  1. `lead_service` — lead-service serves a lead state for the person
+ *     (LEAD-GENERIC-1106: its ONE lead vocabulary, `leadState`, read off its
+ *     Unibox, lead-state.ts). `state` = its verdict `won | hot | lost`, else
+ *     `open`; the whole `leadState` (Lifecycle, reachable, conversation, fit,
+ *     interest, client status, next follow-up) rides in the detail and is served
+ *     as the person's `leadState`. The lead row the person's address is
+ *     (`leadCampaignId`, `leadId`, campaign) and lead-service's marks on it
+ *     (`disqualification`, `company`, `human`) ride beside it, verbatim. When
+ *     lead-service could not be asked about a lead, the state is `unavailable`
+ *     with the error, never a guess from the other sources.
  *  2. `stripe` — the brand's own Stripe account holds money from them. Stripe's
  *     FIXED subscription status vocabulary, prefixed: `subscription_active`,
  *     else `subscription_trialing`, else `subscription_past_due`, else
@@ -22,9 +20,6 @@
  *     refunded); else `refunded` (every succeeded charge refunded in full); else
  *     `subscription_canceled` (a subscription that ended, no payment kept). A
  *     customer record with none of these states nothing and falls through.
- *     Money received is the strongest fact the brand's own systems hold, so it
- *     outranks a CRM deal stage; lead-service still comes first because it is
- *     verbatim about OUR leads.
  *  3. `gohighlevel` — the customer's own CRM holds a deal for them. GoHighLevel's
  *     FIXED opportunity status vocabulary, prefixed: `deal_won`, else
  *     `deal_open`, else `deal_lost`, else `deal_abandoned` (a person with
@@ -32,28 +27,17 @@
  *     free text and are carried in the detail verbatim, never mapped.
  *  4. `matrix` — the reading of their WhatsApp / Telegram / Discord thread
  *     (`new | qualifying | negotiating | won | lost | unresponsive`).
- *  5. `instantly` — they engaged with our cold email but are not one of our
- *     leads (a platform send): `replied`, else `clicked`.
- *  6. `none` — nothing states anything: `in_conversation` (e.g. a platform
- *     send nobody answered: we wrote to them, they are not one of our leads).
+ *  5. `instantly` — they engaged with our cold email: `replied`, else `clicked`.
+ *  6. `none` — nothing states anything: `in_conversation`.
+ * Sources 2-6 are crm-service's own facts about someone lead-service serves no
+ * lead state for; none of them is a lead verdict.
  *
  * The browser renders `state` + `stateSource`; it never computes either.
  */
+import { leadStateWord, matchLeadState, type BrandLeadStates, type LeadState, type LeadStateMatch } from "./lead-state.js";
 
 export const STATE_SOURCES = ["lead_service", "stripe", "gohighlevel", "matrix", "instantly", "none"] as const;
 export type StateSource = (typeof STATE_SOURCES)[number];
-
-/** lead-service's standing TAG vocabulary (its `state` values + `website_visit`). */
-export const LEAD_STANDING_STATES = [
-  "unresolved",
-  "not_contacted",
-  "contacted",
-  "engaged",
-  "sales_interest",
-  "website_visit",
-  "customer",
-  "opted_out",
-] as const;
 
 /**
  * lead-service's Disqualified MARK on a lead row (`disqualification`), verbatim:
@@ -113,24 +97,19 @@ export interface StripeStandingInput {
 }
 export const INSTANTLY_STATES = ["replied", "clicked"] as const;
 
-/** lead-service's `standing` object: `state` for its stats, `tag` for display. */
-export type LeadStanding = Record<string, unknown> & { state: string; tag: string };
-
 /** What lead-service said about one address. */
 export type LeadObservation =
   | { found: false }
   | {
       found: true;
       email: string;
-      /** lead-service's `standing` object, verbatim. */
-      standing: LeadStanding;
       /** lead-service's Disqualified mark on that same row, verbatim (null = not disqualified). */
       disqualification: LeadDisqualification | null;
       /** lead-service's company block on that same row, verbatim (null = no company known). */
       company: LeadCompanyTags | null;
       /** lead-service's human block on that same row, verbatim. */
       human: LeadHumanTags | null;
-      /** The leads_campaigns row whose standing it is (lead-service `sort=activity` first row). */
+      /** The address's leads_campaigns row (lead-service `sort=activity` first row). */
       leadCampaignId: string;
       leadId: string | null;
       campaignId: string | null;
@@ -149,6 +128,10 @@ export interface GhlDeal {
 export interface StateInputs {
   /** One observation per email of the person, in email order. */
   leadObservations: LeadObservation[];
+  /** The person's human (lead-service's Unibox rows are keyed on it). */
+  humanId: string | null;
+  /** lead-service's lead states for the brand (lead-state.ts), or why they could not be read. */
+  leadStates: { ok: true; states: Pick<BrandLeadStates, "byLeadId" | "byHuman"> } | { ok: false; error: string };
   ghlDeals: GhlDeal[];
   /** One per Stripe customer record of the person. */
   stripe: StripeStandingInput[];
@@ -171,30 +154,24 @@ const DEAL_ORDER: Record<string, (typeof DEAL_STATES)[number]> = {
 };
 
 export function resolvePersonState(input: StateInputs): PersonState {
-  // A person holding several leads (two addresses judged one human, ZARINA-CLIENT-AS-PROSPECT-1104): lead-service's
-  // `unresolved` (it could not say yet) never hides a sibling lead it did resolve (her company mailbox read
-  // `unresolved` while her Gmail lead was a paying `customer`). Otherwise email order, as before.
-  const leads = input.leadObservations.filter((o) => o.found === true);
-  const lead = leads.find((o) => o.found === true && o.standing.tag !== "unresolved") ?? leads[0];
-  if (lead && lead.found === true) {
-    return {
-      state: lead.standing.tag,
-      stateSource: "lead_service",
-      stateDetail: {
-        email: lead.email,
-        standing: lead.standing,
-        disqualification: lead.disqualification,
-        company: lead.company,
-        human: lead.human,
-        leadCampaignId: lead.leadCampaignId,
-        leadId: lead.leadId,
-        campaignId: lead.campaignId,
-      },
-    };
-  }
+  const leads = input.leadObservations.filter((o): o is Extract<LeadObservation, { found: true }> => o.found === true);
   const failed = input.leadObservations.find((o) => o.found === "error");
   if (failed && failed.found === "error") {
     return { state: "unavailable", stateSource: "lead_service", stateDetail: { error: failed.error } };
+  }
+  if (!input.leadStates.ok) {
+    // Unreadable lead states: anyone lead-service may hold (a lead, or a human its Unibox may hold) is unknown.
+    if (leads.length > 0 || input.humanId) {
+      return { state: "unavailable", stateSource: "lead_service", stateDetail: { error: input.leadStates.error } };
+    }
+  } else {
+    const leadIds = leads.map((o) => o.leadId).filter((id): id is string => !!id);
+    const match = matchLeadState(leadIds, input.humanId, input.leadStates.states);
+    if (match) {
+      // The lead row relayed is the one the matched Unibox row holds, else the person's first lead.
+      const lead = leads.find((o) => o.leadId && match.row.leadIds.includes(o.leadId)) ?? leads[0] ?? null;
+      return { state: leadStateWord(match.row.leadState), stateSource: "lead_service", stateDetail: leadDetail(match.row.leadState, match.matchedBy, match.row, lead) };
+    }
   }
 
   const stripeState = resolveStripeState(input.stripe);
@@ -255,4 +232,28 @@ export function resolveStripeState(customers: StripeStandingInput[]): (typeof ST
 export function leadAddressesFirst(emails: string[], observations: Map<string, LeadObservation>): string[] {
   const isLead = (e: string) => observations.get(e)?.found === true;
   return [...emails.filter(isLead), ...emails.filter((e) => !isLead(e))];
+}
+
+function leadDetail(
+  leadState: LeadState,
+  matchedBy: LeadStateMatch,
+  row: { humanId: string; companyKey: string; relationKey: string | null },
+  lead: Extract<LeadObservation, { found: true }> | null,
+): Record<string, unknown> {
+  return {
+    leadState,
+    matchedBy,
+    unibox: { humanId: row.humanId, companyKey: row.companyKey, relationKey: row.relationKey },
+    ...(lead
+      ? {
+          email: lead.email,
+          disqualification: lead.disqualification,
+          company: lead.company,
+          human: lead.human,
+          leadCampaignId: lead.leadCampaignId,
+          leadId: lead.leadId,
+          campaignId: lead.campaignId,
+        }
+      : {}),
+  };
 }

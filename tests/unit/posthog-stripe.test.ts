@@ -256,7 +256,15 @@ describe("Stripe state", () => {
     expect(resolveStripeState([])).toBeNull();
   });
 
-  const base = { leadObservations: [], ghlDeals: [], stripe: [], matrixStatuses: [], instantly: null };
+  const base = {
+    leadObservations: [],
+    humanId: null,
+    leadStates: { ok: true as const, states: { byLeadId: new Map(), byHuman: new Map() } },
+    ghlDeals: [],
+    stripe: [],
+    matrixStatuses: [],
+    instantly: null,
+  };
 
   it("outranks a CRM deal, never lead-service", () => {
     const paying = [standing({ subscriptionStatuses: ["active"] })];
@@ -271,22 +279,40 @@ describe("Stripe state", () => {
       resolvePersonState({
         ...base,
         stripe: paying,
-        leadObservations: [
-          {
-            found: true,
-            email: "a@x.com",
-            standing: { state: "customer", tag: "customer" },
-            disqualification: null,
-            company: null,
-            human: null,
-            leadCampaignId: "lc",
-            leadId: null,
-            campaignId: null,
-            campaignIds: [],
+        humanId: "h1",
+        leadStates: {
+          ok: true as const,
+          states: {
+            byLeadId: new Map(),
+            byHuman: new Map([
+              [
+                "h1",
+                {
+                  humanId: "h1",
+                  companyKey: "",
+                  relationKey: null,
+                  leadIds: [],
+                  leadState: {
+                    lifecycle: { key: "paid_client", rank: 7, label: "Paid client" },
+                    won: true,
+                    hot: false,
+                    lost: null,
+                    reachable: "contactable",
+                    conversation: "closed",
+                    fit: "fit",
+                    fitNote: null,
+                    interest: "interested",
+                    clientStatus: "customer",
+                    nextFollowupAt: null,
+                    nextFollowupBasis: null,
+                  },
+                },
+              ],
+            ]),
           },
-        ],
+        },
       }),
-    ).toMatchObject({ state: "customer", stateSource: "lead_service" });
+    ).toMatchObject({ state: "won", stateSource: "lead_service" });
     // A customer record stating nothing falls through to the next source.
     expect(resolvePersonState({ ...base, stripe: [standing({})], matrixStatuses: ["new"] })).toMatchObject({
       stateSource: "matrix",
