@@ -22,15 +22,16 @@
  *    writes between two parts lands before the later parts without them ever
  *    having read it (WA-REPLY-DROPPED-1101: "Yes, send me the link" at 17:12:05
  *    sat between parts queued at 17:11:58, read as answered, never reported);
- *  - only words a human wrote count (`humanText`): a bridge notice, an
- *    uncaptioned photo are not an answer. An edit is folded into the message
+ *  - only words a human wrote count (`messageWords`): a bridge notice is not
+ *    an answer; a PHOTO is a message, caption or not (SOPHIE-WA-HUMAN-1106,
+ *    prod 2026-11-02: an uncaptioned photo got no answer), `📷 Photo[: caption]`. An edit is folded into the message
  *    it rewrites (`foldEdits`): no new word, but its words ARE the message's,
  *    so a WhatsApp message the bridge could not decrypt (a notice, then the
  *    real words as an edit of it) is the person's words at the notice's place.
  *    A reaction is not a message at all.
  */
 import type { MatrixEvent } from "../matrix/client.js";
-import { editTarget, foldEdits, humanText } from "../matrix/events.js";
+import { editTarget, foldEdits, messageWords, photoOf, quoteOf, type PhotoRef, type QuotedMessage } from "../matrix/events.js";
 
 /** One send through our send route into this thread (any status). */
 export interface RoomSend {
@@ -46,6 +47,10 @@ export interface BurstMessage {
   eventId: string;
   at: string;
   text: string;
+  /** The message they quoted with WhatsApp's « Reply » (SOPHIE-WA-HUMAN-1106); absent when none. */
+  quote?: QuotedMessage;
+  /** The photo this message is (fetch: `GET /orgs/matrix/media?brandId=&eventId=`); absent when none. */
+  photo?: PhotoRef;
 }
 
 export type ThreadReading =
@@ -121,17 +126,25 @@ export function readThreadForReply(events: MatrixEvent[], ownMxid: string, sends
     if (ev.sender === ownMxid) {
       // An edit of one of our messages is no new word; an empty line is the bridge's.
       if (target) continue;
-      if (!humanText(ev.content)) continue;
+      if (!messageWords(ev.content)) continue;
       // Typed by hand on the account: one of our messages, it ends the burst like any other.
       wroteBefore = true;
       burst = [];
       continue;
     }
     if (target) continue; // an edit whose original was never mirrored: not a new word
-    const text = humanText(ev.content);
+    const text = messageWords(ev.content);
     if (!text) continue;
     if (burst.length === 0) campaignOfBurst = lastCampaignId;
-    burst.push({ eventId: ev.event_id, at: new Date(ev.origin_server_ts).toISOString(), text: text.slice(0, MESSAGE_TEXT_CAP) });
+    const quote = quoteOf(ev.content, byId, ownMxid);
+    const photo = photoOf(ev.content, ev.event_id);
+    burst.push({
+      eventId: ev.event_id,
+      at: new Date(ev.origin_server_ts).toISOString(),
+      text: text.slice(0, MESSAGE_TEXT_CAP),
+      ...(quote ? { quote } : {}),
+      ...(photo ? { photo } : {}),
+    });
   }
 
   if (burst.length === 0) return { kind: "answered" };

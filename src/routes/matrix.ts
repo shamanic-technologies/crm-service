@@ -11,6 +11,7 @@ import {
   SERVICE_NAME,
 } from "../middleware/auth.js";
 import { MATRIX_CHANNELS } from "../lib/matrix/events.js";
+import { MediaRefusal, readMessagePhoto } from "../lib/matrix/media.js";
 import { accountTypeOfRole } from "../lib/matrix/account-types.js";
 import { MatrixLinkUpdateRequestSchema } from "../schemas.js";
 import { LEAD_STATUSES } from "../lib/matrix/leads.js";
@@ -560,6 +561,23 @@ const internalBodySchema = z.object({
  * trigger, so a runs-service outage fails the request instead of running
  * untracked.
  */
+/**
+ * GET /orgs/matrix/media?brandId=&eventId= — the photo of one mirrored message, base64 (SOPHIE-WA-HUMAN-1106,
+ * lib/matrix/media.ts): the answering AI puts it in its model input as an image.
+ */
+router.get("/orgs/matrix/media", apiKeyAuth, requireOrg("matrix.media"), async (req: AuthenticatedRequest, res) => {
+  const brandId = typeof req.query.brandId === "string" && req.query.brandId ? req.query.brandId : req.brandIds?.[0];
+  const eventId = typeof req.query.eventId === "string" ? req.query.eventId : "";
+  if (!brandId || !eventId) return res.status(400).json({ error: "brandId (query or x-brand-id) and eventId are required" });
+  try {
+    return res.json(await readMessagePhoto(req.orgId!, brandId, eventId));
+  } catch (err) {
+    if (err instanceof MediaRefusal) return res.status(err.httpStatus).json({ code: err.code, error: err.message });
+    console.error(`[crm-service][matrix] media ${eventId} unreadable:`, err);
+    return res.status(502).json({ code: "media_unreachable", error: (err as Error).message });
+  }
+});
+
 router.post("/internal/matrix/sync", apiKeyAuth, async (req, res) => {
   const parsed = internalBodySchema.safeParse(req.body ?? {});
   if (!parsed.success) {

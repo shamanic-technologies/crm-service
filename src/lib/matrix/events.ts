@@ -386,6 +386,104 @@ export function humanText(content: Record<string, unknown> | undefined): string 
   return body.trim();
 }
 
+// ─── what the answering AI must see beside the words (SOPHIE-WA-HUMAN-1106) ──────────
+
+/** The words a photo stands for when it carries no caption; a caption follows after ": ". */
+export const PHOTO_WORDS = "\u{1F4F7} Photo";
+
+/**
+ * A photo the person (or the brand) sent, as a reference a reader can fetch:
+ * crm-service `GET /orgs/matrix/media?brandId=&eventId=` answers its bytes
+ * (base64) for the brand that received it. Never the bytes themselves here.
+ */
+export interface PhotoRef {
+  kind: "image";
+  /** The Matrix event holding the photo (the id to fetch it by). */
+  eventId: string;
+  mimeType: string | null;
+  sizeBytes: number | null;
+  width: number | null;
+  height: number | null;
+  /** The caption the sender wrote, null when none. */
+  caption: string | null;
+}
+
+/** The message a person (or the brand) quoted with WhatsApp's « Reply », as the thread holds it. */
+export interface QuotedMessage {
+  eventId: string;
+  /** inbound = the person wrote it, outbound = the brand did; null when the quoted message is not in our mirror. */
+  direction: "inbound" | "outbound" | null;
+  at: string | null;
+  /** Its words (photo words included), cut at QUOTE_TEXT_MAX; null when not in our mirror. */
+  text: string | null;
+}
+
+/** A quoted message's words are cut here (the whole message is in the thread when it matters). */
+export const QUOTE_TEXT_MAX = 500;
+
+/** PURE: the photo this content IS (an `m.image` with its file on the homeserver), or null. */
+export function photoOf(content: Record<string, unknown> | undefined, eventId: string): PhotoRef | null {
+  if (content?.msgtype !== "m.image" || typeof content.url !== "string" || !content.url.startsWith("mxc://")) return null;
+  const info = (content.info ?? {}) as { mimetype?: unknown; size?: unknown; w?: unknown; h?: unknown };
+  const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
+  const caption = humanText(content);
+  return {
+    kind: "image",
+    eventId,
+    mimeType: typeof info.mimetype === "string" ? info.mimetype : null,
+    sizeBytes: num(info.size),
+    width: num(info.w),
+    height: num(info.h),
+    caption: caption || null,
+  };
+}
+
+/**
+ * PURE: the words a message stands for, for a reader that answers the person:
+ * the human words (`humanText`), except a PHOTO, which is a message even with no
+ * caption (prod 2026-11-02: an uncaptioned photo to the assistant's line got no
+ * answer): `📷 Photo`, or `📷 Photo: <caption>`. "" = no message (a bridge
+ * notice, an uncaptioned video or file). Readers that judge relevance keep
+ * `humanText` (a photo alone says nothing about who the person is).
+ */
+export function messageWords(content: Record<string, unknown> | undefined): string {
+  if (content?.msgtype === "m.image" && typeof content.url === "string" && content.url.startsWith("mxc://")) {
+    const caption = humanText(content);
+    return caption ? `${PHOTO_WORDS}: ${caption}` : PHOTO_WORDS;
+  }
+  return humanText(content);
+}
+
+/** PURE: the event this message quotes (Matrix `m.relates_to.m.in_reply_to`, how the bridge carries WhatsApp's « Reply »), or null. */
+export function inReplyToOf(content: Record<string, unknown> | undefined): string | null {
+  const rel = content?.["m.relates_to"] as { "m.in_reply_to"?: { event_id?: unknown } } | undefined;
+  const id = rel?.["m.in_reply_to"]?.event_id;
+  return typeof id === "string" && id ? id : null;
+}
+
+/**
+ * PURE: the message `content` quotes, read off the room's own events (`byId`),
+ * or null when it quotes nothing. A quoted message our mirror never held is
+ * still named (its id), with no words.
+ */
+export function quoteOf(
+  content: Record<string, unknown> | undefined,
+  byId: ReadonlyMap<string, MatrixEvent>,
+  own: OwnSenders,
+): QuotedMessage | null {
+  const id = inReplyToOf(content);
+  if (!id) return null;
+  const target = byId.get(id);
+  if (!target) return { eventId: id, direction: null, at: null, text: null };
+  const words = callNotice(target.content) ? describeCall(callNotice(target.content)!, isOwnSender(target.sender, own) ? "outbound" : "inbound") : messageWords(target.content);
+  return {
+    eventId: id,
+    direction: isOwnSender(target.sender, own) ? "outbound" : "inbound",
+    at: new Date(target.origin_server_ts).toISOString(),
+    text: words ? words.slice(0, QUOTE_TEXT_MAX) : null,
+  };
+}
+
 /**
  * A WhatsApp CALL the bridge mirrored, or null (COPILOT-WA-REPEAT-1027).
  *
@@ -448,7 +546,14 @@ export function foldEdits(events: MatrixEvent[]): MatrixEvent[] {
   }
   return messages
     .filter((m) => !folded.has(m.event_id))
-    .map((m) => (latest.has(m.event_id) ? { ...m, content: latest.get(m.event_id) } : m));
+    .map((m) => {
+      if (!latest.has(m.event_id)) return m;
+      const next = latest.get(m.event_id)!;
+      // An edit rewrites the words, never what the message quoted (SOPHIE-WA-HUMAN-1106).
+      const rel = m.content?.["m.relates_to"];
+      const keepQuote = inReplyToOf(m.content) && !next["m.relates_to"] ? { "m.relates_to": rel } : {};
+      return { ...m, content: { ...next, ...keepQuote } };
+    });
 }
 
 /**

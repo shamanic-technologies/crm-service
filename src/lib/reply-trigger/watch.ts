@@ -813,7 +813,7 @@ export function replyOccurrenceBody(input: {
     idempotencyKey: idempotencyKeyFor(input.report.anchorEventId),
     occurredAt: first.at,
     person,
-    item: {
+    item: fitItem({
       kind: "reply",
       source: input.report.source,
       channel: input.report.channel,
@@ -827,8 +827,33 @@ export function replyOccurrenceBody(input: {
       lastMessageAt: last.at,
       messages,
       ...(input.context ?? {}),
-    },
+    }),
   };
+}
+
+/** campaign-service refuses an occurrence whose `item` serializes past 20,000 characters; we stay under it. */
+export const ITEM_MAX_CHARS = 19_000;
+
+/**
+ * PURE: the item, fitted under `ITEM_MAX_CHARS` (SOPHIE-WA-HUMAN-1106: quotes and photo references make lines
+ * longer). The oldest thread lines go first (the burst and the latest exchange are what there is to answer), then
+ * the quoted words of the burst, then each burst message is cut at 500 characters. Untouched when it fits.
+ */
+export function fitItem(item: Record<string, unknown>): Record<string, unknown> {
+  const size = (v: unknown) => JSON.stringify(v).length;
+  if (size(item) <= ITEM_MAX_CHARS) return item;
+  const out = { ...item };
+  const thread = Array.isArray(out.thread) ? [...(out.thread as unknown[])] : null;
+  if (thread) {
+    while (thread.length > 0 && size({ ...out, thread }) > ITEM_MAX_CHARS) thread.shift();
+    out.thread = thread;
+  }
+  if (size(out) <= ITEM_MAX_CHARS) return out;
+  const messages = Array.isArray(out.messages) ? (out.messages as BurstMessage[]) : [];
+  out.messages = messages.map((m) => (m.quote ? { ...m, quote: { ...m.quote, text: null } } : m));
+  if (size(out) <= ITEM_MAX_CHARS) return out;
+  out.messages = (out.messages as BurstMessage[]).map((m) => ({ ...m, text: m.text.slice(0, 500) }));
+  return out;
 }
 
 /**
