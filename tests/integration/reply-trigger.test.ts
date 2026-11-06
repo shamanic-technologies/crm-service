@@ -672,9 +672,9 @@ describe.skipIf(!RUN)("reply trigger", () => {
         const it2 = body.item as Record<string, unknown>;
         expect(it2.line).toEqual({ receivedOn: SOPHIE_LINE, answeringLine: SOPHIE_LINE });
         expect(it2.thread).toEqual([
-          { at: new Date(min(0)).toISOString(), direction: "outbound", kind: "message", text: "Hi, Kevin from distribute.you here", account: `+${FOUNDER}` },
-          { at: new Date(min(1)).toISOString(), direction: "inbound", kind: "message", text: "Hi Kevin, tell me more", account: `+${FOUNDER}` },
-          { at: new Date(min(2)).toISOString(), direction: "outbound", kind: "message", text: "Hi, Sophie here, Kevin's assistant" },
+          { at: new Date(min(0)).toISOString(), direction: "outbound", kind: "message", text: "Hi, Kevin from distribute.you here", account: `+${FOUNDER}`, eventId: "$hello" },
+          { at: new Date(min(1)).toISOString(), direction: "inbound", kind: "message", text: "Hi Kevin, tell me more", account: `+${FOUNDER}`, eventId: "$ans1" },
+          { at: new Date(min(2)).toISOString(), direction: "outbound", kind: "message", text: "Hi, Sophie here, Kevin's assistant", eventId: "$soph1" },
         ]);
       });
 
@@ -716,9 +716,9 @@ describe.skipIf(!RUN)("reply trigger", () => {
       await deliverDueReplies(Date.now() + 10 * 60_000);
       expect(campaignCalls).toHaveLength(2);
       expect(item(1).thread).toEqual([
-        { at: new Date(min(0)).toISOString(), direction: "outbound", kind: "message", text: "Kevin from distribute.you here." },
-        { at: new Date(min(1)).toISOString(), direction: "inbound", kind: "call", text: "They called us on WhatsApp (voice call). Whether it was answered or missed is not known." },
-        { at: new Date(min(2)).toISOString(), direction: "outbound", kind: "message", text: "Sorry I missed your call!" },
+        { at: new Date(min(0)).toISOString(), direction: "outbound", kind: "message", text: "Kevin from distribute.you here.", eventId: "$s0" },
+        { at: new Date(min(1)).toISOString(), direction: "inbound", kind: "call", text: "They called us on WhatsApp (voice call). Whether it was answered or missed is not known.", eventId: "$call" },
+        { at: new Date(min(2)).toISOString(), direction: "outbound", kind: "message", text: "Sorry I missed your call!", eventId: "$ans" },
       ]);
     });
 
