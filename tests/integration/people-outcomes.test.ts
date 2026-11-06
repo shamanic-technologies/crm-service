@@ -45,6 +45,7 @@ function stubRuns() {
     if (url.host === "brand.test" && url.pathname === `/internal/brands/${BRAND}/offers`) {
       return json({ offers: [{ offerId: OFFER_A, name: "A", status: "active" }, { offerId: OFFER_B, name: "B", status: "archived" }] });
     }
+    if (url.host === "lead.test" && url.pathname === "/orgs/leads/unibox") return json({ rows: [], nextCursor: null });
     if (url.host === "lead.test" && url.pathname === "/orgs/leads") {
       if (LEAD_DOWN) return json({ error: "boom" }, 500);
       expect(url.searchParams.get("brandId")).toBe(BRAND);

@@ -220,6 +220,7 @@ function installFetchStub() {
       if (url.pathname === "/internal/outreach-facts") return json({ facts: [], nextCursor: "0", hasMore: false });
       return json({ error: "campaign_not_found" }, 404);
     }
+    if (url.host === "lead.test" && url.pathname === "/orgs/leads/unibox") return json({ rows: [], nextCursor: null });
     if (url.host === "lead.test") {
       if (url.pathname === "/orgs/leads") return json({ leads: [], total: 0 });
       if (url.pathname === "/orgs/leads/crm-pairings") {

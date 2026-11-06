@@ -44,7 +44,7 @@ import { readLatestMessages } from "../lib/people/latest-messages.js";
 import { LatestMessagesRequestSchema, SentAfterRequestSchema, StatedNotToBrandRequestSchema } from "../schemas.js";
 import { statedNotToBrandByEmail } from "../lib/people/stated-not-to-brand.js";
 import { readSentAfter } from "../lib/people/sent-after.js";
-import { familyOf, LEAD_FAMILIES, readBrandFamilies, type FamilyVerdict, type LeadFamily } from "../lib/people/families.js";
+import { LEAD_VERDICTS, type LeadState, type LeadVerdict } from "../lib/people/lead-state.js";
 import {
   matchesOf,
   messageHitsFor,
@@ -65,7 +65,7 @@ const router = Router();
 type ListBase = {
   automatedHidden: number;
   groupMembersHidden: number;
-  members: { personKey: string; emails: unknown; humanId: string | null }[];
+  members: { personKey: string; state: string; stateSource: string; stateDetail: unknown }[];
   perSource: { source: string; people: number }[];
 };
 const LIST_BASE_MAX = 50;
@@ -111,8 +111,8 @@ const listQuerySchema = z.object({
   // Search: name, any email / phone, company, and what was said in their messages.
   // Blank (or absent) = the plain list, unchanged.
   q: z.string().max(SEARCH_MAX_LENGTH).optional(),
-  // Unibox family filter (features-service's verdict on our lead). Absent = All.
-  family: z.enum(LEAD_FAMILIES).optional(),
+  // Won / Hot / Lost filter: lead-service's verdict on the lead (LEAD-GENERIC-1106). Absent = All.
+  family: z.enum(LEAD_VERDICTS).optional(),
   // People known ONLY as members of the brand's messaging groups, who never wrote a word.
   includeGroupMembers: z.enum(["true", "false"]).optional(),
 });
@@ -169,11 +169,21 @@ function companyTagsOf(row: typeof people.$inferSelect): LeadCompanyTags | null 
  * lead-service's HUMAN block for that same lead (opted out / do not contact,
  * from human-service's facts: every company, every brand), relayed verbatim at
  * build. Null when the person is not one of our leads, or lead-service could
- * not resolve the row's standing.
+ * not resolve it.
  */
 function humanTagsOf(row: typeof people.$inferSelect): LeadHumanTags | null {
   if (row.stateSource !== "lead_service") return null;
   return (row.stateDetail as { human?: LeadHumanTags | null } | null)?.human ?? null;
+}
+
+/**
+ * lead-service's ONE lead vocabulary for the person (LEAD-GENERIC-1106: Lifecycle, won / hot / lost, reachable,
+ * conversation, fit, interest, client status, next follow-up), relayed verbatim at build. Null when lead-service
+ * serves no lead state for them.
+ */
+function leadStateOf(row: { stateSource: string; stateDetail: unknown }): LeadState | null {
+  if (row.stateSource !== "lead_service") return null;
+  return (row.stateDetail as { leadState?: LeadState } | null)?.leadState ?? null;
 }
 
 function personView(row: typeof people.$inferSelect) {
@@ -195,6 +205,7 @@ function personView(row: typeof people.$inferSelect) {
     state: row.state,
     stateSource: row.stateSource,
     stateDetail: row.stateDetail as Record<string, unknown> | null,
+    leadState: leadStateOf(row),
     // lead-service's Disqualified mark, beside the state (never instead of it).
     disqualification: disqualificationOf(row),
     // lead-service's tags at THEIR level (LEAD-REFONTE-1013): the company's
@@ -266,10 +277,6 @@ router.get(
       }
 
       const startedAt = Date.now();
-      const familiesRead = readBrandFamilies({ orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId }).then(
-        (f) => ({ ok: true as const, f }),
-        (err: Error) => ({ ok: false as const, error: err.message }),
-      );
       const keys = q ? await messageMatchKeys(scope.id, req.orgId!, brandId, q) : null;
       const where = and(
         eq(people.scopeId, scope.id),
@@ -318,7 +325,10 @@ router.get(
                       q && keys ? searchPredicate(q, keys) : sql`true`,
                     ),
                   ),
-            db.select({ personKey: people.personKey, emails: people.emails, humanId: people.humanId }).from(people).where(where),
+            db
+              .select({ personKey: people.personKey, state: people.state, stateSource: people.stateSource, stateDetail: people.stateDetail })
+              .from(people)
+              .where(where),
             db.execute(sql`
               SELECT s AS source, count(*)::int AS people
               FROM people, jsonb_array_elements_text(people.sources) s
@@ -339,57 +349,33 @@ router.get(
 
       // Who each person is to the brand is lead-service's: it serves the Unibox list itself
       // (UNIBOX-FROM-LEAD-1017); this list no longer reads its relationships.
-      const fam = await familiesRead;
-      if (family && !fam.ok) {
-        return res.status(502).json({
-          type: "upstream",
-          reason: "lead_families_unavailable",
-          error: `cannot filter on family "${family}": ${fam.error}`,
-        });
+      // Won / Hot / Lost = lead-service's verdict on the lead (LEAD-GENERIC-1106), relayed on each person at build.
+      const verdicts = new Map<string, { family: LeadVerdict; lostReason: string | null }>();
+      const familyCounts = Object.fromEntries(LEAD_VERDICTS.map((f) => [f, 0])) as Record<LeadVerdict, number>;
+      const lostReasons: Record<string, number> = {};
+      for (const m of members) {
+        const ls = leadStateOf(m);
+        if (!ls || !(LEAD_VERDICTS as readonly string[]).includes(m.state)) continue;
+        const v = { family: m.state as LeadVerdict, lostReason: ls.lost?.reasons[0] ?? null };
+        verdicts.set(m.personKey, v);
+        familyCounts[v.family] += 1;
+        for (const r of ls.lost?.reasons ?? []) lostReasons[r] = (lostReasons[r] ?? 0) + 1;
       }
-      const verdicts = new Map<string, FamilyVerdict>();
-      const familyCounts = Object.fromEntries(LEAD_FAMILIES.map((f) => [f, 0])) as Record<LeadFamily, number>;
-      if (fam.ok) {
-        for (const m of members) {
-          const v = familyOf(m.emails as string[], m.humanId, fam.f);
-          if (!v) continue;
-          verdicts.set(m.personKey, v);
-          familyCounts[v.family] += 1;
-        }
-      }
-      const familyKeys = family ? [...verdicts].filter(([, v]) => v.family === family).map(([k]) => k) : null;
-      const keyed = (ks: string[]) => sql`${people.personKey} IN (SELECT jsonb_array_elements_text(${JSON.stringify(ks)}::jsonb))`;
       const listWhere = and(
         where,
-        familyKeys ? keyed(familyKeys) : sql`true`,
+        family ? sql`${people.stateSource} = 'lead_service' AND ${people.state} = ${family}` : sql`true`,
       );
       const withFamily = verdicts.size;
-      const families = fam.ok
-        ? {
-            status: "ok" as const,
-            error: null,
-            filter: family ?? null,
-            counts: familyCounts,
-            lostBreakdown: {
-              wentCold: [...verdicts.values()].filter((v) => v.lostReason === "went_cold").length,
-              ruledOut: [...verdicts.values()].filter((v) => v.lostReason === "ruled_out").length,
-            },
-            withFamily,
-            withoutFamily: population - withFamily,
-            producerCounts: fam.f.producerCounts,
-            readAt: fam.f.readAt,
-          }
-        : {
-            status: "failed" as const,
-            error: fam.error,
-            filter: null,
-            counts: null,
-            lostBreakdown: null,
-            withFamily: null,
-            withoutFamily: null,
-            producerCounts: null,
-            readAt: null,
-          };
+      const families = {
+        status: "ok" as const,
+        error: null,
+        filter: family ?? null,
+        counts: familyCounts,
+        lostReasons,
+        withFamily,
+        withoutFamily: population - withFamily,
+        source: "lead_service" as const,
+      };
 
       const [[{ total }], rows] = await Promise.all([
         db.select({ total: sql<number>`count(*)::int` }).from(people).where(listWhere),
@@ -463,7 +449,7 @@ router.get(
         families,
         people: rows.map((r, i) => ({
           ...personView(r),
-          // null = not one of our leads, OR the family read failed (`families.status` says which).
+          // null = not won, hot nor lost (open, or not one of our leads).
           family: verdicts.get(r.personKey)?.family ?? null,
           familyLostReason: verdicts.get(r.personKey)?.lostReason ?? null,
           ...(search ? matches[i] : {}),

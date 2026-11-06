@@ -27,11 +27,12 @@ import {
 } from "./identity.js";
 import { mapLimit, type SiblingIdentity } from "./siblings.js";
 import { replaceScopePeople } from "./write.js";
+import { readBrandLeadStates } from "./lead-state.js";
 import {
   cachedAnswerIsCurrent,
-  lookupLeadStanding,
-  walkLeadStandings,
-  type LeadStandingAnswer,
+  lookupLead,
+  walkLeads,
+  type LeadAnswer,
   readCsvEvidence,
   readWhatsappSendEvidence,
   readStatedMergeEvidence,
@@ -154,6 +155,8 @@ export interface BuildSummary {
   sources: SourceReadSummary[];
   evidence: { kind: string; status: string; records: number; error: string | null }[];
   standing: { asked: number; reused: number; failed: number };
+  /** LEAD-GENERIC-1106: lead-service's Unibox lead states read for the build, and how many people carry one. */
+  leadStates?: { status: "ok" | "failed"; rows: number | null; readAt: string | null; people: number | null; error: string | null };
   ownAddresses: { status: "ok" | "failed"; addresses: number; domain: string | null; error: string | null };
   /** Jev's human-vs-automated verdicts: how many reused, judged now, still pending; people hidden. */
   senderVerdicts: SenderVerdictSummary;
@@ -240,7 +243,7 @@ async function observeStandings(
       hit &&
       now - hit.observedAt.getTime() < STANDING_TTL_MS &&
       (!lastActivity || new Date(lastActivity) <= hit.observedAt) &&
-      // An answer cached before lead-service served `standing.tag`, its
+      // An answer cached before lead-service served its
       // Disqualified mark (`disqualification`, null or the mark, now with its
       // `level`) or its company block (`company`, null or the block), is
       // re-asked: an absent value is not "no".
@@ -253,17 +256,17 @@ async function observeStandings(
     }
   }
   let failed = 0;
-  const answers = new Map<string, LeadStandingAnswer | Error>();
+  const answers = new Map<string, LeadAnswer | Error>();
   if (toAsk.length >= standingWalkMin()) {
     try {
-      for (const [email, answer] of await walkLeadStandings(identity, new Set(toAsk))) answers.set(email, answer);
+      for (const [email, answer] of await walkLeads(identity, new Set(toAsk))) answers.set(email, answer);
     } catch (err) {
       for (const email of toAsk) answers.set(email, err as Error);
     }
   } else {
     await mapLimit(toAsk, STANDING_CONCURRENCY, async (email) => {
       try {
-        answers.set(email, await lookupLeadStanding(identity, email));
+        answers.set(email, await lookupLead(identity, email));
       } catch (err) {
         answers.set(email, err as Error);
       }
@@ -543,6 +546,14 @@ async function buildScopePeopleOn(
     for (const e of c.emails) wanted.set(e, last);
   }
   const standings = await observeStandings(scope, identity, wanted);
+  // LEAD-GENERIC-1106: the lead's verdict is lead-service's ONE vocabulary, read off its Unibox (lead-state.ts).
+  const leadStates = await readBrandLeadStates(identity).then(
+    (states) => ({ ok: true as const, states }),
+    (err: Error) => {
+      console.error(`[crm-service] lead states unreadable scope=${scope.id}: ${err.message}`);
+      return { ok: false as const, error: err.message.slice(0, 1000) };
+    },
+  );
 
   // Jev says which addresses are automated senders (judged once per address, recorded).
   const senders = await resolveSenderVerdicts(clusters, identity, gmail.status === "ok");
@@ -645,8 +656,16 @@ async function buildScopePeopleOn(
     const stripeStandings: StripeStandingInput[] = c.presences
       .filter((p) => p.source === "stripe")
       .map((p) => ({ customerId: p.detail.externalId as string, ...(p.detail.stripe as StripeStanding) }));
+    const humanId =
+      personHumanId(c.identityKeys, humans.humanOf) ??
+      personHumanId(
+        c.presences.map((p) => recordOf.get(presenceFallbackKey(p))).filter((r): r is CrmRecord => !!r).map(crmRecordKey),
+        humans.humanOf,
+      );
     const state = resolvePersonState({
       leadObservations: c.emails.map((e) => standings.observations.get(e)!).filter(Boolean),
+      humanId,
+      leadStates,
       ghlDeals,
       stripe: stripeStandings,
       matrixStatuses,
@@ -663,12 +682,7 @@ async function buildScopePeopleOn(
       orgId: scope.orgId,
       brandId: scope.brandId,
       personKey: c.personKey,
-      humanId:
-        personHumanId(c.identityKeys, humans.humanOf) ??
-        personHumanId(
-          c.presences.map((p) => recordOf.get(presenceFallbackKey(p))).filter((r): r is CrmRecord => !!r).map(crmRecordKey),
-          humans.humanOf,
-        ),
+      humanId,
       identityKeys: c.identityKeys,
       displayName: personDisplayName(c),
       company: firstNonNull(c, "company"),
@@ -748,6 +762,9 @@ async function buildScopePeopleOn(
       error: e.error,
     })),
     standing: { asked: standings.asked, reused: standings.reused, failed: standings.failed },
+    leadStates: leadStates.ok
+      ? { status: "ok", rows: leadStates.states.rows, readAt: leadStates.states.readAt, people: rows.filter((r) => r.stateSource === "lead_service" && r.state !== "unavailable").length, error: null }
+      : { status: "failed", rows: null, readAt: null, people: null, error: leadStates.error },
     ownAddresses: { status: own.status, addresses: own.addresses.size, domain: own.domain, error: own.error },
     senderVerdicts: { ...senders.summary, automatedPeople: rows.filter((r) => r.automated).length },
     relevance: { ...relevance.summary, notBusinessPeople: rows.filter((r) => r.notBusiness).length },

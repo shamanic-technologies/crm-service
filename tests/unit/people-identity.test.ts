@@ -7,8 +7,9 @@ import {
   type Presence,
 } from "../../src/lib/people/identity.js";
 import { resolvePersonState } from "../../src/lib/people/state.js";
-import { cachedAnswerIsCurrent, pairingEvidence, possibleLeadOf, standingFromRows, type LeadPairingRow } from "../../src/lib/people/sources.js";
+import { cachedAnswerIsCurrent, pairingEvidence, possibleLeadOf, leadFromRows, type LeadPairingRow } from "../../src/lib/people/sources.js";
 import { leadAddressesFirst, type LeadObservation } from "../../src/lib/people/state.js";
+import { indexLeadStates, type LeadState } from "../../src/lib/people/lead-state.js";
 
 function presence(over: Partial<Presence> & Pick<Presence, "source" | "sourceRef">): Presence {
   return {
@@ -132,100 +133,89 @@ describe("clusterPeople", () => {
   });
 });
 
-describe("resolvePersonState precedence", () => {
-  const empty = { leadObservations: [], ghlDeals: [], stripe: [], matrixStatuses: [], instantly: null };
+const leadState = (over: Partial<LeadState> = {}): LeadState => ({
+  lifecycle: { key: "engaged", rank: 3, label: "Engaged" },
+  won: false,
+  hot: false,
+  lost: null,
+  reachable: "contactable",
+  conversation: "waiting_on_us",
+  fit: "fit",
+  fitNote: null,
+  interest: "unsure",
+  clientStatus: "prospect",
+  nextFollowupAt: null,
+  nextFollowupBasis: null,
+  ...over,
+});
+const uniboxRow = (humanId: string, leadIds: string[], over: Partial<LeadState> = {}) => ({
+  humanId,
+  companyKey: "",
+  relationKey: null,
+  leadIds,
+  leadState: leadState(over),
+});
+const statesOf = (rows: ReturnType<typeof uniboxRow>[]) => ({ ok: true as const, states: indexLeadStates(rows) });
+const lead = (email: string, leadId: string, extra: Record<string, unknown> = {}) => ({
+  found: true as const,
+  email,
+  disqualification: null,
+  company: null,
+  human: null,
+  leadCampaignId: `lc-${leadId}`,
+  leadId,
+  campaignId: "c1",
+  campaignIds: ["c1"],
+  ...extra,
+});
 
-  it("lead-service standing wins, verbatim", () => {
+describe("resolvePersonState precedence", () => {
+  const empty = { leadObservations: [], humanId: null, leadStates: statesOf([]), ghlDeals: [], stripe: [], matrixStatuses: [], instantly: null };
+
+  it("lead-service's lead state wins: state = its verdict, the whole leadState rides in the detail (LEAD-GENERIC-1106)", () => {
     const s = resolvePersonState({
       ...empty,
-      leadObservations: [
-        { found: false },
-        {
-          found: true,
-          email: "a@x.com",
-          standing: { state: "sales_interest", tag: "sales_interest", signal: "positive_reply" },
-          disqualification: null,
-          company: null,
-          human: null,
-          leadCampaignId: "lc1",
-          leadId: "l1",
-          campaignId: "c1",
-          campaignIds: ["c1"],
-        },
-      ],
+      leadObservations: [{ found: false }, lead("a@x.com", "l1")],
+      leadStates: statesOf([uniboxRow("h1", ["l1"], { hot: true, interest: "interested" })]),
       ghlDeals: [{ status: "won", pipelineName: null, stageName: null, updatedAt: null }],
     });
-    expect(s.state).toBe("sales_interest");
-    expect(s.stateSource).toBe("lead_service");
+    expect(s).toMatchObject({ state: "hot", stateSource: "lead_service", stateDetail: { matchedBy: "lead_id", leadId: "l1", leadCampaignId: "lc-l1" } });
+    expect((s.stateDetail as { leadState: LeadState }).leadState.lifecycle).toEqual({ key: "engaged", rank: 3, label: "Engaged" });
   });
 
-  it("two leads of one person: an `unresolved` lead never hides the one lead-service resolved (ZARINA-CLIENT-AS-PROSPECT-1104)", () => {
-    const obs = (email: string, tag: string, leadId: string) => ({
-      found: true as const,
-      email,
-      standing: { state: tag, tag, signal: "none" },
-      disqualification: null,
-      company: null,
-      human: null,
-      leadCampaignId: null,
-      leadId,
-      campaignId: null,
-      campaignIds: [],
-    });
-    const s = resolvePersonState({ ...empty, leadObservations: [obs("info@livingvital.ch", "unresolved", "l1"), obs("marketingaronia@gmail.com", "customer", "l2")] });
-    expect(s).toMatchObject({ state: "customer", stateSource: "lead_service", stateDetail: { leadId: "l2" } });
-    // Every lead unresolved: the first, as before.
-    const u = resolvePersonState({ ...empty, leadObservations: [obs("a@x.com", "unresolved", "l1"), obs("b@x.com", "unresolved", "l2")] });
-    expect(u.stateDetail).toMatchObject({ leadId: "l1" });
+  it("won, lost, else open: lead-service's words, never re-graded", () => {
+    const at = (over: Partial<LeadState>) =>
+      resolvePersonState({ ...empty, leadObservations: [lead("a@x.com", "l1")], leadStates: statesOf([uniboxRow("h1", ["l1"], over)]) }).state;
+    expect(at({ won: true })).toBe("won");
+    expect(at({ lost: { reasons: ["not_reachable"], reachable: "bounced", fit: null } })).toBe("lost");
+    expect(at({})).toBe("open");
   });
 
-  it("the Unibox tag is lead-service's standing TAG, not its state (a click alone is a website visit)", () => {
+  it("no lead row: the person's human's first Unibox row answers (a client lead-service holds by human)", () => {
+    const s = resolvePersonState({ ...empty, humanId: "h9", leadStates: statesOf([uniboxRow("h9", [], { won: true }), uniboxRow("h9", [], { hot: true })]) });
+    expect(s).toMatchObject({ state: "won", stateSource: "lead_service", stateDetail: { matchedBy: "human_id" } });
+    expect(s.stateDetail).not.toHaveProperty("leadId");
+  });
+
+  it("two leads of one person: the lead lead-service's Unibox holds answers (ZARINA-CLIENT-AS-PROSPECT-1104)", () => {
     const s = resolvePersonState({
       ...empty,
-      leadObservations: [
-        {
-          found: true,
-          email: "norman@x.com",
-          standing: { state: "sales_interest", tag: "website_visit", signal: "click" },
-          disqualification: null,
-          company: null,
-          human: null,
-          leadCampaignId: "lc1",
-          leadId: "l1",
-          campaignId: "c1",
-          campaignIds: ["c1"],
-        },
-      ],
+      leadObservations: [lead("info@livingvital.ch", "l1"), lead("marketingaronia@gmail.com", "l2")],
+      leadStates: statesOf([uniboxRow("h1", ["l2"], { won: true })]),
     });
-    expect(s.state).toBe("website_visit");
-    expect(s.stateSource).toBe("lead_service");
-    expect((s.stateDetail as { standing: { state: string } }).standing.state).toBe("sales_interest");
+    expect(s).toMatchObject({ state: "won", stateSource: "lead_service", stateDetail: { leadId: "l2" } });
   });
 
-  it("lead-service's Disqualified mark rides beside the state, verbatim; the state is unchanged", () => {
+  it("lead-service's marks ride beside the state, verbatim", () => {
     const mark = { level: "lead", offerId: null, note: "Runs a construction company.", source: "manual", statedByUserId: "u1", statedAt: "2026-10-13T09:00:00.000Z" };
     const company = { id: "co1", key: "co1", isClient: true, signedUp: true, disqualification: null };
     const s = resolvePersonState({
       ...empty,
-      leadObservations: [
-        {
-          found: true,
-          email: "hello@obra.cam",
-          standing: { state: "sales_interest", tag: "sales_interest", signal: "positive_reply" },
-          disqualification: mark,
-          company,
-          human: { optedOut: true, doNotContact: false },
-          leadCampaignId: "lc1",
-          leadId: "l1",
-          campaignId: "c1",
-          campaignIds: ["c1"],
-        },
-      ],
+      leadObservations: [lead("hello@obra.cam", "l1", { disqualification: mark, company, human: { optedOut: true, doNotContact: false } })],
+      leadStates: statesOf([uniboxRow("h1", ["l1"], { lost: { reasons: ["wrong_fit"], reachable: null, fit: "not_our_target" } })]),
     });
-    expect(s.state).toBe("sales_interest");
-    expect((s.stateDetail as { disqualification: unknown }).disqualification).toEqual(mark);
-    expect((s.stateDetail as { company: unknown }).company).toEqual(company);
-    expect((s.stateDetail as { human: unknown }).human).toEqual({ optedOut: true, doNotContact: false });
+    expect(s.state).toBe("lost");
+    expect(s.stateDetail).toMatchObject({ disqualification: mark, company, human: { optedOut: true, doNotContact: false } });
   });
 
   it("a failed lead-service read is unavailable, never a guess from another source", () => {
@@ -235,6 +225,18 @@ describe("resolvePersonState precedence", () => {
       ghlDeals: [{ status: "won", pipelineName: null, stageName: null, updatedAt: null }],
     });
     expect(s).toMatchObject({ state: "unavailable", stateSource: "lead_service" });
+    const u = resolvePersonState({ ...empty, humanId: "h1", leadStates: { ok: false, error: "lead-service down" }, stripe: [] });
+    expect(u).toMatchObject({ state: "unavailable", stateSource: "lead_service", stateDetail: { error: "lead-service down" } });
+  });
+
+  it("lead-service serves no lead state for them: crm's own facts decide", () => {
+    const s = resolvePersonState({
+      ...empty,
+      humanId: "h1",
+      leadStates: statesOf([uniboxRow("h2", ["l2"])]),
+      ghlDeals: [{ status: "won", pipelineName: null, stageName: null, updatedAt: null }],
+    });
+    expect(s).toMatchObject({ state: "deal_won", stateSource: "gohighlevel" });
   });
 
   it("then the CRM's deal status, most advanced first", () => {
@@ -326,13 +328,12 @@ describe("leadAddressesFirst: a lead shows under the address lead-service serves
   });
 });
 
-describe("standingFromRows: lead-service's Disqualified mark", () => {
+describe("leadFromRows: lead-service's Disqualified mark", () => {
   const row = (extra: Record<string, unknown>) => ({
     id: "lc1",
     leadId: "l1",
     email: "hello@obra.cam",
     campaignId: "c1",
-    standing: { state: "sales_interest", tag: "sales_interest" },
     company: null,
     human: null,
     ...extra,
@@ -340,32 +341,32 @@ describe("standingFromRows: lead-service's Disqualified mark", () => {
 
   it("relays the mark and its note verbatim", () => {
     const mark = { level: "lead", offerId: "o1", note: "Wrong industry.", source: "reply", statedByUserId: null, statedAt: "2026-10-13T09:00:00.000Z" };
-    const a = standingFromRows([row({ disqualification: mark })]);
-    expect(a).toMatchObject({ found: true, disqualification: mark, standing: { tag: "sales_interest" } });
+    const a = leadFromRows([row({ disqualification: mark })]);
+    expect(a).toMatchObject({ found: true, disqualification: mark });
+    expect(a).not.toHaveProperty("standing");
   });
 
   it("an explicit null is not disqualified", () => {
-    expect(standingFromRows([row({ disqualification: null })])).toMatchObject({ found: true, disqualification: null });
+    expect(leadFromRows([row({ disqualification: null })])).toMatchObject({ found: true, disqualification: null });
   });
 
   it("an absent or unreadable mark fails loud, never read as not disqualified", () => {
-    expect(() => standingFromRows([row({})])).toThrow(/carries no disqualification/);
-    expect(() => standingFromRows([row({ disqualification: { note: "x" } })])).toThrow(/unreadable disqualification/);
-    expect(() => standingFromRows([row({ disqualification: "yes" })])).toThrow(/unreadable disqualification/);
+    expect(() => leadFromRows([row({})])).toThrow(/carries no disqualification/);
+    expect(() => leadFromRows([row({ disqualification: { note: "x" } })])).toThrow(/unreadable disqualification/);
+    expect(() => leadFromRows([row({ disqualification: "yes" })])).toThrow(/unreadable disqualification/);
     // A mark without its level (an answer from before LEAD-REFONTE-1013) is unreadable too.
     expect(() =>
-      standingFromRows([row({ disqualification: { offerId: null, note: null, source: "manual", statedByUserId: null, statedAt: "2026-10-13T09:00:00.000Z" } })]),
+      leadFromRows([row({ disqualification: { offerId: null, note: null, source: "manual", statedByUserId: null, statedAt: "2026-10-13T09:00:00.000Z" } })]),
     ).toThrow(/unreadable disqualification/);
   });
 });
 
-describe("standingFromRows: lead-service's company block (tags at their level)", () => {
+describe("leadFromRows: lead-service's company block (tags at their level)", () => {
   const row = (extra: Record<string, unknown>) => ({
     id: "lc1",
     leadId: "l1",
     email: "hello@obra.cam",
     campaignId: "c1",
-    standing: { state: "customer", tag: "customer" },
     disqualification: null,
     human: null,
     ...extra,
@@ -374,63 +375,61 @@ describe("standingFromRows: lead-service's company block (tags at their level)",
 
   it("relays client / signed up / company Disqualified verbatim", () => {
     const company = { id: "co1", key: "co1", isClient: true, signedUp: true, disqualification: notOurTarget };
-    expect(standingFromRows([row({ company })])).toMatchObject({ found: true, company });
+    expect(leadFromRows([row({ company })])).toMatchObject({ found: true, company });
   });
 
   it("an explicit null is no company known", () => {
-    expect(standingFromRows([row({ company: null })])).toMatchObject({ found: true, company: null });
+    expect(leadFromRows([row({ company: null })])).toMatchObject({ found: true, company: null });
   });
 
   it("an absent or unreadable block fails loud, never read as no company", () => {
-    expect(() => standingFromRows([row({})])).toThrow(/carries no company/);
-    expect(() => standingFromRows([row({ company: { key: "k", isClient: "yes", signedUp: false, disqualification: null, id: null } })])).toThrow(/unreadable company/);
-    expect(() => standingFromRows([row({ company: { key: "k", isClient: true, signedUp: false, id: null } })])).toThrow(/unreadable company/);
+    expect(() => leadFromRows([row({})])).toThrow(/carries no company/);
+    expect(() => leadFromRows([row({ company: { key: "k", isClient: "yes", signedUp: false, disqualification: null, id: null } })])).toThrow(/unreadable company/);
+    expect(() => leadFromRows([row({ company: { key: "k", isClient: true, signedUp: false, id: null } })])).toThrow(/unreadable company/);
     expect(() =>
-      standingFromRows([row({ company: { key: "k", isClient: true, signedUp: false, id: null, disqualification: { note: "x" } } })]),
+      leadFromRows([row({ company: { key: "k", isClient: true, signedUp: false, id: null, disqualification: { note: "x" } } })]),
     ).toThrow(/unreadable company disqualification/);
   });
 });
 
-describe("standingFromRows: lead-service's human block (opted out wherever they work)", () => {
+describe("leadFromRows: lead-service's human block (opted out wherever they work)", () => {
   const row = (extra: Record<string, unknown>) => ({
     id: "lc1",
     leadId: "l1",
     email: "hello@obra.cam",
     campaignId: "c1",
-    // An unsubscribe under this brand decided the standing; the human block still says opted out.
-    standing: { state: "opted_out", tag: "opted_out", signal: "unsubscribed" },
     disqualification: null,
     company: null,
     ...extra,
   });
 
-  it("relays optedOut / doNotContact verbatim, whichever rung decided the standing", () => {
-    expect(standingFromRows([row({ human: { optedOut: true, doNotContact: false } })])).toMatchObject({
+  it("relays optedOut / doNotContact verbatim", () => {
+    expect(leadFromRows([row({ human: { optedOut: true, doNotContact: false } })])).toMatchObject({
       found: true,
       human: { optedOut: true, doNotContact: false },
     });
   });
 
-  it("an explicit null (standing unresolved) is relayed as null, never false", () => {
-    expect(standingFromRows([row({ human: null })])).toMatchObject({ found: true, human: null });
+  it("an explicit null (lead-service could not resolve it) is relayed as null, never false", () => {
+    expect(leadFromRows([row({ human: null })])).toMatchObject({ found: true, human: null });
   });
 
   it("an absent or unreadable block fails loud", () => {
-    expect(() => standingFromRows([row({})])).toThrow(/carries no human/);
-    expect(() => standingFromRows([row({ human: { optedOut: true } })])).toThrow(/unreadable human/);
+    expect(() => leadFromRows([row({})])).toThrow(/carries no human/);
+    expect(() => leadFromRows([row({ human: { optedOut: true } })])).toThrow(/unreadable human/);
   });
 });
 
 describe("cachedAnswerIsCurrent: an older lead-service answer is re-asked", () => {
-  const current = { standing: { tag: "customer" }, disqualification: null, company: null, human: null };
+  const current = { leadCampaignId: "lc1", disqualification: null, company: null, human: null };
   it("a current answer is reused", () => {
     expect(cachedAnswerIsCurrent(current)).toBe(true);
     expect(cachedAnswerIsCurrent({ ...current, disqualification: { level: "lead" } })).toBe(true);
   });
   it("no company block, or a mark with no level, is re-asked (never read as no)", () => {
-    expect(cachedAnswerIsCurrent({ standing: { tag: "customer" }, disqualification: null })).toBe(false);
-    expect(cachedAnswerIsCurrent({ standing: { tag: "customer" }, disqualification: null, company: null })).toBe(false);
+    expect(cachedAnswerIsCurrent({ leadCampaignId: "lc1", disqualification: null })).toBe(false);
+    expect(cachedAnswerIsCurrent({ leadCampaignId: "lc1", disqualification: null, company: null })).toBe(false);
     expect(cachedAnswerIsCurrent({ ...current, disqualification: { note: "x" } })).toBe(false);
-    expect(cachedAnswerIsCurrent({ ...current, standing: { state: "customer" } })).toBe(false);
+    expect(cachedAnswerIsCurrent({ disqualification: null, company: null, human: null })).toBe(false);
   });
 });

@@ -26,7 +26,7 @@ import {
 } from "./identity.js";
 import { siblingGet, siblingGetOk, type SiblingIdentity } from "./siblings.js";
 import { handleOf } from "../matrix/events.js";
-import type { GhlDeal, LeadCompanyTags, LeadDisqualification, LeadHumanTags, LeadStanding } from "./state.js";
+import type { GhlDeal, LeadCompanyTags, LeadDisqualification, LeadHumanTags } from "./state.js";
 import { copilotPresences, isCopilotDestination, readCopilotRows } from "../copilot/messages.js";
 import { apiCallPresences, readApiCallPresenceRows } from "../api-calls/calls.js";
 import { countFiledActivities } from "../account-activity/line.js";
@@ -1215,14 +1215,18 @@ export async function readLeadPairingEvidence(
   }
 }
 
-// ─── lead-service: one address's standing ───────────────────────────────────
+// ─── lead-service: one address's lead row ────────────────────────────────────
 
+/**
+ * One row of lead-service's lead list (`GET /orgs/leads?view=basic`). Read for WHICH lead the address is
+ * (row id, lead id, campaigns) and the marks on it; its old `standing` is NOT read (LEAD-GENERIC-1106: the lead's
+ * verdict is lead-service's `leadState`, read off its Unibox, lead-state.ts).
+ */
 export interface LeadRow {
   id: string;
   leadId: string | null;
   email: string;
   campaignId: string | null;
-  standing: (Record<string, unknown> & { state: string; tag?: unknown }) | null;
   /** lead-service's Disqualified mark (v0.83.59+): null or the mark; absent = an older answer. */
   disqualification?: unknown;
   /** lead-service's company block (LEAD-REFONTE-1013): null or the block; absent = an older answer. */
@@ -1231,11 +1235,10 @@ export interface LeadRow {
   human?: unknown;
 }
 
-export type LeadStandingAnswer =
+export type LeadAnswer =
   | { found: false }
   | {
       found: true;
-      standing: LeadStanding;
       disqualification: LeadDisqualification | null;
       company: LeadCompanyTags | null;
       human: LeadHumanTags | null;
@@ -1312,8 +1315,8 @@ export function companyTagsFromRow(row: LeadRow): LeadCompanyTags | null {
 
 /** PURE: a cached lead-service answer carries every field the current read relays. */
 export function cachedAnswerIsCurrent(payload: unknown): boolean {
-  const p = payload as { standing?: { tag?: unknown }; disqualification?: { level?: unknown } | null; company?: unknown; human?: unknown } | null;
-  if (typeof p?.standing?.tag !== "string") return false;
+  const p = payload as { leadCampaignId?: unknown; disqualification?: { level?: unknown } | null; company?: unknown; human?: unknown } | null;
+  if (typeof p?.leadCampaignId !== "string") return false;
   if (p.disqualification === undefined) return false;
   if (p.disqualification !== null && typeof p.disqualification.level !== "string") return false;
   return p.company !== undefined && p.human !== undefined;
@@ -1337,20 +1340,13 @@ export function humanTagsFromRow(row: LeadRow): LeadHumanTags | null {
 
 /**
  * PURE: one address's answer from ITS rows, in lead-service's `sort=activity`
- * order. The first row's standing is the person's; we never pick a "better" one.
+ * order. The first row is the address's lead; we never pick a "better" one.
  */
-export function standingFromRows(rows: LeadRow[]): LeadStandingAnswer {
+export function leadFromRows(rows: LeadRow[]): LeadAnswer {
   if (rows.length === 0) return { found: false };
   const first = rows[0];
-  if (!first.standing || typeof first.standing.state !== "string") {
-    throw new Error(`lead-service row ${first.id} carries no standing`);
-  }
-  if (typeof first.standing.tag !== "string") {
-    throw new Error(`lead-service row ${first.id} standing carries no tag`);
-  }
   return {
     found: true,
-    standing: { ...first.standing, tag: first.standing.tag },
     disqualification: disqualificationFromRow(first),
     company: companyTagsFromRow(first),
     human: humanTagsFromRow(first),
@@ -1365,22 +1361,22 @@ const leadsPath = (identity: SiblingIdentity, extra: string) =>
   `/orgs/leads?brandId=${encodeURIComponent(identity.brandId)}${extra}&view=basic&sort=activity&status=all`;
 
 /**
- * What lead-service says about one address for the brand. Its own search, in
+ * Which lead of the brand one address is, per lead-service. Its own search, in
  * its own `sort=activity` order (newest proving evidence first), filtered to
  * the EXACT address (the search is a substring match).
  */
-export async function lookupLeadStanding(identity: SiblingIdentity, email: string): Promise<LeadStandingAnswer> {
+export async function lookupLead(identity: SiblingIdentity, email: string): Promise<LeadAnswer> {
   const r = await siblingGet("lead", `${leadsPath(identity, `&q=${encodeURIComponent(email)}`)}&limit=50`, identity);
   if (r.status < 200 || r.status >= 300) {
     throw new Error(`lead-service GET /orgs/leads returned ${r.status}: ${JSON.stringify(r.body).slice(0, 300)}`);
   }
-  return standingFromRows(((r.body as { leads: LeadRow[] }).leads ?? []).filter((row) => normalizeEmail(row.email) === email));
+  return leadFromRows(((r.body as { leads: LeadRow[] }).leads ?? []).filter((row) => normalizeEmail(row.email) === email));
 }
 
 const LEAD_WALK_PAGE = 2000;
 
 /**
- * The same answer as `lookupLeadStanding`, for MANY addresses in one walk of
+ * The same answer as `lookupLead`, for MANY addresses in one walk of
  * the brand's whole lead list (same view, same `sort=activity` order, paged).
  * Taking each address's rows in list order gives exactly the rows its own
  * search would return, in the same order. Built for a brand whose cold email
@@ -1390,10 +1386,10 @@ const LEAD_WALK_PAGE = 2000;
  * Any page failing fails the walk, loud (every address it was for reads
  * `unavailable`, never a guess); a malformed row fails only its own address.
  */
-export async function walkLeadStandings(
+export async function walkLeads(
   identity: SiblingIdentity,
   wanted: Set<string>,
-): Promise<Map<string, LeadStandingAnswer | Error>> {
+): Promise<Map<string, LeadAnswer | Error>> {
   const rowsByEmail = new Map<string, LeadRow[]>();
   for (let offset = 0; ; offset += LEAD_WALK_PAGE) {
     const page = await siblingGetOk<{ leads: LeadRow[] }>(
@@ -1411,10 +1407,10 @@ export async function walkLeadStandings(
     }
     if (leads.length < LEAD_WALK_PAGE) break;
   }
-  const answers = new Map<string, LeadStandingAnswer | Error>();
+  const answers = new Map<string, LeadAnswer | Error>();
   for (const email of wanted) {
     try {
-      answers.set(email, standingFromRows(rowsByEmail.get(email) ?? []));
+      answers.set(email, leadFromRows(rowsByEmail.get(email) ?? []));
     } catch (err) {
       answers.set(email, err as Error);
     }

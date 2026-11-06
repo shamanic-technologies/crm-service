@@ -2339,6 +2339,24 @@ registry.registerPath({
 
 const PeopleSourceSchema = z.enum(PEOPLE_SOURCES);
 
+/** lead-service's `leadState` (LEAD-GENERIC-1106), relayed verbatim. */
+const LeadStateSchema = z
+  .object({
+    lifecycle: z.object({ key: z.string(), rank: z.number(), label: z.string() }).nullable().openapi({ description: "The highest rung of the ONE ladder the lead reached; null = none yet." }),
+    won: z.boolean(),
+    hot: z.boolean(),
+    lost: z.object({ reasons: z.array(z.string()), reachable: z.string().nullable(), fit: z.string().nullable() }).nullable(),
+    reachable: z.string(),
+    conversation: z.string(),
+    fit: z.string(),
+    fitNote: z.string().nullable(),
+    interest: z.string(),
+    clientStatus: z.string(),
+    nextFollowupAt: z.string().nullable(),
+    nextFollowupBasis: z.string().nullable(),
+  })
+  .openapi("PersonLeadState");
+
 const LeadDisqualificationSchema = z
   .object({
     level: z.string().openapi({ description: "lead-service's verbatim: `lead` (this person at this company: not the right contact, left the role) or `company` (\"not our target\": every lead of the company)." }),
@@ -2405,12 +2423,16 @@ const PersonSchema = registry.register(
       firstActivityAt: z.string().nullable(),
       lastActivityAt: z.string().nullable(),
       state: z.string().openapi({
-        example: "sales_interest",
+        example: "hot",
         description:
-          "The ONE state, set by `stateSource` (first that applies): lead_service = lead-service's standing TAG verbatim (unresolved | not_contacted | contacted | engaged | sales_interest | website_visit | customer | opted_out; the standing's own `state` rides in `stateDetail.standing`; Disqualified is not a state, see `disqualification`), or `unavailable` when lead-service could not be asked; stripe = subscription_active | subscription_trialing | subscription_past_due | subscription_unpaid | paid | refunded | subscription_canceled; gohighlevel = deal_won | deal_open | deal_lost | deal_abandoned; matrix = new | qualifying | negotiating | won | lost | unresponsive; instantly = replied | clicked; none = in_conversation. Render it; never recompute it.",
+          "The ONE state, set by `stateSource` (first that applies): lead_service = lead-service's verdict on the lead (LEAD-GENERIC-1106, its ONE lead vocabulary): won | hot | lost, else open (the whole `leadState` beside it), or `unavailable` when lead-service could not be asked; stripe = subscription_active | subscription_trialing | subscription_past_due | subscription_unpaid | paid | refunded | subscription_canceled; gohighlevel = deal_won | deal_open | deal_lost | deal_abandoned; matrix = new | qualifying | negotiating | won | lost | unresponsive; instantly = replied | clicked; none = in_conversation. Render it; never recompute it.",
       }),
       stateSource: z.enum(STATE_SOURCES),
       stateDetail: z.record(z.string(), z.unknown()).nullable(),
+      leadState: LeadStateSchema.nullable().openapi({
+        description:
+          "lead-service's ONE lead vocabulary for the person (LEAD-GENERIC-1106), relayed verbatim from its Unibox row (the row holding the person's lead, else their human's first row): Lifecycle (the one ladder), won / hot / lost (+ reasons), reachable, conversation, fit, interest, client status, next follow-up. Null = lead-service serves no lead state for them (stateSource is not lead_service, or unavailable).",
+      }),
       disqualification: LeadDisqualificationSchema.openapi({
         description:
           "lead-service's Disqualified MARK for the lead the state was read from, relayed verbatim (its `disqualification` on the lead row): shown BESIDE `state`, never instead of it (a lead can read \"Positive reply\" AND \"Disqualified\"). lead-service answers the lead's own mark first, else its company's: `level` says which. Null = not disqualified, or the person is not one of our leads (`stateSource` is not lead_service). Never derived here.",
@@ -2436,7 +2458,7 @@ const PersonSchema = registry.register(
         .nullable()
         .openapi({
           description:
-            "lead-service's HUMAN block for the lead the state was read from, relayed verbatim (its `human` on the lead row): what holds for the human wherever they work, whichever evidence decided the state (an unsubscribe under this brand reads state opted_out AND optedOut true). Null = the person is not one of our leads, or lead-service could not resolve the standing (never read as false). Never derived here.",
+            "lead-service's HUMAN block for the lead the state was read from, relayed verbatim (its `human` on the lead row): what holds for the human wherever they work, whichever evidence decided the state (an unsubscribe under this brand reads state opted_out AND optedOut true). Null = the person is not one of our leads, or lead-service could not resolve it (never read as false). Never derived here.",
         }),
       presences: z.array(PersonPresenceSchema),
       preferredContact: z
@@ -2673,30 +2695,25 @@ const PeopleListResponseSchema = registry.register(
         .openapi({ description: "Present only when `q` is set." }),
       families: z
         .object({
-          status: z.enum(["ok", "failed"]).openapi({ description: "failed = features-service could not be read: every person's family is null for THAT reason, never \"nobody has a family\" (see error)." }),
-          error: z.string().nullable(),
-          filter: z.enum(["won", "hot", "lost", "cold"]).nullable().openapi({ description: "The family this page is filtered on (null = All)." }),
+          status: z.enum(["ok"]).openapi({ description: "Always ok: the verdicts ride on each person (lead-service's, relayed at build)." }),
+          error: z.null(),
+          filter: z.enum(["won", "hot", "lost"]).nullable().openapi({ description: "The verdict this page is filtered on (null = All)." }),
           counts: z
-            .object({ won: z.number().int(), hot: z.number().int(), lost: z.number().int(), cold: z.number().int() })
-            .nullable()
-            .openapi({ description: "People per family over THIS list's population (source / includeAutomated / q applied, family not): what each filter button returns. Sums to withFamily." }),
-          lostBreakdown: z.object({ wentCold: z.number().int(), ruledOut: z.number().int() }).nullable(),
-          withFamily: z.number().int().nullable(),
-          withoutFamily: z.number().int().nullable().openapi({ description: "People of the population who are not one of our leads (shown under All only)." }),
-          producerCounts: z
-            .object({ won: z.number().int(), hot: z.number().int(), lost: z.number().int(), cold: z.number().int() })
-            .nullable()
-            .openapi({ description: "features-service's own counts over ALL the brand's leads, most never in conversation with the brand (for reconciliation)." }),
-          readAt: z.string().nullable().openapi({ description: "When crm-service read features-service (a read is shared for up to 60s)." }),
+            .object({ won: z.number().int(), hot: z.number().int(), lost: z.number().int() })
+            .openapi({ description: "People per verdict over THIS list's population (source / includeAutomated / q applied, family not): what each filter button returns. Sums to withFamily." }),
+          lostReasons: z.record(z.string(), z.number().int()).openapi({ description: "Lost people per lost reason (lead-service's: not_reachable | wrong_fit | not_interested); a person can hold several." }),
+          withFamily: z.number().int(),
+          withoutFamily: z.number().int().openapi({ description: "People of the population neither won, hot nor lost (open leads, and people lead-service serves no lead state for)." }),
+          source: z.literal("lead_service"),
         })
-        .openapi({ description: "The Unibox family filters (Won clients, Hot leads, Lost leads, Cold leads)." }),
+        .openapi({ description: "Won / Hot / Lost (LEAD-GENERIC-1106): lead-service's verdict on the lead, read from its ONE lead vocabulary. \"Cold\" does not exist." }),
       groupMembersHidden: z.number().int().openapi({ description: "People hidden because they are known ONLY as members of the brand's messaging groups and never wrote a word (0 when includeGroupMembers=true)." }),
       people: z.array(
         PersonSchema.extend({
-          family: z.enum(["won", "hot", "lost", "cold"]).nullable().openapi({
-            description: "features-service's verdict on this person as our lead, verbatim; a person with several lead addresses takes the strongest (won > hot > lost > cold). Null = not one of our leads, or families.status = failed.",
+          family: z.enum(["won", "hot", "lost"]).nullable().openapi({
+            description: "lead-service's verdict on this person as a lead (= `state` when `stateSource` is lead_service). Null = open, or no lead state.",
           }),
-          familyLostReason: z.enum(["went_cold", "ruled_out"]).nullable().openapi({ description: "lost only: went_cold or ruled_out (features-service's reason)." }),
+          familyLostReason: z.enum(["not_reachable", "wrong_fit", "not_interested"]).nullable().openapi({ description: "lost only: lead-service's strongest lost reason (all of them in `leadState.lost.reasons`)." }),
           matches: z.array(SearchMatchSchema).optional().openapi({
             description: "Search only: every identity field holding the query, then up to 3 newest matching messages.",
           }),
@@ -2883,11 +2900,11 @@ registry.registerPath({
       includeNotBusiness: z.enum(["true", "false"]).optional().openapi({ description: "Kept for compatibility: since RELATIONSHIP-TAGS-1014 no person is notBusiness (who a person is to the brand is lead-service's, which serves the Unibox list), so it changes nothing." }),
       includeGroupMembers: z.enum(["true", "false"]).optional().openapi({ description: "Also return people known ONLY as members of the brand's messaging groups (WhatsApp, LinkedIn...) who never wrote a word (person.groupOnly = true). Default false: hidden." }),
       offerId: z.string().uuid().optional().openapi({ description: "Only people with a conversation Jev tied to this offer of the brand (person.offerIds contains it)." }),
-      family: z.enum(["won", "hot", "lost", "cold"]).optional().openapi({
+      family: z.enum(["won", "hot", "lost"]).optional().openapi({
         description:
-          "Unibox family filter: only people whose family (features-service's verdict on our lead, read verbatim) is this one. " +
-          "won = client won; hot = interested, not won yet; lost = became interested then went cold, or ruled out; cold = contacted, never interested. " +
-          "Combines with q, source, includeAutomated and paging. 502 lead_families_unavailable when features-service cannot be read (never an empty list). Absent = All.",
+          "Won / Hot / Lost filter: only people whose lead-service verdict (`state`, stateSource lead_service) is this one. " +
+          "won = Lifecycle on the ladder's top rung (Paid client); hot = interested, not won, not lost; lost = not won, and not reachable, wrong fit or not interested. " +
+          "Combines with q, source, includeAutomated and paging. Absent = All.",
       }),
       q: z.string().max(200).optional().openapi({
         description:
