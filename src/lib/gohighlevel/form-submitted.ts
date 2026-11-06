@@ -9,6 +9,11 @@
  *   records the ones not recorded yet, names the lead (lead-service `POST /internal/leads/ids/resolve` with the
  *   identity the submission itself carries, else its mirrored contact's; nothing minted, never guessed) and declares
  *   through runs-service's batch door with `occurredAt` = the submission's own time.
+ * - WHO performed it (OUTCOME-PERFORMER-1106): the brand's CRM recorded the form, so every occurrence states
+ *   `performer: {kind: "crm", name: <the CRM, e.g. gohighlevel>}`. Which of our scripts' messages drove it is not
+ *   readable here, so no script is ever named (runs-service: an attester kind with its name). Occurrences declared
+ *   before the performer existed take it ONCE through the same batch door (`performer_stated`; same = already recorded;
+ *   another one stored = 409 `performer_conflict`, kept as theirs, never overwritten): `performer_status` on the row.
  * - A calendar's own booking form is the BOOKING, never a form (same rule as the form trigger and Outcomes):
  *   `skipped / calendar_booking_form`.
  * - The producing run: a spend-free run of its own per submission (`gohighlevel.form-submitted`), opened once its lead is
@@ -18,10 +23,18 @@
  * - Not a lead (yet), or no email / phone to ask with = waits and is asked again (backoff to 1 h), never given up:
  *   a person can become a lead later. A 422 run = `refused` (kept, logged).
  */
-import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { formSubmittedDeclarations, type FormSubmittedDeclaration } from "../../db/schema.js";
-import { createRun, declareOutcomesBatch, invalidRunsOf, updateRun, type BatchRunOutcomes } from "../runs-client.js";
+import {
+  createRun,
+  declareOutcomesBatch,
+  invalidRunsOf,
+  performerConflictRunsOf,
+  updateRun,
+  type BatchRunOutcomes,
+  type OutcomePerformer,
+} from "../runs-client.js";
 import { siblingQuery } from "../people/siblings.js";
 import { LEAD_SUBJECT_SERVICE, outcomeBackoffMs } from "../reply-trigger/outcome.js";
 import { isCalendarBookingForm, submissionPerson } from "../form-trigger/submission.js";
@@ -55,11 +68,18 @@ export function submissionResolveItem(orgId: string, brandId: string, email: str
   return { orgId, brandIds: [brandId], ...(e ? { email: e } : {}), ...(p ? { phone: p } : {}) };
 }
 
-/** PURE: one batch entry per submission run, the form on its lead, dated when it was submitted. */
-export function formSubmittedBatchBody(rows: Array<{ runId: string; leadId: string; submittedAt: Date }>): BatchRunOutcomes[] {
+/** PURE (OUTCOME-PERFORMER-1106): the brand's CRM recorded the form; the CRM is named, never a script we cannot read. */
+export function formSubmittedPerformer(source: string): OutcomePerformer {
+  return { kind: "crm", name: source };
+}
+
+/** PURE: one batch entry per submission run, the form on its lead, dated when it was submitted, naming who performed it. */
+export function formSubmittedBatchBody(rows: Array<{ runId: string; leadId: string; submittedAt: Date; source: string }>): BatchRunOutcomes[] {
   return rows.map((r) => ({
     runId: r.runId,
-    produced: [{ outcomeKey: FORM_SUBMITTED_OUTCOME, subjectService: LEAD_SUBJECT_SERVICE, subjectId: r.leadId }],
+    produced: [
+      { outcomeKey: FORM_SUBMITTED_OUTCOME, subjectService: LEAD_SUBJECT_SERVICE, subjectId: r.leadId, performer: formSubmittedPerformer(r.source) },
+    ],
     occurredAt: r.submittedAt.toISOString(),
   }));
 }
@@ -143,6 +163,7 @@ export interface FormSubmittedPass {
   skipped: number;
   refused: number;
   failed: number;
+  performers: PerformerPass;
 }
 
 async function wait(r: FormSubmittedDeclaration, now: number, reason: string, error: string | null, pass: FormSubmittedPass) {
@@ -234,11 +255,24 @@ export async function declareDueSubmissions(now: number = Date.now(), pass: Form
     let batch = ready.slice(start, start + MAX_RUNS);
     for (let tries = 0; batch.length > 0 && tries < 3; tries++) {
       try {
-        const answer = await declareOutcomesBatch(formSubmittedBatchBody(batch.map(({ r, leadId, runId }) => ({ runId, leadId, submittedAt: r.submittedAt }))));
+        const answer = await declareOutcomesBatch(formSubmittedBatchBody(batch.map(({ r, leadId, runId }) => ({ runId, leadId, submittedAt: r.submittedAt, source: r.source }))),
+        );
+        // A runs-service that does not know the performer yet strips it and omits the count: left NULL, the past pass completes it.
+        const performerHeld = performerAcknowledged(answer);
         for (const { r, leadId } of batch) {
           await db
             .update(formSubmittedDeclarations)
-            .set({ status: STATUS.DECLARED, leadId, declaredAt: new Date(now), lastError: null, reason: null, nextAt: null, attempts: r.attempts + 1 })
+            .set({
+              status: STATUS.DECLARED,
+              leadId,
+              declaredAt: new Date(now),
+              performerStatus: performerHeld ? PERFORMER_STATUS.STATED : null,
+              performerAt: performerHeld ? new Date(now) : null,
+              lastError: null,
+              reason: null,
+              nextAt: null,
+              attempts: r.attempts + 1,
+            })
             .where(eq(formSubmittedDeclarations.id, r.id));
         }
         pass.declared += answer.recordedCount;
@@ -275,15 +309,112 @@ export async function declareDueSubmissions(now: number = Date.now(), pass: Form
 }
 
 function emptyPass(): FormSubmittedPass {
-  return { recorded: 0, due: 0, declared: 0, alreadyRecorded: 0, waiting: 0, skipped: 0, refused: 0, failed: 0 };
+  return { recorded: 0, due: 0, declared: 0, alreadyRecorded: 0, waiting: 0, skipped: 0, refused: 0, failed: 0, performers: emptyPerformerPass() };
 }
 
-/** One pass: record the submissions not recorded yet, then declare the due ones. */
+/** PURE: runs-service serves `performerStatedCount` whenever a call states a performer it knows (v0.47.133+). */
+export function performerAcknowledged(answer: { performerStatedCount?: number }): boolean {
+  return typeof answer.performerStatedCount === "number";
+}
+
+export const PERFORMER_STATUS = { STATED: "stated", CONFLICT: "conflict", REFUSED: "refused" } as const;
+
+export interface PerformerPass {
+  /** Declared occurrences whose performer is not stated yet (what the pass sends, or would send on a dry run). */
+  toState: number;
+  stated: number;
+  alreadyStated: number;
+  conflict: number;
+  refused: number;
+  failed: number;
+}
+
+function emptyPerformerPass(): PerformerPass {
+  return { toState: 0, stated: 0, alreadyStated: 0, conflict: 0, refused: 0, failed: 0 };
+}
+
+/** A declared occurrence (it names its run and lead) whose performer runs-service does not hold yet. */
+const missingPerformer = and(
+  eq(formSubmittedDeclarations.status, STATUS.DECLARED),
+  isNull(formSubmittedDeclarations.performerStatus),
+  isNotNull(formSubmittedDeclarations.runId),
+  isNotNull(formSubmittedDeclarations.leadId),
+);
+
+/**
+ * OUTCOME-PERFORMER-1106: every occurrence declared before the performer existed states it ONCE, through the same
+ * batch door with the same run, subject and instant (runs-service answers `performer_stated`, or `already_recorded`
+ * when it already holds the same). A 409 `performer_conflict` = runs-service holds another one: kept as theirs
+ * (`conflict`), never overwritten. A 422 run = `refused`. Anything else = left for the next pass. `dryRun` counts only.
+ */
+export async function statePastPerformers(now: number = Date.now(), opts: { dryRun?: boolean } = {}): Promise<PerformerPass> {
+  const out = emptyPerformerPass();
+  const [{ n }] = await db.select({ n: sql<number>`count(*)::int` }).from(formSubmittedDeclarations).where(missingPerformer);
+  out.toState = Number(n);
+  if (opts.dryRun || out.toState === 0) return out;
+  const rows = (
+    await db.select().from(formSubmittedDeclarations).where(missingPerformer).orderBy(asc(formSubmittedDeclarations.submittedAt)).limit(5000)
+  ).filter((r): r is FormSubmittedDeclaration & { runId: string; leadId: string } => !!r.runId && !!r.leadId);
+  const mark = async (ids: string[], status: string, error: string | null) => {
+    if (ids.length === 0) return;
+    await db
+      .update(formSubmittedDeclarations)
+      .set({ performerStatus: status, performerAt: new Date(now), ...(error ? { lastError: error.slice(0, 1000) } : {}) })
+      .where(inArray(formSubmittedDeclarations.id, ids));
+  };
+  for (let start = 0; start < rows.length; start += MAX_RUNS) {
+    let batch = rows.slice(start, start + MAX_RUNS);
+    for (let tries = 0; batch.length > 0 && tries < 3; tries++) {
+      try {
+        const answer = await declareOutcomesBatch(
+          formSubmittedBatchBody(batch.map((r) => ({ runId: r.runId, leadId: r.leadId, submittedAt: r.submittedAt, source: r.source }))),
+        );
+        if (!performerAcknowledged(answer)) {
+          console.error(`${LOG} performer: runs-service answered without performerStatedCount (performer not served yet), retried next pass`);
+          out.failed += batch.length;
+          batch = [];
+          continue;
+        }
+        await mark(batch.map((r) => r.id), PERFORMER_STATUS.STATED, null);
+        const stated = answer.performerStatedCount ?? 0;
+        out.stated += stated;
+        out.alreadyStated += batch.length - stated;
+        batch = [];
+      } catch (err) {
+        const conflicts = performerConflictRunsOf(err);
+        const invalid = invalidRunsOf(err);
+        if (conflicts || invalid) {
+          const named = new Set((conflicts ?? invalid!.map((i) => i.runId)).map((id) => id.toLowerCase()));
+          const hit = batch.filter((r) => named.has(r.runId.toLowerCase()));
+          if (hit.length === 0) {
+            console.error(`${LOG} performer: runs-service answered ${(err as Error).message.slice(0, 300)} naming no run of the batch`);
+            out.failed += batch.length;
+            batch = [];
+            continue;
+          }
+          console.error(`${LOG} performer ${conflicts ? "held otherwise at runs-service (kept as theirs)" : "refused"} for ${hit.length} run(s): ${hit.slice(0, 5).map((r) => r.runId).join(", ")}`);
+          await mark(hit.map((r) => r.id), conflicts ? PERFORMER_STATUS.CONFLICT : PERFORMER_STATUS.REFUSED, (err as Error).message);
+          if (conflicts) out.conflict += hit.length;
+          else out.refused += hit.length;
+          batch = batch.filter((r) => !named.has(r.runId.toLowerCase()));
+          continue;
+        }
+        console.error(`${LOG} performer: stating ${batch.length} occurrence(s) failed, retried next pass: ${(err as Error).message.slice(0, 1000)}`);
+        out.failed += batch.length;
+        batch = [];
+      }
+    }
+  }
+  return out;
+}
+
+/** One pass: record the submissions not recorded yet, declare the due ones, then state any performer still missing. */
 export async function runFormSubmittedPass(now: number = Date.now()): Promise<FormSubmittedPass> {
   const pass = emptyPass();
   pass.recorded = await recordNewSubmissions();
   await declareDueSubmissions(now, pass);
-  if (pass.recorded + pass.due > 0) console.log(`${LOG} pass: ${JSON.stringify(pass)}`);
+  pass.performers = await statePastPerformers(now);
+  if (pass.recorded + pass.due + pass.performers.toState > 0) console.log(`${LOG} pass: ${JSON.stringify(pass)}`);
   return pass;
 }
 

@@ -298,6 +298,18 @@ export interface OutcomeOccurrence {
   outcomeKey: string;
   subjectService: string;
   subjectId: string;
+  /** PRODUCED only (OUTCOME-PERFORMER-1106): who performed it, stored once per occurrence at runs-service. */
+  performer?: OutcomePerformer;
+}
+
+/**
+ * OUTCOME-PERFORMER-1106 (runs-service v0.47.133): WHO performed an occurrence. `workflowSlug` required iff `script`
+ * (never guessed: a script we cannot read is never named); `name` = the tool label (1..128), never a person.
+ */
+export interface OutcomePerformer {
+  kind: "script" | "client_team" | "crm" | "tracker" | "mailbox" | "organic";
+  workflowSlug?: string;
+  name?: string;
 }
 
 export interface DeclareOutcomesBody {
@@ -367,6 +379,8 @@ export interface BatchRunOutcomes {
 export interface BatchOutcomesAnswer {
   recordedCount: number;
   alreadyRecordedCount: number;
+  /** Served only when the call states a performer: recorded occurrences that took it now (`performer_stated`). */
+  performerStatedCount?: number;
   runs: Array<{ runId: string; recordedCount: number; alreadyRecordedCount: number }>;
 }
 
@@ -388,6 +402,18 @@ export async function declareOutcomesBatch(runs: BatchRunOutcomes[]): Promise<Ba
     serviceNameHeader: "crm-service",
     body: { runs },
   });
+}
+
+/** PURE: the runs a 409 `performer_conflict` names (runs-service holds another performer, never overwritten), or null. */
+export function performerConflictRunsOf(err: unknown): string[] | null {
+  if (!(err instanceof RunsServiceError) || err.kind !== "http" || err.status !== 409 || !err.body) return null;
+  try {
+    const parsed = JSON.parse(err.body) as { error?: string; conflicts?: Array<{ runId?: string }> };
+    if (parsed.error !== "performer_conflict" || !Array.isArray(parsed.conflicts)) return null;
+    return [...new Set(parsed.conflicts.map((c) => String(c.runId ?? "").toLowerCase()).filter(Boolean))];
+  } catch {
+    return null;
+  }
 }
 
 /** PURE: the invalid runs a 422 `invalid_runs` answer names, or null when the error is something else. */
