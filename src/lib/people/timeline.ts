@@ -46,7 +46,9 @@
  */
 
 import { connectionOwnSenders } from "../matrix/own-senders.js";
-import { isOwnSender } from "../matrix/events.js";
+import { cachedBrandAddresses, exchangedWithUs, type BrandAddresses } from "./brand-addresses.js";
+import { isOwnSender, messageWords, photoOf, quoteOf, type PhotoRef, type QuotedMessage } from "../matrix/events.js";
+import type { MatrixEvent } from "../matrix/client.js";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { describeKeyEvent } from "../posthog/records.js";
@@ -68,7 +70,7 @@ import { majorAmount } from "../stripe/records.js";
 import { stripeAttempt, subscriptionAttempt } from "../stripe/attempts.js";
 import { readFunnelEvents, type FunnelEvent } from "../gohighlevel/funnel-events.js";
 import type { BuildSummary } from "./build.js";
-import { PEOPLE_SOURCES, type PeopleSource, type Presence } from "./identity.js";
+import { normalizeEmail, PEOPLE_SOURCES, type PeopleSource, type Presence } from "./identity.js";
 import { LATE_JOIN_SOURCES, mirrorContactKeys, type LateJoinSource, type MirrorContactRow } from "./record-keys.js";
 import type { SiblingIdentity } from "./siblings.js";
 import { readStoredTimeline, type StoredReadOptions, type StoredTimeline } from "./search.js";
@@ -149,6 +151,16 @@ export interface TimelineItem {
    * (a Gmail send, a cold email tied to no sequence step). A writer never reads an `automation` line as a person's words.
    */
   sentBy?: "person" | "automation" | null;
+  /**
+   * Matrix messages only (SOPHIE-WA-HUMAN-1106), absent when none: the message this one quoted with WhatsApp's
+   * « Reply » (`ref.eventId` of the quoted item, its direction, time and words).
+   */
+  quote?: QuotedMessage;
+  /**
+   * Matrix messages only, absent when none: the photo this message is (its caption, if any, is in `text` after
+   * `📷 Photo: `). Its bytes: `GET /orgs/matrix/media?brandId=&eventId=`.
+   */
+  photo?: PhotoRef;
 }
 
 /** google-service's `bodyCleanStatus`, verbatim. */
@@ -293,16 +305,22 @@ async function matrixItems(presences: Presence[]): Promise<SourceResult> {
           eq(matrixRawEvents.eventType, "m.room.message"),
         ),
       );
+    const byId = new Map(events.map((e) => [e.eventId, e.payload as unknown as MatrixEvent]));
     for (const e of events) {
-      const content = (e.payload as { content?: { body?: unknown } }).content;
+      const content = (e.payload as { content?: Record<string, unknown> }).content;
+      // A photo reads as one (SOPHIE-WA-HUMAN-1106), never as its file name; what it quoted travels beside it.
+      const photo = photoOf(content, e.eventId);
+      const quote = quoteOf(content, byId, own);
       items.push({
+        ...(quote ? { quote } : {}),
+        ...(photo ? { photo } : {}),
         at: e.originServerTs.toISOString(),
         source: "matrix",
         channel: c.channel,
         kind: "message",
         direction: isOwnSender(e.sender, own) ? "outbound" : "inbound",
         subject: null,
-        text: typeof content?.body === "string" ? content.body : null,
+        text: photo ? messageWords(content) : typeof content?.body === "string" ? content.body : null,
         from: e.sender,
         to: [],
         ref: { eventId: e.eventId, roomId: e.roomId, conversationId: c.id, recordedAt: e.ingestedAt.toISOString() },
@@ -1060,6 +1078,25 @@ export function withoutTransactionalCopies(gmail: TimelineItem[], sends: Transac
   });
 }
 
+/**
+ * The person's Gmail items that went between them and us (`exchangedWithUs`). The brand's own addresses unreadable =
+ * the source is `failed` with no item: a mailbox read unfiltered is exactly what made the assistant answer a third
+ * party's deal (2026-11-04), so it is never served as the person's thread.
+ */
+export async function onlyExchangedWithUs(source: SourceResult, emails: string[], identity: SiblingIdentity): Promise<SourceResult> {
+  let own: BrandAddresses;
+  try {
+    own = await cachedBrandAddresses(identity);
+  } catch (err) {
+    const error = `could not read the brand's own addresses to keep only mails between this person and the brand: ${(err as Error).message}`;
+    console.error(`[crm-service] timeline gmail filter: ${error}`);
+    return { ...source, status: "failed", items: [], error: source.error ? `${source.error}; ${error}` : error };
+  }
+  const person = new Set(emails.map((e) => normalizeEmail(e)).filter((e): e is string => !!e));
+  const items = source.items.filter((i) => exchangedWithUs({ from: i.from, to: i.to }, person, own));
+  return { ...source, items, status: source.status === "ok" && items.length === 0 ? "empty" : source.status };
+}
+
 export async function readTimeline(
   scope: PeopleScope,
   person: Person,
@@ -1127,6 +1164,8 @@ export async function readTimeline(
     activityItems(person).catch((e) => toFailed(e, emails)),
   ]);
   const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional, onboarding, csv, activity };
+  // Only mails between the person and us (SOPHIE-WA-HUMAN-1106): never their mail to a third party, nor a newsletter in a mailbox we mirror.
+  if (bySource.gmail.items.length) bySource.gmail = await onlyExchangedWithUs(bySource.gmail, emails, identity);
   // A Gmail copy of a transactional email we sent (a staff mailbox holds it) is that email: shown once, as ours.
   if (bySource.gmail.items.length && bySource.transactional.status === "ok") {
     bySource.gmail = { ...bySource.gmail, items: withoutTransactionalCopies(bySource.gmail.items, await transactionalSends(bySource.gmail.items)) };

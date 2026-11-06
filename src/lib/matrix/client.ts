@@ -105,12 +105,13 @@ export async function sync(since: string | null, token: string): Promise<MatrixS
 const SEND_TIMEOUT_MS = 30_000;
 
 /**
- * Send a plain text message into `roomId` as the account owning `token`.
+ * Send a plain text message into `roomId` as the account owning `token`, quoting
+ * `replyToEventId` (a message of that room) when given.
  * `txnId` is Matrix's own idempotency key: the homeserver answers the SAME event
  * id for a repeated (token, txnId), so a retry never sends twice.
  * Fails loud: any non-2xx or transport error throws.
  */
-export async function sendText(token: string, roomId: string, txnId: string, text: string): Promise<string> {
+export async function sendText(token: string, roomId: string, txnId: string, text: string, replyToEventId: string | null = null): Promise<string> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
   const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(txnId)}`;
@@ -118,7 +119,12 @@ export async function sendText(token: string, roomId: string, txnId: string, tex
     const res = await fetch(`${homeserverUrl()}${path}`, {
       method: "PUT",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ msgtype: "m.text", body: text }),
+      // A quote-reply (SOPHIE-WA-HUMAN-1106): the WhatsApp bridge sends it as WhatsApp's « Reply » of that message.
+      body: JSON.stringify(
+        replyToEventId
+          ? { msgtype: "m.text", body: text, "m.relates_to": { "m.in_reply_to": { event_id: replyToEventId } } }
+          : { msgtype: "m.text", body: text },
+      ),
       signal: controller.signal,
     });
     const body = await res.text();

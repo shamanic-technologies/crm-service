@@ -32,7 +32,7 @@ import {
   type ReplyTriggerReport,
 } from "../../db/schema.js";
 import type { MatrixEvent } from "../matrix/client.js";
-import { callNotice, describeCall, editTarget, foldEdits, humanText, phoneFromMxid } from "../matrix/events.js";
+import { callNotice, describeCall, editTarget, foldEdits, messageWords, phoneFromMxid, photoOf, quoteOf, type PhotoRef, type QuotedMessage } from "../matrix/events.js";
 import { automationOn, isAccountType, type AccountType } from "../matrix/account-types.js";
 import { personaOf, type SenderPersona } from "../matrix/persona.js";
 import { overlayVoiceTranscripts } from "../matrix/voice-notes.js";
@@ -61,8 +61,17 @@ export interface ThreadLine {
   /** `call` = a WhatsApp call the bridge mirrored (COPILOT-WA-REPEAT-1027), its text says it in plain words. */
   kind: "message" | "call";
   text: string;
+  /**
+   * The message's own id (SOPHIE-WA-HUMAN-1106): the answer names it as `replyToEventId` on
+   * `POST /orgs/whatsapp/messages` to go out as a WhatsApp « Reply » quoting it (a line of the answering number only).
+   */
+  eventId: string;
   /** The brand's number this line happened on, present only when it is NOT the number answering (`fromAccount`). */
   account?: string;
+  /** The message this line quoted with WhatsApp's « Reply »; absent when none. */
+  quote?: QuotedMessage;
+  /** The photo this line is (fetch: `GET /orgs/matrix/media?brandId=&eventId=`); absent when none. */
+  photo?: PhotoRef;
 }
 
 /** At most this many emails travel as `sender.knownEmails`. */
@@ -104,8 +113,9 @@ export function burstInWords(messages: BurstMessage[], events: MatrixEvent[], ow
  * PURE: the conversation BEFORE the burst (messages strictly before its first
  * one), oldest first, the latest `max`. Our sends (campaign,
  * Copilot) are mirrored as the account's messages: outbound. Only human words
- * (`humanText`), edits folded into what they rewrite (`foldEdits`), plus every
- * call the bridge mirrored as a `kind: "call"` line in its time order.
+ * and photos (`messageWords`), edits folded into what they rewrite (`foldEdits`), plus every
+ * call the bridge mirrored as a `kind: "call"` line in its time order. Each line
+ * carries its event id, the message it quoted and the photo it is (SOPHIE-WA-HUMAN-1106).
  */
 export function threadBeforeBurst(
   events: MatrixEvent[],
@@ -116,18 +126,22 @@ export function threadBeforeBurst(
 ): ThreadLine[] {
   const firstTs = Date.parse(burstFirstAt);
   const lines: ThreadLine[] = [];
-  for (const e of foldEdits(events)) {
+  const folded = foldEdits(events);
+  const byId = new Map(folded.map((e) => [e.event_id, e]));
+  for (const e of folded) {
     if (e.event_id === burstFirstEventId || e.origin_server_ts >= firstTs || editTarget(e)) continue;
     const at = new Date(e.origin_server_ts).toISOString();
     const direction = e.sender === ownMxid ? "outbound" : "inbound";
     const call = callNotice(e.content);
     if (call) {
-      lines.push({ at, direction, kind: "call", text: describeCall(call, direction) });
+      lines.push({ at, direction, kind: "call", text: describeCall(call, direction), eventId: e.event_id });
       continue;
     }
-    const text = humanText(e.content);
+    const text = messageWords(e.content);
     if (!text) continue;
-    lines.push({ at, direction, kind: "message", text });
+    const quote = quoteOf(e.content, byId, ownMxid);
+    const photo = photoOf(e.content, e.event_id);
+    lines.push({ at, direction, kind: "message", text, eventId: e.event_id, ...(quote ? { quote } : {}), ...(photo ? { photo } : {}) });
   }
   return lines.slice(-THREAD_MAX);
 }

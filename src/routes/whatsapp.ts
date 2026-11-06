@@ -3,11 +3,11 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { peopleScopes, whatsappSends } from "../db/schema.js";
 import { apiKeyAuth, requireOrg, AuthenticatedRequest } from "../middleware/auth.js";
-import { WhatsappReachRequestSchema, WhatsappSendRequestSchema, WhatsappSendsQueryRequestSchema } from "../schemas.js";
+import { WhatsappReachRequestSchema, WhatsappSendRequestSchema, WhatsappSendsQueryRequestSchema, WhatsappTypingRequestSchema } from "../schemas.js";
 import { BridgeError } from "../lib/matrix/bridge.js";
 import { runSyncPass } from "../lib/matrix/sync.js";
 import { runScopeBuild } from "../lib/people/build.js";
-import { reachWhatsApp, SendRefusal, sendConnection, sendWhatsApp, sendWhatsAppBubbles } from "../lib/whatsapp/send.js";
+import { reachWhatsApp, SendRefusal, sendConnection, sendWhatsApp, sendWhatsAppBubbles, typingWhatsApp } from "../lib/whatsapp/send.js";
 import { normalizeEmail, normalizePhone } from "../lib/people/identity.js";
 import { accountTypeOfRole } from "../lib/matrix/account-types.js";
 
@@ -69,6 +69,7 @@ router.post("/orgs/whatsapp/messages", apiKeyAuth, requireOrg("whatsapp.send"), 
       fromAccountType: body.fromAccountType ?? (body.fromLine ? accountTypeOfRole(body.fromLine) : null),
       skipIfReplied: body.skipIfReplied ?? false,
       userId: req.userId ?? null,
+      replyToEventId: body.replyToEventId ?? null,
     };
     // `messages` = several paced bubbles (WA-BUBBLES-1023); `text` = the one-message send, unchanged.
     const result = body.messages ? await sendWhatsAppBubbles(sendReq, body.messages) : await sendWhatsApp(sendReq);
@@ -124,6 +125,52 @@ router.post("/orgs/whatsapp/reach", apiKeyAuth, requireOrg("whatsapp.reach"), as
     );
   } catch (err) {
     if (err instanceof SendRefusal) return res.json({ reachable: false, code: err.code, error: err.message });
+    if (err instanceof BridgeError) {
+      return res.status(502).json({ type: "upstream", code: "bridge_error", error: `WhatsApp bridge: ${err.code} ${err.bridgeMessage}` });
+    }
+    throw err;
+  }
+});
+
+/**
+ * POST /orgs/whatsapp/typing — « typing… » to a person while the answering AI works (SOPHIE-WA-HUMAN-1106,
+ * lib/whatsapp/typing.ts). `start` = the send's own checks + its account and room, held 3 min after the last start;
+ * `stop` = ends it, no check. A refusal answers 422 with the send's code.
+ */
+router.post("/orgs/whatsapp/typing", apiKeyAuth, requireOrg("whatsapp.typing"), async (req: AuthenticatedRequest, res) => {
+  const parsed = WhatsappTypingRequestSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ type: "validation", code: "invalid_request", error: parsed.error.message });
+  }
+  const body = parsed.data;
+  const brandId = body.brandId ?? req.brandIds?.[0];
+  if (!brandId) {
+    return res.status(400).json({ type: "validation", code: "invalid_request", error: "brandId (body) or x-brand-id header is required" });
+  }
+  if (!normalizeEmail(body.email) && !normalizePhone(body.phone)) {
+    return res.status(400).json({
+      type: "validation",
+      code: "invalid_request",
+      error: "name the person: email, or phone in international form (+<country><number>)",
+    });
+  }
+  try {
+    return res.json(
+      await typingWhatsApp(
+        {
+          orgId: req.orgId!,
+          brandId,
+          email: body.email ?? null,
+          phone: body.phone ?? null,
+          fromAccount: body.fromAccount ?? null,
+          fromAccountType: body.fromAccountType ?? (body.fromLine ? accountTypeOfRole(body.fromLine) : null),
+          skipIfReplied: false,
+        },
+        body.state,
+      ),
+    );
+  } catch (err) {
+    if (err instanceof SendRefusal) return res.status(err.httpStatus).json({ type: "refused", code: err.code, error: err.message });
     if (err instanceof BridgeError) {
       return res.status(502).json({ type: "upstream", code: "bridge_error", error: `WhatsApp bridge: ${err.code} ${err.bridgeMessage}` });
     }

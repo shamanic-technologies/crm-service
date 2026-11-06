@@ -3876,6 +3876,10 @@ export const WhatsappSendRequestSchema = registry.register(
         description: "Older word for `fromAccountType`: `founder` = pro_human, `assistant` = pro_ai. (SOPHIE-SENDS-1028)",
       }),
       skipIfReplied: z.boolean().optional().openapi({ description: "Refuse with `person_replied` when the person has written to the brand on any channel (use on follow-ups)." }),
+      replyToEventId: z.string().min(1).max(255).optional().openapi({
+        description:
+          "Send as a WhatsApp « Reply » quoting this message: the Matrix event id of a message in the person's room on the sending line (a Lead event burst message's `eventId`, a thread line's `eventId` without `account`, a timeline item's `ref.eventId`). With `messages`, the first one quotes it. A message not in the room the send goes to is not quoted: the text still goes out and `replyTo.quoted` is false. (SOPHIE-WA-HUMAN-1106)",
+      }),
     })
     .refine((b) => (b.text === undefined) !== (b.messages === undefined), { message: "exactly one of `text` or `messages` is required" })
     .refine((b) => [b.fromAccount, b.fromAccountType, b.fromLine].filter(Boolean).length <= 1, {
@@ -3899,6 +3903,16 @@ export const WhatsappSendResponseSchema = registry.register(
       eventId: z.string(),
       sentAt: z.string(),
       previousSends: z.number().int().openapi({ description: "WhatsApp messages sent to this number through this route before this one." }),
+      replyTo: z
+        .object({
+          eventId: z.string(),
+          quoted: z.boolean().openapi({ description: "The message went out as a WhatsApp « Reply » of `eventId`." }),
+          reason: z.enum(["not_in_room", "already_sent"]).nullable().openapi({
+            description: "Why not quoted: `not_in_room` (the message is not in the room the send went to), `already_sent` (a retry of a key already sent: nothing sent again).",
+          }),
+        })
+        .optional()
+        .openapi({ description: "Only when the request named `replyToEventId`. (SOPHIE-WA-HUMAN-1106)" }),
       messages: z
         .array(
           z.object({
@@ -3951,6 +3965,93 @@ registry.registerPath({
     409: { description: "`send_in_progress`", content: { "application/json": { schema: WhatsappRefusalSchema } } },
     422: { description: "Refused, with a stable `code`", content: { "application/json": { schema: WhatsappRefusalSchema } } },
     502: { description: "The WhatsApp bridge or run tracking failed (`code: bridge_error`)", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
+export const WhatsappTypingRequestSchema = registry.register(
+  "WhatsappTypingRequest",
+  z
+    .object({
+      brandId: z.string().uuid().optional().openapi({ description: "The brand whose linked WhatsApp shows it. Or the x-brand-id header." }),
+      email: z.string().optional().openapi({ description: "The person, by email, as the send names them." }),
+      phone: z.string().optional().openapi({ description: "The person's number, international form, as the send names them. `stop` must name the person exactly as `start` did." }),
+      fromAccount: z.string().optional().openapi({ description: "As on the send." }),
+      fromAccountType: SendingAccountTypeSchema.optional().openapi({ description: "As on the send." }),
+      fromLine: WhatsappLineRoleSchema.optional().openapi({ description: "As on the send (older word for `fromAccountType`)." }),
+      state: z.enum(["start", "stop"]).openapi({
+        description:
+          "`start`: show WhatsApp « typing… » to the person now, from the account a send without `fromAccount` would write from, held (re-sent every 20 s) for 3 min after the LAST `start`; call it again for a longer turn. It ends by itself when a message is sent to them through POST /orgs/whatsapp/messages. `stop`: the answering AI decided not to write now, it ends at once.",
+      }),
+    })
+    .refine((b) => [b.fromAccount, b.fromAccountType, b.fromLine].filter(Boolean).length <= 1, {
+      message: "`fromAccount`, `fromAccountType` and `fromLine` are exclusive",
+    })
+    .openapi("WhatsappTypingRequest"),
+);
+
+export const WhatsappTypingResponseSchema = registry.register(
+  "WhatsappTypingResponse",
+  z
+    .object({
+      typing: z.boolean().openapi({ description: "True while « typing… » is held (after `start`), false after `stop`." }),
+      until: z.string().nullable().openapi({ description: "When the hold ends by itself unless `start` is called again; null after `stop`." }),
+      fromAccount: z.string().nullable().openapi({ description: "The account showing it (E.164); null after `stop`." }),
+      roomId: z.string().nullable(),
+      wasTyping: z.boolean().optional().openapi({ description: "`stop` only: a hold was running for this person." }),
+    })
+    .openapi("WhatsappTypingResponse"),
+);
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/whatsapp/typing",
+  summary: "Show (or stop) WhatsApp « typing… » to a person while the answering AI works",
+  description:
+    "SOPHIE-WA-HUMAN-1106. `start` runs the send's own checks (same refusal codes as POST /orgs/whatsapp/messages, 422) and shows « typing… » in the person's room from the account the send would write from, held until `stop`, a send to them, or 3 min after the last `start`. `stop` ends it without any check (200 even when nothing was held). Nothing stored, no cost. Requires x-api-key, x-org-id; brand from body or x-brand-id.",
+  request: { body: { content: { "application/json": { schema: WhatsappTypingRequestSchema } }, required: true } },
+  responses: {
+    200: { description: "Held, or stopped", content: { "application/json": { schema: WhatsappTypingResponseSchema } } },
+    400: { description: "Bad request (`code: invalid_request`)", content: { "application/json": { schema: ErrorResponseSchema } } },
+    422: { description: "`start` refused, with the send's `code`", content: { "application/json": { schema: WhatsappRefusalSchema } } },
+    502: { description: "The WhatsApp bridge failed (`code: bridge_error`)", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
+export const MatrixMediaResponseSchema = registry.register(
+  "MatrixMediaResponse",
+  z
+    .object({
+      eventId: z.string(),
+      roomId: z.string(),
+      sentAt: z.string(),
+      direction: z.enum(["inbound", "outbound"]).openapi({ description: "inbound = the person sent it." }),
+      mimeType: z.string().openapi({ description: "As the sender's client stated it, else image/jpeg." }),
+      sizeBytes: z.number().int(),
+      caption: z.string().nullable(),
+      base64: z.string().openapi({ description: "The image bytes, base64: put them in the model input as an image, as is." }),
+    })
+    .openapi("MatrixMediaResponse"),
+);
+
+registry.registerPath({
+  method: "get",
+  path: "/orgs/matrix/media",
+  summary: "The photo of one mirrored message (WhatsApp / Telegram), bytes in base64",
+  description:
+    "SOPHIE-WA-HUMAN-1106. A message carrying `photo` (Lead event burst message, thread line, timeline item) names its `eventId`; this answers the image, downloaded from our homeserver, for the org + brand whose line received it. 404 `message_not_found` (not on this brand's lines), 422 `not_an_image`, 413 `too_large` (over 10 MB), 502 when the homeserver fails. Requires x-api-key, x-org-id.",
+  request: {
+    query: z.object({
+      brandId: z.string().uuid().openapi({ description: "The brand whose line received it. Or the x-brand-id header." }).optional(),
+      eventId: z.string().min(1).openapi({ description: "The message's Matrix event id (`photo.eventId`)." }),
+    }),
+  },
+  responses: {
+    200: { description: "The photo", content: { "application/json": { schema: MatrixMediaResponseSchema } } },
+    400: { description: "Bad request", content: { "application/json": { schema: ErrorResponseSchema } } },
+    404: { description: "`message_not_found`", content: { "application/json": { schema: ErrorResponseSchema } } },
+    413: { description: "`too_large`", content: { "application/json": { schema: ErrorResponseSchema } } },
+    422: { description: "`not_an_image`", content: { "application/json": { schema: ErrorResponseSchema } } },
+    502: { description: "The homeserver failed", content: { "application/json": { schema: ErrorResponseSchema } } },
   },
 });
 

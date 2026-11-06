@@ -69,8 +69,7 @@ import {
 } from "../../db/schema.js";
 import { createRun, updateRun } from "../runs-client.js";
 import { normalizeEmail, type Presence } from "../people/identity.js";
-import { isOwnAddress, readOwnAddresses, type OwnAddresses } from "../people/sources.js";
-import { siblingGet } from "../people/siblings.js";
+import { addressedToBrand, isBrandAddress, readBrandAddresses, type BrandAddresses } from "../people/brand-addresses.js";
 import {
   CampaignRefusal,
   campaignServiceConfigured,
@@ -191,24 +190,8 @@ export async function gmailOwnerBrands(orgId: string, address: string): Promise<
   return new Set([ranked[0].brand_id]);
 }
 
-export interface BrandAddresses {
-  /** Sending mailboxes + the brand's domain (people/sources.ts). */
-  addresses: OwnAddresses;
-  /** The org's connected Gmail mailboxes (google-service `GET /orgs/google/accounts`). */
-  mailboxes: Set<string>;
-}
+export { addressedToBrand, isBrandAddress, type BrandAddresses } from "../people/brand-addresses.js";
 type OwnAddressesOnce = () => Promise<BrandAddresses>;
-
-/** PURE: the address is the brand's own (connected mailbox, sending mailbox, domain). */
-export function isBrandAddress(email: string, own: BrandAddresses): boolean {
-  const e = normalizeEmail(email);
-  return !!e && (own.mailboxes.has(e) || isOwnAddress(e, own.addresses));
-}
-
-/** PURE: the mail is addressed TO the brand: one of its addresses in To, or no To at all (Bcc: benefit of the doubt). */
-export function addressedToBrand(to: string[], own: BrandAddresses): boolean {
-  return to.length === 0 || to.some((t) => isBrandAddress(t, own));
-}
 
 /** The brand's own addresses + the org's connected mailboxes, read once per pass (a run is opened for it). */
 export function ownAddressesOnce(scope: PeopleScope, runId: () => Promise<string>): OwnAddressesOnce {
@@ -216,18 +199,8 @@ export function ownAddressesOnce(scope: PeopleScope, runId: () => Promise<string
   return async () => {
     if (own) return own;
     const identity = { orgId: scope.orgId, userId: scope.createdByUserId, runId: await runId(), brandId: scope.brandId };
-    const [read, accounts] = await Promise.all([readOwnAddresses(identity), siblingGet("google", "/orgs/google/accounts", identity)]);
     // Unreadable = nothing recorded this pass (our own mail must never be reported by mistake).
-    if (read.status !== "ok") throw new Error(`own addresses unreadable: ${read.error}`);
-    if (accounts.status !== 200) {
-      throw new Error(`google-service GET /orgs/google/accounts returned ${accounts.status}: ${JSON.stringify(accounts.body).slice(0, 300)}`);
-    }
-    const mailboxes = new Set<string>();
-    for (const a of (accounts.body as { accounts?: { email?: string | null }[] } | null)?.accounts ?? []) {
-      const e = normalizeEmail(a.email ?? null);
-      if (e) mailboxes.add(e);
-    }
-    return (own = { addresses: read, mailboxes });
+    return (own = await readBrandAddresses(identity));
   };
 }
 

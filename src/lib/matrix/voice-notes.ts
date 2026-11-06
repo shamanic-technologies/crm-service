@@ -127,7 +127,7 @@ type Attempt =
   | { ok: false; retry: boolean; code: string; error: string };
 
 /** The voice note's file, from the homeserver, as the account that received it. */
-async function downloadMedia(conn: Pick<MatrixConnection, "accessToken">, mxc: string): Promise<Buffer> {
+export async function downloadMedia(conn: Pick<MatrixConnection, "accessToken">, mxc: string): Promise<Buffer> {
   const parts = parseMxc(mxc);
   if (!parts) throw new Error(`not an mxc URL: ${mxc}`);
   const res = await fetch(

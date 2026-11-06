@@ -32,6 +32,7 @@ import { automationOn, narrowByType, type SendingAccountType } from "../matrix/a
 import { humanTypedTo } from "../matrix/human-takeover.js";
 import { joinRoom, readRoomBridgeInfo, sendText, setTyping } from "../matrix/client.js";
 import { expectedChannelIds, roomDeliversTo } from "./room-check.js";
+import { endTypingIn, startTyping, stopTyping, typingKey } from "./typing.js";
 import { emailKey, handleKey, normalizeEmail, normalizePhone, phoneKey, type Presence } from "../people/identity.js";
 import { statedNotToBrand } from "../people/stated-not-to-brand.js";
 import { handleOf, WHATSAPP_GHOST_PREFIX } from "../matrix/events.js";
@@ -105,6 +106,12 @@ export interface SendRequest {
   skipIfReplied: boolean;
   /** Who asked (`x-user-id`), only to read names for a staff alert. */
   userId: string | null;
+  /**
+   * Send as a WhatsApp « Reply » quoting this message (a Matrix event id of the room the send goes to, e.g. a
+   * burst message's or a thread line's `eventId`), SOPHIE-WA-HUMAN-1106. A message of another room is not quoted:
+   * the text still goes out, `replyTo.quoted = false`. With `messages`, the first bubble quotes it.
+   */
+  replyToEventId?: string | null;
 }
 
 export interface SendResult {
@@ -122,6 +129,30 @@ export interface SendResult {
   sentAt: string;
   /** Messages already sent to this person on WhatsApp through this route BEFORE this one. */
   previousSends: number;
+  /** Only when the request named `replyToEventId`: whether the message went out quoting it, and why not. */
+  replyTo?: ReplyToResult;
+}
+
+export interface ReplyToResult {
+  eventId: string;
+  quoted: boolean;
+  /** `not_in_room`: the message is not in the room the send went to (another line, another person); `already_sent`: a retry. */
+  reason: "not_in_room" | "already_sent" | null;
+}
+
+/** Whether `eventId` is a message of `roomId` in our mirror (the only messages a send there can quote). */
+export async function messageInRoom(roomId: string, eventId: string): Promise<boolean> {
+  const rows = (await db.execute(sql`
+    SELECT 1 FROM matrix_raw_events WHERE room_id = ${roomId} AND event_id = ${eventId} AND event_type = 'm.room.message' LIMIT 1
+  `)) as unknown as unknown[];
+  return rows.length > 0;
+}
+
+/** PURE: what the answer says about the quote asked. */
+export function replyToResult(eventId: string | null | undefined, quoted: boolean | "already_sent"): ReplyToResult | undefined {
+  if (!eventId) return undefined;
+  if (quoted === "already_sent") return { eventId, quoted: false, reason: "already_sent" };
+  return { eventId, quoted, reason: quoted ? null : "not_in_room" };
 }
 
 /** A send stuck in `sending` this long belongs to a dead process: the key may be taken over. */
@@ -607,11 +638,43 @@ async function openRoom(
   return { account, roomId, ghost };
 }
 
+export interface TypingResult {
+  /** True while "typing..." is held (after `start`); false after `stop`. */
+  typing: boolean;
+  /** When the hold ends by itself unless `start` is called again (null after `stop`). */
+  until: string | null;
+  /** The account showing it (the one a send without `fromAccount` would write from), E.164; null after `stop`. */
+  fromAccount: string | null;
+  roomId: string | null;
+  /** `stop` only: whether a hold was running under this person. */
+  wasTyping?: boolean;
+}
+
+/**
+ * « typing… » while the answering AI works (SOPHIE-WA-HUMAN-1106, ./typing.ts). `start` runs the send's OWN checks
+ * and picks the send's account and room (resolveReach + openRoom: the same refusals, so nobody we would not write to
+ * sees it), then holds "typing..." there. `stop` ends the hold named by the same person (phone, else email) without
+ * asking anything.
+ */
+export async function typingWhatsApp(req: ReachRequest, state: "start" | "stop"): Promise<TypingResult> {
+  const key = typingKey(req.orgId, req.brandId, { phone: normalizePhone(req.phone), email: normalizeEmail(req.email) });
+  if (state === "stop") {
+    return { typing: false, until: null, fromAccount: null, roomId: null, wasTyping: await stopTyping(key) };
+  }
+  const { phone, accounts, who, personGhosts } = await resolveReach(req);
+  const { account, roomId } = await openRoom(accounts, who, phone, personGhosts);
+  const until = await startTyping(key, account, roomId);
+  return { typing: true, until: until.toISOString(), fromAccount: `+${digitsOf(account.loginId)}`, roomId };
+}
+
 export async function sendWhatsApp(req: SendRequest): Promise<SendResult> {
   const claimed = await claim(req);
   if ("earlier" in claimed) {
     const e = claimed.earlier;
-    if (e.status === "sent") return resultOf(e, true, await countPreviousSends(req, e.phone!, e.id), await personaOfConnection(e.connectionId));
+    if (e.status === "sent") {
+      const replyTo = replyToResult(req.replyToEventId, "already_sent");
+      return { ...resultOf(e, true, await countPreviousSends(req, e.phone!, e.id), await personaOfConnection(e.connectionId)), ...(replyTo ? { replyTo } : {}) };
+    }
     if (e.status === "refused") throw new SendRefusal(e.errorCode as SendRefusalCode, e.error ?? e.errorCode!);
     throw new SendRefusal("send_in_progress", "A send with this idempotency key is in progress.", 409);
   }
@@ -624,8 +687,11 @@ export async function sendWhatsApp(req: SendRequest): Promise<SendResult> {
 
     const { account, roomId, ghost } = await openRoom(accounts, who, phone, personGhosts);
 
-    // 6. Send.
-    const eventId = await sendText(account.accessToken, roomId, txnIdFor(req.orgId, req.brandId, req.idempotencyKey), req.text);
+    // 6. Send (a WhatsApp « Reply » when asked and the quoted message is in this room).
+    const quoted = req.replyToEventId ? await messageInRoom(roomId, req.replyToEventId) : false;
+    if (req.replyToEventId && !quoted) console.warn(`[crm-service][whatsapp] send ${row.id}: ${req.replyToEventId} is not a message of room ${roomId}, sent without the quote`);
+    const eventId = await sendText(account.accessToken, roomId, txnIdFor(req.orgId, req.brandId, req.idempotencyKey), req.text, quoted ? req.replyToEventId! : null);
+    endTypingIn(roomId, account.matrixUserId);
     const sent = await finish(row.id, {
       status: "sent",
       connectionId: account.connectionId,
@@ -635,7 +701,8 @@ export async function sendWhatsApp(req: SendRequest): Promise<SendResult> {
       eventId,
       sentAt: new Date(),
     });
-    return resultOf(sent, false, await countPreviousSends(req, phone, sent.id), account.persona);
+    const replyTo = replyToResult(req.replyToEventId, quoted);
+    return { ...resultOf(sent, false, await countPreviousSends(req, phone, sent.id), account.persona), ...(replyTo ? { replyTo } : {}) };
   } catch (err) {
     if (err instanceof SendRefusal) {
       await finish(row.id, { status: "refused", errorCode: err.code, error: err.message });
@@ -774,6 +841,8 @@ export async function sendWhatsAppBubbles(
     pending.push({ index: 0, row });
   }
 
+  // Bubble 1 quotes the message asked (SOPHIE-WA-HUMAN-1106), when it is still to send and the message is in this room.
+  const quoteFirst = req.replyToEventId && pending.some((p) => p.index === 0) ? await messageInRoom(target.roomId, req.replyToEventId) : false;
   try {
     // Hold bubbles 2..N before anything goes out.
     for (let i = 1; i < messages.length; i++) {
@@ -796,6 +865,7 @@ export async function sendWhatsAppBubbles(
         target.roomId,
         txnIdFor(req.orgId, req.brandId, bubbleKey(req.idempotencyKey, index)),
         messages[index],
+        index === 0 && quoteFirst ? req.replyToEventId! : null,
       );
       const sent = await finish(row.id, {
         status: "sent",
@@ -816,6 +886,7 @@ export async function sendWhatsAppBubbles(
     throw err;
   }
 
+  endTypingIn(target.roomId, target.account.matrixUserId);
   done.sort((a, b) => a.index - b.index);
   const first = done[0].row;
   const result = resultOf(
@@ -824,8 +895,10 @@ export async function sendWhatsAppBubbles(
     await countPreviousSends(req, target.phone, done.map((d) => d.row.id)),
     target.account.persona,
   );
+  const replyTo = replyToResult(req.replyToEventId, done.find((d) => d.index === 0)?.duplicate ? "already_sent" : quoteFirst);
   return {
     ...result,
+    ...(replyTo ? { replyTo } : {}),
     messages: done.map((d) => ({
       index: d.index,
       sendId: d.row.id,

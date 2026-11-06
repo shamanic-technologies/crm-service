@@ -33,8 +33,8 @@ describe("what a Lead event occurrence knows about the line and the person (ONE-
       msg("$4", GHOST, 4000, "after"),
     ];
     expect(threadBeforeBurst(events, OWN, "$3", new Date(3000).toISOString())).toEqual([
-      { at: new Date(1000).toISOString(), direction: "outbound", kind: "message", text: "Hi from Sophie" },
-      { at: new Date(2000).toISOString(), direction: "inbound", kind: "message", text: "hey" },
+      { at: new Date(1000).toISOString(), direction: "outbound", kind: "message", text: "Hi from Sophie", eventId: "$1" },
+      { at: new Date(2000).toISOString(), direction: "inbound", kind: "message", text: "hey", eventId: "$2" },
     ]);
     const many = Array.from({ length: 40 }, (_, i) => msg(`$m${i}`, GHOST, 1000 + i, `m${i}`));
     const thread = threadBeforeBurst(many, OWN, "$x", new Date(10_000).toISOString());
@@ -86,18 +86,20 @@ describe("what a Lead event occurrence knows about the line and the person (ONE-
       msg("$3", GHOST, 3000, "Sorry I can't take calls at this moment"),
     ];
     expect(threadBeforeBurst(events, OWN, "$3", new Date(3000).toISOString())).toEqual([
-      { at: new Date(1000).toISOString(), direction: "outbound", kind: "message", text: "Kevin from distribute.you here." },
+      { at: new Date(1000).toISOString(), direction: "outbound", kind: "message", text: "Kevin from distribute.you here.", eventId: "$1" },
       {
         at: new Date(2000).toISOString(),
         direction: "inbound",
         kind: "call",
         text: "They called us on WhatsApp (voice call). Whether it was answered or missed is not known.",
+        eventId: "$c",
       },
       {
         at: new Date(2500).toISOString(),
         direction: "inbound",
         kind: "call",
         text: "They called us on WhatsApp (video call). Whether it was answered or missed is not known.",
+        eventId: "$v",
       },
     ]);
   });
@@ -168,9 +170,9 @@ describe("Sophie answers from her line (SOPHIE-ANSWERS-FROM-HER-LINE-1029)", () 
       { account: "+77776879632", ownMxid: OWN, events: [msg("$s", OWN, 3000, "Sophie here"), msg("$b", GHOST, 4000, "burst")] },
     ];
     expect(threadAcrossLines(rooms, "+77776879632", "$b", new Date(4000).toISOString())).toEqual([
-      { at: new Date(1000).toISOString(), direction: "outbound", kind: "message", text: "hello from Kevin", account: "+33680478702" },
-      { at: new Date(2000).toISOString(), direction: "inbound", kind: "message", text: "tell me more", account: "+33680478702" },
-      { at: new Date(3000).toISOString(), direction: "outbound", kind: "message", text: "Sophie here" },
+      { at: new Date(1000).toISOString(), direction: "outbound", kind: "message", text: "hello from Kevin", eventId: "$h", account: "+33680478702" },
+      { at: new Date(2000).toISOString(), direction: "inbound", kind: "message", text: "tell me more", eventId: "$a", account: "+33680478702" },
+      { at: new Date(3000).toISOString(), direction: "outbound", kind: "message", text: "Sophie here", eventId: "$s" },
     ]);
     const long = [{ account: "+77776879632", ownMxid: OWN, events: [msg("$l", GHOST, 1000, "x".repeat(THREAD_TEXT_MAX + 50)), msg("$b", GHOST, 4000, "burst")] }];
     expect(threadAcrossLines(long, "+77776879632", "$b", new Date(4000).toISOString())[0].text).toHaveLength(THREAD_TEXT_MAX);

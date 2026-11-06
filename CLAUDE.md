@@ -1583,7 +1583,7 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   human words since our last outbound = ONE burst = ONE row (`reply_trigger_reports`, UNIQUE on its first message,
   `idempotencyKey crm:matrix:reply:<event>`); ANY outbound ends it: one of our sends (only for words written before it was
   QUEUED, `createdAt` − 2 s: a word typed between the parts of a multi-part answer still waits, WA-REPLY-DROPPED-1101) OR a message typed by hand on the
-  account (it ends the burst; the person's later bursts are then skipped `human_in_conversation`: a human took it, see "Human takeover"); bridge notices / uncaptioned media are no answer; an edit is
+  account (it ends the burst; the person's later bursts are then skipped `human_in_conversation`: a human took it, see "Human takeover"); bridge notices / uncaptioned video or files are no answer, a photo IS one (SOPHIE-WA-HUMAN-1106); an edit is
   FOLDED into the message it rewrites (`foldEdits`, events.ts, same sender only): WhatsApp delivers a message the bridge
   could not decrypt yet (common right after a relink) as an `m.notice` placeholder then the words as an EDIT of it; read
   as "notice + edit = nothing", the Copilot line's 18:26 question of 2026-10-18 was never handed off (follow-up 3). Every
@@ -1652,6 +1652,38 @@ be understood)` (failed or nothing said); byte-equal to chat-service `VOICE_NOTE
 whose Copilot block says what they mean. A voice note nobody transcribed (history, automation off) stays silent.
 The owner ping of an inbound voice note waits (unrecorded) up to `VOICE_NOTE_PING_WAIT_MS` (10 min) for its words; the
 sync re-runs the pings right after a pass that transcribed (`voiceNotesTranscribed`).
+
+## What the answering AI sees and does on WhatsApp (SOPHIE-WA-HUMAN-1106, contract for chat-service)
+
+Owner 2026-11-04 (« complètement à côté de la plaque »): Sophie answered a deal from Kevin's mailbox, missed his quotes and
+photo, and was silent 3 min while thinking. Every field below is OPTIONAL / additive; absent = nothing of that kind.
+- **Only mails between the person and us** (`lib/people/brand-addresses.ts` `exchangedWithUs`, applied to the Gmail source of
+  EVERY timeline read, `onlyExchangedWithUs`): from the person to one of our addresses (connected mailbox, sending mailbox,
+  brand domain), or from ours to them; no To = kept only when the sender is on ONE side. Kevin's person holds the connected
+  mailbox (kevin.lourd@gmail.com), so google's "conversation with" it was the whole mailbox: his mail to Thierry read as
+  THEM, MAIF / The Hustle as US. Own addresses cached 5 min per brand; unreadable = gmail source `failed`, no item (never
+  unfiltered). Generic, no per-person case.
+- **Quotes**: a message carrying Matrix `m.relates_to.m.in_reply_to` (WhatsApp « Reply ») carries `quote {eventId, direction
+  inbound|outbound|null, at, text (500 chars)}` (null words = not in our mirror) on: Lead event `item.messages[]`, `item.thread[]`
+  lines, timeline items (Matrix). An edit keeps the original's quote (`foldEdits`).
+- **Photos are messages** (`messageWords`, events.ts): an `m.image` reads `📷 Photo` or `📷 Photo: <caption>`, wakes the reply
+  trigger like words (2026-11-02: an uncaptioned photo got no answer), and carries `photo {kind: "image", eventId, mimeType,
+  sizeBytes, width, height, caption}`. Relevance / connection tags keep `humanText` (a photo says nothing about who they are).
+  **Bytes**: `GET /orgs/matrix/media?brandId=&eventId=` → `{eventId, roomId, sentAt, direction, mimeType, sizeBytes, caption,
+  base64}` (homeserver download with the receiving account's token; 404 `message_not_found` (not this org+brand's lines), 422
+  `not_an_image`, 413 `too_large` > 10 MB, 502). The image goes to the model as is, never described to text here.
+- **Thread lines carry `eventId`** (always) so the answer can quote; `POST /orgs/whatsapp/messages {replyToEventId}` sends a
+  WhatsApp « Reply » of it (Matrix `m.in_reply_to`, bridged natively; `messages` = bubble 1 quotes). Only a message of the
+  room the send goes to is quoted (a line with `account` = another number cannot be): else the text still goes, answer
+  `replyTo {eventId, quoted: false, reason: "not_in_room"}`; a duplicate key = `reason: "already_sent"`; absent when not asked.
+- **« typing… »** (`lib/whatsapp/typing.ts`): `POST /orgs/whatsapp/typing {brandId?, phone|email, fromAccount?|fromAccountType?,
+  state: "start"|"stop"}`. `start` = the send's own checks (422 with the send's codes: nobody we would not write to sees it) +
+  the send's account and room (may open the DM like a send), typing re-sent every 20 s, held until `stop`, a send into that
+  room (`endTypingIn`), or 3 min after the LAST start (call start again for a longer turn) → `{typing, until, fromAccount,
+  roomId}`. `stop` = no check, names the person EXACTLY as `start` did (phone, else email) → `{typing: false, wasTyping}`.
+  In-process (one container): a restart drops holds, WhatsApp clears after the 30 s timeout.
+- An occurrence `item` is fitted under campaign-service's 20,000-char cap (`fitItem`: oldest thread lines first, then quote
+  words, then burst texts cut at 500).
 
 ## Google Calendar meetings — a meeting with a lead is a funnel fact (`src/lib/calendar/`, GOOGLE-CALENDAR-MEETING-FACTS-1021)
 
