@@ -4376,7 +4376,17 @@ registry.registerPath({
   summary: "Declare every CRM form submission crm-service holds as form_submitted on its lead (CRM-FORM-SUBMITTED-LEDGER-1025)",
   description:
     "One pass of the in-process loop (every 5 min): every dated CRM form submission (GoHighLevel), never recorded, is recorded; a calendar's own booking form is skipped (it is the booking); each other one's lead is named by lead-service from the identity the submission carries (else its mirrored contact's), a spend-free run of its own is opened once (`gohighlevel.form-submitted`), and runs-service records `form_submitted` produced (subject lead-service, the lead id) on it with occurredAt = the submission time. The same path covers the past and the future. Not a lead (yet) = asked again (backoff to 1 h), never guessed. Idempotent: a replay names the same run (already_recorded).",
-  responses: { 200: { description: "recorded, due, declared, alreadyRecorded, waiting, skipped, refused, failed" }, 502: { description: "The pass failed" } },
+  responses: { 200: { description: "recorded, due, declared, alreadyRecorded, waiting, skipped, refused, failed, performers" }, 502: { description: "The pass failed" } },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/outcomes/form-submitted/performers",
+  summary: "State who performed every form_submitted occurrence declared without one (OUTCOME-PERFORMER-1106)",
+  description:
+    "Every form_submitted occurrence states `performer: {kind: \"crm\", name: <the CRM, e.g. gohighlevel>}` at runs-service (the brand's CRM recorded the form; no script is ever named, crm-service cannot read which message drove it). Occurrences declared before the performer existed take it ONCE through the batch door, same run, subject and instant (`performer_stated`); runs-service holding another one = `conflict`, kept as theirs. The 5-min form_submitted loop runs the same pass on its own. Body `{dryRun?: boolean}`: true only counts (`toState`).",
+  request: { body: { content: { "application/json": { schema: z.object({ dryRun: z.boolean().optional() }) } } } },
+  responses: { 200: { description: "dryRun, toState, stated, alreadyStated, conflict, refused, failed" }, 400: { description: "dryRun not a boolean" }, 502: { description: "The pass failed" } },
 });
 
 registry.registerPath({

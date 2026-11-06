@@ -178,6 +178,11 @@ submission's own email / phone, else its mirrored contact's), on a spend-free ru
 `occurredAt` = `submitted_at` (before the run's start: allowed on a spend-free run). Calendar booking forms `skipped`. Not a
 lead / no key = asked again (backoff to 1 h), never given up, never guessed. Ledger `form_submitted_declarations`, loop every
 5 min (`FORM_SUBMITTED_DECLARATIONS=off`), ONE path past and future; `POST /internal/outcomes/form-submitted` = a pass now.
+WHO performed it (OUTCOME-PERFORMER-1106): every occurrence states `performer {kind: "crm", name: <row source, gohighlevel>}`,
+never a script (which message drove the form is not readable here). Rows declared before it (`performer_status` NULL) take it ONCE
+in the same loop (same run/subject/instant, runs-service `performer_stated`); stored `stated` only when the answer carries
+`performerStatedCount` (a runs-service not serving it strips it); 409 `performer_conflict` = `conflict`, kept as theirs.
+`POST /internal/outcomes/form-submitted/performers {dryRun}` = count / pass now.
 Spend that produces no outcome by design sits on its OWN child run marked support at creation, never mixed with a
 judging run: Matrix thread reading `matrix.lead-reading`, GoHighLevel stage / label meanings `gohighlevel.label-meanings`,
 column typing `contacts.column-typing`, `calendar.judge`, identity resolution `people.identity` (a mail domain's kind, a

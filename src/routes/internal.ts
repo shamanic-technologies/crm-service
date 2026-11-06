@@ -12,7 +12,7 @@ import { pgErrorOf } from "../lib/pg-error.js";
 import { backfillPositiveReplies } from "../lib/reply-trigger/outcome-backfill.js";
 import { runLeadIdentifiedPass } from "../lib/people/lead-identified.js";
 import { runMessageSentPass } from "../lib/whatsapp/message-sent.js";
-import { runFormSubmittedPass } from "../lib/gohighlevel/form-submitted.js";
+import { runFormSubmittedPass, statePastPerformers } from "../lib/gohighlevel/form-submitted.js";
 
 const router = Router();
 
@@ -153,6 +153,24 @@ router.post("/internal/outcomes/message-sent", apiKeyAuth, async (_req, res) => 
     res.json(await runMessageSentPass());
   } catch (err) {
     console.error("[crm-service][message-sent] manual pass failed:", err);
+    res.status(502).json({ type: "upstream", error: (err as Error).message });
+  }
+});
+
+/**
+ * OUTCOME-PERFORMER-1106: state the performer on every form_submitted occurrence declared without one, now
+ * (the 5-min loop does the same on its own). `{dryRun: true}` only counts them.
+ */
+router.post("/internal/outcomes/form-submitted/performers", apiKeyAuth, async (req, res) => {
+  const dryRun = req.body?.dryRun;
+  if (dryRun !== undefined && typeof dryRun !== "boolean") {
+    res.status(400).json({ error: "dryRun must be a boolean" });
+    return;
+  }
+  try {
+    res.json({ dryRun: dryRun === true, ...(await statePastPerformers(Date.now(), { dryRun: dryRun === true })) });
+  } catch (err) {
+    console.error("[crm-service][form-submitted] performer pass failed:", err);
     res.status(502).json({ type: "upstream", error: (err as Error).message });
   }
 });

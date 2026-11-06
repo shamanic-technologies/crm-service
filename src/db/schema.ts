@@ -3025,11 +3025,15 @@ export const formSubmittedDeclarations = pgTable(
     lastError: text("last_error"),
     nextAt: timestamp("next_at", { withTimezone: true }),
     declaredAt: timestamp("declared_at", { withTimezone: true }),
+    /** OUTCOME-PERFORMER-1106: NULL = performer not stated yet at runs-service; `stated` | `conflict` | `refused`. */
+    performerStatus: text("performer_status"),
+    performerAt: timestamp("performer_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
     uniqueIndex("form_submitted_declarations_submission_uq").on(table.orgId, table.brandId, table.source, table.submissionExternalId),
     index("form_submitted_declarations_due_idx").on(table.nextAt).where(sql`${table.status} = 'pending'`),
+    index("form_submitted_declarations_performer_due_idx").on(table.submittedAt).where(sql`${table.status} = 'declared' AND ${table.performerStatus} IS NULL`),
   ],
 );
 export type FormSubmittedDeclaration = typeof formSubmittedDeclarations.$inferSelect;
