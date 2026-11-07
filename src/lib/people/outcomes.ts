@@ -52,6 +52,10 @@ import { mapLimit, siblingGetOk, type SiblingIdentity } from "./siblings.js";
 import { readBrandOffers } from "../form-trigger/offer.js";
 import { SwrCache } from "./swr.js";
 import { createHash } from "node:crypto";
+import { STAFF_DOMAIN, STAFF_EMAIL_LIST } from "../owner-telegram.js";
+
+/** P(positive) a paying client's message needs to count (client-satisfaction.ts, which re-exports it). */
+export const POSITIVE_THRESHOLD = 0.75;
 
 /** The steps lead-service holds a bucket for (its bucket tokens): the campaigns reach and "contacted by us" read them. */
 export const LEAD_BUCKET_STEPS = [
@@ -220,12 +224,28 @@ export const NOT_CALENDAR_BOOKING_FORM = sql`(f.type <> 'form_submitted' OR f.pa
           AND cal.payload->>'formId' = f.payload->>'formId'
       ))`;
 
+/**
+ * A person holding one of our STAFF addresses (`isStaffEmail`: any @distribute.you address, or one of the owner's own,
+ * plus-addressing ignored), read on the built person `sp` of the fact owner. Staff are never a client of the brand: the
+ * owner's test payments made him a "paying client" and his own mailbox mails his "messages" (prod 2026-11-07).
+ */
+function ownerIsStaffSql(orgId: SQL, brandId: SQL, personKey: SQL): SQL {
+  return sql`EXISTS (
+      SELECT 1 FROM people sp, jsonb_array_elements_text(sp.emails) AS se(email)
+      WHERE sp.org_id = ${orgId} AND sp.brand_id = ${brandId} AND sp.person_key = ${personKey}
+        AND (lower(se.email) LIKE ${`%${STAFF_DOMAIN}`}
+          OR (regexp_replace(split_part(lower(se.email), '@', 1), '[+].*$', '') || '@' || split_part(lower(se.email), '@', 2))
+             IN (${sql.join(STAFF_EMAIL_LIST.map((e) => sql`${e}`), sql`, `)}))
+    )`;
+}
+
 /** The fact types stating a person is a PAYING client of the brand: the `sale` step's evidence + the CRM's `client` label. */
 export const PAYING_CLIENT_FACT_TYPES = ["sale", "payment", "client"] as const;
 
 /**
  * Per paying client of the brand (current fact owner), when they became one: their earliest dated paying fact (a deal
- * won, a payment that STANDS, a CRM `client` label), NULL when every one is undated. Columns owner_person_key, client_since.
+ * won, a payment that STANDS, a CRM `client` label), NULL when every one is undated. Our staff is nobody's client. Columns
+ * owner_person_key, client_since.
  */
 export function payingClientsSql(orgId: string, brandId: string): SQL {
   return sql`
@@ -235,6 +255,7 @@ export function payingClientsSql(orgId: string, brandId: string): SQL {
       AND f.live AND f.owner_person_key IS NOT NULL
       AND f.type IN (${sql.join(PAYING_CLIENT_FACT_TYPES.map((t) => sql`${t}`), sql`, `)})
       AND ${PAYMENT_STANDS}
+      AND NOT ${ownerIsStaffSql(sql`f.org_id`, sql`f.brand_id`, sql`f.owner_person_key`)}
     GROUP BY f.owner_person_key
   `;
 }
@@ -251,7 +272,7 @@ function clientSatisfiedEvidence(orgId: string, brandId: string): SQL {
     FROM client_message_verdicts v
     JOIN people_facts f ON f.org_id = v.org_id AND f.brand_id = v.brand_id AND f.natural_key = v.natural_key
     JOIN (${payingClientsSql(orgId, brandId)}) pc ON pc.owner_person_key = f.owner_person_key
-    WHERE v.org_id = ${orgId} AND v.brand_id = ${brandId} AND v.verdict = 'positive'
+    WHERE v.org_id = ${orgId} AND v.brand_id = ${brandId} AND v.verdict = 'positive' AND v.p_positive >= ${POSITIVE_THRESHOLD}
       AND f.live AND f.type = 'message_in' AND f.owner_person_key IS NOT NULL
       AND v.text_hash = md5(COALESCE(f.payload->>'text', ''))
       AND (pc.client_since IS NULL OR f.occurred_at >= pc.client_since)
@@ -625,7 +646,7 @@ async function satisfiedMessagesOf(orgId: string, brandId: string, personKeys: s
       FROM client_message_verdicts v
       JOIN people_facts f ON f.org_id = v.org_id AND f.brand_id = v.brand_id AND f.natural_key = v.natural_key
       JOIN (${payingClientsSql(orgId, brandId)}) pc ON pc.owner_person_key = f.owner_person_key
-      WHERE v.org_id = ${orgId} AND v.brand_id = ${brandId} AND v.verdict = 'positive'
+      WHERE v.org_id = ${orgId} AND v.brand_id = ${brandId} AND v.verdict = 'positive' AND v.p_positive >= ${POSITIVE_THRESHOLD}
         AND f.live AND f.type = 'message_in'
         AND f.owner_person_key IN (${sql.join(personKeys.map((k) => sql`${k}`), sql`, `)})
         AND v.text_hash = md5(COALESCE(f.payload->>'text', ''))

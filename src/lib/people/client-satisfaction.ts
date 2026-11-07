@@ -9,7 +9,7 @@
  * - **A message they wrote** = a live `message_in` fact owned by them (Gmail, WhatsApp, LinkedIn, Telegram...: every
  *   conversation channel the feed carries; one path, no channel case), dated at or after they became a client. A word
  *   written BEFORE paying is a positive reply, not a satisfied client.
- * - **Positive** = Jev's verdict (`positive | neutral | negative`, P(positive) >= 0.5), judged ONCE per message (keyed
+ * - **Positive** = Jev's verdict (`positive | neutral | negative`, P(positive) >= 0.75), judged ONCE per message (keyed
  *   on the fact's natural key + its text hash: a message whose text moves is judged again), recorded in
  *   `client_message_verdicts` with the message excerpt, run and model: the stored evidence of every reach. Politeness
  *   alone ("ok", "thanks") is neutral. A message holding no words is recorded `no_words` with no call.
@@ -27,9 +27,14 @@ import { db } from "../../db/index.js";
 import { peopleScopes, type PeopleScope } from "../../db/schema.js";
 import { judgeChoices, type ChoiceQuestion, type JudgmentsResult } from "../judgments-client.js";
 import { createRun, updateRun } from "../runs-client.js";
-import { payingClientsSql } from "./outcomes.js";
+import { payingClientsSql, POSITIVE_THRESHOLD } from "./outcomes.js";
 
-export const POSITIVE_THRESHOLD = 0.5;
+/**
+ * P(positive) a message needs to count: 0.75, not 0.5 (prod 2026-11-07, distribute.you's 685 backfilled messages): Jev put
+ * plain politeness ("Ok cool.", "Ok thanks", "cool") at 0.53-0.70 while praise sat at 0.76-0.99 ("Best thing I liked is
+ * the depth to which it personalizes outreach" 0.99, "I'm excited" 0.76). Defined in outcomes.ts (its read applies it).
+ */
+export { POSITIVE_THRESHOLD };
 const MESSAGE_CHARS = 1500;
 const CONTEXT_CHARS = 600;
 const EXCERPT_CHARS = 500;
@@ -106,7 +111,7 @@ export interface Verdict {
   probabilities: Record<string, number>;
 }
 
-/** PURE: one answer's verdict: positive only at P(positive) >= 0.5, else the likelier of neutral / negative. */
+/** PURE: one answer's verdict: positive only at P(positive) >= POSITIVE_THRESHOLD (0.75), else the likelier of neutral / negative. */
 export function verdictOf(probabilities: Record<string, number>): Verdict {
   const p = probabilities.positive ?? 0;
   if (p >= POSITIVE_THRESHOLD) return { verdict: "positive", pPositive: p, probabilities };

@@ -13,8 +13,10 @@ const msg = (personKey: string, text: string, i = 0): ClientMessage => ({
 });
 
 describe("CLIENT-SATISFIED-1107 client satisfaction (pure)", () => {
-  it("positive only at P(positive) >= 0.5; otherwise the likelier of neutral / negative", () => {
-    expect(verdictOf({ positive: 0.5, neutral: 0.3, negative: 0.2 }).verdict).toBe("positive");
+  it("positive only at P(positive) >= 0.75 (plain politeness sat at 0.53-0.70 in prod); otherwise the likelier of neutral / negative", () => {
+    expect(verdictOf({ positive: 0.75, neutral: 0.2, negative: 0.05 }).verdict).toBe("positive");
+    expect(verdictOf({ positive: 0.7, neutral: 0.2, negative: 0.1 }).verdict).toBe("neutral");
+    expect(verdictOf({ positive: 0.6, neutral: 0.1, negative: 0.3 }).verdict).toBe("negative");
     expect(verdictOf({ positive: 0.49, neutral: 0.5, negative: 0.01 }).verdict).toBe("neutral");
     expect(verdictOf({ positive: 0.1, neutral: 0.2, negative: 0.7 }).verdict).toBe("negative");
     expect(verdictOf({ positive: 0.1, neutral: 0.2, negative: 0.7 }).pPositive).toBe(0.1);

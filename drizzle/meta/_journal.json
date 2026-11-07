@@ -547,6 +547,13 @@
       "when": 1793100000000,
       "tag": "0078_client_message_verdicts",
       "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1793200000000,
+      "tag": "0079_client_satisfied_threshold",
+      "breakpoints": true
     }
   ]
 }
