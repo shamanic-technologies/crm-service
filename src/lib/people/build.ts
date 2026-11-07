@@ -15,6 +15,7 @@ import { db } from "../../db/index.js";
 import { contacts, leadStandingObservations, people, peopleScopes, type PeopleScope } from "../../db/schema.js";
 import { SERVICE_NAME } from "../../middleware/auth.js";
 import { createRun, lazyChildRun, SUPPORT_RUNS, updateRun } from "../runs-client.js";
+import { closeRun, isRunTrackingFailure } from "../run-close.js";
 import {
   clusterPeople,
   keysOf,
@@ -871,7 +872,8 @@ export async function runScopeBuild(
     });
     runId = run.id;
     const summary = await buildScopePeople(scope, run.id);
-    await updateRun(run.id, "completed", { orgId: scope.orgId, userId: scope.createdByUserId });
+    // POSTHOG-RUNCLOSE-1107: the build is done; closing its run is our bookkeeping and never throws.
+    await closeRun(run.id, "completed", { orgId: scope.orgId, userId: scope.createdByUserId }, `people build scope ${scope.id}`);
     console.log(
       `[crm-service] people build scope=${scope.id} brand=${scope.brandId} people=${summary.people} humanIds=${summary.humanIdentity?.peopleWithHumanId}/${summary.people}:${summary.humanIdentity?.status}:+${summary.humanIdentity?.resolved}~${summary.humanIdentity?.pending} automated=${summary.senderVerdicts.automatedPeople} notBusiness=${summary.relevance?.notBusinessPeople} relevanceJudged=${summary.relevance?.judged} relevancePending=${summary.relevance?.pending} judged=${summary.senderVerdicts.judged} pending=${summary.senderVerdicts.pending} facts=${summary.facts?.status === "ok" ? `+${summary.facts.emitted}/-${summary.facts.corrected + summary.facts.withdrawnGone}` : summary.facts?.status} sources=${summary.sources
         .map((s) => `${s.source}:${s.status}:${s.presences}`)
@@ -881,15 +883,14 @@ export async function runScopeBuild(
   } catch (err) {
     const message = (err as Error).message;
     console.error(`[crm-service] people build failed scope=${scope.id}:`, err);
-    await db
-      .update(peopleScopes)
-      .set({ status: "error", lastError: message, lastRunId: runId })
-      .where(eq(peopleScopes.id, scope.id));
-    if (runId) {
-      await updateRun(runId, "failed", { orgId: scope.orgId, userId: scope.createdByUserId }).catch((e) =>
-        console.error(`[crm-service] failed to close people build run ${runId}:`, e),
-      );
+    // Our own run tracking failing under the build is bookkeeping: the scope keeps its status and last_error.
+    if (!isRunTrackingFailure(err)) {
+      await db
+        .update(peopleScopes)
+        .set({ status: "error", lastError: message, lastRunId: runId })
+        .where(eq(peopleScopes.id, scope.id));
     }
+    if (runId) await closeRun(runId, "failed", { orgId: scope.orgId, userId: scope.createdByUserId }, `people build scope ${scope.id}`);
     return { scopeId: scope.id, ok: false, error: message };
   } finally {
     building.delete(scope.id);

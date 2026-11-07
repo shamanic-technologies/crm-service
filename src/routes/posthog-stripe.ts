@@ -24,7 +24,8 @@ import {
   type AuthenticatedRequest,
 } from "../middleware/auth.js";
 import { CredentialError, resolveBrandCredential } from "../lib/gohighlevel/credentials.js";
-import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
+import { createPlatformRun } from "../lib/runs-client.js";
+import { closePlatformRun } from "../lib/run-close.js";
 import { countIdentifiedPersons, PosthogError, POSTHOG_REGIONS } from "../lib/posthog/client.js";
 import { POSTHOG_SOURCE } from "../lib/posthog/records.js";
 import {
@@ -444,12 +445,11 @@ export function internalTrigger(
       try {
         const result = await work(parsed.data.connectionId, parsed.data.rereadSince ? new Date(parsed.data.rereadSince) : undefined);
         console.log(`[crm-service][${log}] pass: ${result.results.length} ok, ${result.failures.length} failed`);
-        await updatePlatformRun(platformRunId, result.failures.length ? "failed" : "completed", SERVICE_NAME);
+        // POSTHOG-RUNCLOSE-1107: the pass's results stand; closing its run never throws (retried, logged loud).
+        await closePlatformRun(platformRunId, result.failures.length ? "failed" : "completed", SERVICE_NAME, `${log} pass`);
       } catch (err) {
         console.error(`[crm-service][${log}] pass crashed:`, err);
-        await updatePlatformRun(platformRunId, "failed", SERVICE_NAME).catch((e) =>
-          console.error(`[crm-service][${log}] failed to close trigger run:`, e),
-        );
+        await closePlatformRun(platformRunId, "failed", SERVICE_NAME, `${log} pass`);
       }
     });
   };

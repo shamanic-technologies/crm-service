@@ -26,7 +26,8 @@ import { and, eq, inArray, notInArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { authConnections, authRawRecords, contacts, type AuthConnection } from "../../db/schema.js";
 import { SERVICE_NAME } from "../../middleware/auth.js";
-import { createRun, updateRun } from "../runs-client.js";
+import { createRun } from "../runs-client.js";
+import { closeRun, connectionErrorText, isRunTrackingFailure } from "../run-close.js";
 import { resolveBrandCredential } from "../gohighlevel/credentials.js";
 import { canonicalHash } from "../gohighlevel/records.js";
 import { normalizePhone } from "../people/identity.js";
@@ -291,7 +292,8 @@ export async function syncAuthConnection(conn: AuthConnection): Promise<AuthSync
       .update(authConnections)
       .set({ status: "active", lastError: null, lastRunId: run.id, lastSyncedAt: new Date(), providerUserCount })
       .where(eq(authConnections.id, conn.id));
-    await updateRun(run.id, "completed", identity);
+    // POSTHOG-RUNCLOSE-1107: closing the run is our bookkeeping, never the connection's health; it never throws.
+    await closeRun(run.id, "completed", identity, `${conn.provider} connection ${conn.id}`);
     return {
       connectionId: conn.id,
       provider: conn.provider,
@@ -305,13 +307,16 @@ export async function syncAuthConnection(conn: AuthConnection): Promise<AuthSync
       memberships,
     };
   } catch (err) {
-    await db
-      .update(authConnections)
-      .set({ status: "error", lastError: (err as Error).message, lastRunId: run.id })
-      .where(eq(authConnections.id, conn.id));
-    await updateRun(run.id, "failed", identity).catch((e) =>
-      console.error(`[crm-service][${conn.provider}] failed to close run:`, e),
-    );
+    if (isRunTrackingFailure(err)) {
+      console.error(`[crm-service][${conn.provider}] connection ${conn.id} run ${run.id}: run tracking failed, connection left as is:`, err);
+    } else {
+      console.error(`[crm-service][${conn.provider}] connection ${conn.id} run ${run.id}: read failed:`, err);
+      await db
+        .update(authConnections)
+        .set({ status: "error", lastError: connectionErrorText(adapter.label, err), lastRunId: run.id })
+        .where(eq(authConnections.id, conn.id));
+    }
+    await closeRun(run.id, "failed", identity, `${conn.provider} connection ${conn.id}`);
     throw err;
   }
 }

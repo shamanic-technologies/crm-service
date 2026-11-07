@@ -32,7 +32,8 @@ import {
   type MatrixConnection,
   type NewMatrixRawEvent,
 } from "../../db/schema.js";
-import { createRun, lazyChildRun, SUPPORT_RUNS, updateRun } from "../runs-client.js";
+import { createRun, lazyChildRun, SUPPORT_RUNS } from "../runs-client.js";
+import { closeRun, connectionErrorText, isRunTrackingFailure } from "../run-close.js";
 import { SERVICE_NAME } from "../../middleware/auth.js";
 import { platformAccessToken, sync, type MatrixEvent } from "./client.js";
 import {
@@ -724,12 +725,13 @@ async function syncConnectionLocked(conn: MatrixConnection): Promise<ConnectionS
       .update(matrixConnections)
       .set({ status: "active", lastError: null, lastRunId: run.id })
       .where(eq(matrixConnections.id, conn.id));
-    await updateRun(run.id, "completed", {
+    // POSTHOG-RUNCLOSE-1107: closing the run is our bookkeeping, never the connection's health; it never throws.
+    await closeRun(run.id, "completed", {
       orgId: conn.orgId,
       userId: conn.createdByUserId,
       runId: run.id,
       brandIds: [conn.brandId],
-    });
+    }, `matrix connection ${conn.id}`);
 
     return {
       connectionId: conn.id,
@@ -747,19 +749,29 @@ async function syncConnectionLocked(conn: MatrixConnection): Promise<ConnectionS
       replies,
     };
   } catch (err) {
-    const message = (err as Error).message;
-    await db
-      .update(matrixConnections)
-      .set({ status: "error", lastError: message, lastRunId: run.id })
-      .where(eq(matrixConnections.id, conn.id));
-    await updateRun(run.id, "failed", {
+    if (isRunTrackingFailure(err)) {
+      console.error(`[crm-service][matrix] connection ${conn.id} run ${run.id}: run tracking failed, connection left as is:`, err);
+    } else {
+      console.error(`[crm-service][matrix] connection ${conn.id} run ${run.id}: read failed:`, err);
+      await db
+        .update(matrixConnections)
+        .set({ status: "error", lastError: connectionErrorText(channelLabel(conn.channel), err), lastRunId: run.id })
+        .where(eq(matrixConnections.id, conn.id));
+    }
+    await closeRun(run.id, "failed", {
       orgId: conn.orgId,
       userId: conn.createdByUserId,
       runId: run.id,
       brandIds: [conn.brandId],
-    }).catch((e) => console.error("[crm-service][matrix] failed to close run:", e));
+    }, `matrix connection ${conn.id}`);
     throw err;
   }
+}
+
+/** The channel as the client names it (`whatsapp` -> WhatsApp), for the plain words of last_error. */
+function channelLabel(channel: string): string {
+  const known: Record<string, string> = { whatsapp: "WhatsApp", telegram: "Telegram", discord: "Discord" };
+  return known[channel] ?? channel;
 }
 
 export interface SyncPassResult {
@@ -836,10 +848,14 @@ export async function liveSyncConnection(conn: MatrixConnection): Promise<number
       const replies = await detectReplies(current, lazyRun, Date.now(), { rooms: [...bronze.rooms] });
       // A voice note's ping waited for its words (SOPHIE-VOICE-1019).
       if (replies.voiceNotesTranscribed) void announceAssistantMatrixMessages(current);
-      if (runId) await updateRun(await runId, "completed", { ...ids, runId: await runId });
+      if (runId) {
+        const id = await runId;
+        await closeRun(id, "completed", { ...ids, runId: id }, `matrix live ${current.id}`);
+      }
       return replies.detected;
     } catch (err) {
-      if (runId) await updateRun(await runId, "failed", { ...ids, runId: await runId }).catch(() => undefined);
+      const id = runId ? await (runId as Promise<string>).catch(() => null) : null;
+      if (id) await closeRun(id, "failed", { ...ids, runId: id }, `matrix live ${current.id}`);
       throw err;
     }
   });
@@ -928,12 +944,12 @@ export async function rebuildFromBronze(conn: MatrixConnection): Promise<Connect
       await reading.close(readingFailed);
     }
 
-    await updateRun(run.id, "completed", {
+    await closeRun(run.id, "completed", {
       orgId: conn.orgId,
       userId: conn.createdByUserId,
       runId: run.id,
       brandIds: [conn.brandId],
-    });
+    }, `matrix rebuild ${conn.id}`);
 
     return {
       connectionId: conn.id,
@@ -951,12 +967,12 @@ export async function rebuildFromBronze(conn: MatrixConnection): Promise<Connect
       replies: null,
     };
   } catch (err) {
-    await updateRun(run.id, "failed", {
+    await closeRun(run.id, "failed", {
       orgId: conn.orgId,
       userId: conn.createdByUserId,
       runId: run.id,
       brandIds: [conn.brandId],
-    }).catch((e) => console.error("[crm-service][matrix] failed to close run:", e));
+    }, `matrix rebuild ${conn.id}`);
     throw err;
   }
 }

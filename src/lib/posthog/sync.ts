@@ -29,7 +29,8 @@ import {
   type PosthogConnection,
 } from "../../db/schema.js";
 import { SERVICE_NAME } from "../../middleware/auth.js";
-import { createRun, updateRun } from "../runs-client.js";
+import { createRun } from "../runs-client.js";
+import { closeRun, connectionErrorText, isRunTrackingFailure } from "../run-close.js";
 import { resolveBrandCredential } from "../gohighlevel/credentials.js";
 import { canonicalHash } from "../gohighlevel/records.js";
 import {
@@ -663,7 +664,8 @@ export async function syncPosthogConnection(
           : { rateLimitedUntil: null, rateLimitedSince: null, rateLimitMessage: null }),
       })
       .where(eq(posthogConnections.id, conn.id));
-    await updateRun(run.id, "completed", identity);
+    // POSTHOG-RUNCLOSE-1107: the read is done and recorded; closing the run is our bookkeeping and never throws.
+    await closeRun(run.id, "completed", identity, `posthog connection ${conn.id}`);
     if (refused) {
       console.log(
         `[crm-service][posthog] ${conn.id}: PostHog's read budget is used up, next read at ${refused.retryAt.toISOString()} (kept what was read)`,
@@ -694,15 +696,27 @@ export async function syncPosthogConnection(
       },
     };
   } catch (err) {
-    await db
-      .update(posthogConnections)
-      .set({ status: "error", lastError: (err as Error).message, lastRunId: run.id })
-      .where(eq(posthogConnections.id, conn.id));
-    await updateRun(run.id, "failed", identity).catch((e) =>
-      console.error("[crm-service][posthog] failed to close run:", e),
-    );
+    await markConnectionFailed(conn.id, run.id, err);
+    await closeRun(run.id, "failed", identity, `posthog connection ${conn.id}`);
     throw err;
   }
+}
+
+/**
+ * POSTHOG-RUNCLOSE-1107: a read that failed. Our own run tracking failing under it (runs-service slow or down) is OUR
+ * bookkeeping: the connection keeps its status and its last_error, the cause is logged. Anything else marks it
+ * `error`, with plain words about the client's connection in last_error (the raw cause is logged, never shown).
+ */
+async function markConnectionFailed(connectionId: string, runId: string, err: unknown) {
+  if (isRunTrackingFailure(err)) {
+    console.error(`[crm-service][posthog] connection ${connectionId} run ${runId}: run tracking failed, connection left as is:`, err);
+    return;
+  }
+  console.error(`[crm-service][posthog] connection ${connectionId} run ${runId}: read failed:`, err);
+  await db
+    .update(posthogConnections)
+    .set({ status: "error", lastError: connectionErrorText("PostHog", err), lastRunId: runId })
+    .where(eq(posthogConnections.id, connectionId));
 }
 
 /**

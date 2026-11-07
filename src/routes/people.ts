@@ -16,6 +16,7 @@ import {
   type AuthenticatedRequest,
 } from "../middleware/auth.js";
 import { createPlatformRun, SUPPORT_RUNS, updatePlatformRun } from "../lib/runs-client.js";
+import { closePlatformRun } from "../lib/run-close.js";
 import { ensureScope, runPeopleBuildPass, runScopeBuild, type BuildSummary } from "../lib/people/build.js";
 import { PEOPLE_SOURCES, type Presence } from "../lib/people/identity.js";
 import type { PossibleLead } from "../lib/people/sources.js";
@@ -1163,12 +1164,11 @@ router.post("/internal/people/sync", apiKeyAuth, async (req, res) => {
       const result = await runPeopleBuildPass(parsed.data.scopeId);
       const failed = result.results.filter((r) => !r.ok).length;
       console.log(`[crm-service] people sync pass scopes=${result.scopes} failed=${failed}`);
-      await updatePlatformRun(platformRunId, failed ? "failed" : "completed", SERVICE_NAME);
+      // POSTHOG-RUNCLOSE-1107: the pass's results stand; closing its run never throws (retried, logged loud).
+      await closePlatformRun(platformRunId, failed ? "failed" : "completed", SERVICE_NAME, "people sync pass");
     } catch (err) {
       console.error("[crm-service] people sync pass crashed:", err);
-      await updatePlatformRun(platformRunId, "failed", SERVICE_NAME).catch((e) =>
-        console.error("[crm-service] failed to close people sync run:", e),
-      );
+      await closePlatformRun(platformRunId, "failed", SERVICE_NAME, "people sync pass");
     }
   });
 });

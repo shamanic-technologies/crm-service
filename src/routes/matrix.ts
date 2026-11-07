@@ -17,7 +17,8 @@ import { MatrixLinkUpdateRequestSchema } from "../schemas.js";
 import { LEAD_STATUSES } from "../lib/matrix/leads.js";
 import { BRAND_MIN_PROBABILITY } from "../lib/people/relevance.js";
 import { rebuildFromBronze, runSyncPass } from "../lib/matrix/sync.js";
-import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
+import { createPlatformRun } from "../lib/runs-client.js";
+import { closePlatformRun } from "../lib/run-close.js";
 import { BridgeError, LINK_METHODS } from "../lib/matrix/bridge.js";
 import {
   LinkRequestError,
@@ -611,16 +612,11 @@ router.post("/internal/matrix/sync", apiKeyAuth, async (req, res) => {
       console.log(
         `[crm-service][matrix] sync pass: ${result.results.length} ok, ${result.failures.length} failed`,
       );
-      await updatePlatformRun(
-        platformRunId,
-        result.failures.length > 0 ? "failed" : "completed",
-        SERVICE_NAME,
-      );
+      // POSTHOG-RUNCLOSE-1107: the pass's results stand; closing its run never throws (retried, logged loud).
+      await closePlatformRun(platformRunId, result.failures.length > 0 ? "failed" : "completed", SERVICE_NAME, "matrix sync pass");
     } catch (err) {
       console.error("[crm-service][matrix] sync pass failed:", err);
-      await updatePlatformRun(platformRunId, "failed", SERVICE_NAME).catch((e) =>
-        console.error("[crm-service][matrix] failed to close trigger run:", e),
-      );
+      await closePlatformRun(platformRunId, "failed", SERVICE_NAME, "matrix sync pass");
     }
   });
 });
@@ -663,12 +659,10 @@ router.post("/internal/matrix/rebuild", apiKeyAuth, async (req, res) => {
       for (const conn of rows) {
         await rebuildFromBronze(conn);
       }
-      await updatePlatformRun(platformRunId, "completed", SERVICE_NAME);
+      await closePlatformRun(platformRunId, "completed", SERVICE_NAME, "matrix rebuild pass");
     } catch (err) {
       console.error("[crm-service][matrix] rebuild failed:", err);
-      await updatePlatformRun(platformRunId, "failed", SERVICE_NAME).catch((e) =>
-        console.error("[crm-service][matrix] failed to close rebuild run:", e),
-      );
+      await closePlatformRun(platformRunId, "failed", SERVICE_NAME, "matrix rebuild pass");
     }
   });
 });

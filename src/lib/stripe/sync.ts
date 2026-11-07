@@ -27,7 +27,8 @@ import {
   type StripeConnection,
 } from "../../db/schema.js";
 import { SERVICE_NAME } from "../../middleware/auth.js";
-import { createRun, updateRun } from "../runs-client.js";
+import { createRun } from "../runs-client.js";
+import { closeRun, connectionErrorText, isRunTrackingFailure } from "../run-close.js";
 import { resolveBrandCredential } from "../gohighlevel/credentials.js";
 import { canonicalHash } from "../gohighlevel/records.js";
 import { normalizePhone } from "../people/identity.js";
@@ -284,7 +285,8 @@ export async function syncStripeConnection(conn: StripeConnection): Promise<Stri
         ...(account ? { accountId: account.id, accountName: account.name } : {}),
       })
       .where(eq(stripeConnections.id, conn.id));
-    await updateRun(run.id, "completed", identity);
+    // POSTHOG-RUNCLOSE-1107: closing the run is our bookkeeping, never the connection's health; it never throws.
+    await closeRun(run.id, "completed", identity, `stripe connection ${conn.id}`);
     return {
       connectionId: conn.id,
       runId: run.id,
@@ -297,13 +299,16 @@ export async function syncStripeConnection(conn: StripeConnection): Promise<Stri
       truncated,
     };
   } catch (err) {
-    await db
-      .update(stripeConnections)
-      .set({ status: "error", lastError: (err as Error).message, lastRunId: run.id })
-      .where(eq(stripeConnections.id, conn.id));
-    await updateRun(run.id, "failed", identity).catch((e) =>
-      console.error("[crm-service][stripe] failed to close run:", e),
-    );
+    if (isRunTrackingFailure(err)) {
+      console.error(`[crm-service][stripe] connection ${conn.id} run ${run.id}: run tracking failed, connection left as is:`, err);
+    } else {
+      console.error(`[crm-service][stripe] connection ${conn.id} run ${run.id}: read failed:`, err);
+      await db
+        .update(stripeConnections)
+        .set({ status: "error", lastError: connectionErrorText("Stripe", err), lastRunId: run.id })
+        .where(eq(stripeConnections.id, conn.id));
+    }
+    await closeRun(run.id, "failed", identity, `stripe connection ${conn.id}`);
     throw err;
   }
 }
