@@ -60,7 +60,7 @@ import {
   campaignServiceConfigured,
   reportOccurrence,
 } from "./campaign-client.js";
-import { resolveOffer } from "./offer.js";
+import { resolveFormOffer, type FormOfferAnswer } from "./offer-pick.js";
 import { doorPersonKey, FINAL_REFUSAL_STATUSES, NO_EMAIL_OR_PHONE } from "../trigger-door.js";
 import { isCalendarBookingForm, submissionAnswers, submissionPerson } from "./submission.js";
 
@@ -77,6 +77,8 @@ export const REPORT_STATUS = { PENDING: "pending", REPORTED: "reported", SKIPPED
 export const REPORT_REASONS = {
   CALENDAR_BOOKING_FORM: "calendar_booking_form",
   OFFER_UNKNOWN: "offer_unknown",
+  /** FORM-OFFER-PICK-1108: placing the fill on an offer failed (human-service, brand-service or Jev down): retried. */
+  OFFER_PICK_FAILED: "offer_pick_failed",
   CAMPAIGN_REFUSED: "campaign_refused",
   CAMPAIGN_UNREACHABLE: "campaign_unreachable",
   CONNECTION_GONE: "connection_gone",
@@ -298,7 +300,7 @@ export async function deliverDue(now: number = Date.now()): Promise<FormWatchRes
 async function settle(
   r: FormTriggerReport,
   now: number,
-  set: Partial<Pick<FormTriggerReport, "status" | "reason" | "lastError" | "offerId" | "runId" | "reportedAt" | "campaignEventId" | "campaignRecordedAt" | "campaignOutcome">>,
+  set: Partial<Pick<FormTriggerReport, "status" | "reason" | "lastError" | "offerId" | "offerBasis" | "offerVerdict" | "runId" | "reportedAt" | "campaignEventId" | "campaignRecordedAt" | "campaignOutcome">>,
 ): Promise<void> {
   await db
     .update(formTriggerReports)
@@ -321,11 +323,29 @@ export async function deliverOne(
     await settle(r, now, { status: REPORT_STATUS.SKIPPED, reason: REPORT_REASONS.STATED_NOT_TO_BRAND, runId: identity.runId });
     return { status: REPORT_STATUS.SKIPPED, reason: REPORT_REASONS.STATED_NOT_TO_BRAND };
   }
-  const offer = await resolveOffer(identity, r.formId);
+  // FORM-OFFER-PICK-1108: a stated offer, the only offer, the offer that already reached the person, else Jev.
+  let offer: FormOfferAnswer;
+  try {
+    offer = await resolveFormOffer({ orgId: identity.orgId, userId: identity.userId, runId: identity.runId, brandId: identity.brandId }, r);
+  } catch (err) {
+    const message = `placing the fill on an offer failed: ${(err as Error).message}`;
+    console.warn(`[crm-service][form-trigger] submission ${r.submissionId} (brand ${r.brandId}) not reported: ${message}`);
+    await settle(r, now, { status: REPORT_STATUS.FAILED, reason: REPORT_REASONS.OFFER_PICK_FAILED, lastError: message, runId: identity.runId });
+    return { status: REPORT_STATUS.FAILED, reason: REPORT_REASONS.OFFER_PICK_FAILED };
+  }
   if (offer.offerId === null) {
     console.warn(`[crm-service][form-trigger] submission ${r.submissionId} (brand ${r.brandId}) not reported: ${offer.detail}`);
     await settle(r, now, { status: REPORT_STATUS.FAILED, reason: REPORT_REASONS.OFFER_UNKNOWN, lastError: offer.detail, runId: identity.runId });
     return { status: REPORT_STATUS.FAILED, reason: REPORT_REASONS.OFFER_UNKNOWN };
+  }
+  const placed = { offerId: offer.offerId, offerBasis: offer.basis, offerVerdict: offer.verdict };
+  // Persisted at once (judged once): a campaign-service failure below retries on the same pick.
+  await db.update(formTriggerReports).set(placed).where(eq(formTriggerReports.id, r.id));
+  if (offer.basis === "person_reached" || offer.basis === "judged") {
+    console.log(
+      `[crm-service][form-trigger] submission ${r.submissionId} (brand ${r.brandId}) placed on offer ${offer.offerId} (${offer.basis}` +
+        `${offer.basis === "judged" && offer.verdict && "confidence" in offer.verdict ? `, confidence ${offer.verdict.confidence.toFixed(2)}` : ""})`,
+    );
   }
   try {
     const recorded = await reportOccurrence({
@@ -348,7 +368,7 @@ export async function deliverOne(
       status: REPORT_STATUS.REPORTED,
       reason: null,
       lastError: null,
-      offerId: offer.offerId,
+      ...placed,
       runId: identity.runId,
       reportedAt,
       campaignEventId: recorded.eventId,
@@ -367,7 +387,7 @@ export async function deliverOne(
     const final = err instanceof CampaignRefusal && FINAL_REFUSAL_STATUSES.has(err.status);
     const reason = final ? REPORT_REASONS.CAMPAIGN_REFUSED : REPORT_REASONS.CAMPAIGN_UNREACHABLE;
     console.warn(`[crm-service][form-trigger] submission ${r.submissionId} (brand ${r.brandId}) not reported: ${(err as Error).message}`);
-    await settle(r, now, { status: REPORT_STATUS.FAILED, reason, lastError: (err as Error).message, offerId: offer.offerId, runId: identity.runId });
+    await settle(r, now, { status: REPORT_STATUS.FAILED, reason, lastError: (err as Error).message, ...placed, runId: identity.runId });
     return { status: REPORT_STATUS.FAILED, reason };
   }
 }

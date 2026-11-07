@@ -4421,10 +4421,22 @@ const FormTriggerReportSchema = z.object({
   }),
   answers: z.array(z.object({ key: z.string(), label: z.string().nullable(), value: z.unknown() })),
   status: z.enum(["pending", "reported", "skipped", "failed"]),
-  reason: z.string().nullable().describe("calendar_booking_form | no_email_or_phone (neither an email nor an E.164 phone; older rows no_email) | offer_unknown | campaign_refused | campaign_unreachable | connection_gone | stated_not_to_brand (the brand stated the person is not theirs: never answered)"),
+  reason: z.string().nullable().describe("calendar_booking_form | no_email_or_phone (neither an email nor an E.164 phone; older rows no_email) | offer_unknown | campaign_refused | campaign_unreachable | connection_gone | stated_not_to_brand (the brand stated the person is not theirs: never answered) | offer_pick_failed (placing the fill on an offer failed: a sibling or Jev down, retried)"),
   lastError: z.string().nullable(),
   attempts: z.number().int(),
   offerId: z.string().nullable(),
+  offerBasis: z
+    .enum(["stated_for_form", "stated_for_brand", "only_offer", "person_reached", "judged"])
+    .nullable()
+    .describe(
+      "How the fill was placed on its offer (FORM-OFFER-PICK-1108): the offer stated for this form, for every form, the brand's only active offer, " +
+        "the offer that already reached this person at this brand (person_reached), or Jev reading the answers against each offer's audience (judged). null = not placed yet.",
+    ),
+  offerVerdict: z
+    .unknown()
+    .describe(
+      "judged: {model, confidence, probabilities per offer id, audiences per offer id, judgedAt}; person_reached: {via: form_report | audience_served, ref, at}; null otherwise.",
+    ),
   submittedAt: z.string(),
   detectedAt: z.string(),
   reportedAt: z.string().nullable(),

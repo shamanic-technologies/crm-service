@@ -28,6 +28,8 @@ process.env.CAMPAIGN_SERVICE_URL = "http://campaign.test";
 process.env.CAMPAIGN_SERVICE_API_KEY = "campaign-key";
 process.env.BRAND_SERVICE_URL = "http://brand.test";
 process.env.BRAND_SERVICE_API_KEY = "brand-key";
+process.env.HUMAN_SERVICE_URL = "http://human.test";
+process.env.HUMAN_SERVICE_API_KEY = "human-key";
 // The post-detection GoHighLevel sync + people build runs behind the pass; off here.
 process.env.FORM_TRIGGER_REFRESH = "off";
 
@@ -38,6 +40,11 @@ let submissions: Record<string, unknown>[] = [];
 let offers: { offerId: string; name: string; description: null; status: string }[] = [];
 let campaignCalls: { headers: Headers; body: Record<string, unknown> }[] = [];
 let campaignAnswer: () => Response = () => json({}, 500);
+/** human-service memberships of the filler (FORM-OFFER-PICK-1108): which offer audience served them. */
+let memberships: { audienceId: string; offerId: string | null; list: string | null; status: string; provenance: string; joinedAt: string }[] = [];
+/** Jev's answer to the offer choice, and every question it was asked. */
+let jevAnswer: () => Response = () => json({}, 500);
+let jevCalls: Record<string, unknown>[] = [];
 
 function submission(id: string, createdAt: string, formId = META_FORM, extra: Record<string, unknown> = {}) {
   return {
@@ -53,6 +60,7 @@ function submission(id: string, createdAt: string, formId = META_FORM, extra: Re
 
 function installFetchStub() {
   campaignCalls = [];
+  jevCalls = [];
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
@@ -70,6 +78,28 @@ function installFetchStub() {
       if (url.pathname === "/forms/") return json({ forms: [{ id: META_FORM, name: "Meta Ads" }], total: 1 });
     }
     if (url.host === "brand.test" && url.pathname.endsWith("/offers")) return json({ offers });
+    if (url.host === "brand.test" && url.pathname === `/internal/brands/${BRAND}`) return json({ brand: { name: "Doc Dinners", domain: "docdinners.com", url: null } });
+    if (url.host === "brand.test" && url.pathname === "/orgs/brands") return json({ brands: [] });
+    if (url.host === "brand.test" && url.pathname.endsWith("/extracted-fields")) return json({ fields: [] });
+    if (url.host === "brand.test" && url.pathname.endsWith("/user-fields")) return json({ fields: {} });
+    if (url.host === "human.test" && url.pathname === `/internal/brands/${BRAND}/memberships/by-email`) {
+      const body = JSON.parse(String(init?.body)) as { orgId: string; emails: string[] };
+      expect(body.orgId).toBe(ORG);
+      return json({ brandId: BRAND, byEmail: Object.fromEntries(body.emails.map((e) => [e, { personId: "p1", emails: [], memberships }])) });
+    }
+    if (url.host === "human.test" && url.pathname === "/orgs/audiences") {
+      const offerId = url.searchParams.get("offerId");
+      return json({
+        audiences: [
+          { id: `aud-${offerId}`, role: "target", targetText: offerId === OFFER_A ? "Restaurant owners" : "Chiropractors and other doctors" },
+        ],
+        total: 1, limit: 200, offset: 0,
+      });
+    }
+    if (url.pathname === "/orgs/judgments") {
+      jevCalls.push(JSON.parse(String(init?.body)));
+      return jevAnswer();
+    }
     if (url.host === "campaign.test" && url.pathname === "/internal/trigger-events") {
       campaignCalls.push({ headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) });
       return campaignAnswer();
@@ -110,6 +140,8 @@ describe.skipIf(!RUN)("form trigger watch", () => {
       contentHash: "h", payload: { id: "cal-1", name: "Free Consultation", formId: BOOKING_FORM },
     });
     offers = [{ offerId: OFFER_A, name: "A", description: null, status: "active" }];
+    memberships = [];
+    jevAnswer = () => json({}, 500);
     submissions = [submission("old-1", "2026-10-11T09:00:00.000Z")];
     campaignAnswer = () => json({ event: { id: `ev-${campaignCalls.length}`, status: "done", outcome: "skipped", skipReason: "no_campaign", processedAt: new Date(min(1)).toISOString() }, replayed: false }, 201);
     installFetchStub();
@@ -178,16 +210,76 @@ describe.skipIf(!RUN)("form trigger watch", () => {
     ]);
   });
 
-  it("several offers and none stated: loud offer_unknown, then reported once an offer is stated", async () => {
-    offers = [
-      { offerId: OFFER_A, name: "A", description: null, status: "active" },
-      { offerId: OFFER_B, name: "B", description: null, status: "active" },
-    ];
+  const TWO_OFFERS = () => [
+    { offerId: OFFER_A, name: "Dinner for restaurants", description: null, status: "active" },
+    { offerId: OFFER_B, name: "Dinner for doctors", description: null, status: "active" },
+  ];
+
+  it("several offers and none stated: Jev places the fill on its answers, persisted, never judged twice (FORM-OFFER-PICK-1108)", async () => {
+    offers = TWO_OFFERS();
+    // Offers are shown to Jev sorted by id: o0 = OFFER_A, o1 = OFFER_B.
+    jevAnswer = () => json({ model: "jev-1.13", answers: { offer: { type: "choice", choice: "o1", confidence: 0.91, probabilities: { o0: 0.09, o1: 0.91 } } } });
+    campaignAnswer = () => json({}, 503);
     await runFormWatchPass(T0);
     submissions = [submission("multi-1", new Date(min(1)).toISOString())];
     await runFormWatchPass(min(2));
+
+    expect(jevCalls).toHaveLength(1);
+    const asked = JSON.stringify(jevCalls[0]);
+    expect(asked).toContain("Chiropractor"); // the person's answer
+    expect(asked).toContain("Chiropractors and other doctors"); // OFFER_B's audience text
+    expect(asked).toContain("Restaurant owners"); // OFFER_A's audience text
+    let [r] = await reports();
+    expect(r).toMatchObject({ status: "failed", reason: "campaign_unreachable", offerId: OFFER_B, offerBasis: "judged" });
+    expect(r.offerVerdict).toMatchObject({ model: "jev-1.13", confidence: 0.91, probabilities: { [OFFER_A]: 0.09, [OFFER_B]: 0.91 } });
+
+    // The retry reads the persisted verdict: Jev is not asked again.
+    campaignAnswer = () => json({ event: { id: "ev-multi", status: "done" }, replayed: false }, 201);
+    await runFormWatchPass(min(4));
+    expect(jevCalls).toHaveLength(1);
+    expect(campaignCalls.at(-1)!.body.offerId).toBe(OFFER_B);
+    [r] = await reports();
+    expect(r).toMatchObject({ status: "reported", offerId: OFFER_B, offerBasis: "judged" });
+
+    const res = await request(app()).get(`/orgs/gohighlevel/form-triggers?brandId=${BRAND}`).set("x-api-key", API_KEY).set("x-org-id", ORG);
+    expect(res.body.reports[0]).toMatchObject({ offerId: OFFER_B, offerBasis: "judged", offerVerdict: { confidence: 0.91 } });
+  });
+
+  it("the offer that already reached the person wins over Jev (a person is contacted for ONE offer of a brand)", async () => {
+    offers = TWO_OFFERS();
+    memberships = [
+      { audienceId: "aud-old", offerId: OFFER_A, list: "crm_contacts", status: "active", provenance: "served", joinedAt: "2026-10-01T00:00:00.000Z" },
+      // Found while already taken: never contacted for B.
+      { audienceId: "aud-b", offerId: OFFER_B, list: "apollo_search", status: "active", provenance: "found_taken", joinedAt: "2026-09-01T00:00:00.000Z" },
+    ];
+    await runFormWatchPass(T0);
+    submissions = [submission("reached-1", new Date(min(1)).toISOString())];
+    await runFormWatchPass(min(2));
+    expect(jevCalls).toHaveLength(0);
+    expect(campaignCalls[0].body.offerId).toBe(OFFER_A);
+    const [r] = await reports();
+    expect(r).toMatchObject({ status: "reported", offerId: OFFER_A, offerBasis: "person_reached" });
+    expect(r.offerVerdict).toMatchObject({ via: "audience_served", ref: "aud-old" });
+
+    // Their next fill lands on the same offer, from our own report, even once human-service forgets them.
+    memberships = [];
+    submissions = [submission("reached-1b", new Date(min(3)).toISOString(), META_FORM, {}), ...submissions];
+    submissions[0].email = "reached-1@example.com";
+    await runFormWatchPass(min(4));
+    expect(jevCalls).toHaveLength(0);
+    expect(campaignCalls.at(-1)!.body.offerId).toBe(OFFER_A);
+    const second = (await reports()).find((x) => x.submissionId === "reached-1b")!;
+    expect(second).toMatchObject({ offerBasis: "person_reached", offerVerdict: { via: "form_report" } });
+  });
+
+  it("Jev down: loud offer_pick_failed, retried; a stated offer then wins over everything", async () => {
+    offers = TWO_OFFERS();
+    memberships = [{ audienceId: "aud-old", offerId: OFFER_A, list: null, status: "active", provenance: "found_taken", joinedAt: "2026-10-01T00:00:00.000Z" }];
+    await runFormWatchPass(T0);
+    submissions = [submission("multi-2", new Date(min(1)).toISOString())];
+    await runFormWatchPass(min(2));
     expect(campaignCalls).toHaveLength(0);
-    expect((await reports())[0]).toMatchObject({ status: "failed", reason: "offer_unknown", attempts: 1 });
+    expect((await reports())[0]).toMatchObject({ status: "failed", reason: "offer_pick_failed", attempts: 1, offerId: null });
 
     const put = await request(app())
       .put("/orgs/gohighlevel/form-offers")
@@ -205,7 +297,16 @@ describe.skipIf(!RUN)("form trigger watch", () => {
     await runFormWatchPass(min(4));
     expect(campaignCalls).toHaveLength(1);
     expect(campaignCalls[0].body.offerId).toBe(OFFER_B);
-    expect((await reports())[0]).toMatchObject({ status: "reported" });
+    expect((await reports())[0]).toMatchObject({ status: "reported", offerBasis: "stated_for_form" });
+  });
+
+  it("a brand with no active offer stays loud offer_unknown", async () => {
+    offers = [{ offerId: OFFER_A, name: "A", description: null, status: "archived" }];
+    await runFormWatchPass(T0);
+    submissions = [submission("none-1", new Date(min(1)).toISOString())];
+    await runFormWatchPass(min(2));
+    expect(campaignCalls).toHaveLength(0);
+    expect((await reports())[0]).toMatchObject({ status: "failed", reason: "offer_unknown", lastError: "the brand has no active offer" });
   });
 
   it("an outage is retried with backoff under the same idempotency key; a 400 is final; a day late is given up", async () => {
