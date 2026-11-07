@@ -217,6 +217,7 @@ describe.skipIf(!RUN)("people outcomes (all sources)", () => {
       "meeting_booked",
       "meeting_attended",
       "sale",
+      "client_satisfied",
     ]);
     // Ann carries an Instantly presence AND lead-service holds her, but lead-service credits no step
     // to our campaigns (no bucket): she is NOT contacted by us (OUTCOMES-CONTACTED-1027).

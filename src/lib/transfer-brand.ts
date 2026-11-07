@@ -69,6 +69,7 @@ import {
   formTriggerReports,
   formOfferMappings,
   leadIdentifiedDeclarations,
+  clientMessageVerdicts,
   messageSentDeclarations,
   formSubmittedDeclarations,
   replyTriggerReports,
@@ -171,6 +172,8 @@ export const TRANSFER_TABLES: PgTable[] = [
   calendarAttendeeMatches,
   samePersonVerdicts,
   calendarAttendanceVerdicts,
+  // Jev's verdicts on paying clients' messages (outcome « Client Satisfied », CLIENT-SATISFIED-1107).
+  clientMessageVerdicts,
 ];
 
 export interface TransferBrandInput {

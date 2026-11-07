@@ -137,6 +137,8 @@ There are exactly THREE such calls, all once-per-artifact, never per row:
    see "Voice notes" under the reply trigger), stored once, never redone.
 6. calendar matching, one Jev `choice` per calendar attendee no person holds by address and one per
    (Meet record, matched lead), recorded once (see "Google Calendar meetings");
+7. client satisfaction, one Jev `choice` per message a PAYING client wrote the brand (<= 20 per call, one person per
+   call), recorded once per (message, text) (see "Client Satisfied" under Outcomes);
 
 **Outcomes produced (COST-ACCOUNTING-1023-P1, `lib/reply-trigger/outcome.ts`; doctrine: agent-config skill
 `cost-accounting`):** a reply burst Jev judged POSITIVE (WhatsApp / Matrix, the org's Gmail) is `conversation`
@@ -1846,7 +1848,7 @@ lead-service serves the overall tag, then go.
 Dashboard v2 Outcomes page. lead-service's buckets cover only leads WE contacted;
 this answers the same steps for everyone the brand's own tools state.
 
-- `GET /orgs/people/outcomes?brandId=` → `steps[]` (all six, funnel order):
+- `GET /orgs/people/outcomes?brandId=` → `steps[]` (all seven, funnel order, `client_satisfied` last):
   `{ step, people, sources: [{source, people}], contactedByUs }`.
   `GET /orgs/people/outcomes/people?brandId=&step=&limit=&offset=` → `{ total,
   people: [{ personId, personKey, displayName, company, emails, phones,
@@ -1872,6 +1874,16 @@ this answers the same steps for everyone the brand's own tools state.
   first dated reach of any step → current month, empty months zero) + `undated {people,
   contactedByUs}` (campaigns-only reaches: lead-service states no bucket date). Last month's
   cumulative + undated = the step's figures. Same route, the gateway passes it through.
+- **`client_satisfied` = « Client Satisfied »** (CLIENT-SATISFIED-1107, features catalogue key, `people/client-satisfaction.ts`):
+  a PAYING client (live `sale` | standing `payment` | CRM `client` label; since = earliest dated, all undated = any date)
+  whose live `message_in` (any channel the feed carries: Gmail, WhatsApp, LinkedIn, Telegram) written since becoming one
+  Jev judged `positive` (P >= 0.5; politeness alone is neutral). Verdicts in `client_message_verdicts` (fact natural key +
+  text md5, excerpt, run, model), judged once; a `no_words` message gets no call. Loop every 10 min (+2 min boot,
+  `CLIENT_SATISFACTION=off`), ONE path past and future (first pass = backfill), one org run per scope pass
+  `people.client-satisfaction` (scope creator; chat-service declares the cost). `POST /internal/client-satisfaction/judge`
+  = a pass now. Read side re-checks paying + text hash (a refund ends it). NO lead-service bucket: `LEAD_BUCKET_STEPS`
+  (six) feed the campaigns reach, `OUTCOME_STEPS` = those + `client_satisfied`; `contactedByUs` 0. The people list adds
+  `satisfiedBy` (the positive messages, newest first, <= 5) on that step only. Not declared at runs-service yet.
 - lead-service bucket lists page by `nextCursor` (`walkBucket`), never "stop on a short page": a
   bucket filters after reading, a short page has more behind it (Doc Dinners' contacted walk lost
   7,211 of 19,209).

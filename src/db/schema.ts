@@ -2887,6 +2887,39 @@ export const leadIdentifiedDeclarations = pgTable(
 export type LeadIdentifiedDeclaration = typeof leadIdentifiedDeclarations.$inferSelect;
 
 /**
+ * CLIENT-SATISFIED-1107: Jev's verdict on each message a PAYING client of the brand wrote it (a live `message_in` fact,
+ * any channel), judged once per (fact natural key, text): `positive` | `neutral` | `negative`, or `no_words` (nothing
+ * to read, recorded without a call). A positive verdict makes its writer reach the outcome « Client Satisfied »
+ * (`client_satisfied` on the people Outcomes read), as long as they are still a paying client.
+ */
+export const clientMessageVerdicts = pgTable(
+  "client_message_verdicts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    // The message fact's natural key (`matrix|<event>`, `gmail|<address>|<message key>`): stable across re-emits.
+    naturalKey: text("natural_key").notNull(),
+    // md5 of the text judged: a message whose text moved is judged again.
+    textHash: text("text_hash").notNull(),
+    verdict: text("verdict").notNull(),
+    pPositive: doublePrecision("p_positive").notNull(),
+    probabilities: jsonb("probabilities"),
+    model: text("model"),
+    // The org run the Jev call rode (chat-service declared its cost there); null for `no_words`.
+    runId: text("run_id"),
+    source: text("source").notNull(),
+    messageAt: timestamp("message_at", { withTimezone: true }),
+    excerpt: text("excerpt").notNull(),
+    judgedAt: timestamp("judged_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("client_message_verdicts_message_uq").on(table.orgId, table.brandId, table.naturalKey),
+    index("client_message_verdicts_positive_idx").on(table.orgId, table.brandId).where(sql`${table.verdict} = 'positive'`),
+  ],
+);
+
+/**
  * CREDIT-RAN-OUT-UNIBOX-EVENT-1024: the cursor of a billing-service feed read (one row per feed). `watch_since` = the
  * first pass: an event dated before it is history, shown on the thread and stated as a fact, never reported as a
  * Lead event.
