@@ -600,34 +600,45 @@ export function matrixPlans(
 }
 
 /** What Jev reads about one Matrix conversation: the thread, the account's user, what the brand knows of the person. */
-export function matrixLoader(users: AccountUsers, views: Map<string, PersonView>) {
+/**
+ * `views`: the person view of each conversation key, either already in hand (a people build holds every person)
+ * or read on demand for the ONE conversation being loaded (`personViewOfConversation`). The loader only runs for a
+ * conversation Jev is about to judge, so a pass whose verdicts are all reused reads no person at all.
+ */
+export function matrixLoader(
+  users: AccountUsers,
+  views: Map<string, PersonView> | ((conversationId: string) => Promise<PersonView | null>),
+) {
   return async (conversationId: string): Promise<ConversationInput | null> => {
     const input = await matrixConversationInput(conversationId);
     if (!input) return null;
     const { connectionId, ...rest } = input;
     const acc = users.matrix.get(connectionId);
+    const person = views instanceof Map ? (views.get(input.key) ?? null) : await views(conversationId);
     return {
       ...rest,
       user: acc ? accountUserView(acc.channel, acc.account, [acc.user]) : null,
       userIds: acc ? userIdsOf([acc.user]) : [],
-      person: views.get(input.key) ?? null,
+      person,
     };
   };
 }
 
-/** What the brand's tools know about the people holding these Matrix conversations, from the last people build. */
-export async function personViewsOfConversations(orgId: string, brandId: string, ids: string[]): Promise<Map<string, PersonView>> {
-  const out = new Map<string, PersonView>();
-  for (const id of ids) {
-    const rows = (await db.execute(sql`
-      SELECT presences, merge_evidence FROM people
-      WHERE org_id = ${orgId} AND brand_id = ${brandId}
-        AND presences @> ${JSON.stringify([{ detail: { conversationId: id } }])}::jsonb
-      LIMIT 1
-    `)) as unknown as { presences: PersonLike["presences"]; merge_evidence: { kind: string }[] | null }[];
-    if (rows[0]) out.set(`matrix:${id}`, personView({ presences: rows[0].presences, evidence: rows[0].merge_evidence ?? [] }));
-  }
-  return out;
+/**
+ * What the brand's tools know about the person holding ONE Matrix conversation, from the last people build.
+ *
+ * BOX-LOAD-1107: read only for a conversation about to be judged. Before, the Matrix pass read it up front for EVERY
+ * candidate conversation of the connection (each conversation whose lead is behind, judged or not: 144 reads / 5 min
+ * at 722 ms on prod 2026-11-07, the most expensive statement of the box), then reused almost every stored verdict.
+ */
+export async function personViewOfConversation(orgId: string, brandId: string, id: string): Promise<PersonView | null> {
+  const rows = (await db.execute(sql`
+    SELECT presences, merge_evidence FROM people
+    WHERE org_id = ${orgId} AND brand_id = ${brandId}
+      AND presences @> ${JSON.stringify([{ detail: { conversationId: id } }])}::jsonb
+    LIMIT 1
+  `)) as unknown as { presences: PersonLike["presences"]; merge_evidence: { kind: string }[] | null }[];
+  return rows[0] ? personView({ presences: rows[0].presences, evidence: rows[0].merge_evidence ?? [] }) : null;
 }
 
 // ─── the record ─────────────────────────────────────────────────────────────

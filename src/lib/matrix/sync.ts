@@ -58,7 +58,7 @@ import {
   judgeAndRecord,
   matrixLoader,
   matrixPlans,
-  personViewsOfConversations,
+  personViewOfConversation,
   matrixMarkers,
   readBrandContext,
   type JudgePassSummary,
@@ -141,8 +141,9 @@ async function gateLeadReading(
   }
   const markers = await matrixMarkers(ids);
   const plans = matrixPlans(ids, markers, context, users);
-  const views = await personViewsOfConversations(conn.orgId, conn.brandId, plans.map((p) => p.plan));
-  const { verdicts, summary } = await judgeAndRecord(identity, context, plans, matrixLoader(users, views));
+  // The person view is read only for a conversation Jev judges now (BOX-LOAD-1107), never for a reused verdict.
+  const viewOf = (id: string) => personViewOfConversation(conn.orgId, conn.brandId, id);
+  const { verdicts, summary } = await judgeAndRecord(identity, context, plans, matrixLoader(users, viewOf));
   if (summary.error) console.error(`[crm-service][matrix] relevance judgments connection=${conn.id}: ${summary.error}`);
   const cleared: string[] = [];
   let notBusiness = 0;
