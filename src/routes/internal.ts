@@ -11,6 +11,7 @@ import { TransferBrandRequestSchema } from "../schemas.js";
 import { pgErrorOf } from "../lib/pg-error.js";
 import { backfillPositiveReplies } from "../lib/reply-trigger/outcome-backfill.js";
 import { runLeadIdentifiedPass } from "../lib/people/lead-identified.js";
+import { runClientSatisfactionPass } from "../lib/people/client-satisfaction.js";
 import { runMessageSentPass } from "../lib/whatsapp/message-sent.js";
 import { runFormSubmittedPass, statePastPerformers } from "../lib/gohighlevel/form-submitted.js";
 
@@ -145,6 +146,16 @@ router.post("/internal/outcomes/lead-identified", apiKeyAuth, async (_req, res) 
     console.error("[crm-service][lead-identified] manual pass failed:", err);
     res.status(502).json({ type: "upstream", error: (err as Error).message });
   }
+});
+
+/** CLIENT-SATISFIED-1107: one client-satisfaction pass now (judge every unjudged message of every paying client), in the background. */
+router.post("/internal/client-satisfaction/judge", apiKeyAuth, (_req, res) => {
+  res.status(202).json({ status: "accepted" });
+  setImmediate(() => {
+    runClientSatisfactionPass()
+      .then((r) => console.log(`[crm-service][client-satisfaction] manual pass: ${r === null ? "a pass already runs" : JSON.stringify(r.filter((x) => x.candidates > 0 || x.error))}`))
+      .catch((err) => console.error("[crm-service][client-satisfaction] manual pass failed:", err));
+  });
 });
 
 /** LEDGER-HISTORY-1024: one message_sent pass now (record the campaign WhatsApp sends not recorded yet, declare the due ones). */

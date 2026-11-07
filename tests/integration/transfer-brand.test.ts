@@ -200,6 +200,9 @@ async function seedBrand(org: string, brand: string, tag: string) {
     INSERT INTO lead_identified_declarations (org_id, brand_id, conversation_key, relation_key, run_id, judged_at, status)
     VALUES (${org}, ${brand}, 'gmail:' || gen_random_uuid()::text, 'rel:' || gen_random_uuid()::text || ':pro', gen_random_uuid()::text, now(), 'declared')`);
   await db.execute(sql`
+    INSERT INTO client_message_verdicts (org_id, brand_id, natural_key, text_hash, verdict, p_positive, source, excerpt)
+    VALUES (${org}, ${brand}, 'matrix|' || gen_random_uuid()::text, 'h', 'positive', 0.9, 'matrix', 'love it')`);
+  await db.execute(sql`
     INSERT INTO message_sent_declarations (org_id, brand_id, run_id, send_id, campaign_id, sent_at, status)
     VALUES (${org}, ${brand}, gen_random_uuid()::text, gen_random_uuid(), gen_random_uuid()::text, now(), 'declared')`);
   await db.execute(sql`

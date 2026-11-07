@@ -2966,7 +2966,9 @@ registry.registerPath({
 const OutcomeStepSchema = z.enum(OUTCOME_STEPS).openapi({
   description:
     "lead-service's bucket tokens. website_visit / signup / form_submission (crm fact form_submitted) / meeting_booked / " +
-    "meeting_attended / sale (a CRM deal won, or a Stripe payment that succeeded and was not wholly refunded).",
+    "meeting_attended / sale (a CRM deal won, or a Stripe payment that succeeded and was not wholly refunded), plus crm-service's own " +
+    "client_satisfied (« Client Satisfied »: a paying client of the brand (a deal won, a payment that stands, or the CRM's client " +
+    "label) wrote it a message, any channel, since becoming one, that Jev judged positive; no lead-service bucket, contactedByUs is 0).",
 });
 const ScopeViewSchema = z.object({
   status: z.string().openapi({ description: "building on the first read for a brand (the people index is being built), then the build status." }),
@@ -3005,7 +3007,7 @@ export const OutcomesResponseSchema = registry.register(
           .object({ people: z.number().int(), contactedByUs: z.number().int() })
           .openapi({ description: "Reaches no source dates (campaigns-only: lead-service states no bucket date), kept apart so the series reconciles with `people`." }),
       }),
-    ).openapi({ description: "Always all six steps, in funnel order, zeros included." }),
+    ).openapi({ description: "Always every step, in funnel order (client_satisfied last), zeros included." }),
   }),
 );
 
@@ -3030,6 +3032,20 @@ export const OutcomePeopleResponseSchema = registry.register(
         contactedByUs: z.boolean().openapi({ description: "In lead-service's bucket of this step under one of the brand's offers: our campaigns brought them here (same rule as the step's contactedByUs)." }),
         state: z.string().nullable(),
         stateSource: z.string().nullable(),
+        satisfiedBy: z
+          .array(
+            z.object({
+              at: z.string().nullable().openapi({ description: "When the client wrote it." }),
+              source: z.string().openapi({ description: "Where it was written: gmail, matrix (WhatsApp / LinkedIn / Telegram...)." }),
+              channel: z.string().nullable(),
+              excerpt: z.string().openapi({ description: "The message's first 500 characters, as Jev judged it." }),
+              pPositive: z.number().openapi({ description: "Jev's probability that the message is positive about the brand (>= 0.5 counts)." }),
+              judgedAt: z.string(),
+              factId: z.string().uuid().openapi({ description: "The message fact on the people fact feed." }),
+            }),
+          )
+          .optional()
+          .openapi({ description: "step=client_satisfied only: the positive messages that made the reach, newest first, at most 5. Absent on other steps." }),
       }),
     ).openapi({ description: "Earliest reachedAt first (undated last), then personKey: a total order, safe to page." }),
   }),
@@ -4493,6 +4509,15 @@ registry.registerPath({
   description:
     "One pass of the in-process loop (every 5 min): every crm relation (human x company) tagged professional_to_brand by a judged conversation, never recorded, is recorded (first conversation of a relation = pending, others = duplicate_subject), then every pending one is declared at runs-service as `lead_identified` produced (subject crm-service, the relation key) on the run whose Jev call judged it, with occurredAt = the judgment time. The same path covers the past and the future. Idempotent.",
   responses: { 200: { description: "recorded, duplicates, due, declared, alreadyRecorded, refused, failed" }, 502: { description: "The pass failed" } },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/client-satisfaction/judge",
+  summary: "Judge every unjudged message of every paying client now (outcome « Client Satisfied », CLIENT-SATISFIED-1107)",
+  description:
+    "One pass of the in-process loop (every 10 min), in the background: per people scope, every live message_in a paying client of the brand (a deal won, a payment that stands, the CRM's client label) wrote since becoming one and not judged on its current text yet gets Jev's verdict positive | neutral | negative (chat-service /orgs/judgments, org-billed on one people.client-satisfaction org run per scope), stored once. History included: the first pass is the backfill. A positive one makes its writer reach client_satisfied on GET /orgs/people/outcomes.",
+  responses: { 202: { description: "Accepted; the pass result is logged" } },
 });
 
 registry.registerPath({

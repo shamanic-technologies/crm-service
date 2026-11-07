@@ -22,6 +22,9 @@
  *   meeting_attended← meeting_attended
  *   sale            ← sale (a CRM deal won) | payment that STANDS (succeeded and
  *                     not wholly refunded — lead-service's own `paymentStands`)
+ *   client_satisfied← a message a PAYING client wrote the brand since becoming one, judged
+ *                     positive by Jev (`client_message_verdicts`, client-satisfaction.ts;
+ *                     CLIENT-SATISFIED-1107). crm-service's own step: no lead-service bucket.
  *
  * PLUS the people OUR campaigns brought to each step (source `campaigns`):
  * lead-service's own bucket of that token (`GET /orgs/leads?bucket=`, the rows
@@ -50,7 +53,8 @@ import { readBrandOffers } from "../form-trigger/offer.js";
 import { SwrCache } from "./swr.js";
 import { createHash } from "node:crypto";
 
-export const OUTCOME_STEPS = [
+/** The steps lead-service holds a bucket for (its bucket tokens): the campaigns reach and "contacted by us" read them. */
+export const LEAD_BUCKET_STEPS = [
   "website_visit",
   "signup",
   "form_submission",
@@ -58,9 +62,19 @@ export const OUTCOME_STEPS = [
   "meeting_attended",
   "sale",
 ] as const;
-export type OutcomeStep = (typeof OUTCOME_STEPS)[number];
 
-/** Which crm fact types state each step. */
+/**
+ * « Client Satisfied » (CLIENT-SATISFIED-1107, features-service catalogue key `client_satisfied`): a paying client of the
+ * brand wrote it a positive message, Jev's verdict stored in `client_message_verdicts` (people/client-satisfaction.ts).
+ * No lead-service bucket: crm-service states it alone.
+ */
+export const CLIENT_SATISFIED_STEP = "client_satisfied" as const;
+
+export const OUTCOME_STEPS = [...LEAD_BUCKET_STEPS, CLIENT_SATISFIED_STEP] as const;
+export type OutcomeStep = (typeof OUTCOME_STEPS)[number];
+export type LeadBucketStep = (typeof LEAD_BUCKET_STEPS)[number];
+
+/** Which crm fact types state each step (`client_satisfied`: none, its evidence is a stored verdict on a message fact). */
 export const STEP_FACT_TYPES: Record<OutcomeStep, readonly string[]> = {
   website_visit: ["website_visit"],
   signup: ["signup"],
@@ -68,6 +82,7 @@ export const STEP_FACT_TYPES: Record<OutcomeStep, readonly string[]> = {
   meeting_booked: ["meeting_booked"],
   meeting_attended: ["meeting_attended"],
   sale: ["sale", "payment"],
+  client_satisfied: [],
 };
 
 async function rows<T>(query: SQL): Promise<T[]> {
@@ -139,7 +154,7 @@ async function walkBucket(identity: SiblingIdentity, bucket: string, offerId: st
  * leads our campaigns never brought there (distribute.you: all 101 Clerk signups sit in its
  * brand-wide signup bucket, none caused by outreach, while every offer's signup bucket is 0).
  */
-export async function readContactedReach(identity: SiblingIdentity, steps: readonly OutcomeStep[]): Promise<ContactedReach[]> {
+export async function readContactedReach(identity: SiblingIdentity, steps: readonly LeadBucketStep[]): Promise<ContactedReach[]> {
   const offers = await readBrandOffers(identity);
   const pairs = offers.flatMap((o) => steps.map((step) => ({ offerId: o.offerId, step })));
   const seen = new Set<string>();
@@ -161,7 +176,7 @@ export async function readContactedReach(identity: SiblingIdentity, steps: reado
  * address (a lead in two campaigns is one address). Same population as its
  * `/orgs/leads/bucket-counts` (default statuses).
  */
-export async function readCampaignReach(identity: SiblingIdentity, steps: readonly OutcomeStep[]): Promise<CampaignReach[]> {
+export async function readCampaignReach(identity: SiblingIdentity, steps: readonly LeadBucketStep[]): Promise<CampaignReach[]> {
   const perStep = await mapLimit([...steps], 3, async (step) => {
     const byEmail = new Map<string, CampaignReach>();
     await walkBucket(identity, step, null, (row) => {
@@ -205,6 +220,44 @@ export const NOT_CALENDAR_BOOKING_FORM = sql`(f.type <> 'form_submitted' OR f.pa
           AND cal.payload->>'formId' = f.payload->>'formId'
       ))`;
 
+/** The fact types stating a person is a PAYING client of the brand: the `sale` step's evidence + the CRM's `client` label. */
+export const PAYING_CLIENT_FACT_TYPES = ["sale", "payment", "client"] as const;
+
+/**
+ * Per paying client of the brand (current fact owner), when they became one: their earliest dated paying fact (a deal
+ * won, a payment that STANDS, a CRM `client` label), NULL when every one is undated. Columns owner_person_key, client_since.
+ */
+export function payingClientsSql(orgId: string, brandId: string): SQL {
+  return sql`
+    SELECT f.owner_person_key, min(f.occurred_at) AS client_since
+    FROM people_facts f
+    WHERE f.org_id = ${orgId} AND f.brand_id = ${brandId}
+      AND f.live AND f.owner_person_key IS NOT NULL
+      AND f.type IN (${sql.join(PAYING_CLIENT_FACT_TYPES.map((t) => sql`${t}`), sql`, `)})
+      AND ${PAYMENT_STANDS}
+    GROUP BY f.owner_person_key
+  `;
+}
+
+/**
+ * `client_satisfied` evidence: each live message a paying client wrote since becoming one whose CURRENT text Jev judged
+ * positive (client-satisfaction.ts). The paying condition is re-checked here: a refund that ends it ends the outcome.
+ * Same columns as `evidence`.
+ */
+function clientSatisfiedEvidence(orgId: string, brandId: string): SQL {
+  return sql`
+    SELECT f.owner_person_key AS person_key, ${CLIENT_SATISFIED_STEP}::text AS step,
+           f.source, f.occurred_at, f.feed_seq, f.emails, f.full_name
+    FROM client_message_verdicts v
+    JOIN people_facts f ON f.org_id = v.org_id AND f.brand_id = v.brand_id AND f.natural_key = v.natural_key
+    JOIN (${payingClientsSql(orgId, brandId)}) pc ON pc.owner_person_key = f.owner_person_key
+    WHERE v.org_id = ${orgId} AND v.brand_id = ${brandId} AND v.verdict = 'positive'
+      AND f.live AND f.type = 'message_in' AND f.owner_person_key IS NOT NULL
+      AND v.text_hash = md5(COALESCE(f.payload->>'text', ''))
+      AND (pc.client_since IS NULL OR f.occurred_at >= pc.client_since)
+  `;
+}
+
 /**
  * The live step evidence of one brand: one row per fact, its step and its owner.
  * A payment counts only when it stands: status `succeeded` AND net of refunds > 0
@@ -214,6 +267,23 @@ function evidence(orgId: string, brandId: string, step: OutcomeStep | null, camp
   const steps = step ? [step] : [...OUTCOME_STEPS];
   const types = [...new Set(steps.flatMap((s) => STEP_FACT_TYPES[s]))];
   const reach = JSON.stringify(campaigns.filter((c) => steps.includes(c.step)));
+  const facts =
+    types.length === 0
+      ? sql``
+      : sql`
+    UNION ALL
+    SELECT f.owner_person_key AS person_key,
+           CASE f.type WHEN 'form_submitted' THEN 'form_submission'
+                       WHEN 'payment' THEN 'sale'
+                       ELSE f.type END AS step,
+           f.source, f.occurred_at, f.feed_seq, f.emails, f.full_name
+    FROM people_facts f
+    WHERE f.org_id = ${orgId} AND f.brand_id = ${brandId}
+      AND f.live AND f.owner_person_key IS NOT NULL
+      AND f.type IN (${sql.join(types.map((t) => sql`${t}`), sql`, `)})
+      AND ${PAYMENT_STANDS}
+      AND ${NOT_CALENDAR_BOOKING_FORM}`;
+  const satisfied = steps.includes(CLIENT_SATISFIED_STEP) ? sql` UNION ALL ${clientSatisfiedEvidence(orgId, brandId)}` : sql``;
   // A campaigns reach is the person whose identity holds that address, else a
   // person of its own (`email:<addr>`, the key the people index would give them).
   //
@@ -232,18 +302,8 @@ function evidence(orgId: string, brandId: string, step: OutcomeStep | null, camp
       WHERE pp.org_id = ${orgId} AND pp.brand_id = ${brandId}
         AND pp.identity_keys ?| ARRAY(SELECT 'email:' || x.email FROM jsonb_to_recordset(${reach}::jsonb) AS x(email text))
     ) p ON p.identity_keys @> jsonb_build_array('email:' || l.email)
-    UNION ALL
-    SELECT f.owner_person_key AS person_key,
-           CASE f.type WHEN 'form_submitted' THEN 'form_submission'
-                       WHEN 'payment' THEN 'sale'
-                       ELSE f.type END AS step,
-           f.source, f.occurred_at, f.feed_seq, f.emails, f.full_name
-    FROM people_facts f
-    WHERE f.org_id = ${orgId} AND f.brand_id = ${brandId}
-      AND f.live AND f.owner_person_key IS NOT NULL
-      AND f.type IN (${sql.join(types.map((t) => sql`${t}`), sql`, `)})
-      AND ${PAYMENT_STANDS}
-      AND ${NOT_CALENDAR_BOOKING_FORM}
+    ${facts}
+    ${satisfied}
   `;
 }
 
@@ -446,6 +506,22 @@ export interface OutcomePerson {
   contactedByUs: boolean;
   state: string | null;
   stateSource: string | null;
+  /**
+   * `client_satisfied` only: the messages that made it, each with Jev's verdict (newest first, at most 5). Absent on
+   * every other step.
+   */
+  satisfiedBy?: SatisfiedMessage[];
+}
+
+/** One positive message of a paying client, the stored evidence of a `client_satisfied` reach. */
+export interface SatisfiedMessage {
+  at: string | null;
+  source: string;
+  channel: string | null;
+  excerpt: string;
+  pPositive: number;
+  judgedAt: string;
+  factId: string;
 }
 
 /**
@@ -508,6 +584,7 @@ export async function readOutcomePeople(
     list.length > 0
       ? list[0].total
       : (await rows<{ n: number }>(sql`WITH e AS (${ev}) SELECT count(DISTINCT person_key)::int AS n FROM e`))[0].n;
+  const satisfied = step === CLIENT_SATISFIED_STEP ? await satisfiedMessagesOf(orgId, brandId, list.map((r) => r.person_key)) : null;
   return {
     total,
     people: list.map((r) => ({
@@ -522,8 +599,53 @@ export async function readOutcomePeople(
       contactedByUs: r.contacted,
       state: r.state,
       stateSource: r.state_source,
+      ...(satisfied ? { satisfiedBy: satisfied.get(r.person_key) ?? [] } : {}),
     })),
   };
+}
+
+/** Per person key, the positive messages behind their `client_satisfied` reach (the same evidence, newest first, <= 5). */
+async function satisfiedMessagesOf(orgId: string, brandId: string, personKeys: string[]): Promise<Map<string, SatisfiedMessage[]>> {
+  const out = new Map<string, SatisfiedMessage[]>();
+  if (personKeys.length === 0) return out;
+  const found = await rows<{
+    person_key: string;
+    fact_id: string;
+    at: string | Date | null;
+    source: string;
+    channel: string | null;
+    excerpt: string;
+    p_positive: number;
+    judged_at: string | Date;
+  }>(sql`
+    SELECT x.person_key, x.fact_id, x.at, x.source, x.channel, x.excerpt, x.p_positive, x.judged_at FROM (
+      SELECT f.owner_person_key AS person_key, f.fact_id, f.occurred_at AS at, f.source, f.payload->>'channel' AS channel,
+             v.excerpt, v.p_positive, v.judged_at,
+             row_number() OVER (PARTITION BY f.owner_person_key ORDER BY f.occurred_at DESC NULLS LAST, f.feed_seq DESC) AS n
+      FROM client_message_verdicts v
+      JOIN people_facts f ON f.org_id = v.org_id AND f.brand_id = v.brand_id AND f.natural_key = v.natural_key
+      JOIN (${payingClientsSql(orgId, brandId)}) pc ON pc.owner_person_key = f.owner_person_key
+      WHERE v.org_id = ${orgId} AND v.brand_id = ${brandId} AND v.verdict = 'positive'
+        AND f.live AND f.type = 'message_in'
+        AND f.owner_person_key IN (${sql.join(personKeys.map((k) => sql`${k}`), sql`, `)})
+        AND v.text_hash = md5(COALESCE(f.payload->>'text', ''))
+        AND (pc.client_since IS NULL OR f.occurred_at >= pc.client_since)
+    ) x WHERE x.n <= 5
+    ORDER BY x.person_key, x.n
+  `);
+  for (const r of found) {
+    const list = out.get(r.person_key) ?? out.set(r.person_key, []).get(r.person_key)!;
+    list.push({
+      at: r.at === null ? null : new Date(r.at).toISOString(),
+      source: r.source,
+      channel: r.channel,
+      excerpt: r.excerpt,
+      pPositive: Number(r.p_positive),
+      judgedAt: new Date(r.judged_at).toISOString(),
+      factId: r.fact_id,
+    });
+  }
+  return out;
 }
 
 // ─── Cached reads (DASH-LATENCY-1014) ───────────────────────────────────────
@@ -552,7 +674,7 @@ const reachCache = new SwrCache<OutcomeInputs>("outcomes campaign reach", outcom
 /** Every step's campaigns reach of the brand (readCampaignReach over all steps) + its contacted leads, cached. */
 export function cachedOutcomeInputs(identity: SiblingIdentity): Promise<OutcomeInputs> {
   return reachCache.get(`${identity.orgId}|${identity.brandId}`, () =>
-    Promise.all([readCampaignReach(identity, OUTCOME_STEPS), readContactedReach(identity, OUTCOME_STEPS)])
+    Promise.all([readCampaignReach(identity, LEAD_BUCKET_STEPS), readContactedReach(identity, LEAD_BUCKET_STEPS)])
       .then(([reach, contacted]) => ({ reach, contacted }))
       .catch((err: Error) => {
         throw new CampaignReachUnavailable(err.message);
@@ -562,13 +684,15 @@ export function cachedOutcomeInputs(identity: SiblingIdentity): Promise<OutcomeI
 
 /** What the counts are computed from, besides the campaigns reach. One indexed probe. */
 export async function outcomesFingerprint(orgId: string, brandId: string): Promise<string> {
-  const [r] = await rows<{ built: string | null; seq: string | null; calendars: string | null }>(sql`
+  const [r] = await rows<{ built: string | null; seq: string | null; calendars: string | null; verdicts: string | null }>(sql`
     SELECT (SELECT last_built_at::text FROM people_scopes WHERE org_id = ${orgId} AND brand_id = ${brandId}) AS built,
+           (SELECT count(*)::text || ':' || COALESCE(max(judged_at)::text, '') FROM client_message_verdicts
+              WHERE org_id = ${orgId} AND brand_id = ${brandId}) AS verdicts,
            (SELECT max(feed_seq)::text FROM people_facts WHERE org_id = ${orgId} AND brand_id = ${brandId}) AS seq,
            (SELECT md5(string_agg(external_id || ':' || content_hash, ',' ORDER BY external_id, content_hash))
               FROM ghl_raw_records WHERE org_id = ${orgId} AND brand_id = ${brandId} AND kind = 'calendar') AS calendars
   `);
-  return `${r?.built ?? ""}|${r?.seq ?? ""}|${r?.calendars ?? ""}`;
+  return `${r?.built ?? ""}|${r?.seq ?? ""}|${r?.calendars ?? ""}|${r?.verdicts ?? ""}`;
 }
 
 const reachDigest = (inputs: OutcomeInputs) => createHash("sha256").update(JSON.stringify(inputs)).digest("hex");

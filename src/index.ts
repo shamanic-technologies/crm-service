@@ -41,6 +41,7 @@ import { startActivityWatch } from "./lib/account-activity/activity.js";
 import { startLineWatch } from "./lib/whatsapp/line-health.js";
 import { startOutcomeDeclarations } from "./lib/reply-trigger/outcome.js";
 import { startLeadIdentifiedDeclarations } from "./lib/people/lead-identified.js";
+import { startClientSatisfactionWatch } from "./lib/people/client-satisfaction.js";
 import { startMessageSentDeclarations } from "./lib/whatsapp/message-sent.js";
 import { startFormSubmittedDeclarations } from "./lib/gohighlevel/form-submitted.js";
 
@@ -158,6 +159,8 @@ if (process.env.NODE_ENV !== "test") {
         startOutcomeDeclarations();
         // Declares each lead the registry's Jev identified (a conversation tagged professional_to_brand) as lead_identified.
         startLeadIdentifiedDeclarations();
+        // Judges each message a paying client wrote the brand (Jev): a positive one = outcome « Client Satisfied ».
+        startClientSatisfactionWatch();
         // Declares each WhatsApp message a campaign sent as message_sent on its send run (past and future, one path).
         startMessageSentDeclarations();
         // Declares each CRM form submission crm-service holds as form_submitted on its lead (past and future, one path).
