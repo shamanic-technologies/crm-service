@@ -1442,6 +1442,11 @@ export const formTriggerReports = pgTable(
     attempts: integer("attempts").notNull().default(0),
     lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
     offerId: uuid("offer_id"),
+    // FORM-OFFER-PICK-1108: how the offer was placed ('stated_for_form' | 'stated_for_brand' | 'only_offer' |
+    // 'person_reached' | 'judged'), and Jev's verdict when judged (model, confidence, probabilities per offer,
+    // judgedAt): persisted the moment it is placed, so a retry never re-judges.
+    offerBasis: text("offer_basis"),
+    offerVerdict: jsonb("offer_verdict"),
     runId: text("run_id"),
     reportedAt: timestamp("reported_at", { withTimezone: true }),
     // campaign-service's answer: its event id, when it recorded it, what it did.

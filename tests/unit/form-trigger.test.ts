@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { isCalendarBookingForm, submissionAnswers, submissionPerson } from "../../src/lib/form-trigger/submission.js";
 import { pickOffer } from "../../src/lib/form-trigger/offer.js";
+import { offerChoice, pickReachedOffer } from "../../src/lib/form-trigger/offer-pick.js";
 import { occurrenceBody } from "../../src/lib/form-trigger/campaign-client.js";
 import { nextAttemptDue } from "../../src/lib/form-trigger/watch.js";
 
@@ -87,6 +88,49 @@ describe("pickOffer", () => {
     expect(r.offerId).toBeNull();
     expect(r).toMatchObject({ reason: "offer_unknown" });
     expect(pickOffer("f1", [], [OLD])).toMatchObject({ offerId: null, detail: "the brand has no active offer" });
+  });
+});
+
+describe("pickReachedOffer (FORM-OFFER-PICK-1108)", () => {
+  const ev = (ref: string) => ({ via: "audience_served" as const, ref, at: "x" });
+  it("the earliest offer that reached the person, among the brand's active offers", () => {
+    const active = new Set(["a", "b"]);
+    expect(
+      pickReachedOffer(
+        [
+          { offerId: "b", at: new Date("2026-10-02"), evidence: ev("2") },
+          { offerId: "a", at: new Date("2026-10-01"), evidence: ev("1") },
+        ],
+        active,
+      ),
+    ).toEqual({ offerId: "a", evidence: ev("1") });
+  });
+  it("an archived offer or an offer-less audience reached nobody for this pick", () => {
+    expect(pickReachedOffer([{ offerId: "c", at: new Date(0), evidence: ev("c") }, { offerId: null, at: new Date(0), evidence: ev("n") }], new Set(["a"]))).toBeNull();
+    expect(pickReachedOffer([], new Set(["a"]))).toBeNull();
+  });
+});
+
+describe("offerChoice (FORM-OFFER-PICK-1108)", () => {
+  it("one option per offer, each with what it sells and its audience text; the answers as question / answer", () => {
+    const { state, question, keyToOffer } = offerChoice(
+      { name: "Doc Dinners", website: "docdinners.com", description: null },
+      [
+        { offerId: "a", name: "Restaurants", whatWeOffer: "Dinners", audienceId: "aud-a", audienceText: "Restaurant owners" },
+        { offerId: "b", name: "Doctors", whatWeOffer: null, audienceId: null, audienceText: null },
+      ],
+      { formName: "Meta Ads", answers: [{ key: "k1", label: "Which profession best describes you?", value: "Chiropractor" }, { key: "k2", label: null, value: "x" }] },
+    );
+    expect(question.type).toBe("choice");
+    expect(Object.keys(question.criteria)).toEqual(["o0", "o1"]);
+    expect(question.criteria.o0).toContain("Restaurant owners");
+    expect(question.criteria.o0).toContain("Dinners");
+    expect(question.criteria.o1).toContain("No audience text");
+    expect([...keyToOffer]).toEqual([["o0", "a"], ["o1", "b"]]);
+    expect(state.formFill).toEqual({
+      formName: "Meta Ads",
+      answers: [{ question: "Which profession best describes you?", answer: "Chiropractor" }, { question: "k2", answer: "x" }],
+    });
   });
 });
 

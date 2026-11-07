@@ -1505,8 +1505,14 @@ in a brand's CRM is reported to campaign-service's generic trigger door
   submissionId, formId, formName, submittedAt, answers [{key, label, value}], crmContactId}`
   handed verbatim to the workflow. `answers` = `others.fieldsOriSequance` order minus identity
   keys and GoHighLevel's fixed non-answer elements; labels from `GET /locations/{id}/customFields`.
-- **Offer**: stated per form (`PUT /orgs/gohighlevel/form-offers {brandId, formId?, offerId}`,
-  omitted formId = every form) > the brand's ONLY active offer > `offer_unknown` (not sent, loud).
+- **Offer** (`offer-pick.ts`, FORM-OFFER-PICK-1108): stated per form (`PUT /orgs/gohighlevel/form-offers {brandId, formId?,
+  offerId}`, omitted formId = every form) > the brand's ONLY active offer > the pick persisted on the report (judged once)
+  > the offer that already REACHED the person at the brand (our earlier reported fill by email / phone, or an offer audience
+  that SERVED them: human-service `memberships/by-email` provenance `served`; earliest wins) > Jev `choice` over the active
+  offers (name + what it sells + the offer's `role: "target"` audience `targetText`) on the answers, most probable offer.
+  Persisted `offer_basis` + `offer_verdict` (confidence, probabilities) the moment it is placed, served on the read. No
+  active offer = `offer_unknown`; a sibling / Jev down = `offer_pick_failed`; both loud, retried. Phone / reply triggers
+  keep `resolveOffer` (stated > only offer).
 - **Detection kicks the brand's GoHighLevel sync + people build** (unawaited) and reports at
   once: lead-service only serves a person it knows from our fact feed; campaign-service holds a
   `person_not_known` event `pending` and retries it 60 min.

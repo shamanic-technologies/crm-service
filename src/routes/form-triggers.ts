@@ -46,6 +46,8 @@ router.get(
         lastError: r.lastError,
         attempts: r.attempts,
         offerId: r.offerId,
+        offerBasis: r.offerBasis,
+        offerVerdict: r.offerVerdict,
         submittedAt: r.submittedAt,
         detectedAt: r.detectedAt,
         reportedAt: r.reportedAt,
