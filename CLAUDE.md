@@ -1877,7 +1877,7 @@ this answers the same steps for everyone the brand's own tools state.
 - **`client_satisfied` = « Client Satisfied »** (CLIENT-SATISFIED-1107, features catalogue key, `people/client-satisfaction.ts`):
   a PAYING client (live `sale` | standing `payment` | CRM `client` label; since = earliest dated, all undated = any date)
   whose live `message_in` (any channel the feed carries: Gmail, WhatsApp, LinkedIn, Telegram) written since becoming one
-  Jev judged `positive` (P >= 0.5; politeness alone is neutral). Verdicts in `client_message_verdicts` (fact natural key +
+  Jev judged `positive` (P >= 0.75: at 0.5 plain "Ok cool." passed, prod 2026-11-07); our staff (`isStaffEmail` on the person) is nobody's client (the owner's test payments + own mailbox mails counted). Verdicts in `client_message_verdicts` (fact natural key +
   text md5, excerpt, run, model), judged once; a `no_words` message gets no call. Loop every 10 min (+2 min boot,
   `CLIENT_SATISFACTION=off`), ONE path past and future (first pass = backfill), one org run per scope pass
   `people.client-satisfaction` (scope creator; chat-service declares the cost). `POST /internal/client-satisfaction/judge`

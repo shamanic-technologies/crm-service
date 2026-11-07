@@ -111,14 +111,15 @@ describe.skipIf(!RUN)("CLIENT-SATISFIED-1107 client_satisfied outcome (real DB)"
     await wipe();
     [scope] = await db.insert(peopleScopes).values({ orgId: ORG, brandId: BRAND, createdByUserId: USER, status: "built" }).returning();
     await db.insert(people).values(
-      ["pam", "nat", "neo", "ref", "gil"].map((n) => ({
+      ["pam", "nat", "neo", "ref", "gil", "kev"].map((n) => ({
         scopeId: scope.id,
         orgId: ORG,
         brandId: BRAND,
         personKey: `email:${n}@x.com`,
         identityKeys: [`email:${n}@x.com`],
         displayName: n,
-        emails: [`${n}@x.com`],
+        // Kev is our staff: his person also holds an @distribute.you address.
+        emails: n === "kev" ? [`${n}@x.com`, "ops+test@distribute.you"] : [`${n}@x.com`],
         phones: [],
         sources: ["stripe"],
         presences: [],
@@ -147,6 +148,9 @@ describe.skipIf(!RUN)("CLIENT-SATISFIED-1107 client_satisfied outcome (real DB)"
       // Gil: a CRM `client` label (undated) and a positive email.
       fact("email:gil@x.com", "client", "gohighlevel", null, {}),
       fact("email:gil@x.com", "message_in", "gmail", "2026-10-02T00:00:00Z", said("Love working with you")),
+      // Kev (staff) made a test payment and writes "amazing": staff is nobody's client, never judged.
+      fact("email:kev@x.com", "payment", "stripe", "2026-09-01T00:00:00Z", paid()),
+      fact("email:kev@x.com", "message_in", "gmail", "2026-09-05T00:00:00Z", said("amazing tool")),
     ]);
   });
   afterAll(wipe);
@@ -155,7 +159,7 @@ describe.skipIf(!RUN)("CLIENT-SATISFIED-1107 client_satisfied outcome (real DB)"
     const r = await judgeScope(scope, fakeJudge);
     expect(r).toMatchObject({ judged: 5, positive: 2, noWords: 1, failedCalls: 0 });
     expect(RUNS_OPENED).toBe(1);
-    // Never asked: a non-payer, a refunded payer, a message before paying, a message with no words.
+    // Never asked: a non-payer, a refunded payer, our staff, a message before paying, a message with no words.
     expect(ASKED.sort()).toEqual(["Love working with you", "The dashboard is broken", "Where is my invoice?", "You guys are amazing", "ok"]);
 
     const verdicts = await db.select().from(clientMessageVerdicts).where(eq(clientMessageVerdicts.orgId, ORG));

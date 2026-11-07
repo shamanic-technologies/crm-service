@@ -2968,7 +2968,7 @@ const OutcomeStepSchema = z.enum(OUTCOME_STEPS).openapi({
     "lead-service's bucket tokens. website_visit / signup / form_submission (crm fact form_submitted) / meeting_booked / " +
     "meeting_attended / sale (a CRM deal won, or a Stripe payment that succeeded and was not wholly refunded), plus crm-service's own " +
     "client_satisfied (« Client Satisfied »: a paying client of the brand (a deal won, a payment that stands, or the CRM's client " +
-    "label) wrote it a message, any channel, since becoming one, that Jev judged positive; no lead-service bucket, contactedByUs is 0).",
+    "label) wrote it a message, any channel, since becoming one, that Jev judged positive (P >= 0.75); our staff never counts; no lead-service bucket, contactedByUs is 0).",
 });
 const ScopeViewSchema = z.object({
   status: z.string().openapi({ description: "building on the first read for a brand (the people index is being built), then the build status." }),
@@ -3039,7 +3039,7 @@ export const OutcomePeopleResponseSchema = registry.register(
               source: z.string().openapi({ description: "Where it was written: gmail, matrix (WhatsApp / LinkedIn / Telegram...)." }),
               channel: z.string().nullable(),
               excerpt: z.string().openapi({ description: "The message's first 500 characters, as Jev judged it." }),
-              pPositive: z.number().openapi({ description: "Jev's probability that the message is positive about the brand (>= 0.5 counts)." }),
+              pPositive: z.number().openapi({ description: "Jev's probability that the message is positive about the brand (>= 0.75 counts)." }),
               judgedAt: z.string(),
               factId: z.string().uuid().openapi({ description: "The message fact on the people fact feed." }),
             }),
