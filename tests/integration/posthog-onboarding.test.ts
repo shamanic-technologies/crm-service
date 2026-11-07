@@ -86,6 +86,7 @@ function installFetchStub() {
       const rows = (cols: string[], data: Record<string, unknown>[]) =>
         json({ columns: cols, results: data.map((d) => cols.map((c) => d[c] ?? null)) });
       if (q.includes("SELECT DISTINCT toString(person_id) AS id")) return rows(["id"], [{ id: person.id }]);
+      if (q.includes("FROM person_distinct_ids")) return rows(["person_id", "ids"], [{ person_id: person.id, ids: person.distinct_ids }]);
       if (q.includes("FROM persons AS p")) return rows(Object.keys(person), [person]);
       if (q.includes("event = '$pageview'")) return rows(["session_id"], []);
       if (q.includes("NOT LIKE '$%'")) return rows(Object.keys(EVENTS[0]), EVENTS);
@@ -143,9 +144,12 @@ describe.skipIf(!RUN)("a product's signup walk on the person (ONBOARDING-IN-UNIB
 
     const first = await mirrorRecentPersons(conn, new Date("2026-10-15T08:55:00Z"));
     expect(first).toMatchObject({ changed: ["ph-visitor"], created: 1 });
-    // The fast mirror asks only who is KNOWN: a person set by none of these keys is never read.
+    // POSTHOG-429-1107: who moved is read by event NAME (person-setting events + custom events), never by reading
+    // `properties.$set` nor the persons table (2-3 GB a minute); who is KNOWN is decided on the person read.
     const touched = hogql.find((q) => q.includes("SELECT DISTINCT"))!;
-    for (const k of ["email", "phone", "name", "first_name", "website"]) expect(touched).toContain(`$set.${k}`);
+    expect(touched).toContain("'$identify'");
+    expect(touched).not.toContain("$set.");
+    expect(touched).not.toContain("FROM persons");
 
     const [c] = await db.select().from(contacts).where(eq(contacts.brandId, BRAND));
     expect(c).toMatchObject({ source: "posthog", externalId: "ph-visitor", primaryEmail: null, phoneE164: null, fullName: null });

@@ -533,6 +533,13 @@
       "when": 1792900000000,
       "tag": "0076_form_submitted_performer",
       "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1793000000000,
+      "tag": "0077_posthog_read_budget",
+      "breakpoints": true
     }
   ]
 }

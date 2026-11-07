@@ -1877,6 +1877,14 @@ export const posthogConnections = pgTable(
     lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
     syncedThrough: timestamp("synced_through", { withTimezone: true }),
     lastRunId: text("last_run_id"),
+    // POSTHOG-429-1107: PostHog refused reads because the PROJECT's hourly read budget is used up. A temporary state,
+    // never `error`: no read is sent before `rate_limited_until` (PostHog's own "available in N seconds"); since =
+    // the first refusal since the last complete pass; message = PostHog's words. All three cleared by a complete pass.
+    rateLimitedUntil: timestamp("rate_limited_until", { withTimezone: true }),
+    rateLimitedSince: timestamp("rate_limited_since", { withTimezone: true }),
+    rateLimitMessage: text("rate_limit_message"),
+    // When every known person was last re-listed (a full persons read, ~0.8 GB): every 6 h, not every pass.
+    personsListedAt: timestamp("persons_listed_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
@@ -1907,6 +1915,9 @@ export const posthogRawRecords = pgTable(
     contentHash: text("content_hash").notNull(),
     payload: jsonb("payload").notNull(),
     mirroredAt: timestamp("mirrored_at", { withTimezone: true }).notNull().defaultNow(),
+    // POSTHOG-429-1107, `person` rows only: when the person's whole visit + event history was read. NULL = still to
+    // read (a person new to us, or one mirrored while PostHog refused reads): the paced history backlog reads it.
+    historyReadAt: timestamp("history_read_at", { withTimezone: true }),
   },
   (table) => [
     uniqueIndex("posthog_raw_records_conn_kind_external_uq").on(

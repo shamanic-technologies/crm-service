@@ -123,9 +123,20 @@ function hogqlAnswer(query: string) {
   if (query.includes("FROM persons AS p") && query.includes("WHERE NOT")) {
     return rows(PH_COLS, query.includes("'user_bob'") && !phBobHidden ? PH_BY_AUTH_ID : []);
   }
+  // POSTHOG-429-1107: persons by id (the auth-id and fast-mirror reads), then their distinct ids from their own read.
+  const all = [...PH_PERSONS, ...(phBobHidden ? [] : PH_BY_AUTH_ID)];
+  if (query.includes("FROM persons AS p") && query.includes("toString(p.id) IN")) {
+    return rows(PH_COLS, all.filter((p) => query.includes(`'${p.id}'`)));
+  }
   if (query.includes("FROM persons AS p")) return rows(PH_COLS, query.includes("toString(p.id) >") ? [] : PH_PERSONS);
+  if (query.includes("FROM person_distinct_ids") && query.includes("groupArray")) {
+    return rows(["person_id", "ids"], all.filter((p) => query.includes(`'${p.id}'`)).map((p) => ({ person_id: p.id, ids: p.distinct_ids })));
+  }
+  if (query.includes("FROM person_distinct_ids")) {
+    return rows(["person_id"], all.filter((p) => p.distinct_ids.some((d) => query.includes(`'${d}'`))).map((p) => ({ person_id: p.id })));
+  }
   if (query.includes("event = '$pageview'")) {
-    const visits = query.includes("'ph-bob'")
+    const visits = query.includes("'user_bob'")
       ? [
           {
             session_id: "s-bob",

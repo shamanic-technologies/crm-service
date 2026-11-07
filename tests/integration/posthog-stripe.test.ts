@@ -197,6 +197,12 @@ function hogqlAnswer(query: string) {
       ["id", "email", "name", "first_name", "last_name", "created_at", "is_identified"],
       query.includes("toString(p.id) >") ? [] : PERSONS,
     );
+  // POSTHOG-429-1107: distinct ids come from their own small read; each test person's distinct id is its own id.
+  if (query.includes("FROM person_distinct_ids") && query.includes("groupArray")) {
+    const ids = [...query.matchAll(/'(ph-[a-z]+)'/g)].map((m) => m[1]);
+    return rows(["person_id", "ids"], [...new Set(ids)].map((id) => ({ person_id: id, ids: [id] })));
+  }
+  if (query.includes("FROM person_distinct_ids")) return rows(["person_id"], []);
   throw new Error(`unexpected HogQL ${query}`);
 }
 

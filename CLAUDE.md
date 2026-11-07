@@ -1959,11 +1959,23 @@ re-derives silver with no vendor call. API reads are free → no cost declared.
   from `region`, never taken from the caller (no SSRF). Reads go through the
   HogQL query API (a POST that only needs `query:read`). ⚠️ PostHog REFUSES
   `OFFSET` on personal-API-key queries → keyset pagination only. Only
-  identified persons (`properties.email`) are read; anonymous visitors never
-  leave PostHog. Silver: `contacts` (source `posthog`) + `posthog_activities`
+  known persons are stored; an anonymous visitor's row read in a window is dropped in memory, never stored.
+  Silver: `contacts` (source `posthog`) + `posthog_activities`
   (`visit` = one session aggregated over ALL its pageviews, `event` = custom
-  non-`$` event). Window = `synced_through - 1h`; a capped stream resumes from
+  non-`$` event). Window = `synced_through - 1h` (first pass: last day); a capped stream resumes from
   its last row.
+  **The project's hourly READ BUDGET (POSTHOG-429-1107)**: personal-key queries draw on a per-project budget of bytes
+  scanned (shared with every other reader of the project: dashboard, scripts); spent = 429 `api_queries_budget_exceeded`
+  + `Retry-After`. 2026-11-02..07 our own reads spent it (the fast mirror's `properties.$set` + persons sub-query = 2-3 GB
+  a MINUTE; one person's history by `person.id` 7.6 GB) and every retry spent more: 5 days without a sync. Rules, each
+  measured with PostHog's `X-PostHog-Query-Bytes-Read`: never a `persons` sub-query nor `person.id` filter in an events
+  read (window reads have no person filter, kept in code; history reads `distinct_id IN` + dated from creation), the
+  fast mirror picks who moved by event NAME (2.8 MB) then reads those persons by id (~18 MB), persons are re-listed every
+  6 h (`persons_listed_at`). A 429 = a WAIT: `rate_limited_until/_since/_message`, status stays `active` (never error,
+  never paused), no read of the project leaves before then (in-process gate in `hogql` + stored row read by the full
+  pass, the fast mirror and the phone watch); the view's `sync {state: catching_up, reason, retryAt}`; Monitoring's
+  intake `waiting` (red only once 2 h behind). Persons' older history = `posthog_raw_records.history_read_at` NULL
+  backlog, newest first, read only while our reads over the last hour stay under `POSTHOG_BACKFILL_HOURLY_BYTES` (2 GB).
   **A machine's visit is no act of theirs** (POSTHOG-SCANNER-VISIT-1025): mail scanners open every newsletter link
   (`dy_sub` identifies the subscriber), so each visit read as "they visited" → Lead event. `visit.detail.machine` =
   POSITIVE fingerprint only: EVERY pageview desktop with viewport == screen in both dims (headless; measured 7,423 vs

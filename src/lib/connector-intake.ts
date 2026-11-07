@@ -14,7 +14,15 @@ import { assessIntake, dailySeries, HISTORY_DAYS, MIN_ACTIVE_DAYS, MIN_QUIET_DAY
  * creation date (ISO text, or epoch seconds / milliseconds). A kind not listed (pipelines, calendars, forms: setup,
  * not activity) counts for nothing.
  */
-const SOURCES: { source: string; connections: string; raw: string; account: string; dateKey: Record<string, string> }[] = [
+const SOURCES: {
+  source: string;
+  connections: string;
+  raw: string;
+  account: string;
+  dateKey: Record<string, string>;
+  /** The vendor asked us to wait (POSTHOG-429-1107): since / until columns, when the connection table has them. */
+  waiting?: { since: string; until: string };
+}[] = [
   {
     source: "gohighlevel",
     connections: "ghl_connections",
@@ -28,6 +36,7 @@ const SOURCES: { source: string; connections: string; raw: string; account: stri
     raw: "posthog_raw_records",
     account: "c.project_id::text",
     dateKey: { visit: "started_at", event: "timestamp", person: "created_at" },
+    waiting: { since: "c.rate_limited_since", until: "c.rate_limited_until" },
   },
   {
     source: "stripe",
@@ -76,9 +85,11 @@ export async function readConnectorIntake(days: number, now: number = Date.now()
   const since = new Date(now - (HISTORY_DAYS + days + 1) * 86_400_000).toISOString().slice(0, 10);
   const connections: ConnectorIntake["connections"] = [];
   for (const s of SOURCES) {
-    const conns = await rows<{ id: string; org_id: string; brand_id: string; account: string | null; status: string; last_synced_at: Date | null; last_error: string | null }>(sql`
+    const conns = await rows<{ id: string; org_id: string; brand_id: string; account: string | null; status: string; last_synced_at: Date | null; last_error: string | null; waiting_since: Date | null; waiting_until: Date | null }>(sql`
       SELECT c.id::text AS id, c.org_id::text AS org_id, c.brand_id::text AS brand_id, ${sql.raw(s.account)} AS account,
-        c.status, c.last_synced_at, c.last_error
+        c.status, c.last_synced_at, c.last_error,
+        ${sql.raw(s.waiting ? s.waiting.since : "NULL::timestamptz")} AS waiting_since,
+        ${sql.raw(s.waiting ? s.waiting.until : "NULL::timestamptz")} AS waiting_until
       FROM ${sql.raw(s.connections)} c ORDER BY c.created_at, c.id`);
     if (conns.length === 0) continue;
     const keyCase = `CASE r.kind ${Object.entries(s.dateKey).map(([k, f]) => `WHEN '${k}' THEN '${f}'`).join(" ")} END`;
@@ -107,7 +118,15 @@ export async function readConnectorIntake(days: number, now: number = Date.now()
         syncStatus: c.status,
         lastSyncedAt: lastSyncedAt?.toISOString() ?? null,
         lastError: c.last_error,
-        ...assessIntake({ activeDays: [...perDay.keys()], syncStatus: c.status, lastSyncedAt, lastError: c.last_error, now }),
+        ...assessIntake({
+          activeDays: [...perDay.keys()],
+          syncStatus: c.status,
+          lastSyncedAt,
+          lastError: c.last_error,
+          now,
+          waitingSince: c.waiting_since ? new Date(c.waiting_since) : null,
+          waitingUntil: c.waiting_until ? new Date(c.waiting_until) : null,
+        }),
         byDay: dailySeries(perDay, days, now),
       });
     }
