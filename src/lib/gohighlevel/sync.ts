@@ -33,7 +33,8 @@ import {
   type GhlConnection,
   type NewGhlRawRecord,
 } from "../../db/schema.js";
-import { createRun, lazyChildRun, SUPPORT_RUNS, updateRun } from "../runs-client.js";
+import { createRun, lazyChildRun, SUPPORT_RUNS } from "../runs-client.js";
+import { closeRun, connectionErrorText, isRunTrackingFailure } from "../run-close.js";
 import { SERVICE_NAME } from "../../middleware/auth.js";
 import {
   listCalendarAppointments,
@@ -787,12 +788,13 @@ export async function syncConnection(conn: GhlConnection): Promise<ConnectionSyn
       .update(ghlConnections)
       .set({ status: "active", lastError: null, lastRunId: run.id, lastSyncedAt: new Date() })
       .where(eq(ghlConnections.id, conn.id));
-    await updateRun(run.id, "completed", {
-      orgId: conn.orgId,
-      userId: conn.createdByUserId,
-      runId: run.id,
-      brandIds: [conn.brandId],
-    });
+    // POSTHOG-RUNCLOSE-1107: closing the run is our bookkeeping, never the connection's health; it never throws.
+    await closeRun(
+      run.id,
+      "completed",
+      { orgId: conn.orgId, userId: conn.createdByUserId, runId: run.id, brandIds: [conn.brandId] },
+      `gohighlevel connection ${conn.id}`,
+    );
 
     return {
       connectionId: conn.id,
@@ -818,17 +820,21 @@ export async function syncConnection(conn: GhlConnection): Promise<ConnectionSyn
       labelVerdictsDecided,
     };
   } catch (err) {
-    const message = (err as Error).message;
-    await db
-      .update(ghlConnections)
-      .set({ status: "error", lastError: message, lastRunId: run.id })
-      .where(eq(ghlConnections.id, conn.id));
-    await updateRun(run.id, "failed", {
-      orgId: conn.orgId,
-      userId: conn.createdByUserId,
-      runId: run.id,
-      brandIds: [conn.brandId],
-    }).catch((e) => console.error("[crm-service][ghl] failed to close run:", e));
+    if (isRunTrackingFailure(err)) {
+      console.error(`[crm-service][ghl] connection ${conn.id} run ${run.id}: run tracking failed, connection left as is:`, err);
+    } else {
+      console.error(`[crm-service][ghl] connection ${conn.id} run ${run.id}: read failed:`, err);
+      await db
+        .update(ghlConnections)
+        .set({ status: "error", lastError: connectionErrorText("GoHighLevel", err), lastRunId: run.id })
+        .where(eq(ghlConnections.id, conn.id));
+    }
+    await closeRun(
+      run.id,
+      "failed",
+      { orgId: conn.orgId, userId: conn.createdByUserId, runId: run.id, brandIds: [conn.brandId] },
+      `gohighlevel connection ${conn.id}`,
+    );
     throw err;
   }
 }
@@ -897,12 +903,10 @@ export async function rebuildFromBronze(
   try {
     const derived = await deriveSilver(conn);
     const { stageMeaningsDecided, labelVerdictsDecided } = await decideCrmLabels(conn, run.id);
-    await updateRun(run.id, "completed", identity);
+    await closeRun(run.id, "completed", identity, `gohighlevel rebuild ${conn.id}`);
     return { ...derived, stageMeaningsDecided, labelVerdictsDecided };
   } catch (err) {
-    await updateRun(run.id, "failed", identity).catch((e) =>
-      console.error("[crm-service][ghl] failed to close run:", e),
-    );
+    await closeRun(run.id, "failed", identity, `gohighlevel rebuild ${conn.id}`);
     throw err;
   }
 }

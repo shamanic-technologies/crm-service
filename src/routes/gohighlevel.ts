@@ -20,6 +20,7 @@ import { readFunnelReach } from "../lib/gohighlevel/funnel-reach.js";
 import { STAGE_MEANING_MIN_CONFIDENCE } from "../lib/gohighlevel/stage-meanings.js";
 import { LABEL_VERDICT_MIN_CONFIDENCE, readLabelVerdicts } from "../lib/gohighlevel/label-verdicts.js";
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
+import { closePlatformRun } from "../lib/run-close.js";
 import { bookingView, bookMeeting, checkBookingAccess, GHL_SCOPES } from "../lib/gohighlevel/booking.js";
 
 const router = Router();
@@ -681,16 +682,11 @@ router.post("/internal/gohighlevel/sync", apiKeyAuth, async (req, res) => {
       console.log(
         `[crm-service][ghl] sync pass: ${result.results.length} ok, ${result.failures.length} failed`,
       );
-      await updatePlatformRun(
-        platformRunId,
-        result.failures.length > 0 ? "failed" : "completed",
-        SERVICE_NAME,
-      );
+      // POSTHOG-RUNCLOSE-1107: the pass's results stand; closing its run never throws (retried, logged loud).
+      await closePlatformRun(platformRunId, result.failures.length > 0 ? "failed" : "completed", SERVICE_NAME, "ghl sync pass");
     } catch (err) {
       console.error("[crm-service][ghl] sync pass failed:", err);
-      await updatePlatformRun(platformRunId, "failed", SERVICE_NAME).catch((e) =>
-        console.error("[crm-service][ghl] failed to close trigger run:", e),
-      );
+      await closePlatformRun(platformRunId, "failed", SERVICE_NAME, "ghl sync pass");
     }
   });
 });
@@ -733,12 +729,10 @@ router.post("/internal/gohighlevel/rebuild", apiKeyAuth, async (req, res) => {
       for (const conn of rows) {
         await rebuildFromBronze(conn);
       }
-      await updatePlatformRun(platformRunId, "completed", SERVICE_NAME);
+      await closePlatformRun(platformRunId, "completed", SERVICE_NAME, "ghl rebuild pass");
     } catch (err) {
       console.error("[crm-service][ghl] rebuild failed:", err);
-      await updatePlatformRun(platformRunId, "failed", SERVICE_NAME).catch((e) =>
-        console.error("[crm-service][ghl] failed to close rebuild run:", e),
-      );
+      await closePlatformRun(platformRunId, "failed", SERVICE_NAME, "ghl rebuild pass");
     }
   });
 });

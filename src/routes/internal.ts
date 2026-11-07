@@ -6,6 +6,7 @@ import { contactUploads } from "../db/schema.js";
 import { apiKeyAuth, SERVICE_NAME } from "../middleware/auth.js";
 import { promoteUpload } from "../lib/promote.js";
 import { createPlatformRun, markOwnRunsSupport, RunsServiceError, updatePlatformRun } from "../lib/runs-client.js";
+import { closePlatformRun } from "../lib/run-close.js";
 import { transferBrand } from "../lib/transfer-brand.js";
 import { TransferBrandRequestSchema } from "../schemas.js";
 import { pgErrorOf } from "../lib/pg-error.js";
@@ -61,12 +62,10 @@ router.post("/internal/contacts/promote", apiKeyAuth, async (req, res) => {
           await promoteUpload(u.id);
         }
       }
-      await updatePlatformRun(platformRunId, "completed", SERVICE_NAME);
+      await closePlatformRun(platformRunId, "completed", SERVICE_NAME, "contacts reprocess pass");
     } catch (err) {
       console.error("[crm-service] reprocess promotion failed:", err);
-      await updatePlatformRun(platformRunId, "failed", SERVICE_NAME).catch((e) =>
-        console.error("[crm-service] failed to close reprocess run:", e),
-      );
+      await closePlatformRun(platformRunId, "failed", SERVICE_NAME, "contacts reprocess pass");
     }
   });
 });

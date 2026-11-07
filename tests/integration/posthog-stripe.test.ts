@@ -49,6 +49,10 @@ let keys: Record<string, string> = {};
 let posthogRefuses = false;
 let stripeRefundsForbidden = false;
 let calls: string[] = [];
+// POSTHOG-RUNCLOSE-1107: runs-service answers every run CLOSE (PATCH) with a timeout.
+let runsCloseTimesOut = false;
+process.env.RUN_CLOSE_RETRY_DELAYS_MS = "1";
+process.env.RUN_CLOSE_LATE_RETRY_MS = "5";
 
 const PERSONS = [
   {
@@ -212,6 +216,11 @@ function installFetchStub() {
     const url = new URL(String(input));
     calls.push(`${init?.method ?? "GET"} ${url.host}${url.pathname}`);
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
+      if (runsCloseTimesOut && init?.method === "PATCH") {
+        const e = new Error("This operation was aborted");
+        e.name = "AbortError";
+        throw e;
+      }
       return json({ id: "run-" + Math.random().toString(16).slice(2) });
     }
     if (url.host === "keys.test") {
@@ -292,6 +301,7 @@ describe.skipIf(!RUN)("PostHog + Stripe sources", () => {
     keys = {};
     posthogRefuses = false;
     stripeRefundsForbidden = false;
+    runsCloseTimesOut = false;
     installFetchStub();
     await wipe();
   });
@@ -524,7 +534,7 @@ describe.skipIf(!RUN)("PostHog + Stripe sources", () => {
     const built = await runScopeBuild(scope);
     const ph = built.summary!.sources.find((s) => s.source === "posthog")!;
     expect(ph.status).toBe("failed");
-    expect(ph.error).toMatch(/no PostHog credential stored/);
+    expect(ph.error).toBe("No PostHog key is saved for this brand. Connect PostHog again.");
     const st = built.summary!.sources.find((s) => s.source === "stripe")!;
     expect(st).toMatchObject({ status: "failed", error: "connected, first sync not finished yet" });
     const [row] = await db.select().from(posthogConnections).where(eq(posthogConnections.brandId, BRAND));
@@ -682,6 +692,64 @@ describe.skipIf(!RUN)("PostHog + Stripe sources", () => {
     } finally {
       VISITS.splice(VISITS.length - extraVisits.length);
       EVENTS.splice(EVENTS.length - extraEvents.length);
+    }
+  });
+
+  it("POSTHOG-RUNCLOSE-1107: the read succeeds and the run close times out: the connection stays active, no last_error, the failure is logged", async () => {
+    await connectBoth();
+    const [before] = await db.select().from(posthogConnections).where(eq(posthogConnections.brandId, BRAND));
+    // The connection was marked broken by the old bug: the next pass heals it.
+    await db.update(posthogConnections).set({ status: "error", lastError: "runs-service PATCH /v1/runs/x timed out after 10000ms" }).where(eq(posthogConnections.id, before.id));
+    runsCloseTimesOut = true;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const pass = await runPosthogSyncPass();
+      expect(pass.failures).toEqual([]);
+      expect(pass.results).toHaveLength(1);
+      const [row] = await db.select().from(posthogConnections).where(eq(posthogConnections.id, before.id));
+      expect(row).toMatchObject({ status: "active", lastError: null });
+      expect(row.lastSyncedAt).not.toBeNull();
+      const runId = pass.results[0].runId;
+      expect(errors.mock.calls.some((c) => String(c[0]).includes(`posthog connection ${before.id} run ${runId}`))).toBe(true);
+    } finally {
+      errors.mockRestore();
+    }
+  });
+
+  it("POSTHOG-RUNCLOSE-1107: PostHog refuses the key: the connection is marked failed, in PostHog's words", async () => {
+    await connectBoth();
+    posthogRefuses = true;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const pass = await runPosthogSyncPass();
+      expect(pass.failures).toHaveLength(1);
+    } finally {
+      errors.mockRestore();
+    }
+    const [row] = await db.select().from(posthogConnections).where(eq(posthogConnections.brandId, BRAND));
+    expect(row.status).toBe("error");
+    expect(row.lastError).toBe("PostHog refused the key: Personal API key found in request Authorization header is invalid.");
+  });
+
+  it("POSTHOG-RUNCLOSE-1107: the pass-level platform run close timing out does not crash the pass", async () => {
+    await connectBoth();
+    runsCloseTimesOut = true;
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const logs = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const res = await request(app()).post("/internal/posthog/sync").set("x-api-key", API_KEY).send({});
+      expect(res.status).toBe(202);
+      const platformRunId = res.body.platformRunId as string;
+      const closed = () => errors.mock.calls.some((c) => String(c[0]).includes(`posthog pass platform run ${platformRunId}`));
+      for (let i = 0; i < 200 && !closed(); i++) await new Promise((r) => setTimeout(r, 25));
+      expect(closed()).toBe(true);
+      expect(errors.mock.calls.some((c) => String(c[0]).includes("pass crashed"))).toBe(false);
+      expect(logs.mock.calls.some((c) => String(c[0]).includes("[crm-service][posthog] pass: 1 ok, 0 failed"))).toBe(true);
+      const [row] = await db.select().from(posthogConnections).where(eq(posthogConnections.brandId, BRAND));
+      expect(row).toMatchObject({ status: "active", lastError: null });
+    } finally {
+      errors.mockRestore();
+      logs.mockRestore();
     }
   });
 

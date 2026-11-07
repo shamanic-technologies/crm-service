@@ -766,7 +766,10 @@ describe.skipIf(!RUN)("GoHighLevel ingestion", () => {
 
     expect(res.status).toBe(200);
     expect(res.body.connections[0].status).toBe("error");
-    expect(res.body.connections[0].lastError).toContain("key-service");
+    // POSTHOG-RUNCLOSE-1107: plain words about the client's connection, never our plumbing (key-service).
+    expect(res.body.connections[0].lastError).toBe(
+      "We could not read your GoHighLevel data on the last try. The next read tries again on its own.",
+    );
   });
 
   it("one broken connection does not stop the others", async () => {
