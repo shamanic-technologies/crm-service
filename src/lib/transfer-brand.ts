@@ -26,6 +26,8 @@ import {
   contactRowsRaw,
   contacts,
   contactServes,
+  contactHandOuts,
+  contactHandOutKeys,
   matrixConnections,
   matrixLinks,
   voiceNoteTranscripts,
@@ -95,6 +97,9 @@ export const TRANSFER_TABLES: PgTable[] = [
   contactRowsRaw,
   contacts,
   contactServes,
+  // Per-asker hand-outs of the CRM pool (AUDIENCE-PER-OFFER-1107).
+  contactHandOuts,
+  contactHandOutKeys,
   // Email lookups of contacts whose email was not known (CRM-ADD-ONE-CONTACT-1021).
   contactEmailLookups,
   matrixConnections,

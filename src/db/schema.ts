@@ -280,6 +280,52 @@ export const contactServes = pgTable(
 );
 
 /**
+ * HAND-OUTS PER ASKER (AUDIENCE-PER-OFFER-1107): a brand's CRM pool (files, people) is
+ * walked by every offer of the brand; each ASKER (one offer audience, named by the caller)
+ * is handed a contact to JUDGE without burning it for the brand. One row per hand-out:
+ * `handed_out` -> `declined` (the asker said no: never offered to it again, still open to
+ * every other asker) | `served` (the asker serves it: `contact_serves` burns it for the
+ * whole brand, forever, exactly as serve-next does). `emails` = every address the burn
+ * covers (people pool: all of the person's), empty for an email-unknown contact.
+ */
+export const contactHandOuts = pgTable(
+  "contact_hand_outs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    asker: text("asker").notNull(),
+    pool: text("pool").notNull(), // csv | people
+    contactId: uuid("contact_id").notNull(), // contacts.id (csv) | people.id (people), provenance
+    emails: jsonb("emails").$type<string[]>().notNull(),
+    status: text("status").notNull().default("handed_out"), // handed_out | declined | served
+    reason: text("reason"),
+    handedOutAt: timestamp("handed_out_at", { withTimezone: true }).notNull().defaultNow(),
+    handedOutRunId: text("handed_out_run_id").notNull(),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    decidedRunId: text("decided_run_id"),
+  },
+  (table) => [index("contact_hand_outs_brand_asker_idx").on(table.brandId, table.asker)],
+);
+
+/**
+ * The per-asker no-repeat keys of a hand-out: `email:<lower>` per address, `row:<bronze row>`
+ * for an email-unknown contact. UNIQUE (brand, asker, key): an asker is never handed one
+ * person twice; another asker of the brand still can be.
+ */
+export const contactHandOutKeys = pgTable(
+  "contact_hand_out_keys",
+  {
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    asker: text("asker").notNull(),
+    key: text("key").notNull(),
+    handOutId: uuid("hand_out_id").notNull(),
+  },
+  (table) => [uniqueIndex("contact_hand_out_keys_uq").on(table.brandId, table.asker, table.key)],
+);
+
+/**
  * EMAIL LOOKUPS — a CSV-pool contact whose email is not known yet, handed out by serve-next
  * (`includeEmailUnknown`) so the serving side finds the email inside the campaign's caps.
  * Keyed on the BRONZE row (`source_row_id`, stable across re-promotes), one row per (brand, row).

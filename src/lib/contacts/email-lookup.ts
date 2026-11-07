@@ -105,6 +105,42 @@ export async function handOutEmailUnknown(
   `)) as unknown as HandedOutRow[];
 }
 
+/**
+ * AUDIENCE-PER-OFFER-1107: email-unknown contacts a per-asker hand-out may offer (select only,
+ * NOTHING recorded here: the asker's own no-repeat key does that, lib/serve.ts `handOut`).
+ * Out: a contact whose lookup is resolved (found = served, not_found = never again, for every
+ * asker: both are facts about the person) or handed out by serve-next within the TTL (the old
+ * path holds it). `notAsked` = the caller's per-asker exclusion (alias `c`).
+ */
+export async function emailUnknownCandidates(
+  exec: (q: SQL) => Promise<unknown>,
+  orgId: string,
+  brandId: string,
+  limit: number,
+  extra: SQL,
+  notAsked: SQL,
+): Promise<HandedOutRow[]> {
+  if (limit <= 0) return [];
+  return (await exec(sql`
+    SELECT c.id, c.org_id, c.brand_id, c.primary_email, c.phone_e164, c.full_name, c.first_name, c.last_name,
+           c.raw_attributes, c.consent_status, c.unsubscribed, c.source_upload_id, c.source_row_id,
+           c.last_rebuilt_at, c.company_name, c.company_domain, c.job_title, c.linkedin_url, c.note
+    FROM contacts c
+    WHERE ${lookupPoolWhere(orgId, brandId, extra)} AND ${NOT_LOOKED_UP} AND ${notAsked}
+    ORDER BY c.last_rebuilt_at ASC, c.id ASC
+    LIMIT ${limit}
+  `)) as unknown as HandedOutRow[];
+}
+
+/** How many email-unknown contacts a per-asker hand-out could still offer. */
+export async function emailUnknownRemainingForAsker(orgId: string, brandId: string, extra: SQL, notAsked: SQL): Promise<number> {
+  const [r] = (await db.execute(sql`
+    SELECT count(*)::int AS n FROM contacts c
+    WHERE ${lookupPoolWhere(orgId, brandId, extra)} AND ${NOT_LOOKED_UP} AND ${notAsked}
+  `)) as unknown as { n: number }[];
+  return r?.n ?? 0;
+}
+
 export async function emailUnknownCounts(orgId: string, brandId: string, extra: SQL): Promise<EmailUnknownCounts> {
   const [r] = (await db.execute(sql`
     SELECT

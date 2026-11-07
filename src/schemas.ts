@@ -583,6 +583,131 @@ registry.registerPath({
   },
 });
 
+// ─── Hand-outs per asker (AUDIENCE-PER-OFFER-1107) ──────────────────────────
+
+export const HandOutRequestSchema = registry.register(
+  "HandOutRequest",
+  ServeNextRequestSchema.extend({
+    asker: z.string().min(1).max(200).openapi({
+      description:
+        "Who judges the contact: an opaque name the caller picks, ONE per offer audience (e.g. `audience:<audienceId>`). The same asker is never handed the same contact (person) twice; any other asker of the brand still can be.",
+    }),
+  }).openapi("HandOutRequest"),
+);
+
+export const HandOutResponseSchema = registry.register(
+  "HandOutResponse",
+  z
+    .object({
+      asker: z.string(),
+      contacts: z.array(
+        (ServeNextResponseSchema.shape.contacts.element as unknown as z.ZodObject<z.ZodRawShape>)
+          .extend({
+            handOutId: z.string().uuid().openapi({ description: "Name this hand-out by it to serve or decline it." }),
+          })
+          .openapi("HandedOutContact"),
+      ),
+      handedOut: z.number().int().openapi({ description: "Contacts handed out by this call. NONE is burned for the brand." }),
+      exhausted: z.boolean().openapi({
+        description:
+          "True when this asker has nothing left to be handed in this pool (every contact burned for the brand or already handed to this asker). Under relationships=business_only: nothing left that may ever be handed (as serve-next).",
+      }),
+      relationships: z
+        .object({ policy: z.enum(RELATIONSHIP_POLICIES), checked: z.number().int(), skipped: z.record(z.string(), z.number().int()) })
+        .optional()
+        .openapi({ description: "Present only when the request set `relationships` (same meaning as serve-next)." }),
+      emailUnknown: z
+        .object({ handedOut: z.number().int(), remaining: z.number().int() })
+        .optional()
+        .openapi({ description: "Present only with includeEmailUnknown (CSV pool): email-unknown contacts handed by this call, and how many this asker could still be handed." }),
+    })
+    .openapi("HandOutResponse"),
+);
+
+export const HandOutDecisionRequestSchema = registry.register(
+  "HandOutDecisionRequest",
+  z
+    .object({
+      brandId: z.string().uuid(),
+      reason: z.string().max(500).optional().openapi({ description: "Decline only: why (stored for the record)." }),
+    })
+    .openapi("HandOutDecisionRequest"),
+);
+
+export const HandOutDecisionResponseSchema = registry.register(
+  "HandOutDecisionResponse",
+  z
+    .object({
+      handOutId: z.string().uuid(),
+      asker: z.string(),
+      status: z.enum(["served", "declined"]),
+      duplicate: z.boolean().openapi({ description: "True when the hand-out was already in that state (a retry)." }),
+      emails: z.array(z.string()).openapi({ description: "Serve: every address now burned for the brand. Decline: empty." }),
+    })
+    .openapi("HandOutDecisionResponse"),
+);
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/contacts/hand-outs",
+  summary: "Hand the next contact(s) of the brand's CRM pool to ONE asker to judge, without burning them",
+  description:
+    "AUDIENCE-PER-OFFER-1107. The brand's CRM pool (its files, or its people with `people`) is walked by every offer of the brand; " +
+    "this hands contacts to ONE asker (one offer audience) to judge, and burns NOTHING for the brand. Same pool words and filters as " +
+    "serve-next (uploadIds, people, reachableBy, relationships, stepFilter, includeEmailUnknown, limit default 100). Out: every contact " +
+    "already burned for the brand (served by serve-next, by a hand-out serve, or an email lookup found), and every contact already handed to " +
+    "THIS asker (served, declined or still open). Then: POST /orgs/contacts/hand-outs/{handOutId}/serve when the asker serves it (burned " +
+    "for the brand, forever), or /decline (never offered to this asker again; still offered to the brand's other askers). " +
+    "An email-unknown contact is served by writing its lookup back (POST /orgs/contacts/{contactId}/email-lookup, found = served); a lookup " +
+    "not_found takes it out for every asker. Requires x-api-key, x-org-id. 400 validation; 502 relationships_unavailable.",
+  request: { body: { content: { "application/json": { schema: HandOutRequestSchema } } } },
+  responses: {
+    200: { description: "Handed out", content: { "application/json": { schema: HandOutResponseSchema } } },
+    400: { description: "Bad request", content: { "application/json": { schema: ErrorResponseSchema } } },
+    502: { description: "lead-service relationships unreadable (business_only)", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/contacts/hand-outs/{handOutId}/serve",
+  summary: "The asker serves a handed-out contact: burned for the brand, forever",
+  description:
+    "Marks every address of the hand-out served for the brand (the same permanent no-re-serve serve-next writes): no asker of the brand is " +
+    "ever handed the person again, serve-next never serves them. All or nothing. Idempotent (duplicate: true). 404 hand_out_not_found; " +
+    "409 already_served (someone served the person first: do NOT write to them, nothing written) | declined (this asker declined it) | " +
+    "email_unknown (write the lookup back instead). Requires x-api-key, x-org-id.",
+  request: {
+    params: z.object({ handOutId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: HandOutDecisionRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Served", content: { "application/json": { schema: HandOutDecisionResponseSchema } } },
+    400: { description: "Bad request", content: { "application/json": { schema: ErrorResponseSchema } } },
+    404: { description: "No hand-out of this brand has this id", content: { "application/json": { schema: ErrorResponseSchema } } },
+    409: { description: "already_served | declined | email_unknown", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/contacts/hand-outs/{handOutId}/decline",
+  summary: "The asker declines a handed-out contact: never offered to it again, still open to the brand's other askers",
+  description:
+    "Records the asker's no (with an optional reason). Nothing is burned for the brand. Idempotent (duplicate: true). 404 hand_out_not_found; " +
+    "409 already_served (this asker served it). Requires x-api-key, x-org-id.",
+  request: {
+    params: z.object({ handOutId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: HandOutDecisionRequestSchema } } },
+  },
+  responses: {
+    200: { description: "Declined", content: { "application/json": { schema: HandOutDecisionResponseSchema } } },
+    400: { description: "Bad request", content: { "application/json": { schema: ErrorResponseSchema } } },
+    404: { description: "No hand-out of this brand has this id", content: { "application/json": { schema: ErrorResponseSchema } } },
+    409: { description: "already_served", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
 registry.registerPath({
   method: "get",
   path: "/orgs/contacts/serve-stats",
