@@ -311,6 +311,23 @@ serve (identity-keying rule: the emitter owns "don't re-emit").
   totalSendable }`.
 - Zero cost declared (DB-only). Org run per request via `requireOrg`.
 
+### Hand-outs per asker (`/orgs/contacts/hand-outs`, `src/lib/hand-outs.ts`, AUDIENCE-PER-OFFER-1107)
+
+Owner 2026-11-07: a brand has several offers, each ONE audience; the CRM pool (files, people) is the BRAND's and every
+offer's campaign walks it; lead-service's Jev judges each person against THAT offer. serve-next burns at hand-out, so the
+first offer that merely LOOKED at a contact consumed it. Three calls, serve-next untouched (pinned in `hand-outs.test.ts`):
+- `POST /orgs/contacts/hand-outs {brandId, asker, limit?, uploadIds? | people?, reachableBy?, relationships?, stepFilter?,
+  includeEmailUnknown?}` → `{asker, contacts: [ServedContact + handOutId], handedOut, exhausted, relationships?, emailUnknown?}`.
+  NOTHING burned. `asker` = opaque caller name, one per offer audience (`audience:<id>`). Out: burned for the brand
+  (`contact_serves`, any path) + already handed to THIS asker (keys `email:<addr>` every address of the person /
+  `row:<bronze row>` email-unknown, UNIQUE (brand, asker, key) in `contact_hand_out_keys`; per (brand, asker) advisory
+  lock). Another asker still gets it. `exhausted` = nothing left for this asker.
+- `POST /orgs/contacts/hand-outs/{handOutId}/serve {brandId}` → `contact_serves` for every address (same permanent burn as
+  serve-next), all or nothing; 409 `already_served` (someone served first: do not write) | `declined` | `email_unknown`
+  (write the lookup back instead: found = burned; not_found = out for every asker). Idempotent.
+- `POST /orgs/contacts/hand-outs/{handOutId}/decline {brandId, reason?}` → bookkeeping (the asker key already keeps it
+  away from that asker); 409 `already_served`. Idempotent. Table `contact_hand_outs` (status handed_out | declined | served).
+
 ### People pool (`people`) — serve merged persons, filtered
 
 `POST /orgs/contacts/serve-next` body `people: { signedUp?, replied?, reachableBy?: "phone"|"email" }`

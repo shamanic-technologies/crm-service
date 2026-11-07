@@ -554,6 +554,13 @@
       "when": 1793200000000,
       "tag": "0079_client_satisfied_threshold",
       "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1793300000000,
+      "tag": "0080_contact_hand_outs",
+      "breakpoints": true
     }
   ]
 }

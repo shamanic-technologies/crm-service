@@ -90,7 +90,7 @@ export interface ServeNextResult {
   exhausted: boolean;
 }
 
-interface RawContactRow {
+export interface RawContactRow {
   id: string;
   org_id: string;
   brand_id: string;
@@ -146,7 +146,7 @@ export function toServedContact(r: RawContactRow): ServedContact {
  * One bound parameter per id (not an array literal) so the fragment is safe and
  * driver-agnostic; the route caps the list length.
  */
-function uploadFilter(uploadIds?: string[]) {
+export function uploadFilter(uploadIds?: string[]) {
   if (!uploadIds || uploadIds.length === 0) return sql.empty();
   return sql` AND c.source_upload_id IN (${sql.join(
     uploadIds.map((id) => sql`${id}::uuid`),
@@ -167,7 +167,7 @@ export const REACH_CHANNELS = ["phone", "email"] as const;
 export type Reach = (typeof REACH_CHANNELS)[number];
 
 /** CSV pool (alias `c` on `sendable_contacts`): the view already requires a valid email. */
-function csvReachFilter(reach: readonly Reach[] = []) {
+export function csvReachFilter(reach: readonly Reach[] = []) {
   return reach.includes("phone") ? sql` AND c.phone_e164 IS NOT NULL` : sql.empty();
 }
 
@@ -177,7 +177,7 @@ export function normalizeReachQuery(raw: unknown): string[] {
 }
 
 /** SQL restricting a candidate CTE to the given row ids (a `business_only` serve's allowed rows). Empty list = none. */
-function idFilter(alias: "c" | "p", ids?: string[]) {
+export function idFilter(alias: "c" | "p", ids?: string[]) {
   if (ids === undefined) return sql.empty();
   if (ids.length === 0) return sql` AND false`;
   return sql` AND ${sql.raw(alias)}.id IN (${sql.join(ids.map((id) => sql`${id}::uuid`), sql`, `)})`;
@@ -474,7 +474,7 @@ export interface ServeNextPeopleResult {
   exhausted: boolean;
 }
 
-interface RawPersonRow {
+export interface RawPersonRow {
   id: string;
   org_id: string;
   brand_id: string;
@@ -508,7 +508,7 @@ export function phoneSourcesOf(row: Pick<RawPersonRow, "phones" | "presences">):
 const digits = (s: string) => s.replace(/\D/g, "");
 const normalizedEq = (a: string, b: string) => digits(a) === digits(b);
 
-function toServedPerson(r: RawPersonRow): ServedPerson {
+export function toServedPerson(r: RawPersonRow): ServedPerson {
   const { firstName, lastName } = splitDisplayName(r.display_name);
   return {
     id: r.id,
@@ -600,7 +600,7 @@ export function peoplePoolWhere(orgId: string, brandId: string, filter: PeopleFi
   return sql.join(parts, sql` AND `);
 }
 
-const NOT_SERVED = sql`NOT EXISTS (
+export const NOT_SERVED = sql`NOT EXISTS (
   SELECT 1 FROM jsonb_array_elements_text(p.emails) AS pe(email)
   JOIN contact_serves s ON s.brand_id = p.brand_id AND s.email = pe.email
 )`;
@@ -728,7 +728,7 @@ export interface RelationshipsServeSummary {
 const RELATIONSHIP_PAGE = 1000;
 const RELATIONSHIP_MAX_PAGES = Number(process.env.SERVE_RELATIONSHIP_MAX_PAGES) || 50;
 
-async function pickBusinessOnly(
+export async function pickBusinessOnly(
   identity: SiblingIdentity,
   limit: number,
   page: (offset: number, size: number) => Promise<{ id: string; human_id: string | null }[]>,

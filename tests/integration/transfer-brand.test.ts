@@ -31,6 +31,12 @@ async function seedBrand(org: string, brand: string, tag: string) {
   await db.execute(sql`
     INSERT INTO contact_serves (org_id, brand_id, contact_id, email, served_run_id)
     VALUES (${org}, ${brand}, ${contact.id}, ${tag + "@x.com"}, 'run')`);
+  const [handOut] = await db.execute<{ id: string }>(sql`
+    INSERT INTO contact_hand_outs (org_id, brand_id, asker, pool, contact_id, emails, handed_out_run_id)
+    VALUES (${org}, ${brand}, 'audience:a', 'csv', ${contact.id}, ${JSON.stringify([tag + "@x.com"])}::jsonb, 'run') RETURNING id`);
+  await db.execute(sql`
+    INSERT INTO contact_hand_out_keys (org_id, brand_id, asker, key, hand_out_id)
+    VALUES (${org}, ${brand}, 'audience:a', ${"email:" + tag + "@x.com"}, ${handOut.id})`);
   await db.execute(sql`
     INSERT INTO contact_email_lookups (org_id, brand_id, source_row_id, contact_id, status, handed_out_run_id)
     VALUES (${org}, ${brand}, gen_random_uuid(), ${contact.id}, 'handed_out', 'run')`);

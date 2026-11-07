@@ -42,6 +42,7 @@ import {
 } from "../lib/serve.js";
 import { createPlatformRun, createRun, SUPPORT_RUNS, updatePlatformRun, updateRun } from "../lib/runs-client.js";
 import { AmbiguousPersonError, stillFitsCsv, stillFitsPeople } from "../lib/still-fits.js";
+import { declineHandOut, handOut, HandOutError, MAX_ASKER_LENGTH, serveHandOut } from "../lib/hand-outs.js";
 import { SERVICE_NAME } from "../middleware/auth.js";
 import { addManualContact, normalizeManualInput } from "../lib/contacts/manual.js";
 import { EmailLookupError, recordEmailLookup } from "../lib/contacts/email-lookup.js";
@@ -265,7 +266,7 @@ const peopleFilterSchema = z
   })
   .strict();
 
-const serveNextBodySchema = z
+const serveBodyShape = z
   .object({
     brandId: z.string().uuid(),
     limit: z.number().int().positive().max(5000).optional(),
@@ -281,7 +282,9 @@ const serveNextBodySchema = z
     // CSV pool only (CRM-ADD-ONE-CONTACT-1021): also hand out contacts whose email is not known
     // yet, for the caller to look it up and write it back (POST /orgs/contacts/{id}/email-lookup).
     includeEmailUnknown: z.boolean().optional(),
-  })
+  });
+
+const serveNextBodySchema = serveBodyShape
   .refine((b) => !(b.uploadIds && b.people), { message: "uploadIds and people are exclusive" })
   .refine((b) => !(b.includeEmailUnknown && b.people), { message: "includeEmailUnknown is for the CSV pool, not people" });
 
@@ -375,6 +378,83 @@ router.post(
     res.json(emailUnknown ? await withEmailUnknown(result, req.orgId!, brandId, limit, req.runId!, uploadIds, reach, stepFilter) : result);
   },
 );
+
+// ─── Hand-outs per asker (AUDIENCE-PER-OFFER-1107, lib/hand-outs.ts) ────────
+//
+// The brand's CRM pool, walked by EVERY offer of the brand: hand out a contact to ONE asker
+// (an offer audience) to judge WITHOUT burning it; burn it for the brand only once the asker
+// serves it; a decline keeps it away from that asker only. serve-next is unchanged.
+
+const handOutBodySchema = serveBodyShape
+  .extend({ asker: z.string().trim().min(1).max(MAX_ASKER_LENGTH) })
+  .refine((b) => !(b.uploadIds && b.people), { message: "uploadIds and people are exclusive" })
+  .refine((b) => !(b.includeEmailUnknown && b.people), { message: "includeEmailUnknown is for the CSV pool, not people" });
+
+router.post(
+  "/orgs/contacts/hand-outs",
+  apiKeyAuth,
+  requireOrg("contacts.hand-out"),
+  async (req: AuthenticatedRequest, res) => {
+    const parsed = handOutBodySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return res.status(400).json({
+        type: "validation",
+        error: `brandId (uuid) and asker (1..${MAX_ASKER_LENGTH} chars) required; the rest as serve-next: ${parsed.error.issues.map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`,
+      });
+    }
+    const b = parsed.data;
+    // No user on a service call: the header is then not sent (never a placeholder identity).
+    const identity = { orgId: req.orgId!, userId: req.userId ?? "", runId: req.runId!, brandId: b.brandId };
+    try {
+      res.json(
+        await handOut(identity, {
+          asker: b.asker,
+          limit: b.limit ?? 100,
+          runId: req.runId!,
+          uploadIds: b.uploadIds,
+          people: b.people,
+          reach: reachOf(b.reachableBy),
+          steps: b.stepFilter,
+          businessOnly: b.relationships === "business_only",
+          includeEmailUnknown: b.includeEmailUnknown === true,
+        }),
+      );
+    } catch (e) {
+      if (e instanceof RelationshipsUnavailableError) {
+        return res.status(502).json({ type: "upstream", reason: "relationships_unavailable", error: e.message });
+      }
+      throw e;
+    }
+  },
+);
+
+const handOutDecisionSchema = z.object({ brandId: z.string().uuid(), reason: z.string().max(500).optional() });
+
+for (const decision of ["serve", "decline"] as const) {
+  router.post(
+    `/orgs/contacts/hand-outs/:handOutId/${decision}`,
+    apiKeyAuth,
+    requireOrg(`contacts.hand-out.${decision}`),
+    async (req: AuthenticatedRequest, res) => {
+      const id = z.string().uuid().safeParse(req.params.handOutId);
+      const parsed = handOutDecisionSchema.safeParse(req.body ?? {});
+      if (!id.success || !parsed.success) {
+        return res.status(400).json({ type: "validation", error: "handOutId (uuid) path param and brandId (uuid) body required; reason optional (decline)" });
+      }
+      const identity = { orgId: req.orgId!, brandId: parsed.data.brandId, runId: req.runId! };
+      try {
+        res.json(
+          decision === "serve"
+            ? await serveHandOut(identity, id.data)
+            : await declineHandOut(identity, id.data, parsed.data.reason ?? null),
+        );
+      } catch (e) {
+        if (e instanceof HandOutError) return res.status(e.status).json({ type: e.type, error: e.message });
+        throw e;
+      }
+    },
+  );
+}
 
 // ─── POST /orgs/contacts/still-fits ──────────────────────────────────────────
 
