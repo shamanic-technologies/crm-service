@@ -139,3 +139,73 @@ export async function statedNotToBrandByEmail(
   }
   return out;
 }
+
+export interface StatedEmailSet {
+  correctionId: string;
+  brandId: string;
+  /** Every NORMALIZED address of the stated person: the statement's own keys + every key of the brand's built person holding one. */
+  emails: string[];
+}
+
+/**
+ * PURE: per active statement, every address of the person it covers, so `statedNotToBrandByEmail(address)` hits
+ * exactly when `address` is in one of these sets. Equivalence: that read hits when the address key is one of the
+ * statement's keys, or a built person of the statement's brand holds the address key AND shares a key with the
+ * statement; the set below is the statement's keys plus every key of each built person of that brand sharing one
+ * with it, i.e. the same condition read from the statement's side. Order = the statements' order.
+ */
+export function statedEmailSets(
+  statements: { id: string; brandId: string; personKeys: string[] }[],
+  held: { brandId: string; identityKeys: string[] }[],
+): StatedEmailSet[] {
+  return statements.map((s) => {
+    const stated = new Set(s.personKeys);
+    const keys = new Set(s.personKeys);
+    for (const p of held) {
+      if (p.brandId !== s.brandId || !p.identityKeys.some((k) => stated.has(k))) continue;
+      for (const k of p.identityKeys) keys.add(k);
+    }
+    const emails = [...keys].filter((k) => k.startsWith("email:")).map((k) => k.slice("email:".length)).sort();
+    return { correctionId: s.id, brandId: s.brandId, emails };
+  });
+}
+
+/**
+ * STATUS-CRM-TIMEOUT-1107: the whole answer for (org, brands) at once, so a caller asking for thousands of addresses
+ * a second (instantly-service's status read) reads it ONCE and matches locally, instead of one request per batch of
+ * addresses (461 timeouts in 3 h under a features-service restart burst). Statements are few (44 fleet-wide on
+ * 2026-11-07); an org with none answers after one indexed read. DB-only, fail loud.
+ */
+export async function statedNotToBrandEmailSets(orgId: string, brandIds: string[]): Promise<StatedEmailSet[]> {
+  const brands = [...new Set(brandIds.filter(Boolean))];
+  if (brands.length === 0) return [];
+  const statements = await db
+    .select({ id: peopleCorrections.id, brandId: peopleCorrections.brandId, personKeys: peopleCorrections.personKeys })
+    .from(peopleCorrections)
+    .where(
+      and(
+        eq(peopleCorrections.orgId, orgId),
+        inArray(peopleCorrections.brandId, brands),
+        eq(peopleCorrections.targetKey, NOT_TO_BRAND_TARGET),
+        isNull(peopleCorrections.undoneAt),
+      ),
+    )
+    .orderBy(asc(peopleCorrections.createdAt), asc(peopleCorrections.id));
+  if (statements.length === 0) return [];
+  const rows = statements.map((s) => ({ id: s.id, brandId: s.brandId, personKeys: s.personKeys as string[] }));
+  const allKeys = [...new Set(rows.flatMap((s) => s.personKeys))];
+  const held =
+    allKeys.length === 0
+      ? []
+      : await db
+          .select({ brandId: people.brandId, identityKeys: people.identityKeys })
+          .from(people)
+          .where(
+            and(
+              eq(people.orgId, orgId),
+              inArray(people.brandId, [...new Set(rows.map((s) => s.brandId))]),
+              sql`${people.identityKeys} ?| ARRAY[${sql.join(allKeys.map((k) => sql`${k}`), sql`, `)}]::text[]`,
+            ),
+          );
+  return statedEmailSets(rows, held.map((p) => ({ brandId: p.brandId, identityKeys: p.identityKeys as string[] })));
+}

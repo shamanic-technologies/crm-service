@@ -4935,6 +4935,44 @@ registry.registerPath({
   },
 });
 
+export const StatedNotToBrandEmailSetsRequestSchema = z
+  .object({
+    orgId: z.string().uuid(),
+    brandIds: z.array(z.string().uuid()).min(1).max(50).openapi({ description: "The brands asked about." }),
+  })
+  .strict();
+
+export const StatedNotToBrandEmailSetsResponseSchema = z.object({
+  orgId: z.string(),
+  brandIds: z.array(z.string()),
+  statements: z.array(
+    z.object({
+      correctionId: z.string().openapi({ description: "The statement (`/orgs/people/corrections`); undoing it lifts the refusal." }),
+      brandId: z.string(),
+      emails: z
+        .array(z.string())
+        .openapi({ description: "Every normalized (trimmed, lowercased) address of the stated person on that brand: an address in this list is stated." }),
+    }),
+  ).openapi({ description: "Active statements, oldest first. Empty = nobody stated on these brands." }),
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/people/stated-not-to-brand/email-sets",
+  summary: "Every address the brand stated is NOT someone of theirs (the whole answer, read once)",
+  description:
+    "The same fact as `POST /internal/people/stated-not-to-brand`, for one org and its brands at once: per active statement " +
+    "`tag_add professional_not_to_brand`, every address of the person it covers (the statement's own keys and every key of the brand's " +
+    "built person sharing one). An address answers `stated` on `/internal/people/stated-not-to-brand` exactly when it is in one of " +
+    "these lists. For callers asking about thousands of addresses a second (STATUS-CRM-TIMEOUT-1107). DB-only: no sibling call, no model, no cost.",
+  request: { body: { content: { "application/json": { schema: StatedNotToBrandEmailSetsRequestSchema } } } },
+  responses: {
+    200: { description: "The statements and their addresses", content: { "application/json": { schema: StatedNotToBrandEmailSetsResponseSchema } } },
+    400: { description: "Invalid body" },
+    502: { description: "Run tracking unavailable" },
+  },
+});
+
 // ─── WhatsApp line health (WA-LINE-HEALTH-1023) ─────────────────────────────
 
 const LineStateSchema = z

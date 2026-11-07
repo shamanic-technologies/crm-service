@@ -91,7 +91,9 @@ professional_not_to_brand` makes every path of ours skip the person for that bra
 another line is caught before any build): reply trigger Matrix + Gmail (`skipped / stated_not_to_brand`, no Jev, no voice
 transcription; at delivery too), assistant pings, phone + form triggers, WhatsApp send / reach (422 `stated_not_to_brand`); EMAIL
 senders ask `POST /internal/people/stated-not-to-brand` {orgId, brandIds, emails} (batch, DUALIST-WA-SILENCE-EMAIL:
-instantly-service refuses send / reply / status 409 `stated_not_to_brand`). Jev's
+instantly-service refuses send / reply / status 409 `stated_not_to_brand`); a caller asking for thousands of addresses (the status read)
+reads `POST /internal/people/stated-not-to-brand/email-sets` {orgId, brandIds} ONCE (every address of each stated person, same
+match, `statedEmailSets` pure; STATUS-CRM-TIMEOUT-1107: one call per 100-address batch timed out 461 times in 3 h). Jev's
 own "not to brand" never silences. On contact points too, a stated tag drops the one it contradicts (`correctPointTags`).
 A route that states something kicks a rebuild with `followUp` (a running build is followed by one
 more; before, the kick was silently skipped until the next cron).

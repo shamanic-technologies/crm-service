@@ -41,8 +41,8 @@ import {
 } from "../lib/people/outcomes.js";
 import { LEG_STEPS, ServedUnavailable, listLegReachBrands, parseLegStep, readLegReach } from "../lib/people/leg-reach.js";
 import { readLatestMessages } from "../lib/people/latest-messages.js";
-import { LatestMessagesRequestSchema, SentAfterRequestSchema, StatedNotToBrandRequestSchema } from "../schemas.js";
-import { statedNotToBrandByEmail } from "../lib/people/stated-not-to-brand.js";
+import { LatestMessagesRequestSchema, SentAfterRequestSchema, StatedNotToBrandEmailSetsRequestSchema, StatedNotToBrandRequestSchema } from "../schemas.js";
+import { statedNotToBrandByEmail, statedNotToBrandEmailSets } from "../lib/people/stated-not-to-brand.js";
 import { readSentAfter } from "../lib/people/sent-after.js";
 import { LEAD_VERDICTS, type LeadState, type LeadVerdict } from "../lib/people/lead-state.js";
 import {
@@ -1367,6 +1367,36 @@ router.post("/internal/people/stated-not-to-brand", apiKeyAuth, async (req, res)
       return { email, stated: !!hit, brandId: hit?.brandId ?? null, correctionId: hit?.correctionId ?? null };
     }),
   });
+});
+
+// ─── POST /internal/people/stated-not-to-brand/email-sets (instantly-service: the status read, STATUS-CRM-TIMEOUT-1107) ──
+
+/**
+ * Every address of every person the brand stated is not someone of theirs, per active statement: the whole answer of
+ * `/internal/people/stated-not-to-brand` for (org, brands), read once and matched by the caller. DB-only.
+ */
+router.post("/internal/people/stated-not-to-brand/email-sets", apiKeyAuth, async (req, res) => {
+  const parsed = StatedNotToBrandEmailSetsRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ type: "validation", error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
+  }
+  const { orgId, brandIds } = parsed.data;
+  let statements: Awaited<ReturnType<typeof statedNotToBrandEmailSets>>;
+  try {
+    statements = await statedNotToBrandEmailSets(orgId, brandIds);
+  } catch (err) {
+    console.error("[crm-service] people.stated-not-to-brand.email-sets.read failed:", err);
+    return res.status(500).json({ type: "internal", error: (err as Error).message });
+  }
+  if (statements.length > 0) {
+    try {
+      const run = await createPlatformRun({ serviceName: SERVICE_NAME, taskName: "people.stated-not-to-brand.read" });
+      await updatePlatformRun(run.id, "completed", SERVICE_NAME);
+    } catch (err) {
+      return res.status(502).json({ type: "upstream", error: `run tracking unavailable: ${(err as Error).message}` });
+    }
+  }
+  res.json({ orgId, brandIds, statements });
 });
 
 export default router;

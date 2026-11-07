@@ -153,6 +153,29 @@ describe.skipIf(!RUN)("POST /internal/people/stated-not-to-brand (DUALIST-WA-SIL
     expect(runCalls).toBeGreaterThan(0);
   });
 
+  it("email-sets: the whole answer at once agrees with the per-address read (STATUS-CRM-TIMEOUT-1107)", async () => {
+    const onEmail = await state(ORG, BRAND, ["email:thierry@dualist.test"]);
+    const onPhone = await state(ORG, BRAND, ["phone:+33611111111"]);
+    await state(OTHER_ORG, BRAND, ["email:other-org@dualist.test"]);
+    const sets = await request(app()).post("/internal/people/stated-not-to-brand/email-sets").set("x-api-key", API_KEY).send({ orgId: ORG, brandIds: [BRAND, OTHER_BRAND] });
+    expect(sets.status).toBe(200);
+    expect(sets.body).toEqual({
+      orgId: ORG,
+      brandIds: [BRAND, OTHER_BRAND],
+      statements: [
+        { correctionId: onEmail.id, brandId: BRAND, emails: ["thierry@dualist.test"] },
+        { correctionId: onPhone.id, brandId: BRAND, emails: ["both@dualist.test"] },
+      ],
+    });
+    const asked = ["thierry@dualist.test", "both@dualist.test", "someone@else.test", "other-org@dualist.test"];
+    const one = await post({ orgId: ORG, brandIds: [BRAND, OTHER_BRAND], emails: asked });
+    const inSets = new Set(sets.body.statements.flatMap((s: { emails: string[] }) => s.emails));
+    expect(one.body.results.map((r: { stated: boolean }) => r.stated)).toEqual(asked.map((e) => inSets.has(e)));
+    const none = await request(app()).post("/internal/people/stated-not-to-brand/email-sets").set("x-api-key", API_KEY).send({ orgId: ORG, brandIds: [OTHER_BRAND] });
+    expect(none.body.statements).toEqual([]);
+    expect((await request(app()).post("/internal/people/stated-not-to-brand/email-sets").set("x-api-key", API_KEY).send({ orgId: ORG, brandIds: [] })).status).toBe(400);
+  });
+
   it("refuses a body that names no brand or no address", async () => {
     expect((await post({ orgId: ORG, brandIds: [], emails: ["a@b.co"] })).status).toBe(400);
     expect((await post({ orgId: ORG, brandIds: [BRAND], emails: [] })).status).toBe(400);
