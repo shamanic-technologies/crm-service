@@ -27,7 +27,14 @@ import { CredentialError, resolveBrandCredential } from "../lib/gohighlevel/cred
 import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { countIdentifiedPersons, PosthogError, POSTHOG_REGIONS } from "../lib/posthog/client.js";
 import { POSTHOG_SOURCE } from "../lib/posthog/records.js";
-import { POSTHOG_PROVIDER, rebuildPosthogFromBronze, runPosthogSyncPass, targetOf } from "../lib/posthog/sync.js";
+import {
+  historyBacklogs,
+  POSTHOG_PROVIDER,
+  posthogSyncState,
+  rebuildPosthogFromBronze,
+  runPosthogSyncPass,
+  targetOf,
+} from "../lib/posthog/sync.js";
 import { readStripeAccount, restrictedKeyMode, StripeError, verifyStripeAccess } from "../lib/stripe/client.js";
 import { STRIPE_SOURCE } from "../lib/stripe/records.js";
 import {
@@ -40,7 +47,7 @@ import {
 const router = Router();
 const uuid = z.string().uuid();
 
-function posthogView(row: typeof posthogConnections.$inferSelect) {
+function posthogView(row: typeof posthogConnections.$inferSelect, historyBacklog: number | null = null) {
   return {
     id: row.id,
     brandId: row.brandId,
@@ -53,6 +60,7 @@ function posthogView(row: typeof posthogConnections.$inferSelect) {
     lastError: row.lastError,
     lastRunId: row.lastRunId,
     createdAt: row.createdAt,
+    sync: posthogSyncState(row, historyBacklog),
   };
 }
 
@@ -169,7 +177,8 @@ router.get(
         .select()
         .from(posthogConnections)
         .where(and(eq(posthogConnections.orgId, req.orgId!), eq(posthogConnections.brandId, brand.data)));
-      res.json({ connections: rows.map(posthogView) });
+      const backlogs = await historyBacklogs(rows.map((r) => r.id));
+      res.json({ connections: rows.map((r) => posthogView(r, backlogs.get(r.id) ?? null)) });
     } catch (err) {
       next(err);
     }

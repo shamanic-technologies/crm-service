@@ -37,7 +37,7 @@ import {
   stripeConnections,
   type PhoneGivenReport,
 } from "../../db/schema.js";
-import { mirrorRecentPersons } from "../posthog/sync.js";
+import { mirrorRecentPersons, waitingForBudget } from "../posthog/sync.js";
 import { mirrorRecentStripe } from "../stripe/sync.js";
 import { mirrorRecentlyUpdatedUsers } from "../auth/sync.js";
 import { runScopeBuild } from "../people/build.js";
@@ -70,7 +70,7 @@ const MAX_BACKOFF_MS = 60 * 60_000;
 const DETECT_BATCH = 10_000;
 
 export interface PhoneWatchResult {
-  mirrored: { source: string; connectionId: string; orgId: string; brandId: string; changed: number; created?: number; eventsChanged?: number; error?: string }[];
+  mirrored: { source: string; connectionId: string; orgId: string; brandId: string; changed: number; created?: number; eventsChanged?: number; waitingUntil?: string | null; error?: string }[];
   baselined: { artifactId: string; source: string; phones: number }[];
   detected: number;
   skipped: Record<string, number>;
@@ -92,9 +92,14 @@ async function fastMirror(now: number): Promise<PhoneWatchResult["mirrored"]> {
     .from(posthogConnections)
     .where(and(inArray(posthogConnections.status, ["active", "error"]), sql`${posthogConnections.lastSyncedAt} IS NOT NULL`));
   for (const conn of ph) {
+    // POSTHOG-429-1107: PostHog asked to wait (the project's hourly read budget is used up): no read until then.
+    if (waitingForBudget(conn, now)) {
+      out.push({ source: "posthog", connectionId: conn.id, orgId: conn.orgId, brandId: conn.brandId, changed: 0, waitingUntil: conn.rateLimitedUntil!.toISOString() });
+      continue;
+    }
     try {
       const r = await mirrorRecentPersons(conn, new Date(since));
-      out.push({ source: "posthog", connectionId: conn.id, orgId: conn.orgId, brandId: conn.brandId, changed: r.changed.length, created: r.created, eventsChanged: r.eventsChanged });
+      out.push({ source: "posthog", connectionId: conn.id, orgId: conn.orgId, brandId: conn.brandId, changed: r.changed.length, created: r.created, eventsChanged: r.eventsChanged, waitingUntil: r.waitingUntil });
     } catch (err) {
       console.warn(`[crm-service][phone-trigger] PostHog fast mirror of ${conn.id} (brand ${conn.brandId}) failed: ${(err as Error).message}`);
       out.push({ source: "posthog", connectionId: conn.id, orgId: conn.orgId, brandId: conn.brandId, changed: 0, error: (err as Error).message });

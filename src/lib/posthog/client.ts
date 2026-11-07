@@ -11,8 +11,9 @@
  * `is_identified` (the brand called `identify`) or an email it holds — plus a
  * person carrying, as a distinct id, the user id of one of the brand's
  * connected auth providers (a server-side capture keyed on the Clerk user id
- * never sets `is_identified`). Anonymous visitors are out of scope and are
- * filtered inside PostHog's own query, so they never reach this service.
+ * never sets `is_identified`). Anonymous visitors are out of scope: a window read
+ * returns every row (cheaper than any persons filter, see PersonScope) and the
+ * caller keeps only the persons it holds; an anonymous row is never stored.
  *
  * A person carrying a PHONE property counts too (WA-GIVEN-TRIGGER-1015): a
  * visitor who typed their WhatsApp number before any account exists is known by
@@ -59,6 +60,62 @@ export class PosthogError extends Error {
   }
 }
 
+/**
+ * POSTHOG-429-1107: PostHog refused the read because the PROJECT's hourly budget of data read by API queries is used
+ * up (429 `api_queries_budget_exceeded`, or the request rate limit). A temporary state, never a broken connection:
+ * `retryAt` is when PostHog says the budget is back (its `Retry-After` header, else "Expected available in N seconds",
+ * else one minute). Until then no read of this project leaves this process (`hogql` refuses before any fetch).
+ */
+export class PosthogThrottled extends PosthogError {
+  readonly retryAt: Date;
+  constructor(vendorMessage: string, retryAt: Date) {
+    super(429, vendorMessage);
+    this.name = "PosthogThrottled";
+    this.retryAt = retryAt;
+  }
+}
+
+/** PURE: when PostHog says the budget is back, from its `Retry-After` header or its own words; one minute when it says nothing. */
+export function retryAtOf(retryAfterHeader: string | null, vendorMessage: string, now: number): Date {
+  const header = Number(retryAfterHeader);
+  if (retryAfterHeader && Number.isFinite(header) && header >= 0) return new Date(now + header * 1000);
+  const said = /available in (\d+) seconds?/i.exec(vendorMessage);
+  if (said) return new Date(now + Number(said[1]) * 1000);
+  return new Date(now + 60_000);
+}
+
+/** In-process gate per project: until when no read may be sent (a 429 seen by the full pass also stops the fast mirror). */
+const gates = new Map<string, number>();
+/** Every read's cost as PostHog reported it (`X-PostHog-Query-Bytes-Read`), per project, for the last hour. */
+const spent = new Map<string, { at: number; bytes: number }[]>();
+const projectKey = (t: Pick<PosthogTarget, "region" | "projectId">) => `${t.region}:${t.projectId}`;
+const HOUR_MS = 60 * 60 * 1000;
+
+/** Until when PostHog refuses reads of this project (null = reads allowed). */
+export function throttledUntil(target: Pick<PosthogTarget, "region" | "projectId">, now = Date.now()): Date | null {
+  const until = gates.get(projectKey(target));
+  return until && until > now ? new Date(until) : null;
+}
+
+/** Hold every read of this project until `until` (a stored throttle read back at the start of a pass). */
+export function holdReads(target: Pick<PosthogTarget, "region" | "projectId">, until: Date): void {
+  const key = projectKey(target);
+  gates.set(key, Math.max(gates.get(key) ?? 0, until.getTime()));
+}
+
+/** Bytes our reads of this project made PostHog scan over the last hour. */
+export function bytesReadLastHour(target: Pick<PosthogTarget, "region" | "projectId">, now = Date.now()): number {
+  const list = (spent.get(projectKey(target)) ?? []).filter((r) => r.at > now - HOUR_MS);
+  spent.set(projectKey(target), list);
+  return list.reduce((a, r) => a + r.bytes, 0);
+}
+
+/** Tests only: forget every gate and every recorded read. */
+export function resetPosthogBudgetState(): void {
+  gates.clear();
+  spent.clear();
+}
+
 /** PostHog reports errors as `{ type, code, detail }`. */
 function readVendorMessage(body: string): string {
   try {
@@ -79,6 +136,8 @@ export interface PosthogTarget {
 
 /** Run one HogQL SELECT; rows come back as objects keyed on the column names. */
 export async function hogql(target: PosthogTarget, query: string): Promise<Record<string, unknown>[]> {
+  const until = throttledUntil(target);
+  if (until) throw new PosthogThrottled(`waiting for PostHog's read budget until ${until.toISOString()}`, until);
   const url = `${POSTHOG_HOSTS[target.region]}/api/projects/${encodeURIComponent(target.projectId)}/query/`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -94,6 +153,17 @@ export async function hogql(target: PosthogTarget, query: string): Promise<Recor
       signal: controller.signal,
     });
     const text = await res.text();
+    const bytesRead = Number(res.headers.get("x-posthog-query-bytes-read"));
+    if (Number.isFinite(bytesRead) && bytesRead > 0) {
+      const key = projectKey(target);
+      spent.set(key, [...(spent.get(key) ?? []), { at: Date.now(), bytes: bytesRead }]);
+    }
+    if (res.status === 429) {
+      const message = readVendorMessage(text);
+      const retryAt = retryAtOf(res.headers.get("retry-after"), message, Date.now());
+      holdReads(target, retryAt);
+      throw new PosthogThrottled(message, retryAt);
+    }
     if (!res.ok) throw new PosthogError(res.status, readVendorMessage(text));
     const body = JSON.parse(text) as { columns?: string[]; results?: unknown[][] };
     if (!Array.isArray(body.columns) || !Array.isArray(body.results)) {
@@ -137,13 +207,31 @@ const IS_IDENTIFIED = (alias: string) =>
 export const KNOWN_PROPERTY_KEYS = ["email", ...PHONE_PROPERTY_KEYS, ...NAME_PROPERTY_KEYS, ...WEBSITE_PROPERTY_KEYS] as const;
 export const IDENTIFIED = IS_IDENTIFIED("");
 
-/** Which persons an activity read covers: the identified ones, or an explicit id list. */
-export type PersonScope = { kind: "identified" } | { kind: "ids"; ids: string[] };
+/**
+ * Which rows an activity read covers (POSTHOG-429-1107, measured on project 171095 with PostHog's own
+ * `X-PostHog-Query-Bytes-Read`): a persons sub-query (`person.id IN (SELECT id FROM persons WHERE ...)`) re-scans the
+ * whole persons table with every property on EVERY read: 1.8 GB for one 15-min visit window, 2-3 GB for the
+ * every-minute fast mirror, 7.6 GB for one person's history. So no read filters on the persons table any more:
+ *  - `window`: every row of the window, no person filter (2 days of visits = 24 MB); the caller keeps only the rows
+ *    of persons it holds and drops the rest in memory (an anonymous visitor is never stored).
+ *  - `distinctIds`: the rows of these distinct ids. The events table is sorted by (day, event, distinct id hash), so
+ *    this prunes to the granules holding them (7 people over 30 days of pageviews = 21 MB).
+ */
+export type PersonScope = { kind: "window" } | { kind: "distinctIds"; ids: string[] };
 
 const personScopeSql = (scope: PersonScope) =>
-  scope.kind === "identified"
-    ? `person.id IN (SELECT id FROM persons WHERE ${IDENTIFIED})`
-    : `toString(person.id) IN (${scope.ids.map(lit).join(", ")})`;
+  scope.kind === "window" ? "1 = 1" : `distinct_id IN (${scope.ids.map(lit).join(", ")})`;
+
+/** PURE: a person row read without the IDENTIFIED filter is KNOWN (the same rule as `IDENTIFIED`, applied in code). */
+export function isKnownPerson(row: Record<string, unknown>): boolean {
+  const filled = (v: unknown) => v !== null && v !== undefined && String(v).trim() !== "";
+  if (Number(row.is_identified) === 1 || row.is_identified === true) return true;
+  return (
+    filled(row.email) ||
+    NAME_PROPERTY_KEYS.some((k) => filled(row[k])) ||
+    [...PHONE_PROPERTY_KEYS, ...WEBSITE_PROPERTY_KEYS].some((k) => filled(row[`prop_${k}`]))
+  );
+}
 
 /**
  * Prove the key reads THIS project with the scope the sync needs, in one call:
@@ -169,12 +257,13 @@ async function* keysetPages(
   }
 }
 
-const PERSON_COLUMNS = `
+const PERSON_BASE_COLUMNS = `
   toString(p.id) AS id, toString(p.properties.email) AS email,
   toString(p.properties.name) AS name, toString(p.properties.first_name) AS first_name,
   toString(p.properties.last_name) AS last_name, p.created_at AS created_at,
   ${[...PHONE_PROPERTY_KEYS, ...WEBSITE_PROPERTY_KEYS].map((k) => `toString(p.properties.${k}) AS prop_${k}`).join(", ")},
-  p.is_identified AS is_identified, d.ids AS distinct_ids`;
+  p.is_identified AS is_identified`;
+const PERSON_COLUMNS = `${PERSON_BASE_COLUMNS}, d.ids AS distinct_ids`;
 
 /** Up to 50 distinct ids per person: the ids another tool of the brand may name them by. */
 const distinctIdsOf = (personFilter: string) => `
@@ -199,22 +288,50 @@ export function listIdentifiedPersons(target: PosthogTarget) {
 }
 
 /**
- * The NOT-identified persons carrying one of these distinct ids (the brand's
- * auth user ids). Call with at most a few hundred ids at a time.
+ * The NOT-identified persons carrying one of these distinct ids (the brand's auth user ids). Two cheap reads: the
+ * distinct id -> person map (person_distinct_ids, ~1 MB), then those persons by id. Call with at most a few hundred ids.
  */
 export async function listPersonsByDistinctIds(target: PosthogTarget, distinctIds: string[]) {
   if (distinctIds.length === 0) return [];
-  const match = `id IN (SELECT person_id FROM person_distinct_ids WHERE distinct_id IN (${distinctIds.map(lit).join(", ")}))`;
-  return hogql(
+  const rows = await hogql(
+    target,
+    `SELECT DISTINCT toString(person_id) AS person_id FROM person_distinct_ids WHERE distinct_id IN (${distinctIds.map(lit).join(", ")}) LIMIT ${POSTHOG_PAGE_SIZE}`,
+  );
+  const persons = await readPersonsByIds(target, rows.map((r) => String(r.person_id)).filter(Boolean));
+  return persons.filter((p) => !isKnownPerson(p));
+}
+
+/** Up to `max` distinct ids of each of these persons (by person id): ~1.5 MB, the table is small. */
+export async function distinctIdsOfPersons(target: PosthogTarget, personIds: string[], max = 50): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  if (personIds.length === 0) return out;
+  const rows = await hogql(
+    target,
+    `SELECT toString(person_id) AS person_id, groupArray(${max})(distinct_id) AS ids FROM person_distinct_ids
+     WHERE toString(person_id) IN (${personIds.map(lit).join(", ")}) GROUP BY person_id LIMIT ${POSTHOG_PAGE_SIZE}`,
+  );
+  for (const r of rows) out.set(String(r.person_id), Array.isArray(r.ids) ? r.ids.map(String) : []);
+  return out;
+}
+
+/**
+ * These persons by id, known or not, each with `distinct_ids`, the SAME columns as every person read. The persons
+ * table is keyed on the id, so this reads only their rows (3 persons = 16.5 MB); the distinct ids come from their own
+ * small read (the old `person_id IN (SELECT id FROM persons WHERE ...)` join re-scanned persons: 76 MB).
+ */
+async function readPersonsByIds(target: PosthogTarget, ids: string[]): Promise<Record<string, unknown>[]> {
+  if (ids.length === 0) return [];
+  const persons = await hogql(
     target,
     `
-      SELECT ${PERSON_COLUMNS}
-      FROM persons AS p ${distinctIdsOf(match)}
-      WHERE NOT ${IS_IDENTIFIED("p.")}
-        AND p.${match}
+      SELECT ${PERSON_BASE_COLUMNS}
+      FROM persons AS p
+      WHERE toString(p.id) IN (${ids.map(lit).join(", ")})
       ORDER BY id
       LIMIT ${POSTHOG_PAGE_SIZE}`,
   );
+  const distinct = await distinctIdsOfPersons(target, persons.map((p) => String(p.id)));
+  return persons.map((p) => ({ ...p, distinct_ids: distinct.get(String(p.id)) ?? null }));
 }
 
 /**
@@ -355,33 +472,35 @@ export async function* listKeyEvents(target: PosthogTarget, since: Date, scope: 
  * minute, so a number or a website typed on a form, and each step after it, reach
  * us within a minute. Returns PostHog person ids.
  */
+/**
+ * The events that can make a person known or change who they are: PostHog's own person-setting events (`identify`,
+ * `setPersonProperties`, alias, merge) and every custom event (a product's form step carries its `$set`).
+ */
+export const PERSON_SETTING_EVENTS = ["$identify", "$set", "$create_alias", "$merge_dangerously"] as const;
+
 export async function listPersonIdsTouchedSince(target: PosthogTarget, since: Date): Promise<string[]> {
-  const setsKnown = KNOWN_PROPERTY_KEYS.flatMap((k) =>
-    ["$set", "$set_once"].map((op) => `ifNull(toString(properties.${op}.${k}), '') != ''`),
-  ).join(" OR ");
+  // POSTHOG-429-1107: chosen by event NAME, never by reading `properties.$set` nor the persons table: 2.8 MB a call
+  // (it was 2-3 GB, every minute, and alone spent the project's hourly read budget). Who is KNOWN is decided on the
+  // person read that follows (`isKnownPerson`). Anonymous person ids read here are dropped, never stored.
   const rows = await hogql(
     target,
     `
       SELECT DISTINCT toString(person_id) AS id
       FROM events
       WHERE timestamp >= ${ts(since)}
-        AND ((${setsKnown}) OR (event NOT LIKE '$%' AND person.id IN (SELECT id FROM persons WHERE ${IDENTIFIED})))
+        AND (event NOT LIKE '$%' OR event IN (${PERSON_SETTING_EVENTS.map(lit).join(", ")}))
       LIMIT ${POSTHOG_PAGE_SIZE}`,
   );
   return rows.map((r) => String(r.id)).filter((id) => !!id);
 }
 
-/** These persons (PostHog ids) when they are known (`IDENTIFIED`), with the same columns as every person read. */
-export async function listPersonsByIds(target: PosthogTarget, ids: string[]) {
-  if (ids.length === 0) return [];
-  const match = `toString(id) IN (${ids.map(lit).join(", ")})`;
-  return hogql(
-    target,
-    `
-      SELECT ${PERSON_COLUMNS}
-      FROM persons AS p ${distinctIdsOf(match)}
-      WHERE toString(p.id) IN (${ids.map(lit).join(", ")}) AND ${IS_IDENTIFIED("p.")}
-      ORDER BY id
-      LIMIT ${POSTHOG_PAGE_SIZE}`,
+/**
+ * These persons (PostHog ids) when they are known (`isKnownPerson`) or carry one of `authUserIds` as a distinct id,
+ * with the same columns as every person read.
+ */
+export async function listPersonsByIds(target: PosthogTarget, ids: string[], authUserIds: ReadonlySet<string> = new Set()) {
+  const persons = await readPersonsByIds(target, ids);
+  return persons.filter(
+    (p) => isKnownPerson(p) || (Array.isArray(p.distinct_ids) && p.distinct_ids.some((d) => authUserIds.has(String(d)))),
   );
 }

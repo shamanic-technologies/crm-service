@@ -29,6 +29,12 @@ export interface IntakeAssessment {
   quietDays: number | null;
   usualLongestQuietDays: number | null;
   activeDaysInHistory: number;
+  /**
+   * POSTHOG-429-1107: the vendor asked us to wait (PostHog's hourly read budget of the project used up): a wait, never
+   * a failure. Alone it is no reason for red; a wait that left the mirror more than 2 h behind is still red
+   * (`sync_late`, the gap is real), its text says why.
+   */
+  waiting: { until: string | null; since: string | null } | null;
 }
 
 export function assessIntake(args: {
@@ -38,6 +44,9 @@ export function assessIntake(args: {
   lastSyncedAt: Date | null;
   lastError: string | null;
   now: number;
+  /** The vendor asked us to wait: since when, and until when (POSTHOG-429-1107). */
+  waitingSince?: Date | null;
+  waitingUntil?: Date | null;
 }): IntakeAssessment {
   const today = dayNumber(utcDay(args.now));
   const days = [...new Set(args.activeDays)].map(dayNumber).filter((d) => d <= today).sort((a, b) => a - b);
@@ -47,18 +56,30 @@ export function assessIntake(args: {
   for (let i = 1; i < history.length; i++) usual = Math.max(usual ?? 0, history[i] - history[i - 1]);
   const quietDays = newest === null ? null : today - newest;
 
+  const waiting =
+    args.waitingSince || args.waitingUntil
+      ? {
+          until: args.waitingUntil && args.waitingUntil.getTime() > args.now ? args.waitingUntil.toISOString() : null,
+          since: args.waitingSince?.toISOString() ?? null,
+        }
+      : null;
   const base = {
     newestRecordDay: newest === null ? null : utcDay(newest * DAY_MS),
     quietDays,
     usualLongestQuietDays: usual,
     activeDaysInHistory: history.length,
+    waiting,
   };
   if (args.syncStatus === "paused") return { status: "paused", reasons: [], ...base };
 
   const reasons: IntakeAssessment["reasons"] = [];
   if (args.syncStatus === "error") reasons.push({ code: "sync_error", text: `The sync fails: ${args.lastError ?? "no message"}` });
   if (!args.lastSyncedAt || args.now - args.lastSyncedAt.getTime() > SYNC_LATE_AFTER_MS) {
-    reasons.push({ code: "sync_late", text: args.lastSyncedAt ? `Last good sync ${args.lastSyncedAt.toISOString()}` : "Never synced" });
+    const last = args.lastSyncedAt ? `Last good sync ${args.lastSyncedAt.toISOString()}` : "Never synced";
+    const why = waiting
+      ? `; the vendor's hourly read limit is used up, catching up on its own${waiting.until ? `, next read ${waiting.until}` : ""}`
+      : "";
+    reasons.push({ code: "sync_late", text: `${last}${why}` });
   }
   if (
     quietDays !== null &&

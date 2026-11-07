@@ -3690,6 +3690,22 @@ export const PosthogConnectionSchema = registry.register(
       lastError: z.string().nullable().openapi({ description: "Why the last sync failed, verbatim. Null when healthy." }),
       lastRunId: z.string().nullable(),
       createdAt: z.string(),
+      sync: z
+        .object({
+          state: z.enum(["up_to_date", "catching_up", "first_sync", "failed", "paused"]).openapi({
+            description:
+              "What the client should read. `catching_up` = we are behind on purpose and reading again on our own (PostHog's hourly read limit for the project is used up, or older history is still being read); nothing is broken and nothing is needed from the client. `failed` = a real failure (bad key, wrong project): `lastError` says why.",
+          }),
+          reason: z.enum(["posthog_read_budget", "reading_history"]).nullable().openapi({
+            description: "Why `catching_up`: PostHog asked us to wait (`posthog_read_budget`), or persons' older visits are still being read (`reading_history`).",
+          }),
+          retryAt: z.string().nullable().openapi({ description: "When PostHog said reads come back; the next read happens then (null = not waiting)." }),
+          waitingSince: z.string().nullable().openapi({ description: "First refusal since the last complete pass." }),
+          behindSince: z.string().nullable().openapi({ description: "Activity is complete up to this instant (the last complete pass's start)." }),
+          historyBacklog: z.number().int().nullable().openapi({ description: "Persons whose older history is still to read (null on single-row answers)." }),
+          message: z.string().nullable().openapi({ description: "PostHog's own words when it asked us to wait." }),
+        })
+        .openapi({ description: "POSTHOG-429-1107: the connection's sync state in plain terms, distinct from a failure." }),
     })
     .openapi("PosthogConnection"),
 );
@@ -4406,7 +4422,7 @@ registry.registerPath({
     "A sync that succeeds while the account takes in nothing is therefore red, never healthy. Paused = `paused`, never red. " +
     "Nothing is emailed: red on the Monitoring hub is the alert. Staff-only behind the gateway.",
   request: { query: z.object({ days: z.coerce.number().int().min(1).max(90).optional().describe("Window in days, default 30") }) },
-  responses: { 200: { description: "`{generatedAt, days, rule: {historyDays, minActiveDays, minQuietDays, syncLateAfterMinutes}, status, connections: [{source, connectionId, orgId, brandId, brandName, account, syncStatus, lastSyncedAt, lastError, status: ok|red|paused, reasons: [{code, text}], newestRecordDay, quietDays, usualLongestQuietDays, activeDaysInHistory, byDay: [{day, records}]}]}`" }, 400: { description: "Invalid days" } },
+  responses: { 200: { description: "`{generatedAt, days, rule: {historyDays, minActiveDays, minQuietDays, syncLateAfterMinutes}, status, connections: [{source, connectionId, orgId, brandId, brandName, account, syncStatus, lastSyncedAt, lastError, status: ok|red|paused, reasons: [{code, text}], newestRecordDay, quietDays, usualLongestQuietDays, activeDaysInHistory, waiting: {until, since} | null (the vendor asked us to wait: PostHog's hourly read limit; never red alone, red only once the mirror is 2 h behind), byDay: [{day, records}]}]}`" }, 400: { description: "Invalid days" } },
 });
 
 registry.registerPath({
