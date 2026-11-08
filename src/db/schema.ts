@@ -3024,6 +3024,14 @@ export const creditEventReports = pgTable(
     attempts: integer("attempts").notNull().default(0),
     lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
     lastError: text("last_error"),
+    // ACCOUNT-EVENTS-ONE-OFFER-1108: the staff Unibox scope the report was filed under and the ONE offer it went out on
+    // (lib/offer-pick.ts), how it was placed and Jev's verdict, persisted when placed (judged once). Null on older rows.
+    orgId: uuid("org_id"),
+    brandId: uuid("brand_id"),
+    offerId: uuid("offer_id"),
+    offerBasis: text("offer_basis"),
+    offerVerdict: jsonb("offer_verdict"),
+    // The offers it was reported under: one since ACCOUNT-EVENTS-ONE-OFFER-1108 (older rows: one per active offer).
     offerIds: jsonb("offer_ids").$type<string[]>(),
     campaignEvents: jsonb("campaign_events").$type<{ offerId: string; eventId: string; replayed: boolean }[]>(),
     runId: text("run_id"),
@@ -3055,6 +3063,12 @@ export const paymentRefusalReports = pgTable(
     attempts: integer("attempts").notNull().default(0),
     lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
     lastError: text("last_error"),
+    // ACCOUNT-EVENTS-ONE-OFFER-1108: the ONE offer the refusal went out on (lib/offer-pick.ts), how it was placed and
+    // Jev's verdict, persisted when placed (judged once). Null on older rows.
+    offerId: uuid("offer_id"),
+    offerBasis: text("offer_basis"),
+    offerVerdict: jsonb("offer_verdict"),
+    // The offers it was reported under: one since ACCOUNT-EVENTS-ONE-OFFER-1108 (older rows: one per active offer).
     offerIds: jsonb("offer_ids").$type<string[]>(),
     campaignEvents: jsonb("campaign_events").$type<{ offerId: string; eventId: string; replayed: boolean }[]>(),
     runId: text("run_id"),

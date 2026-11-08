@@ -1507,9 +1507,10 @@ in a brand's CRM is reported to campaign-service's generic trigger door
   keys and GoHighLevel's fixed non-answer elements; labels from `GET /locations/{id}/customFields`.
 - **Offer** (`src/lib/offer-pick.ts` `resolveOccurrenceOffer`, FORM-OFFER-PICK-1108; the ONE resolver of EVERY trigger since OFFER-PICK-ALL-1108): stated per form (`PUT /orgs/gohighlevel/form-offers {brandId, formId?,
   offerId}`, omitted formId = every form) > the brand's ONLY active offer > the pick persisted on the report (judged once)
-  > the offer that already REACHED the person at the brand (any earlier reported form / phone / reply report by email / phone, or an offer audience
+  > the offer that already REACHED the person at the brand (any earlier reported form / phone / reply / refusal / credit report by email / phone, or an offer audience
   that SERVED them: human-service `memberships/by-email`, else `by-phone` for a phone-only person, provenance `served`; earliest wins) > Jev `choice` over the active
   offers (name + what it sells + the offer's `role: "target"` audience `targetText`) on the occurrence's words, most probable offer.
+  Several held tags with no score = Jev (tags in its facts), never an id-order pick. Account facts (refused charge, credit) = ONE event, never one per offer.
   Persisted `offer_basis` + `offer_verdict` (confidence, probabilities) the moment it is placed, served on the read. No
   active offer = `offer_unknown`; a sibling / Jev down = `offer_pick_failed`; both loud, retried. Phone / reply call the SAME
   resolver (their evidence: the number's contact; the burst's messages); never a per-trigger rule.
@@ -2229,10 +2230,11 @@ se déclenche »); NO credit-specific trigger (« non »); the dunning emails st
   Old (closed) episodes ARE stated: a fact is what happened. lead-service reads them like any act of theirs (it checks no
   type list).
 - **Lead event = the GENERIC trigger `account_event`** ("Account Event", declared DATA in features-service, kind `reported`,
-  reportedBy crm-service, no pipe heads it): one occurrence per (event, member, offer) through `lib/trigger-door.ts`, `item.kind`
+  reportedBy crm-service, no pipe heads it): one occurrence per (event, member) through `lib/trigger-door.ts`, `item.kind`
   = the credit type, key `crm:account_event:<eventId>:<sha16(address)>:<offer>`; `lead_event` takes every member trigger, so
-  it fires the reactive campaigns on "Lead event" (who to act on = the pipe's strategy). Offer = the person's tagged active
-  offers, else EVERY active offer of the staff brand (the fact is about the account). **Never history**: an event dated before
+  it fires the reactive campaigns on "Lead event" (who to act on = the pipe's strategy). Offer = ONE (ACCOUNT-EVENTS-ONE-OFFER-1108, `lib/account-offer.ts`
+  → `resolveOccurrenceOffer`, ledger `credit`; persisted `org_id`/`brand_id`/`offer_id`/`offer_basis`/`offer_verdict`; `offer_pick_failed`
+  retried): Jev evidence = account name + their Copilot words + account actions, none = `eventOnly` (warned, on the verdict). **Never history**: an event dated before
   `billing_feed_cursors.watch_since` (the first pass) = `skipped before_watch`, older than 24 h when reported = `stale`; so the
   backlog (open episodes at ship time included) shows and is stated, never fires. Retries 1 → 60 min for 24 h; 400/422 final.
 
@@ -2247,8 +2249,8 @@ UNIBOX-PAYMENT-REFUSED-1028 (`payment_refused` on the thread); this is the trigg
   Stripe customer (`contacts` row: email, else dialable phone); staff = `skipped / staff`; nobody named = `no_email_or_phone`.
 - Delivered on ONE org run per (org, brand), filed under the connection's creator, through the trigger door as the GENERIC
   `account_event` (member of `lead_event`, like a credit running out): `item {kind: "payment_refused", text (the timeline's
-  words), chargeId, amount, amountMinor, currency, reason, description, stripeAccountId, at}`; offers = the person's tagged
-  active offers, else every active offer (`reportOffers`); key `crm:account_event:stripe_charge:<charge>:<sha16(who)>:<offer>`.
+  words), chargeId, amount, amountMinor, currency, reason, description, stripeAccountId, at}`; ONE offer (ACCOUNT-EVENTS-ONE-OFFER-1108,
+  ledger `refusal`, same resolver as credit; Jev evidence = charge + Stripe contact); key `crm:account_event:stripe_charge:<charge>:<sha16(who)>:<offer>`.
   Several refusals of one person due together (Stripe retries hourly) = the LATEST reported, the others `superseded`.
   Retries 1 -> 60 min for 24 h; 400 / 422 final. Nothing here writes a message: the Lead event workflow decides.
 - Monitoring: trigger `payment_refused` on `GET /internal/ops/trigger-reports`. A pass now: `POST /internal/payment-refusals/watch`.

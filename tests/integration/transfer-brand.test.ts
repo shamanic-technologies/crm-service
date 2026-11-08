@@ -166,6 +166,9 @@ async function seedBrand(org: string, brand: string, tag: string) {
     INSERT INTO payment_refusal_reports (org_id, brand_id, connection_id, charge_id, charged_at, email, status)
     VALUES (${org}, ${brand}, gen_random_uuid(), ${"ch_ref_" + tag}, now(), 'payer@example.com', 'reported')`);
   await db.execute(sql`
+    INSERT INTO credit_event_reports (event_id, email, status, org_id, brand_id)
+    VALUES (${"ev-" + tag + "-" + Math.random().toString(16).slice(2)}, 'member@example.com', 'reported', ${org}, ${brand})`);
+  await db.execute(sql`
     INSERT INTO phone_watch_artifacts (org_id, brand_id, artifact_id, source)
     VALUES (${org}, ${brand}, gen_random_uuid(), 'clerk')`);
   await db.execute(sql`

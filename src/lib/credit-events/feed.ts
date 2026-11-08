@@ -2,7 +2,8 @@
  * THE CREDIT WATCH (CREDIT-RAN-OUT-UNIBOX-EVENT-1024): mirror billing-service's "credit ran out" / "credit restored"
  * feed (`GET /internal/credit-events?cursor=`, cross-org, total order (at, eventId), events at least 60 s old) into
  * bronze `credit_events` (insert-only on billing's event id: a re-read page stores nothing twice), find the people each
- * event is about (client-service org members, staff dropped), and report each member once as a Lead event (rules.ts).
+ * event is about (client-service org members, staff dropped), and report each member once as a Lead event (rules.ts), on
+ * ONE offer of the staff brand (lib/account-offer.ts -> lib/offer-pick.ts, ACCOUNT-EVENTS-ONE-OFFER-1108).
  *
  * Filed ONLY under the staff Unibox scope (`COPILOT_UNIBOX_ORG_ID` + `_BRAND_ID`, same structural privacy as the
  * Copilot / API sources): the timeline (people/timeline.ts `billingItems`) and the fact feed (people/facts.ts
@@ -12,15 +13,23 @@
  * The cursor only moves after its page is stored, so a crash re-reads a page (idempotent), never skips one.
  */
 
-import { and, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { billingFeedCursors, creditEventReports, creditEvents, people, peopleScopes, type CreditEventReport } from "../../db/schema.js";
+import {
+  accountActivities,
+  billingFeedCursors,
+  copilotMessages,
+  creditEventReports,
+  creditEvents,
+  peopleScopes,
+  type CreditEventReport,
+} from "../../db/schema.js";
 import { readOrgMembers } from "../org-members.js";
 import { readOrg } from "../conversation-pings.js";
-import { readBrandOffers } from "../form-trigger/offer.js";
 import { copilotDestination } from "../copilot/messages.js";
 import { runScopeBuild } from "../people/build.js";
-import { emailKey } from "../people/identity.js";
+import { accountPersonOf, resolveAccountFactOffer } from "../account-offer.js";
+import type { OfferPick } from "../offer-pick.js";
 import { siblingGet, type SiblingIdentity } from "../people/siblings.js";
 import { createRun, updateRun } from "../runs-client.js";
 import { CampaignRefusal, FINAL_REFUSAL_STATUSES, campaignServiceConfigured, recordTriggerEvent } from "../trigger-door.js";
@@ -29,8 +38,8 @@ import {
   CREDIT_REPORT_STATUS,
   creditOccurrenceBody,
   memberEmailsOf,
+  creditEventText,
   parseFeedPage,
-  reportOffers,
   reportVerdict,
   type FeedPage,
 } from "./rules.js";
@@ -232,14 +241,28 @@ async function dueReports(now: number): Promise<CreditEventReport[]> {
   return found.filter((r) => nextAttemptDue(r.attempts, r.lastAttemptAt) <= now);
 }
 
-/** The staff scope's person holding this address: their name and the offers their conversations are about. */
-async function personOf(scope: { orgId: string; brandId: string }, email: string): Promise<{ name: string | null; offerIds: string[] }> {
-  const [p] = await db
-    .select({ name: people.displayName, offerIds: people.offerIds })
-    .from(people)
-    .where(and(eq(people.orgId, scope.orgId), eq(people.brandId, scope.brandId), sql`${people.identityKeys} @> ${JSON.stringify([emailKey(email)])}::jsonb`))
-    .limit(1);
-  return { name: p?.name ?? null, offerIds: (p?.offerIds as string[] | undefined) ?? [] };
+/**
+ * What the account's person said and did with us, as Jev reads it to place a credit event on an offer: their latest
+ * Copilot words (the staff scope's `copilot_messages`, what they asked for when they signed up / onboarded) and their
+ * latest account actions (`account_activities`, filed by their address). Empty = nothing held about them.
+ */
+export async function accountWordsOf(scope: { orgId: string; brandId: string }, email: string): Promise<Record<string, unknown>> {
+  const said = await db
+    .select({ at: copilotMessages.sentAt, text: copilotMessages.text })
+    .from(copilotMessages)
+    .where(and(eq(copilotMessages.orgId, scope.orgId), eq(copilotMessages.brandId, scope.brandId), sql`lower(${copilotMessages.email}) = ${email}`, eq(copilotMessages.role, "user")))
+    .orderBy(desc(copilotMessages.sentAt))
+    .limit(10);
+  const did = await db
+    .select({ at: accountActivities.occurredAt, title: accountActivities.title })
+    .from(accountActivities)
+    .where(and(sql`lower(${accountActivities.actorEmail}) = ${email}`, eq(accountActivities.status, "filed")))
+    .orderBy(desc(accountActivities.occurredAt))
+    .limit(10);
+  const out: Record<string, unknown> = {};
+  if (said.length > 0) out.theirCopilotMessages = said.reverse().map((m) => ({ at: m.at.toISOString(), text: m.text.slice(0, 1000) }));
+  if (did.length > 0) out.theirAccountActions = did.reverse().map((a) => ({ at: a.at.toISOString(), what: a.title.slice(0, 300) }));
+  return out;
 }
 
 export interface DeliveredReport {
@@ -263,61 +286,82 @@ export async function deliverCreditReports(
       .update(creditEventReports)
       .set({ ...set, attempts: r.attempts + 1, lastAttemptAt: new Date(now), runId })
       .where(eq(creditEventReports.id, r.id));
-  let activeOffers: string[];
-  try {
-    activeOffers = (await readBrandOffers(identity)).filter((o) => o.status === "active").map((o) => o.offerId);
-  } catch (err) {
-    console.warn(`[crm-service][credit] staff brand offers unreadable, reports retried next pass: ${(err as Error).message}`);
-    return [];
-  }
   const events = new Map(
     (await db.select().from(creditEvents).where(inArray(creditEvents.eventId, [...new Set(due.map((r) => r.eventId))]))).map((e) => [e.eventId, e]),
   );
   const out: DeliveredReport[] = [];
   for (const r of due) {
     const e = events.get(r.eventId)!;
-    const person = await personOf(scope, r.email);
-    const offers = reportOffers(person.offerIds, activeOffers);
-    if (offers.length === 0) {
-      await settle(r, { status: CREDIT_REPORT_STATUS.FAILED, reason: CREDIT_REPORT_REASONS.OFFER_UNKNOWN, lastError: "the staff brand has no active offer" });
+    const person = await accountPersonOf(scope.orgId, scope.brandId, r.email, null);
+    // ACCOUNT-EVENTS-ONE-OFFER-1108: ONE event on ONE offer (the resolver every trigger shares), never one per offer.
+    let offer: OfferPick;
+    try {
+      const words = await accountWordsOf(scope, r.email);
+      offer = await resolveAccountFactOffer(identity, {
+        ledger: "credit",
+        reportId: r.id,
+        persisted: { offerId: r.offerId, offerBasis: r.offerBasis, offerVerdict: r.offerVerdict },
+        person: { email: r.email, phone: null },
+        who: person,
+        what: `A client account of this brand just had this happen: ${creditEventText(e.type, e.orgLabel)}. The person is a member of that account.`,
+        facts: { name: person.name, email: r.email, account: e.orgLabel, event: e.type, ...words },
+        hasPersonEvidence: Object.keys(words).length > 0,
+      });
+    } catch (err) {
+      const message = `placing the event on an offer failed: ${(err as Error).message}`.slice(0, 1000);
+      console.warn(`[crm-service][credit] ${e.type} ${e.eventId} for ${r.email} not reported: ${message}`);
+      await settle(r, { status: CREDIT_REPORT_STATUS.FAILED, reason: CREDIT_REPORT_REASONS.OFFER_PICK_FAILED, lastError: message });
+      out.push({ reportId: r.id, status: CREDIT_REPORT_STATUS.FAILED, reason: CREDIT_REPORT_REASONS.OFFER_PICK_FAILED });
+      continue;
+    }
+    if (offer.offerId === null) {
+      await settle(r, { status: CREDIT_REPORT_STATUS.FAILED, reason: CREDIT_REPORT_REASONS.OFFER_UNKNOWN, lastError: offer.detail.replace(/: state it with .*$/, "") });
       out.push({ reportId: r.id, status: CREDIT_REPORT_STATUS.FAILED, reason: CREDIT_REPORT_REASONS.OFFER_UNKNOWN });
       continue;
     }
+    const offerId = offer.offerId;
+    const placed = {
+      orgId: scope.orgId,
+      brandId: scope.brandId,
+      offerId,
+      offerBasis: offer.basis,
+      offerVerdict: offer.verdict,
+      offerIds: [offerId],
+    };
+    // Persisted at once (judged once): a campaign-service failure below retries on the same pick.
+    await db.update(creditEventReports).set(placed).where(eq(creditEventReports.id, r.id));
     try {
-      const recorded: { offerId: string; eventId: string; replayed: boolean }[] = [];
-      for (const offerId of offers) {
-        const rec = await recordTriggerEvent(
-          identity,
-          creditOccurrenceBody({
-            brandId: scope.brandId,
-            offerId,
-            email: r.email,
-            name: person.name,
-            eventId: e.eventId,
-            type: e.type,
-            creditOrgId: e.creditOrgId,
-            episodeId: e.episodeId,
-            orgLabel: e.orgLabel,
-            at: e.at,
-          }),
-        );
-        recorded.push({ offerId, eventId: rec.eventId, replayed: rec.replayed });
-      }
+      const rec = await recordTriggerEvent(
+        identity,
+        creditOccurrenceBody({
+          brandId: scope.brandId,
+          offerId,
+          email: r.email,
+          name: person.name,
+          eventId: e.eventId,
+          type: e.type,
+          creditOrgId: e.creditOrgId,
+          episodeId: e.episodeId,
+          orgLabel: e.orgLabel,
+          at: e.at,
+        }),
+      );
+      const recorded = [{ offerId, eventId: rec.eventId, replayed: rec.replayed }];
       await settle(r, {
         status: CREDIT_REPORT_STATUS.REPORTED,
         reason: null,
         lastError: null,
-        offerIds: offers,
+        ...placed,
         campaignEvents: recorded,
         reportedAt: new Date(),
       });
-      console.log(`[crm-service][credit] reported ${e.type} ${e.eventId} for ${r.email} as account_event x${recorded.length}`);
+      console.log(`[crm-service][credit] reported ${e.type} ${e.eventId} for ${r.email} as account_event on offer ${offerId} (${offer.basis})`);
       out.push({ reportId: r.id, status: CREDIT_REPORT_STATUS.REPORTED, reason: null });
     } catch (err) {
       const final = err instanceof CampaignRefusal && FINAL_REFUSAL_STATUSES.has(err.status);
       const reason = final ? CREDIT_REPORT_REASONS.CAMPAIGN_REFUSED : CREDIT_REPORT_REASONS.CAMPAIGN_UNREACHABLE;
       console.warn(`[crm-service][credit] ${e.type} ${e.eventId} for ${r.email} not reported (${reason}): ${(err as Error).message}`);
-      await settle(r, { status: CREDIT_REPORT_STATUS.FAILED, reason, lastError: (err as Error).message.slice(0, 1000), offerIds: offers });
+      await settle(r, { status: CREDIT_REPORT_STATUS.FAILED, reason, lastError: (err as Error).message.slice(0, 1000), ...placed });
       out.push({ reportId: r.id, status: CREDIT_REPORT_STATUS.FAILED, reason });
     }
   }

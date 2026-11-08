@@ -52,7 +52,7 @@ router.get("/internal/credit-events", apiKeyAuth, async (req, res) => {
       membersError: e.membersError,
       reports: reports
         .filter((r) => r.eventId === e.eventId)
-        .map((r) => ({ email: r.email, status: r.status, reason: r.reason, attempts: r.attempts, offerIds: r.offerIds, campaignEvents: r.campaignEvents, reportedAt: r.reportedAt?.toISOString() ?? null })),
+        .map((r) => ({ email: r.email, status: r.status, reason: r.reason, attempts: r.attempts, offerId: r.offerId, offerBasis: r.offerBasis, offerIds: r.offerIds, campaignEvents: r.campaignEvents, reportedAt: r.reportedAt?.toISOString() ?? null })),
     })),
   });
 });

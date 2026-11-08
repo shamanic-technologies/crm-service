@@ -4737,7 +4737,8 @@ registry.registerPath({
   summary:
     "Report refused Stripe charges now (the loop runs every minute): each refused charge of a brand's Stripe, dated after the " +
     "connection was made and less than 24 h old, is ONE Lead event (`account_event`, item.kind `payment_refused`) for the person who paid; " +
-    "several waiting for one person = the latest reported, the others `superseded`",
+    "several waiting for one person = the latest reported, the others `superseded`. ONE event on ONE offer of the brand (the offer that already reached the person, " +
+    "else their offer tags, else Jev on the charge and their contact; ACCOUNT-EVENTS-ONE-OFFER-1108), never one per active offer",
   responses: {
     200: { description: "`{detected: {recorded, pending}, delivered: [{reportId, status, reason}]}`, or `{skipped: \"pass_running\"}`" },
     502: { description: "The pass failed" },
@@ -4748,7 +4749,7 @@ registry.registerPath({
   method: "get",
   path: "/internal/credit-events",
   summary: "The mirrored credit events (newest first, `limit` <= 1000): the people each is about and their Lead event report",
-  responses: { 200: { description: "`{events: [{eventId, type, accountOrgId, accountName, episodeId, at, memberEmails, reports}]}`" } },
+  responses: { 200: { description: "`{events: [{eventId, type, accountOrgId, accountName, episodeId, at, memberEmails, reports: [{email, status, reason, attempts, offerId, offerBasis, offerIds, campaignEvents, reportedAt}]}]}`. Each member is reported on ONE offer of the staff brand (`offerBasis`: only_offer | person_reached | judged; ACCOUNT-EVENTS-ONE-OFFER-1108); reason `offer_pick_failed` = placing it failed (a sibling or Jev down), retried" } },
 });
 
 registry.registerPath({

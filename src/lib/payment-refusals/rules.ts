@@ -31,6 +31,8 @@ export const REFUSAL_REASONS = {
   NO_EMAIL_OR_PHONE,
   SUPERSEDED: "superseded",
   OFFER_UNKNOWN: "offer_unknown",
+  /** Placing the refusal on ONE offer failed (lib/offer-pick.ts: a sibling or Jev down): retried. */
+  OFFER_PICK_FAILED: "offer_pick_failed",
   CAMPAIGN_REFUSED: "campaign_refused",
   CAMPAIGN_UNREACHABLE: "campaign_unreachable",
 } as const;
