@@ -3141,7 +3141,10 @@ export const OutcomePeopleResponseSchema = registry.register(
   z.object({
     brandId: z.string().uuid(),
     step: OutcomeStepSchema,
-    total: z.number().int().openapi({ description: "Equals that step's `people` in GET /orgs/people/outcomes." }),
+    contactedByUs: z.literal(true).optional().openapi({ description: "Present only when the list was narrowed to the people contacted by us." }),
+    total: z.number().int().openapi({
+      description: "Equals that step's `people` in GET /orgs/people/outcomes (its `contactedByUs` when `contactedByUs=true` was asked).",
+    }),
     limit: z.number().int(),
     offset: z.number().int(),
     people: z.array(
@@ -3331,6 +3334,10 @@ registry.registerPath({
       step: OutcomeStepSchema,
       limit: z.coerce.number().int().min(1).max(500).optional().openapi({ description: "Default 100." }),
       offset: z.coerce.number().int().min(0).optional(),
+      contactedByUs: z.enum(["true", "false"]).optional().openapi({
+        description:
+          "`true` = only the people our campaigns brought to the step (the step's served `contactedByUs` rule): `total` equals that count and paging walks exactly them. Absent / `false` = everyone, unchanged.",
+      }),
     }),
   },
   responses: {
