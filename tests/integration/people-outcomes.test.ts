@@ -308,6 +308,44 @@ describe.skipIf(!RUN)("people outcomes (all sources)", () => {
     expect(visits.body.people.map((p: { personKey: string }) => p.personKey)).toEqual(["email:bob@x.com", "email:ann@x.com", "email:gus@x.com"]);
   });
 
+  it("OUTCOME-CONTACTED-LIST-1108: contactedByUs=true lists only the people contacted by us, total = the step's served count, paging consistent", async () => {
+    await seed();
+    BUCKETS = { website_visit: [lead("ann@x.com"), lead("gus@x.com", "Gus")], sale: [lead("dan@x.com")] };
+    OFFER_BUCKETS = { [`${OFFER_A}|website_visit`]: [lead("ann@x.com"), lead("gus@x.com")], [`${OFFER_B}|sale`]: [lead("dan@x.com")] };
+    const r = await asOrg(request(app()).get("/orgs/people/outcomes").query({ brandId: BRAND }));
+    const by = Object.fromEntries(r.body.steps.map((s: { step: string }) => [s.step, s]));
+
+    for (const step of ["website_visit", "sale", "signup"]) {
+      const all = await asOrg(request(app()).get("/orgs/people/outcomes/people").query({ brandId: BRAND, step }));
+      const ours = await asOrg(request(app()).get("/orgs/people/outcomes/people").query({ brandId: BRAND, step, contactedByUs: "true" }));
+      expect(ours.status).toBe(200);
+      expect(ours.body.contactedByUs).toBe(true);
+      expect(all.body).not.toHaveProperty("contactedByUs");
+      expect(ours.body.total).toBe(by[step].contactedByUs);
+      expect(ours.body.people.every((p: { contactedByUs: boolean }) => p.contactedByUs)).toBe(true);
+      // Same people, same order, as the flagged rows of the full list.
+      expect(ours.body.people.map((p: { personKey: string }) => p.personKey)).toEqual(
+        all.body.people.filter((p: { contactedByUs: boolean }) => p.contactedByUs).map((p: { personKey: string }) => p.personKey),
+      );
+      // Paging by 1 walks exactly `total` distinct people; past the end keeps the total.
+      const walked: string[] = [];
+      for (let offset = 0; offset < ours.body.total + 1; offset++) {
+        const p = await asOrg(
+          request(app()).get("/orgs/people/outcomes/people").query({ brandId: BRAND, step, contactedByUs: "true", limit: 1, offset }),
+        );
+        expect(p.body.total).toBe(ours.body.total);
+        walked.push(...p.body.people.map((x: { personKey: string }) => x.personKey));
+      }
+      expect(walked).toEqual(ours.body.people.map((p: { personKey: string }) => p.personKey));
+      // `false` = the full list, byte for byte.
+      const off = await asOrg(request(app()).get("/orgs/people/outcomes/people").query({ brandId: BRAND, step, contactedByUs: "false" }));
+      expect(off.body).toEqual(all.body);
+    }
+    expect(by.website_visit.contactedByUs).toBe(2);
+    expect(by.sale.contactedByUs).toBe(1);
+    expect((await asOrg(request(app()).get("/orgs/people/outcomes/people").query({ brandId: BRAND, step: "sale", contactedByUs: "yes" }))).status).toBe(400);
+  });
+
   it("OUTCOMES-CONTACTED-1027: contacted by us = an offer's bucket of the step, never a person lead-service merely holds", async () => {
     await seed();
     // lead-service's BRAND-WIDE buckets hold Ann for signup and visit (its ledger matched her), but

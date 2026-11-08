@@ -548,6 +548,10 @@ export interface SatisfiedMessage {
 /**
  * The people who reached one step, earliest first (undated last), total order on
  * person key. Pages to exactly the `people` count of `readOutcomeCounts`.
+ *
+ * `contactedOnly` (OUTCOME-CONTACTED-LIST-1108, the dashboard's "Contacted by us" tab): only the
+ * people `CONTACTED_FOR_STEP` holds, the SAME rule as the step's `contactedByUs` count, so the
+ * total equals it and paging walks exactly those people.
  */
 export async function readOutcomePeople(
   orgId: string,
@@ -556,8 +560,10 @@ export async function readOutcomePeople(
   limit: number,
   offset: number,
   inputs: OutcomeInputs,
+  contactedOnly = false,
 ): Promise<{ total: number; people: OutcomePerson[] }> {
   const ev = evidence(orgId, brandId, step, inputs.reach);
+  const onlyContacted = contactedOnly ? sql`WHERE ${CONTACTED_FOR_STEP}` : sql``;
   const list = await rows<{
     person_key: string;
     person_id: string | null;
@@ -597,6 +603,7 @@ export async function readOutcomePeople(
     LEFT JOIN c ON c.step = ${step} AND c.person_key = w.person_key
     JOIN latest l ON l.person_key = w.person_key
     LEFT JOIN people p ON p.org_id = ${orgId} AND p.brand_id = ${brandId} AND p.person_key = w.person_key
+    ${onlyContacted}
     ORDER BY w.reached_at ASC NULLS LAST, w.person_key
     LIMIT ${limit} OFFSET ${offset}
   `);
@@ -604,7 +611,14 @@ export async function readOutcomePeople(
   const total =
     list.length > 0
       ? list[0].total
-      : (await rows<{ n: number }>(sql`WITH e AS (${ev}) SELECT count(DISTINCT person_key)::int AS n FROM e`))[0].n;
+      : contactedOnly
+        ? (
+            await rows<{ n: number }>(sql`
+              WITH e AS (${ev}), c AS (${contactedPeople(orgId, brandId, inputs.contacted)})
+              SELECT count(DISTINCT e.person_key)::int AS n FROM e
+              JOIN c ON c.step = ${step} AND c.person_key = e.person_key`)
+          )[0].n
+        : (await rows<{ n: number }>(sql`WITH e AS (${ev}) SELECT count(DISTINCT person_key)::int AS n FROM e`))[0].n;
   const satisfied = step === CLIENT_SATISFIED_STEP ? await satisfiedMessagesOf(orgId, brandId, list.map((r) => r.person_key)) : null;
   return {
     total,

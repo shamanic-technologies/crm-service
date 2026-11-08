@@ -714,6 +714,7 @@ const outcomePeopleQuerySchema = z.object({
   step: z.enum(OUTCOME_STEPS),
   limit: z.coerce.number().int().min(1).max(500).optional(),
   offset: z.coerce.number().int().min(0).optional(),
+  contactedByUs: z.enum(["true", "false"]).optional(),
 });
 
 /** The people who reached one step, earliest first; pages to exactly that step's count. */
@@ -733,8 +734,17 @@ router.get(
       await openScope(req, brandId);
       const campaigns = await campaignReachOr502(req, res, brandId, [step]);
       if (!campaigns) return;
-      const page = await readOutcomePeople(req.orgId!, brandId, step, limit, offset, campaigns);
-      res.json({ brandId, step, total: page.total, limit, offset, people: page.people });
+      const contactedOnly = parsed.data.contactedByUs === "true";
+      const page = await readOutcomePeople(req.orgId!, brandId, step, limit, offset, campaigns, contactedOnly);
+      res.json({
+        brandId,
+        step,
+        ...(contactedOnly ? { contactedByUs: true } : {}),
+        total: page.total,
+        limit,
+        offset,
+        people: page.people,
+      });
     } catch (err) {
       next(err);
     }
