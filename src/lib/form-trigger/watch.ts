@@ -60,7 +60,7 @@ import {
   campaignServiceConfigured,
   reportOccurrence,
 } from "./campaign-client.js";
-import { resolveFormOffer, type FormOfferAnswer } from "./offer-pick.js";
+import { resolveOccurrenceOffer, type OfferPick } from "../offer-pick.js";
 import { doorPersonKey, FINAL_REFUSAL_STATUSES, NO_EMAIL_OR_PHONE } from "../trigger-door.js";
 import { isCalendarBookingForm, submissionAnswers, submissionPerson } from "./submission.js";
 
@@ -324,9 +324,25 @@ export async function deliverOne(
     return { status: REPORT_STATUS.SKIPPED, reason: REPORT_REASONS.STATED_NOT_TO_BRAND };
   }
   // FORM-OFFER-PICK-1108: a stated offer, the only offer, the offer that already reached the person, else Jev.
-  let offer: FormOfferAnswer;
+  let offer: OfferPick;
   try {
-    offer = await resolveFormOffer({ orgId: identity.orgId, userId: identity.userId, runId: identity.runId, brandId: identity.brandId }, r);
+    offer = await resolveOccurrenceOffer(
+      { orgId: identity.orgId, userId: identity.userId, runId: identity.runId, brandId: identity.brandId },
+      {
+        ledger: "form",
+        reportId: r.id,
+        formId: r.formId,
+        persisted: { offerId: r.offerId, offerBasis: r.offerBasis, offerVerdict: r.offerVerdict },
+        person: { email: r.email, phone: r.phone },
+        evidence: {
+          what: "A person just filled a form of this brand.",
+          facts: {
+            formName: r.formName,
+            answers: ((r.answers as { key: string; label: string | null; value: unknown }[]) ?? []).map((a) => ({ question: a.label ?? a.key, answer: a.value })),
+          },
+        },
+      },
+    );
   } catch (err) {
     const message = `placing the fill on an offer failed: ${(err as Error).message}`;
     console.warn(`[crm-service][form-trigger] submission ${r.submissionId} (brand ${r.brandId}) not reported: ${message}`);

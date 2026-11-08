@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { isCalendarBookingForm, submissionAnswers, submissionPerson } from "../../src/lib/form-trigger/submission.js";
 import { pickOffer } from "../../src/lib/form-trigger/offer.js";
-import { offerChoice, pickReachedOffer } from "../../src/lib/form-trigger/offer-pick.js";
+import { burstFacts, offerChoice, pickHeldOffer, pickReachedOffer } from "../../src/lib/offer-pick.js";
 import { occurrenceBody } from "../../src/lib/form-trigger/campaign-client.js";
 import { nextAttemptDue } from "../../src/lib/form-trigger/watch.js";
 
@@ -119,7 +119,10 @@ describe("offerChoice (FORM-OFFER-PICK-1108)", () => {
         { offerId: "a", name: "Restaurants", whatWeOffer: "Dinners", audienceId: "aud-a", audienceText: "Restaurant owners" },
         { offerId: "b", name: "Doctors", whatWeOffer: null, audienceId: null, audienceText: null },
       ],
-      { formName: "Meta Ads", answers: [{ key: "k1", label: "Which profession best describes you?", value: "Chiropractor" }, { key: "k2", label: null, value: "x" }] },
+      {
+        what: "A person just filled a form of this brand.",
+        facts: { formName: "Meta Ads", answers: [{ question: "Which profession best describes you?", answer: "Chiropractor" }, { question: "k2", answer: "x" }] },
+      },
     );
     expect(question.type).toBe("choice");
     expect(Object.keys(question.criteria)).toEqual(["o0", "o1"]);
@@ -127,10 +130,36 @@ describe("offerChoice (FORM-OFFER-PICK-1108)", () => {
     expect(question.criteria.o0).toContain("Dinners");
     expect(question.criteria.o1).toContain("No audience text");
     expect([...keyToOffer]).toEqual([["o0", "a"], ["o1", "b"]]);
-    expect(state.formFill).toEqual({
+    expect(question.instructions.startsWith("A person just filled a form of this brand.")).toBe(true);
+    expect(state.whatHappened).toBe("A person just filled a form of this brand.");
+    expect(state.occurrence).toEqual({
       formName: "Meta Ads",
       answers: [{ question: "Which profession best describes you?", answer: "Chiropractor" }, { question: "k2", answer: "x" }],
     });
+  });
+  it("the same question for a number given or a message: only what happened and the evidence differ (OFFER-PICK-ALL-1108)", () => {
+    const offers = [{ offerId: "a", name: "A", whatWeOffer: null, audienceId: null, audienceText: "Doctors" }];
+    const { question } = offerChoice({ name: "B", website: null, description: null }, offers, { what: "A person just wrote to this brand on whatsapp.", facts: { messages: [] } });
+    expect(question.instructions.startsWith("A person just wrote to this brand on whatsapp.")).toBe(true);
+    expect(question.criteria.o0).toContain("Doctors");
+  });
+});
+
+describe("pickHeldOffer (OFFER-PICK-ALL-1108)", () => {
+  it("the ACTIVE tagged offer Jev is most sure of; an archived or unknown tag places nothing", () => {
+    const active = new Set(["a", "b"]);
+    expect(pickHeldOffer([], null, active)).toBeNull();
+    expect(pickHeldOffer(["a", "b"], { a: 0.6, b: 0.9 }, active)).toBe("b");
+    expect(pickHeldOffer(["b", "a"], null, active)).toBe("a");
+    expect(pickHeldOffer(["z", "a"], { z: 0.99, a: 0.1 }, active)).toBe("a");
+    expect(pickHeldOffer(["z"], null, active)).toBeNull();
+  });
+});
+
+describe("burstFacts (OFFER-PICK-ALL-1108)", () => {
+  it("when and what they wrote; empty texts and non-arrays dropped", () => {
+    expect(burstFacts([{ eventId: "$1", at: "t1", text: "Hello", photo: {} }, { at: "t2", text: "  " }])).toEqual([{ at: "t1", text: "Hello" }]);
+    expect(burstFacts(null)).toEqual([]);
   });
 });
 

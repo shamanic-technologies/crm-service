@@ -1495,6 +1495,9 @@ export const phoneGivenReports = pgTable(
     attempts: integer("attempts").notNull().default(0),
     lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
     offerId: uuid("offer_id"),
+    // OFFER-PICK-ALL-1108 (lib/offer-pick.ts): how the offer was placed and Jev's verdict, persisted when placed (judged once).
+    offerBasis: text("offer_basis"),
+    offerVerdict: jsonb("offer_verdict"),
     runId: text("run_id"),
     reportedAt: timestamp("reported_at", { withTimezone: true }),
     campaignEventId: text("campaign_event_id"),
@@ -1576,10 +1579,12 @@ export const replyTriggerReports = pgTable(
     // The burst's first message: the row's identity.
     anchorEventId: text("anchor_event_id").notNull(),
     // The last campaign whose send preceded the burst (null: no campaign wrote in the thread), and
-    // the offer once resolved, with what decided it (campaign | conversation | only_offer).
+    // the offer once resolved, with what decided it (lib/offer-pick.ts `OfferBasis`; older rows: conversation).
     campaignId: text("campaign_id"),
     offerId: uuid("offer_id"),
     offerBasis: text("offer_basis"),
+    // OFFER-PICK-ALL-1108: Jev's verdict / the earlier report that reached them, persisted when placed (judged once).
+    offerVerdict: jsonb("offer_verdict"),
     // [{ eventId, at, text }] as detected (delivery re-reads the burst from bronze).
     messages: jsonb("messages").notNull(),
     firstMessageAt: timestamp("first_message_at", { withTimezone: true }).notNull(),

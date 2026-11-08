@@ -36,6 +36,8 @@ export const PHONE_REASONS = {
   /** The brand stated the person holding this number is not someone of theirs (DUALIST-WA-SILENCE-1104): never offered. */
   STATED_NOT_TO_BRAND: "stated_not_to_brand",
   OFFER_UNKNOWN: "offer_unknown",
+  /** OFFER-PICK-ALL-1108: placing the number on an offer failed (brand-service, human-service or Jev down): retried. */
+  OFFER_PICK_FAILED: "offer_pick_failed",
   /** The owner said never send this one (an owner door, WA-GREETING-OFFER-1027): final. */
   WITHHELD: "withheld",
   CAMPAIGN_REFUSED: "campaign_refused",

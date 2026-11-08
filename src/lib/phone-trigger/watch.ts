@@ -20,8 +20,10 @@
  *     group member gave nothing). No WHO filter (staff, own team, already wrote): the
  *     answering pipe's strategy decides (WA-GIVEN-PURE-FACT-1017).
  *  3. DELIVER every pending / failed-and-due report: one ORG run per (org, brand),
- *     an impossible number dropped (`invalid_number`), the offer = the one the brand stated
- *     for every form (`form_offer_mappings` '*'), else its only active offer, idempotency key `crm:phone_given:<brand>:<number>` (a retry returns
+ *     an impossible number dropped (`invalid_number`), the offer placed by lib/offer-pick.ts (the
+ *     resolver every trigger shares: stated for every form, else the only active offer, else the
+ *     offer that already reached the person, else Jev on the contact the number came with),
+ *     persisted at once (judged once), idempotency key `crm:phone_given:<brand>:<number>` (a retry returns
  *     campaign-service's first event). Retries 1 → 60 min for 24h; 400 / 422 final.
  *  A detection kicks the brand's people build (unawaited) so the person is known to
  *  lead-service; campaign-service holds a `person_not_known` event and retries it.
@@ -44,7 +46,7 @@ import { runScopeBuild } from "../people/build.js";
 import { phoneKey } from "../people/identity.js";
 import { statedNotToBrand } from "../people/stated-not-to-brand.js";
 import { createRun, updateRun } from "../runs-client.js";
-import { resolveOffer, type OfferAnswer } from "../form-trigger/offer.js";
+import { contactFacts, resolveOccurrenceOffer, type OfferPick } from "../offer-pick.js";
 import {
   CampaignRefusal,
   campaignServiceConfigured,
@@ -293,7 +295,7 @@ async function brandActor(orgId: string, brandId: string): Promise<string | null
 async function settle(
   r: PhoneGivenReport,
   now: number,
-  set: Partial<Pick<PhoneGivenReport, "status" | "reason" | "lastError" | "offerId" | "runId" | "reportedAt" | "campaignEventId" | "campaignRecordedAt" | "campaignOutcome">>,
+  set: Partial<Pick<PhoneGivenReport, "status" | "reason" | "lastError" | "offerId" | "offerBasis" | "offerVerdict" | "runId" | "reportedAt" | "campaignEventId" | "campaignRecordedAt" | "campaignOutcome">>,
 ): Promise<void> {
   await db
     .update(phoneGivenReports)
@@ -326,10 +328,6 @@ async function deliverReports(due: PhoneGivenReport[], now: number, replay = fal
     const identity = { orgId, userId, runId: run.id, brandId };
     let failed = false;
     try {
-      // Read once per brand; a brand-service outage leaves every report for the next pass.
-      // Same answer as a form submission (WA-GREETING-OFFER-1027): the offer the brand STATED
-      // for every form wins, then its only active offer; several and none stated = offer_unknown.
-      const offer = await resolveOffer(identity, null);
       // A replay first reads each reported row's event as campaign-service holds it NOW (the door's first
       // answer is usually `pending`; the skip that makes it replayable is decided after).
       const current = new Map<string, Record<string, unknown>>();
@@ -351,13 +349,13 @@ async function deliverReports(due: PhoneGivenReport[], now: number, replay = fal
             continue;
           }
         }
-        const outcome = await deliverOne(r, identity, offer, now, replay && repliedOff(r) ? r.campaignEventId : null);
+        const outcome = await deliverOne(r, identity, now, replay && repliedOff(r) ? r.campaignEventId : null);
         if (outcome.status === PHONE_STATUS.FAILED) failed = true;
         delivered.push({ reportId: r.id, ...outcome });
       }
     } catch (err) {
       failed = true;
-      console.warn(`[crm-service][phone-trigger] brand ${brandId}: offers unreadable, retried next pass: ${(err as Error).message}`);
+      console.warn(`[crm-service][phone-trigger] brand ${brandId}: reports retried next pass: ${(err as Error).message}`);
     }
     await updateRun(run.id, failed ? "failed" : "completed", { orgId, userId, runId: run.id, brandIds: [brandId] });
   }
@@ -367,7 +365,6 @@ async function deliverReports(due: PhoneGivenReport[], now: number, replay = fal
 async function deliverOne(
   r: PhoneGivenReport,
   identity: { orgId: string; userId: string; runId: string; brandId: string },
-  offer: OfferAnswer,
   now: number,
   replayOf: string | null = null,
 ): Promise<{ status: string; reason: string | null }> {
@@ -379,12 +376,36 @@ async function deliverOne(
     await settle(r, now, { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.STATED_NOT_TO_BRAND, runId: identity.runId });
     return { status: PHONE_STATUS.SKIPPED, reason: PHONE_REASONS.STATED_NOT_TO_BRAND };
   }
+  // OFFER-PICK-ALL-1108: the resolver every trigger shares (lib/offer-pick.ts), per person.
+  let offer: OfferPick;
+  try {
+    const contact = await contactFacts(r.orgId, r.contactId);
+    offer = await resolveOccurrenceOffer(identity, {
+      ledger: "phone",
+      reportId: r.id,
+      formId: null,
+      persisted: { offerId: r.offerId, offerBasis: r.offerBasis, offerVerdict: r.offerVerdict },
+      person: { email: r.email, phone: r.phone },
+      evidence: {
+        what: `A person just gave this brand their phone / WhatsApp number (on ${r.source}).`,
+        facts: { source: r.source, name: r.fullName, email: r.email, ...(contact ? { contact } : {}) },
+      },
+    });
+  } catch (err) {
+    const message = `placing the number on an offer failed: ${(err as Error).message}`.slice(0, 1000);
+    console.warn(`[crm-service][phone-trigger] number ${r.id} (brand ${r.brandId}) not reported: ${message}`);
+    await settle(r, now, { status: PHONE_STATUS.FAILED, reason: PHONE_REASONS.OFFER_PICK_FAILED, lastError: message, runId: identity.runId });
+    return { status: PHONE_STATUS.FAILED, reason: PHONE_REASONS.OFFER_PICK_FAILED };
+  }
   if (offer.offerId === null) {
     const detail = offer.detail.replace(/: state it with .*$/, "");
     console.warn(`[crm-service][phone-trigger] number ${r.id} (brand ${r.brandId}) not reported: ${detail}`);
     await settle(r, now, { status: PHONE_STATUS.FAILED, reason: PHONE_REASONS.OFFER_UNKNOWN, lastError: detail, runId: identity.runId });
     return { status: PHONE_STATUS.FAILED, reason: PHONE_REASONS.OFFER_UNKNOWN };
   }
+  const placed = { offerId: offer.offerId, offerBasis: offer.basis, offerVerdict: offer.verdict };
+  // Persisted at once (judged once): a campaign-service failure below retries on the same pick.
+  await db.update(phoneGivenReports).set(placed).where(eq(phoneGivenReports.id, r.id));
   try {
     const recorded = await recordTriggerEvent(
       identity,
@@ -408,7 +429,7 @@ async function deliverOne(
       status: PHONE_STATUS.REPORTED,
       reason: null,
       lastError: null,
-      offerId: offer.offerId,
+      ...placed,
       runId: identity.runId,
       reportedAt,
       campaignEventId: recorded.eventId,
@@ -425,7 +446,7 @@ async function deliverOne(
     const final = err instanceof CampaignRefusal && FINAL_REFUSAL_STATUSES.has(err.status);
     const reason = final ? PHONE_REASONS.CAMPAIGN_REFUSED : PHONE_REASONS.CAMPAIGN_UNREACHABLE;
     console.warn(`[crm-service][phone-trigger] number ${r.id} (brand ${r.brandId}) not reported: ${(err as Error).message}`);
-    await settle(r, now, { status: PHONE_STATUS.FAILED, reason, lastError: (err as Error).message, offerId: offer.offerId, runId: identity.runId });
+    await settle(r, now, { status: PHONE_STATUS.FAILED, reason, lastError: (err as Error).message, ...placed, runId: identity.runId });
     return { status: PHONE_STATUS.FAILED, reason };
   }
 }
