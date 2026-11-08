@@ -4435,7 +4435,7 @@ const FormTriggerReportSchema = z.object({
   offerVerdict: z
     .unknown()
     .describe(
-      "judged: {model, confidence, probabilities per offer id, audiences per offer id, judgedAt}; person_reached: {via: form_report | audience_served, ref, at}; null otherwise.",
+      "judged: {model, confidence, probabilities per offer id, audiences per offer id, judgedAt} (a reply placed by its conversation's offer tags: {via: conversation_verdict, conversationKey, scores}); person_reached: {via: form_report | phone_report | reply_report | audience_served, ref, at}; null otherwise.",
     ),
   submittedAt: z.string(),
   detectedAt: z.string(),
@@ -4478,11 +4478,20 @@ export const PhoneTriggerReportSchema = z.object({
     .nullable()
     .describe(
       "Skipped: `before_watch` (known before the watch first looked at its source, history) | `conversation_channel` (learned " +
-        "from a chat the person opened) | `staff` | `own_team`. Failed: `offer_unknown` | `campaign_unreachable` | `campaign_refused`.",
+        "from a chat the person opened) | `staff` | `own_team`. Failed: `offer_unknown` | `offer_pick_failed` (placing the number on an offer failed: " +
+        "a sibling or Jev down, retried) | `campaign_unreachable` | `campaign_refused`.",
     ),
   lastError: z.string().nullable(),
   attempts: z.number().int(),
   offerId: z.string().uuid().nullable(),
+  offerBasis: z
+    .string()
+    .nullable()
+    .describe(
+      "How the number was placed on its offer (OFFER-PICK-ALL-1108, the resolver every trigger shares): `stated_for_brand` | `only_offer` | " +
+        "`person_reached` (the offer that already reached this person at this brand) | `judged` (Jev on the contact the number came with). null = not placed yet.",
+    ),
+  offerVerdict: z.unknown().describe("judged: {model, confidence, probabilities per offer id, audiences per offer id, judgedAt} (a reply placed by its conversation's offer tags: {via: conversation_verdict, conversationKey, scores}); person_reached: {via: form_report | phone_report | reply_report | audience_served, ref, at}; null otherwise."),
   detectedAt: z.string(),
   reportedAt: z.string().nullable(),
   campaignEventId: z.string().nullable(),
@@ -4761,7 +4770,14 @@ export const ReplyTriggerReportSchema = z.object({
   address: z.string().nullable().describe("gmail: the person's address (the conversation). matrix: null."),
   campaignId: z.string().nullable().describe("The last campaign that wrote in the thread before the burst; null = none did."),
   offerId: z.string().uuid().nullable(),
-  offerBasis: z.string().nullable().describe("What decided the offer: `campaign` | `conversation` (Jev's offer tag) | `only_offer`."),
+  offerBasis: z
+    .string()
+    .nullable()
+    .describe(
+      "What decided the offer (OFFER-PICK-ALL-1108, the resolver every trigger shares): `campaign` (the last campaign that wrote in the thread) | " +
+        "`stated_for_brand` | `only_offer` | `person_reached` | `judged` (the conversation's offer tags, else Jev on the burst). Older rows: `conversation`.",
+    ),
+  offerVerdict: z.unknown().describe("judged: {model, confidence, probabilities per offer id, audiences per offer id, judgedAt} (a reply placed by its conversation's offer tags: {via: conversation_verdict, conversationKey, scores}); person_reached: {via: form_report | phone_report | reply_report | audience_served, ref, at}; null otherwise."),
   conversationId: z.string().uuid().nullable(),
   person: z.object({ personId: z.string().uuid().nullable(), fullName: z.string().nullable(), email: z.string().nullable(), phone: z.string().nullable() }),
   messages: z.array(z.object({
@@ -4776,7 +4792,7 @@ export const ReplyTriggerReportSchema = z.object({
   judgment: z.unknown(),
   status: z.enum(["pending", "reported", "skipped", "failed"]),
   reason: z.string().nullable().describe(
-    "`own_address` (gmail: the brand's own address, its connected mailbox included: our own mail) | `not_addressed_to_brand` (gmail: no mail of the burst names the brand in To) | `own_team` (old rows only) | `automated_reply` | `not_positive` (Jev: a person wrote, no positive answer) | `before_watch` | `no_email_or_phone` (neither an email nor an E.164 phone; older rows `no_email`) | `cold_email_path` (gmail: status `handed_off` = the email path (instantly-service) said it acts on it, its answer stored; status `skipped` = a legacy skip decided on the recipient alone, red on Monitoring until re-checked) | `answered_since` / `other_brand` (re-check only) | `person_not_built` | `offer_unknown` | `campaign_refused` | `campaign_unreachable`",
+    "`own_address` (gmail: the brand's own address, its connected mailbox included: our own mail) | `not_addressed_to_brand` (gmail: no mail of the burst names the brand in To) | `own_team` (old rows only) | `automated_reply` | `not_positive` (Jev: a person wrote, no positive answer) | `before_watch` | `no_email_or_phone` (neither an email nor an E.164 phone; older rows `no_email`) | `cold_email_path` (gmail: status `handed_off` = the email path (instantly-service) said it acts on it, its answer stored; status `skipped` = a legacy skip decided on the recipient alone, red on Monitoring until re-checked) | `answered_since` / `other_brand` (re-check only) | `person_not_built` | `offer_unknown` | `offer_pick_failed` (placing the burst on an offer failed: a sibling or Jev down, retried) | `campaign_refused` | `campaign_unreachable`",
   ),
   lastError: z.string().nullable(),
   attempts: z.number().int(),
@@ -4812,8 +4828,9 @@ registry.registerPath({
   summary: "Which offer each of the brand's CRM forms is about (stated)",
   description:
     "A form submission is reported for the offer stated for its form, else the one stated for every form " +
-    "(`formId: \"*\"`), else the brand's ONLY active offer. A brand with several offers and no statement is reported " +
-    "nowhere (`offer_unknown`).",
+    "(`formId: \"*\"`), else the brand's ONLY active offer. With several offers and no statement, every trigger (form fill, " +
+    "number given, message) lands on the offer that already reached the person, else the offer Jev reads them as belonging to " +
+    "(OFFER-PICK-ALL-1108). The statement for every form also places numbers given and messages.",
   request: { query: z.object({ brandId: z.string().uuid() }) },
   responses: {
     200: {

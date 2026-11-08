@@ -37,6 +37,8 @@ process.env.CAMPAIGN_SERVICE_API_KEY = "campaign-key";
 process.env.BRAND_SERVICE_URL = "http://brand.test";
 process.env.BRAND_SERVICE_API_KEY = "brand-key";
 process.env.CLIENT_SERVICE_URL = "http://client.test";
+process.env.HUMAN_SERVICE_URL = "http://human.test";
+process.env.HUMAN_SERVICE_API_KEY = "human-key";
 process.env.CLIENT_SERVICE_API_KEY = "client-key";
 process.env.PHONE_TRIGGER_REFRESH = "off";
 
@@ -49,12 +51,19 @@ let clerkUsers: Record<string, unknown>[] = [];
 let posthogPersons: Record<string, unknown>[] = [];
 const OFFER_B = "fefefefe-1111-4111-8111-0000000000b1";
 let brandOffers: Record<string, unknown>[] = [];
+/** OFFER-PICK-ALL-1108: Jev's answer to the offer choice (default down), every question it was asked, and human-service memberships. */
+let jevAnswer: () => Response = () => json({}, 500);
+let jevCalls: Record<string, unknown>[] = [];
+let memberships: { audienceId: string; offerId: string | null; provenance: string; joinedAt: string }[] = [];
+let byPhoneCalls: string[][] = [];
 let campaignOutcome: Record<string, unknown> = { outcome: "skipped", skipReason: "no_campaign" };
 /** campaign-service's events as it holds them NOW (its verdict can move after the door answered). */
 let eventsById = new Map<string, Record<string, unknown>>();
 
 function installFetchStub() {
   campaignCalls = [];
+  jevCalls = [];
+  byPhoneCalls = [];
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     if (url.pathname.startsWith("/v1/runs")) return json({ id: "run-" + Math.random().toString(16).slice(2) });
@@ -76,6 +85,28 @@ function installFetchStub() {
       return json({ offers: brandOffers });
     }
     if (url.host === "brand.test" && url.pathname.endsWith("/sales-rep")) return json({ salesRepPhone: SALES_REP });
+    if (url.host === "brand.test" && url.pathname === `/internal/brands/${BRAND}`) return json({ brand: { name: "Brand", domain: "brand.com", url: null } });
+    if (url.host === "brand.test" && url.pathname === "/orgs/brands") return json({ brands: [] });
+    if (url.host === "brand.test" && url.pathname.endsWith("/extracted-fields")) return json({ fields: [] });
+    if (url.host === "brand.test" && url.pathname.endsWith("/user-fields")) return json({ fields: {} });
+    if (url.host === "human.test" && url.pathname === `/internal/brands/${BRAND}/memberships/by-email`) {
+      const body = JSON.parse(String(init?.body)) as { emails: string[] };
+      return json({ brandId: BRAND, byEmail: Object.fromEntries(body.emails.map((e) => [e, { personId: "p1", emails: [], memberships }])) });
+    }
+    if (url.host === "human.test" && url.pathname === `/internal/brands/${BRAND}/memberships/by-phone`) {
+      const body = JSON.parse(String(init?.body)) as { orgId: string; phones: string[] };
+      expect(body.orgId).toBe(ORG);
+      byPhoneCalls.push(body.phones);
+      return json({ brandId: BRAND, byPhone: Object.fromEntries(body.phones.map((p) => [p, { humanId: "h1", personIds: ["p1"], memberships }])) });
+    }
+    if (url.host === "human.test" && url.pathname === "/orgs/audiences") {
+      const offerId = url.searchParams.get("offerId");
+      return json({ audiences: [{ id: `aud-${offerId}`, role: "target", targetText: offerId === OFFER ? "Founders of product-led SaaS" : "Sales teams" }], total: 1, limit: 200, offset: 0 });
+    }
+    if (url.pathname === "/orgs/judgments") {
+      jevCalls.push(JSON.parse(String(init?.body)));
+      return jevAnswer();
+    }
     if (url.host === "client.test" && url.pathname === "/internal/users") return json({ users: [], total: 0 });
     if (url.host === "campaign.test" && url.pathname === "/internal/trigger-events") {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -137,6 +168,8 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     campaignOutcome = { outcome: "skipped", skipReason: "no_campaign" };
     eventsById = new Map();
     brandOffers = [{ offerId: OFFER, name: "A", description: null, status: "active" }];
+    jevAnswer = () => json({}, 500);
+    memberships = [];
     const [a] = await db
       .insert(authConnections)
       .values({ orgId: ORG, brandId: BRAND, provider: "clerk", createdByUserId: USER, status: "active", lastSyncedAt: new Date(T0 - 3_600_000) })
@@ -328,7 +361,7 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     expect(campaignCalls[1].idempotencyKey).toBe(campaignCalls[0].idempotencyKey);
   });
 
-  it("WA-GREETING-OFFER-1027: 2 active offers = offer_unknown (never a guess); once the brand STATES its offer the report goes out on it", async () => {
+  it("OFFER-PICK-ALL-1108: 2 active offers and Jev down = loud offer_pick_failed; once the brand STATES its offer the report goes out on it", async () => {
     brandOffers = [
       { offerId: OFFER, name: "Product-led", description: null, status: "active" },
       { offerId: OFFER_B, name: "Sales-led", description: null, status: "active" },
@@ -337,7 +370,7 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     clerkUsers = [clerkUser("user_two_offers", "+447911123010", min(1))];
     await runPhoneWatchPass(min(2));
     let [row] = (await reports()).filter((r) => r.phone === "+447911123010");
-    expect(row).toMatchObject({ status: "failed", reason: "offer_unknown" });
+    expect(row).toMatchObject({ status: "failed", reason: "offer_pick_failed", offerId: null });
     expect(campaignCalls).toHaveLength(0);
     // Stuck past 15 min: red on the Monitoring read.
     let health = await readTriggerHealth(30, min(20));
@@ -353,12 +386,79 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     await db.insert(formOfferMappings).values({ orgId: ORG, brandId: BRAND, formId: "*", offerId: OFFER_B, statedByUserId: USER });
     await runPhoneWatchPass(min(30));
     [row] = (await reports()).filter((r) => r.phone === "+447911123010");
-    expect(row).toMatchObject({ status: "reported", offerId: OFFER_B });
+    expect(row).toMatchObject({ status: "reported", offerId: OFFER_B, offerBasis: "stated_for_brand" });
     expect(campaignCalls).toHaveLength(1);
     expect(campaignCalls[0]).toMatchObject({ offerId: OFFER_B, idempotencyKey: `crm:phone_given:${BRAND}:+447911123010` });
     health = await readTriggerHealth(30, min(31));
     phone = health.triggers.find((t) => t.trigger === "whatsapp_number_given")!;
     expect(phone.stuckReports.map((r) => r.reportId)).not.toContain(row.id);
+  });
+
+  it("OFFER-PICK-ALL-1108: 2 active offers, none stated: Jev places the number on the contact it came with, persisted, never judged twice", async () => {
+    brandOffers = [
+      { offerId: OFFER, name: "Product-led", description: null, status: "active" },
+      { offerId: OFFER_B, name: "Sales-led", description: null, status: "active" },
+    ];
+    // Sorted by id: o0 = OFFER (…a1), o1 = OFFER_B (…b1).
+    jevAnswer = () => json({ model: "jev-1.13", answers: { offer: { type: "choice", choice: "o1", confidence: 0.82, probabilities: { o0: 0.18, o1: 0.82 } } } });
+    campaignStatus = 503;
+    await runPhoneWatchPass(T0);
+    clerkUsers = [clerkUser("user_judged", "+447911123013", min(1))];
+    await runPhoneWatchPass(min(2));
+    expect(jevCalls).toHaveLength(1);
+    const asked = JSON.stringify(jevCalls[0]);
+    expect(asked).toContain("phone / WhatsApp number");
+    expect(asked).toContain("Sales teams");
+    expect(asked).toContain("Founders of product-led SaaS");
+    let [row] = (await reports()).filter((r) => r.phone === "+447911123013");
+    expect(row).toMatchObject({ status: "failed", reason: "campaign_unreachable", offerId: OFFER_B, offerBasis: "judged" });
+    expect(row.offerVerdict).toMatchObject({ model: "jev-1.13", confidence: 0.82, probabilities: { [OFFER]: 0.18, [OFFER_B]: 0.82 } });
+
+    campaignStatus = 201;
+    clerkUsers = [];
+    await runPhoneWatchPass(min(4));
+    expect(jevCalls).toHaveLength(1);
+    expect(campaignCalls.at(-1)).toMatchObject({ offerId: OFFER_B });
+    [row] = (await reports()).filter((r) => r.phone === "+447911123013");
+    expect(row).toMatchObject({ status: "reported", offerId: OFFER_B, offerBasis: "judged" });
+  });
+
+  it("OFFER-PICK-ALL-1108: the offer that already reached the person wins over Jev (one offer per person at a brand)", async () => {
+    brandOffers = [
+      { offerId: OFFER, name: "Product-led", description: null, status: "active" },
+      { offerId: OFFER_B, name: "Sales-led", description: null, status: "active" },
+    ];
+    memberships = [{ audienceId: "aud-old", offerId: OFFER, provenance: "served", joinedAt: "2026-10-01T00:00:00.000Z" }];
+    await runPhoneWatchPass(T0);
+    clerkUsers = [clerkUser("user_reached", "+447911123014", min(1))];
+    await runPhoneWatchPass(min(2));
+    expect(jevCalls).toHaveLength(0);
+    const [row] = (await reports()).filter((r) => r.phone === "+447911123014");
+    expect(row).toMatchObject({ status: "reported", offerId: OFFER, offerBasis: "person_reached", offerVerdict: { via: "audience_served", ref: "aud-old" } });
+    expect(campaignCalls.at(-1)).toMatchObject({ offerId: OFFER });
+    expect(byPhoneCalls).toHaveLength(0); // an email is held: human-service is asked by email
+  });
+
+  it("OFFER-PICK-ALL-1108: a person known by phone only is matched to the offer that served them through memberships/by-phone", async () => {
+    brandOffers = [
+      { offerId: OFFER, name: "Product-led", description: null, status: "active" },
+      { offerId: OFFER_B, name: "Sales-led", description: null, status: "active" },
+    ];
+    memberships = [
+      { audienceId: "aud-b", offerId: OFFER_B, provenance: "served", joinedAt: "2026-10-02T00:00:00.000Z" },
+      { audienceId: "aud-a", offerId: OFFER, provenance: "found_taken", joinedAt: "2026-09-01T00:00:00.000Z" },
+    ];
+    await runPhoneWatchPass(T0);
+    const u = clerkUser("user_phone_only", "+447911123015", min(1));
+    u.email_addresses = [];
+    u.primary_email_address_id = null as unknown as string;
+    clerkUsers = [u];
+    await runPhoneWatchPass(min(2));
+    const [row] = (await reports()).filter((r) => r.phone === "+447911123015");
+    expect(row.email).toBeNull();
+    expect(byPhoneCalls).toEqual([["+447911123015"]]);
+    expect(jevCalls).toHaveLength(0);
+    expect(row).toMatchObject({ status: "reported", offerId: OFFER_B, offerBasis: "person_reached", offerVerdict: { via: "audience_served", ref: "aud-b" } });
   });
 
   it("WA-GREETING-OFFER-1027 owner doors: a report given up on (past 24 h) is redelivered once; a withheld one is never sent", async () => {
@@ -372,7 +472,7 @@ describe.skipIf(!RUN)("phone watch (whatsapp_number_given)", () => {
     const rows = await reports();
     const late = rows.find((r) => r.phone === "+447911123011")!;
     const client = rows.find((r) => r.phone === "+447911123012")!;
-    expect(late).toMatchObject({ status: "failed", reason: "offer_unknown" });
+    expect(late).toMatchObject({ status: "failed", reason: "offer_pick_failed" });
     await db.insert(formOfferMappings).values({ orgId: ORG, brandId: BRAND, formId: "*", offerId: OFFER, statedByUserId: USER });
     const later = T0 + 3 * 86_400_000;
     clerkUsers = [];

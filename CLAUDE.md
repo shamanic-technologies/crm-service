@@ -1505,14 +1505,14 @@ in a brand's CRM is reported to campaign-service's generic trigger door
   submissionId, formId, formName, submittedAt, answers [{key, label, value}], crmContactId}`
   handed verbatim to the workflow. `answers` = `others.fieldsOriSequance` order minus identity
   keys and GoHighLevel's fixed non-answer elements; labels from `GET /locations/{id}/customFields`.
-- **Offer** (`offer-pick.ts`, FORM-OFFER-PICK-1108): stated per form (`PUT /orgs/gohighlevel/form-offers {brandId, formId?,
+- **Offer** (`src/lib/offer-pick.ts` `resolveOccurrenceOffer`, FORM-OFFER-PICK-1108; the ONE resolver of EVERY trigger since OFFER-PICK-ALL-1108): stated per form (`PUT /orgs/gohighlevel/form-offers {brandId, formId?,
   offerId}`, omitted formId = every form) > the brand's ONLY active offer > the pick persisted on the report (judged once)
-  > the offer that already REACHED the person at the brand (our earlier reported fill by email / phone, or an offer audience
-  that SERVED them: human-service `memberships/by-email` provenance `served`; earliest wins) > Jev `choice` over the active
-  offers (name + what it sells + the offer's `role: "target"` audience `targetText`) on the answers, most probable offer.
+  > the offer that already REACHED the person at the brand (any earlier reported form / phone / reply report by email / phone, or an offer audience
+  that SERVED them: human-service `memberships/by-email`, else `by-phone` for a phone-only person, provenance `served`; earliest wins) > Jev `choice` over the active
+  offers (name + what it sells + the offer's `role: "target"` audience `targetText`) on the occurrence's words, most probable offer.
   Persisted `offer_basis` + `offer_verdict` (confidence, probabilities) the moment it is placed, served on the read. No
-  active offer = `offer_unknown`; a sibling / Jev down = `offer_pick_failed`; both loud, retried. Phone / reply triggers
-  keep `resolveOffer` (stated > only offer).
+  active offer = `offer_unknown`; a sibling / Jev down = `offer_pick_failed`; both loud, retried. Phone / reply call the SAME
+  resolver (their evidence: the number's contact; the burst's messages); never a per-trigger rule.
 - **Detection kicks the brand's GoHighLevel sync + people build** (unawaited) and reports at
   once: lead-service only serves a person it knows from our fact feed; campaign-service holds a
   `person_not_known` event `pending` and retries it 60 min.
@@ -1547,9 +1547,9 @@ kind `reported`, reportedBy crm-service, fromStep `lead_found`), within ~1 min. 
   no-churn upserts); every other connector is seen at its own sync. A new detection kicks the brand's people build.
 - **PostHog reads phones**: a person with a phone property is read like an identified one, its first `+` number lands in
   `contacts.phone_e164` (people key `phone:`); one known by the phone ALONE (`raw_attributes.phoneOnly`) emits no `signup`.
-- Delivery: one org run per (org, brand), offer = `form-trigger/offer.ts resolveOffer` like a form fill (the offer the brand
-  STATED for every form, `PUT /orgs/gohighlevel/form-offers` without formId, > its only active offer > `offer_unknown`,
-  retried; WA-GREETING-OFFER-1027: it read the only offer alone, 2 offers = 5 days of no greeting), body
+- Delivery: one org run per (org, brand), offer PER NUMBER = `resolveOccurrenceOffer` like a form fill (stated for every form >
+  only active offer > persisted > the offer that reached the person > Jev on the contact the number came with; `offer_basis` +
+  `offer_verdict` persisted at once; OFFER-PICK-ALL-1108: Doc Dinners' 3 offers = every number `offer_unknown`), body
   `person {phone, email?, name?}` + `item {kind: "phone_given", phone, firstName, lastName, source, sourceContactId, crmContactId, givenAt}`
   (first / last name as the source states them: PostHog `first_name`/`last_name`/`name`, Clerk's own; a greeting says "Hi Marie").
   Retries 1→60 min for 24h; 400/422 final. Read: `GET /orgs/phone-triggers?brandId=[&includeHistory=true]`; a pass now:
@@ -1631,9 +1631,10 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
 - **Never history**: `reply_watch_since` (campaign threads, since 2026-10-12) / `open_reply_watch_since` (every other
   thread, since REPLY-ANY-LEAD-1015), set at first look; only messages mirrored after them are reported, the rest is
   `before_watch` (does not block a later message of the same burst).
-- **Offer** (`resolveReplyOffer`, `offer_basis`): last campaign that wrote in the thread (`GET /campaigns/{id}`) >
-  the offer Jev tagged the conversation about (`conversation_verdicts`, highest score) > the brand's stated
-  offer for every form > its only active offer (`resolveOffer`) > `offer_unknown` (retried, loud).
+- **Offer** (`resolveReplyOffer` → `resolveOccurrenceOffer`, `offer_basis` + `offer_verdict`, OFFER-PICK-ALL-1108): last campaign
+  that wrote in the thread (`GET /campaigns/{id}`, stated) > stated for every form > only active offer > persisted > the offer
+  that reached the person > the conversation's Jev offer tags (`conversation_verdicts`, active, highest score) > Jev on the
+  burst > `offer_unknown`; resolver down = `offer_pick_failed` (retried, loud).
 - **Body**: `person {email?, name?, phone?}` (email = the address our sends used when held, else the person's first;
   none = named by E.164 phone + name, REPLY-PHONE-ONLY-1015: most WhatsApp writers hold no email, campaign-service
   v0.75.81 accepts it; neither = `no_email_or_phone`, older rows `no_email`. ONE rule for every trigger:
@@ -1659,7 +1660,7 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   addresses (connected mailbox, sending mailboxes, brand domain) = `own_address`, not addressed = `not_addressed_to_brand`; `sender_verdicts` automated >= 0.75 or Jev on the burst =
   `automated_reply`. **Gmail is per ORG**: reported under every brand whose people know the person OUTSIDE the mailbox
   (any non-gmail presence), else the ONE brand with the highest `conversation_verdicts` brand probability, else the
-  oldest scope; other brands record nothing. Offer: conversation tag > only active offer. Delivery: one org run per
+  oldest scope; other brands record nothing. Offer: the reply resolver above. Delivery: one org run per
   scope, `person_not_built` → rebuild → deliver.
 
 ## Voice notes — what a person SAID is read like what they wrote (`src/lib/matrix/voice-notes.ts`, SOPHIE-VOICE-1019)

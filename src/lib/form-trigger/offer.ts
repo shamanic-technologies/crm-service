@@ -7,8 +7,8 @@
  *  2. a stated mapping for every form of the brand (`form_id = '*'`);
  *  3. the brand's ONLY active offer (brand-service).
  * Nothing else here: a brand with several active offers and no stated mapping is
- * `offer_unknown` for the phone / reply triggers. A FORM fill is then placed by
- * offer-pick.ts (the offer that reached the person, else Jev on its answers).
+ * placed by lib/offer-pick.ts (the offer that reached the person, else Jev on what the
+ * occurrence stated), the ONE resolver every trigger (form, phone, reply) calls.
  */
 import { and, eq, inArray } from "drizzle-orm";
 import { db } from "../../db/index.js";
@@ -80,13 +80,4 @@ export async function readStatedAndOffers(
     readBrandOffers(identity),
   ]);
   return { mappings, offers };
-}
-
-/**
- * The stated / only-offer answer (phone and reply triggers). A FORM fill goes
- * further when the brand sells several offers: offer-pick.ts `resolveFormOffer`.
- */
-export async function resolveOffer(identity: SiblingIdentity, formId: string | null): Promise<OfferAnswer> {
-  const { mappings, offers } = await readStatedAndOffers(identity, formId);
-  return pickOffer(formId, mappings, offers);
 }

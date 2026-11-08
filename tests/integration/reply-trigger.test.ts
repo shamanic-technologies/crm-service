@@ -46,6 +46,8 @@ process.env.CAMPAIGN_SERVICE_API_KEY = "campaign-key";
 process.env.BRAND_SERVICE_URL = "http://brand.test";
 process.env.BRAND_SERVICE_API_KEY = "brand-key";
 process.env.CLIENT_SERVICE_URL = "http://client.test";
+process.env.HUMAN_SERVICE_URL = "http://human.test";
+process.env.HUMAN_SERVICE_API_KEY = "human-key";
 process.env.CLIENT_SERVICE_API_KEY = "client-key";
 process.env.MATRIX_HOMESERVER_URL = "http://hs.test";
 process.env.VOICE_NOTE_RETRY_DELAY_MS = "0";
@@ -56,6 +58,12 @@ const json = (body: unknown, status = 200) =>
 
 let campaignCalls: { headers: Headers; body: Record<string, unknown> }[] = [];
 let jevChoice = "interested";
+const ONE_OFFER = [{ offerId: ONLY_OFFER, name: "Only", status: "active" }, { offerId: OFFER, name: "Old", status: "archived" }];
+/** The brand's offers (brand-service); OFFER-PICK-ALL-1108: several active = the shared resolver places the burst. */
+let brandOffers: { offerId: string; name: string; status: string }[] = ONE_OFFER;
+/** Jev's pick on the offer question (option keys o0, o1... over the active offers sorted by id), and what it was shown. */
+let jevOfferChoice = "o0";
+let offerQuestions: Record<string, unknown>[] = [];
 let jevCalls = 0;
 /** What brand-service states as the brand's sales rep phone; a number = brand-service answers that status. */
 let repPhone: string | null | number = null;
@@ -97,7 +105,19 @@ function installFetchStub() {
       return json({ users: memberPhones.map((phone) => ({ email: null, phone })), total: memberPhones.length });
     }
     if (url.host === "brand.test" && url.pathname === `/internal/brands/${BRAND}/offers`) {
-      return json({ offers: [{ offerId: ONLY_OFFER, name: "Only", status: "active" }, { offerId: OFFER, name: "Old", status: "archived" }] });
+      return json({ offers: brandOffers });
+    }
+    if (url.host === "brand.test" && url.pathname === `/internal/brands/${BRAND}`) return json({ brand: { name: "Brand", domain: "brand.com", url: null } });
+    if (url.host === "brand.test" && url.pathname === "/orgs/brands") return json({ brands: [] });
+    if (url.host === "brand.test" && url.pathname.endsWith("/extracted-fields")) return json({ fields: [] });
+    if (url.host === "brand.test" && url.pathname.endsWith("/user-fields")) return json({ fields: {} });
+    if (url.host === "human.test" && url.pathname === `/internal/brands/${BRAND}/memberships/by-email`) {
+      const body = JSON.parse(String(init?.body)) as { emails: string[] };
+      return json({ brandId: BRAND, byEmail: Object.fromEntries(body.emails.map((e) => [e, { personId: "p1", emails: [], memberships: [] }])) });
+    }
+    if (url.host === "human.test" && url.pathname === "/orgs/audiences") {
+      const offerId = url.searchParams.get("offerId");
+      return json({ audiences: [{ id: `aud-${offerId}`, role: "target", targetText: `Audience of ${offerId}` }], total: 1, limit: 200, offset: 0 });
     }
     if (url.host === "hs.test" && url.pathname.startsWith("/_matrix/client/v1/media/download/")) {
       mediaCalls.push({ url: url.pathname, auth: new Headers(init?.headers).get("authorization") });
@@ -112,6 +132,11 @@ function installFetchStub() {
       return json(copilotAnswer.body, copilotAnswer.status);
     }
     if (url.pathname === "/orgs/judgments") {
+      const asked = JSON.parse(String(init?.body)) as { questions: Record<string, unknown> };
+      if (asked.questions.offer) {
+        offerQuestions.push(asked);
+        return json({ model: "jev", answers: { offer: { type: "choice", choice: jevOfferChoice, confidence: 0.8, probabilities: { [jevOfferChoice]: 0.8 } } } });
+      }
       jevCalls += 1;
       return json({ model: "jev", answers: { reply: { type: "choice", choice: jevChoice, confidence: 0.93, probabilities: { [jevChoice]: 0.93 } } } });
     }
@@ -172,6 +197,9 @@ async function cleanup() {
 describe.skipIf(!RUN)("reply trigger", () => {
   beforeEach(async () => {
     await cleanup();
+    brandOffers = ONE_OFFER;
+    jevOfferChoice = "o0";
+    offerQuestions = [];
     [conn] = await db
       .insert(matrixConnections)
       .values({ orgId: ORG, brandId: BRAND, channel: "whatsapp", matrixUserId: OWN, counterpartPrefix: "@whatsapp_", createdByUserId: USER })
@@ -264,7 +292,8 @@ describe.skipIf(!RUN)("reply trigger", () => {
     expect((await detectReplies(conn, run1)).detected).toBe(1);
   });
 
-  it("a thread no campaign opened is reported (the person wrote first), offer = the one Jev tagged the conversation about", async () => {
+  it("a thread no campaign opened is reported (the person wrote first), offer = the active one Jev tagged the conversation about", async () => {
+    brandOffers = [{ offerId: ONLY_OFFER, name: "Only", status: "active" }, { offerId: TAGGED_OFFER, name: "Tagged", status: "active" }];
     await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
     conn = await fresh();
     await buildPerson();
@@ -282,7 +311,36 @@ describe.skipIf(!RUN)("reply trigger", () => {
       idempotencyKey: "crm:matrix:reply:$q",
       item: { campaignId: null, openedBy: "not_campaign", conversationId },
     });
-    expect((await reports())[0]).toMatchObject({ status: "reported", campaignId: null, offerBasis: "conversation" });
+    expect((await reports())[0]).toMatchObject({ status: "reported", campaignId: null, offerBasis: "judged", offerVerdict: { via: "conversation_verdict" } });
+    expect(offerQuestions).toHaveLength(0); // the held verdict answers: Jev is not asked again
+  });
+
+  it("OFFER-PICK-ALL-1108: several offers, no campaign, no tag: Jev reads the burst, persisted; the person's next burst lands on the same offer", async () => {
+    // Sorted by id: o0 = OFFER (a1), o1 = ONLY_OFFER (a3).
+    brandOffers = [{ offerId: ONLY_OFFER, name: "Restaurants", status: "active" }, { offerId: OFFER, name: "Doctors", status: "active" }];
+    jevOfferChoice = "o0";
+    await db.update(matrixConnections).set({ replyWatchSince: new Date(Date.now() - 60_000), openReplyWatchSince: new Date(Date.now() - 60_000) }).where(eq(matrixConnections.id, conn.id));
+    conn = await fresh();
+    await buildPerson();
+    await event("$q", GHOST, min(1), "I run a chiropractic clinic, how does it work?");
+    expect((await detectReplies(conn, run1)).detected).toBe(1);
+    await deliverDueReplies();
+    expect(offerQuestions).toHaveLength(1);
+    expect(JSON.stringify(offerQuestions[0])).toContain("chiropractic clinic");
+    expect(JSON.stringify(offerQuestions[0])).toContain(`Audience of ${OFFER}`);
+    expect(campaignCalls[0].body).toMatchObject({ offerId: OFFER });
+    expect((await reports())[0]).toMatchObject({ status: "reported", offerId: OFFER, offerBasis: "judged", offerVerdict: { model: "jev", confidence: 0.8 } });
+
+    // We answer; their next burst is placed on the offer that already reached them, Jev not asked again.
+    await send("$r", min(3), null);
+    await event("$r", OWN, min(3), "Our answer");
+    await event("$n", GHOST, min(5), "Great, what does it cost?");
+    expect((await detectReplies(conn, run1)).detected).toBe(1);
+    await deliverDueReplies();
+    expect(offerQuestions).toHaveLength(1);
+    expect(campaignCalls.at(-1)!.body).toMatchObject({ offerId: OFFER });
+    const next = (await reports()).find((r) => r.anchorEventId === "$n")!;
+    expect(next).toMatchObject({ offerBasis: "person_reached", offerVerdict: { via: "reply_report" } });
   });
 
   it("no campaign and no offer tag: the brand's only active offer", async () => {

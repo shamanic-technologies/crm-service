@@ -93,6 +93,7 @@ import {
   REPLY_LOOKBACK_MS,
   REPLY_REASONS,
   REPLY_STATUS,
+  offerPickFailureReason,
   resolveReplyOffer,
   settle,
   type Judgment,
@@ -525,20 +526,27 @@ export async function deliverGmailReply(r: ReplyTriggerReport, identity: DoorIde
   const phone = dialablePhone(person.phones as string[]);
   const who = { personId: person.personId, fullName: person.displayName, email: address, phone };
 
-  let offerId = r.offerId;
-  let offerBasis = r.offerBasis;
+  // OFFER-PICK-ALL-1108: the resolver every trigger shares (lib/offer-pick.ts), the mails of the burst as Jev's evidence.
+  let offer: Awaited<ReturnType<typeof resolveReplyOffer>>;
   try {
-    if (!offerId) ({ offerId, offerBasis } = await resolveReplyOffer(identity, r));
+    offer = await resolveReplyOffer(identity, r, { email: address, phone });
   } catch (err) {
-    await settle(r, now, { ...who, status: REPLY_STATUS.FAILED, reason: REPLY_REASONS.CAMPAIGN_UNREACHABLE, lastError: (err as Error).message.slice(0, 1000), runId: identity.runId });
-    return { status: REPLY_STATUS.FAILED, reason: REPLY_REASONS.CAMPAIGN_UNREACHABLE };
+    const reason = offerPickFailureReason(err);
+    console.warn(`[crm-service][reply-trigger] Gmail report ${r.id} (brand ${r.brandId}) not reported (${reason}): ${(err as Error).message}`);
+    await settle(r, now, { ...who, status: REPLY_STATUS.FAILED, reason, lastError: (err as Error).message.slice(0, 1000), runId: identity.runId });
+    return { status: REPLY_STATUS.FAILED, reason };
   }
-  if (!offerId) {
-    const lastError = "Jev tagged this conversation with no offer, and the brand has no single active offer";
+  if (offer.offerId === null) {
+    const lastError = offer.detail.replace(/: state it with .*$/, "");
     console.warn(`[crm-service][reply-trigger] Gmail report ${r.id} (brand ${r.brandId}) not reported: ${lastError}`);
     await settle(r, now, { ...who, status: REPLY_STATUS.FAILED, reason: REPLY_REASONS.OFFER_UNKNOWN, lastError, runId: identity.runId });
     return { status: REPLY_STATUS.FAILED, reason: REPLY_REASONS.OFFER_UNKNOWN };
   }
+  const { offerId } = offer;
+  const offerBasis = offer.basis;
+  const placed = { offerId, offerBasis, offerVerdict: offer.verdict };
+  // Persisted at once (judged once): a campaign-service failure below retries on the same pick.
+  await db.update(replyTriggerReports).set(placed).where(eq(replyTriggerReports.id, r.id));
 
   const messages = await currentGmailBurst(r);
   const body = gmailReplyBody({
@@ -554,8 +562,7 @@ export async function deliverGmailReply(r: ReplyTriggerReport, identity: DoorIde
     const reportedAt = new Date();
     await settle(r, now, {
       ...who,
-      offerId,
-      offerBasis,
+      ...placed,
       messages,
       lastMessageAt: new Date(messages[messages.length - 1].at),
       status: REPLY_STATUS.REPORTED,
@@ -576,7 +583,7 @@ export async function deliverGmailReply(r: ReplyTriggerReport, identity: DoorIde
     const final = err instanceof CampaignRefusal && FINAL_REFUSAL_STATUSES.has(err.status);
     const reason = final ? REPLY_REASONS.CAMPAIGN_REFUSED : REPLY_REASONS.CAMPAIGN_UNREACHABLE;
     console.warn(`[crm-service][reply-trigger] Gmail report ${r.id} (brand ${r.brandId}) not reported: ${(err as Error).message}`);
-    await settle(r, now, { ...who, offerId, offerBasis, status: REPLY_STATUS.FAILED, reason, lastError: (err as Error).message.slice(0, 1000), runId: identity.runId });
+    await settle(r, now, { ...who, ...placed, status: REPLY_STATUS.FAILED, reason, lastError: (err as Error).message.slice(0, 1000), runId: identity.runId });
     return { status: REPLY_STATUS.FAILED, reason };
   }
 }

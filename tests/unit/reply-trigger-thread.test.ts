@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { readThreadForReply, type RoomSend } from "../../src/lib/reply-trigger/thread.js";
-import { burstUntilNextReport, idempotencyKeyFor, nextAttemptDue, pickTaggedOffer, replyOccurrenceBody } from "../../src/lib/reply-trigger/watch.js";
+import { burstUntilNextReport, idempotencyKeyFor, nextAttemptDue, replyOccurrenceBody } from "../../src/lib/reply-trigger/watch.js";
 import type { MatrixEvent } from "../../src/lib/matrix/client.js";
 import { ASSISTANT_PING_SKIPS, classifyAssistantEvent } from "../../src/lib/assistant-pings.js";
 
@@ -242,12 +242,6 @@ describe("replyOccurrenceBody", () => {
     expect(burstUntilNextReport(b, new Set(["$3"])).map((m) => m.eventId)).toEqual(["$1", "$2"]);
     expect(burstUntilNextReport(b, new Set()).map((m) => m.eventId)).toEqual(["$1", "$2", "$3"]);
     expect(burstUntilNextReport(b, new Set(["$1"])).map((m) => m.eventId)).toEqual(["$1", "$2", "$3"]);
-  });
-
-  it("picks the offer Jev is most sure the conversation is about", () => {
-    expect(pickTaggedOffer([], null)).toBeNull();
-    expect(pickTaggedOffer(["a", "b"], { a: 0.6, b: 0.9 })).toBe("b");
-    expect(pickTaggedOffer(["b", "a"], null)).toBe("a");
   });
 
   it("backs off 1, 2, 4... minutes, capped at an hour", () => {

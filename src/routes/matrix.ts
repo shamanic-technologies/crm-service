@@ -62,6 +62,7 @@ router.get(
         campaignId: r.campaignId,
         offerId: r.offerId,
         offerBasis: r.offerBasis,
+        offerVerdict: r.offerVerdict,
         conversationId: r.conversationId,
         person: { personId: r.personId, fullName: r.fullName, email: r.email, phone: r.phone },
         messages: r.messages,

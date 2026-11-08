@@ -47,6 +47,8 @@ router.get("/orgs/phone-triggers", apiKeyAuth, requireOrg("phone-triggers.list")
         lastError: r.lastError,
         attempts: r.attempts,
         offerId: r.offerId,
+        offerBasis: r.offerBasis,
+        offerVerdict: r.offerVerdict,
         detectedAt: r.detectedAt,
         reportedAt: r.reportedAt,
         campaignEventId: r.campaignEventId,

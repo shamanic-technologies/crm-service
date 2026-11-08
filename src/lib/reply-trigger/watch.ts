@@ -81,7 +81,7 @@ import {
   type DoorIdentity,
 } from "../trigger-door.js";
 import { overlayVoiceTranscripts, transcribeVoiceNote, untranscribedVoiceNotesInBurst } from "../matrix/voice-notes.js";
-import { resolveOffer } from "../form-trigger/offer.js";
+import { burstFacts, resolveOccurrenceOffer, type OfferPick } from "../offer-pick.js";
 import { readThreadForReply, type BurstMessage, type RoomSend } from "./thread.js";
 import { humanTypedTo } from "../matrix/human-takeover.js";
 import { HANDOFF_STATUS, readLineContext, type LineContext } from "./line-context.js";
@@ -193,6 +193,8 @@ export const REPLY_REASONS = {
   /** The brand's people do not hold this thread yet: rebuilt, then delivered. */
   PERSON_NOT_BUILT: "person_not_built",
   OFFER_UNKNOWN: "offer_unknown",
+  /** OFFER-PICK-ALL-1108: placing the burst on an offer failed (brand-service, human-service or Jev down): retried. */
+  OFFER_PICK_FAILED: "offer_pick_failed",
   CAMPAIGN_REFUSED: "campaign_refused",
   CAMPAIGN_UNREACHABLE: "campaign_unreachable",
 } as const;
@@ -745,44 +747,67 @@ export async function withholdReplyReports(
   return { acted, refused };
 }
 
+/** The shared resolver failed (a sibling or Jev down): recorded `offer_pick_failed`, retried. */
+export class OfferPickFailed extends Error {}
+
 /**
- * Which offer the burst is about (campaign-service runs a campaign per (brand, offer)), the first that answers:
- *  1. the offer of the last campaign that wrote in the thread;
- *  2. the offer Jev tagged this conversation about (people/relevance.ts, highest yes-probability);
- *  3. the offer the brand STATED for every form (`form_offer_mappings` '*', WA-GREETING-OFFER-1027), then its ONLY
- *     active offer (form-trigger/offer.ts `resolveOffer`, the one rule every trigger shares).
- * Nothing else: `offerId: null` = offer_unknown, never a guess.
+ * Which offer the burst is about (campaign-service runs a campaign per (brand, offer)): the resolver every trigger
+ * shares (lib/offer-pick.ts, OFFER-PICK-ALL-1108), fed with what this burst knows:
+ *  - stated for the occurrence: the offer of the last campaign that wrote in the thread (read once, then persisted);
+ *  - held verdict: the offers Jev tagged this conversation about (people/relevance.ts);
+ *  - Jev's evidence: the messages of the burst.
+ * Throws a CampaignRefusal when the campaign read fails, an `OfferPickFailed` when the resolver does.
  */
 export async function resolveReplyOffer(
   identity: DoorIdentity,
   r: ReplyTriggerReport,
-): Promise<{ offerId: string | null; offerBasis: string | null }> {
-  if (r.campaignId) return { offerId: await readCampaignOffer(identity, r.campaignId), offerBasis: "campaign" };
-  // The conversation Jev judged (people/relevance.ts): a Matrix conversation, or a Gmail address.
-  const conversationKey = r.source === "gmail" ? (r.address ? `gmail:${r.address}` : null) : r.conversationId ? `matrix:${r.conversationId}` : null;
-  if (conversationKey) {
-    const [v] = await db
-      .select({ offerIds: conversationVerdicts.offerIds, offerScores: conversationVerdicts.offerScores })
-      .from(conversationVerdicts)
-      .where(
-        and(
-          eq(conversationVerdicts.orgId, r.orgId),
-          eq(conversationVerdicts.brandId, r.brandId),
-          eq(conversationVerdicts.conversationKey, conversationKey),
-        ),
-      );
-    const tagged = pickTaggedOffer((v?.offerIds as string[] | undefined) ?? [], (v?.offerScores as Record<string, number> | null) ?? null);
-    if (tagged) return { offerId: tagged, offerBasis: "conversation" };
+  person: { email: string | null; phone: string | null },
+): Promise<OfferPick> {
+  const statedOfferId =
+    r.offerBasis === "campaign" && r.offerId ? r.offerId : r.campaignId ? await readCampaignOffer(identity, r.campaignId) : null;
+  try {
+    // The conversation Jev judged (people/relevance.ts): a Matrix conversation, or a Gmail address.
+    const conversationKey = r.source === "gmail" ? (r.address ? `gmail:${r.address}` : null) : r.conversationId ? `matrix:${r.conversationId}` : null;
+    let held: { offerIds: string[]; verdict: { via: "conversation_verdict"; conversationKey: string; scores: Record<string, number> | null } } | null = null;
+    if (conversationKey && !statedOfferId) {
+      const [v] = await db
+        .select({ offerIds: conversationVerdicts.offerIds, offerScores: conversationVerdicts.offerScores })
+        .from(conversationVerdicts)
+        .where(
+          and(
+            eq(conversationVerdicts.orgId, r.orgId),
+            eq(conversationVerdicts.brandId, r.brandId),
+            eq(conversationVerdicts.conversationKey, conversationKey),
+          ),
+        );
+      const offerIds = (v?.offerIds as string[] | undefined) ?? [];
+      if (offerIds.length > 0) {
+        held = { offerIds, verdict: { via: "conversation_verdict", conversationKey, scores: (v?.offerScores as Record<string, number> | null) ?? null } };
+      }
+    }
+    return await resolveOccurrenceOffer(identity, {
+      ledger: "reply",
+      reportId: r.id,
+      formId: null,
+      statedOfferId,
+      persisted: { offerId: r.offerId, offerBasis: r.offerBasis, offerVerdict: r.offerVerdict },
+      person,
+      held,
+      evidence: {
+        what: `A person just wrote to this brand on ${r.channel}.`,
+        facts: { channel: r.channel, messages: burstFacts(r.messages) },
+      },
+    });
+  } catch (err) {
+    throw new OfferPickFailed(`placing the burst on an offer failed: ${(err as Error).message}`);
   }
-  const answer = await resolveOffer(identity, null);
-  if (answer.offerId === null) return { offerId: null, offerBasis: null };
-  return { offerId: answer.offerId, offerBasis: answer.basis };
 }
 
-/** PURE: of the offers Jev tagged a conversation about, the one it is most sure of. */
-export function pickTaggedOffer(offerIds: string[], scores: Record<string, number> | null): string | null {
-  if (offerIds.length === 0) return null;
-  return [...offerIds].sort((a, b) => (scores?.[b] ?? 0) - (scores?.[a] ?? 0) || (a < b ? -1 : 1))[0];
+/** PURE: the reason a failed offer resolution is recorded under (the campaign's 404 is final, the resolver retried). */
+export function offerPickFailureReason(err: unknown): string {
+  if (err instanceof OfferPickFailed) return REPLY_REASONS.OFFER_PICK_FAILED;
+  if (err instanceof CampaignRefusal && err.status === 404) return REPLY_REASONS.OFFER_UNKNOWN;
+  return REPLY_REASONS.CAMPAIGN_UNREACHABLE;
 }
 
 /** PURE: the door's body (campaign-service `RecordTriggerEventBody`). Absent values OMITTED, never null. */
@@ -912,29 +937,26 @@ export async function deliverReply(
     return { status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.NO_EMAIL_OR_PHONE };
   }
 
-  let offerId = r.offerId;
-  let offerBasis = r.offerBasis;
+  let offer: OfferPick;
   try {
-    if (!offerId) ({ offerId, offerBasis } = await resolveReplyOffer(identity, r));
+    offer = await resolveReplyOffer(identity, r, { email: key.email, phone: key.phone });
   } catch (err) {
-    const final = err instanceof CampaignRefusal && err.status === 404;
-    await settle(r, now, {
-      ...who,
-      status: REPLY_STATUS.FAILED,
-      reason: final ? REPLY_REASONS.OFFER_UNKNOWN : REPLY_REASONS.CAMPAIGN_UNREACHABLE,
-      lastError: (err as Error).message.slice(0, 1000),
-      runId: identity.runId,
-    });
-    return { status: REPLY_STATUS.FAILED, reason: final ? REPLY_REASONS.OFFER_UNKNOWN : REPLY_REASONS.CAMPAIGN_UNREACHABLE };
+    const reason = offerPickFailureReason(err);
+    console.warn(`[crm-service][reply-trigger] report ${r.id} (brand ${r.brandId}) not reported (${reason}): ${(err as Error).message}`);
+    await settle(r, now, { ...who, status: REPLY_STATUS.FAILED, reason, lastError: (err as Error).message.slice(0, 1000), runId: identity.runId });
+    return { status: REPLY_STATUS.FAILED, reason };
   }
-  if (!offerId) {
-    const lastError = r.campaignId
-      ? `campaign ${r.campaignId} states no offer`
-      : "no campaign wrote in this thread, Jev tagged it with no offer, and the brand has no single active offer";
+  if (offer.offerId === null) {
+    const lastError = offer.detail.replace(/: state it with .*$/, "");
     console.warn(`[crm-service][reply-trigger] report ${r.id} (brand ${r.brandId}) not reported: ${lastError}`);
     await settle(r, now, { ...who, status: REPLY_STATUS.FAILED, reason: REPLY_REASONS.OFFER_UNKNOWN, lastError, runId: identity.runId });
     return { status: REPLY_STATUS.FAILED, reason: REPLY_REASONS.OFFER_UNKNOWN };
   }
+  const { offerId } = offer;
+  const offerBasis = offer.basis;
+  const placed = { offerId, offerBasis, offerVerdict: offer.verdict };
+  // Persisted at once (judged once): a campaign-service failure below retries on the same pick.
+  await db.update(replyTriggerReports).set(placed).where(eq(replyTriggerReports.id, r.id));
 
   const burst = await currentBurst(r, conn.matrixUserId);
   // What the writer needs to answer from the right line with the right persona (./line-context.ts).
@@ -955,8 +977,7 @@ export async function deliverReply(
     const reportedAt = new Date();
     await settle(r, now, {
       ...who,
-      offerId,
-      offerBasis,
+      ...placed,
       messages,
       lastMessageAt: new Date(messages[messages.length - 1].at),
       status: REPLY_STATUS.REPORTED,
@@ -979,7 +1000,7 @@ export async function deliverReply(
     const final = err instanceof CampaignRefusal && FINAL_REFUSAL_STATUSES.has(err.status);
     const reason = final ? REPLY_REASONS.CAMPAIGN_REFUSED : REPLY_REASONS.CAMPAIGN_UNREACHABLE;
     console.warn(`[crm-service][reply-trigger] report ${r.id} (brand ${r.brandId}) not reported: ${(err as Error).message}`);
-    await settle(r, now, { ...who, offerId, offerBasis, status: REPLY_STATUS.FAILED, reason, lastError: (err as Error).message.slice(0, 1000), runId: identity.runId });
+    await settle(r, now, { ...who, ...placed, status: REPLY_STATUS.FAILED, reason, lastError: (err as Error).message.slice(0, 1000), runId: identity.runId });
     return { status: REPLY_STATUS.FAILED, reason };
   }
 }
