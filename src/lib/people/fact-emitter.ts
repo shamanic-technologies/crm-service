@@ -93,6 +93,19 @@ export async function inputsMark(scope: EmitScope): Promise<string> {
 /** The last mark each scope was emitted at, in this process (a restart emits every scope once). */
 const emittedAt = new Map<string, string>();
 
+/**
+ * The emission a people build runs right after itself. The build moved the scope's mark (`last_built_at`),
+ * so without recording it the next watch pass re-emitted the whole scope for that move alone (BOX-LOAD-1107-CRM2:
+ * one redundant emission of 30-120 s per build of distribute.you's 41k people). The mark is read BEFORE the
+ * emission, as the watch does: a write during it moves the mark again and the watch emits.
+ */
+export async function emitAfterBuild(scope: EmitScope): Promise<FactEmissionSummary> {
+  const mark = await inputsMark(scope);
+  const summary = await requestEmission(scope);
+  emittedAt.set(scope.id, mark);
+  return summary;
+}
+
 export interface FactEmitterPass {
   scopes: number;
   emitted: { scopeId: string; facts: number; withdrawn: number; ms: number }[];

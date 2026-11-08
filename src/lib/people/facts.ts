@@ -307,6 +307,37 @@ export async function recordKeysByContact(orgId: string, brandId: string): Promi
   return out;
 }
 
+/**
+ * BOX-LOAD-1107-CRM2: does a mirrored record written since `since` need a people build to reach the fact feed?
+ * The emitter files a record's facts on the person holding ANY of its keys (`withRecordKeys` +
+ * `PersonIndex.resolve`), within a minute, with no build. So a build is needed only for a record no built
+ * person holds by any key, or one stating no key at all (its presence alone names it).
+ */
+export async function recordsNoPersonHolds(orgId: string, brandId: string, since: Date): Promise<string[]> {
+  const rows = (await db.execute(sql`
+    SELECT id, source, primary_email AS "primaryEmail", phone_e164 AS "phoneE164", external_id AS "externalId",
+           jsonb_build_object('emails', raw_attributes->'emails', 'phones', raw_attributes->'phones', 'distinctIds', raw_attributes->'distinctIds') AS "rawAttributes"
+    FROM contacts
+    WHERE org_id = ${orgId} AND brand_id = ${brandId} AND last_rebuilt_at >= ${since.toISOString()}::timestamptz
+      AND source IN (${sql.join(LATE_JOIN_SOURCES.map((x) => sql`${x}`), sql`, `)})
+  `)) as unknown as Parameters<typeof mirrorContactKeys>[0][];
+  if (rows.length === 0) return [];
+  const keysOf = new Map(rows.map((r) => [r.id, mirrorContactKeys(r)]));
+  const all = [...new Set([...keysOf.values()].flat())];
+  const held = new Set<string>();
+  for (let i = 0; i < all.length; i += 500) {
+    const part = all.slice(i, i + 500);
+    const found = (await db.execute(sql`
+      SELECT DISTINCT k FROM people, jsonb_array_elements_text(identity_keys) AS k
+      WHERE org_id = ${orgId} AND brand_id = ${brandId}
+        AND identity_keys ?| ARRAY[${sql.join(part.map((k) => sql`${k}`), sql`, `)}]::text[]
+        AND k = ANY(ARRAY[${sql.join(part.map((k) => sql`${k}`), sql`, `)}]::text[])
+    `)) as unknown as { k: string }[];
+    for (const f of found) held.add(f.k);
+  }
+  return [...keysOf].filter(([, keys]) => !keys.some((k) => held.has(k))).map(([id]) => id);
+}
+
 /** PURE: a candidate known only by its record's presence also states the record's own identity keys (fallback lookup). */
 export function withRecordKeys(c: CandidateFact, keysOfContact: Map<string, string[]>): CandidateFact {
   if (!c.subject.presence || c.subject.keys.length > 0 || c.subject.standalone || !c.crmContactId) return c;
@@ -1654,7 +1685,9 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
       });
     }
     const moved = moves.filter((m) => m.from !== m.to);
-    const ownerNow = new Map(moves.map((m) => [m.factId, m.to]));
+    // Only the moved facts: an unmoved fact's owner is its own `owner_person_key` (every read below falls back to
+    // it). A map over every fact ever emitted (~413k for distribute.you) was the emission's hottest line (BOX-LOAD-1107-CRM2).
+    const ownerNow = new Map(moved.map((m) => [m.factId, m.to]));
 
     // 3-4. Withdrawals, then new facts.
     const withdrawals: {

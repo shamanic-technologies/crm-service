@@ -43,6 +43,7 @@ import { mirrorRecentPersons, waitingForBudget } from "../posthog/sync.js";
 import { mirrorRecentStripe } from "../stripe/sync.js";
 import { mirrorRecentlyUpdatedUsers } from "../auth/sync.js";
 import { runScopeBuild } from "../people/build.js";
+import { recordsNoPersonHolds } from "../people/facts.js";
 import { phoneKey } from "../people/identity.js";
 import { statedNotToBrand } from "../people/stated-not-to-brand.js";
 import { createRun, updateRun } from "../runs-client.js";
@@ -545,9 +546,27 @@ export async function runPhoneWatchPass(now: number = Date.now()): Promise<Phone
   // events and a Stripe payment attempt show on the thread at once (it reads the mirror live) but
   // reach the fact feed (lead-service) only at the next build, so they kick one too
   // (UNIBOX-PAYMENT-REFUSED-1028: a product event waited ~4 min for the next build).
+  //
+  // BOX-LOAD-1107-CRM2: only when a record it mirrored is held by NO built person. A record a person holds
+  // by one of its keys (measured 2026-11-08: every PostHog person and Clerk user mirrored over 3 hours, cold
+  // email prospects clicking through) reaches the fact feed through the fact emitter within a minute, no
+  // build (fact-emitter.ts, UNIBOX-FACT-LAG-1028); its thread reads the mirror live. Kicking a whole build
+  // for it rebuilt distribute.you's 41k people ~20 times an hour (~115 s each), the box's top Node load.
   const refresh = new Set(brands);
+  const moved = new Set<string>();
   for (const m of mirrored) {
-    if (m.changed > 0 || (m.eventsChanged ?? 0) > 0) refresh.add(`${m.orgId}|${m.brandId}`);
+    if (m.changed > 0 || (m.eventsChanged ?? 0) > 0) moved.add(`${m.orgId}|${m.brandId}`);
+  }
+  for (const b of moved) {
+    if (refresh.has(b)) continue;
+    const [orgId, brandId] = b.split("|");
+    try {
+      if ((await recordsNoPersonHolds(orgId, brandId, new Date(now))).length > 0) refresh.add(b);
+    } catch (err) {
+      // Unknown = build, as before: a record never waits on this check.
+      console.error(`[crm-service][phone-trigger] held-record check of brand ${brandId} failed, building:`, err);
+      refresh.add(b);
+    }
   }
   if (process.env.PHONE_TRIGGER_REFRESH !== "off") {
     for (const b of refresh) {

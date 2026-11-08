@@ -5,6 +5,7 @@ import { sql } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
 import { ensureScope, runScopeBuild } from "../../src/lib/people/build.js";
 import { factEmitterPass, inputsMark } from "../../src/lib/people/fact-emitter.js";
+import { recordsNoPersonHolds } from "../../src/lib/people/facts.js";
 import { runStripeSyncPass } from "../../src/lib/stripe/sync.js";
 import peopleRoutes from "../../src/routes/people.js";
 import posthogStripeRoutes from "../../src/routes/posthog-stripe.js";
@@ -162,5 +163,30 @@ describe.skipIf(!RUN)("a fact reaches the feed and the timeline within the minut
     expect(empty.status).toBe(200);
     expect(empty.body).toEqual({ facts: [], nextCursor: all.body.nextCursor, hasMore: false });
     expect(platformRunsOpened).toBe(1);
+  });
+  // BOX-LOAD-1107-CRM2: the phone watch kicks a people build only for a record no built person holds.
+  it("a new record whose key a built person holds needs no build; one nobody holds, or stating no key, does", async () => {
+    const since = new Date();
+    stripe.customers.push(
+      { id: "cus_same", email: "tari@x.com", name: "Tari", created: 1_793_200_000 },
+      { id: "cus_stranger", email: "someone@else.com", name: "Someone", created: 1_793_200_001 },
+      { id: "cus_keyless", email: null, name: "No Key", created: 1_793_200_002 },
+    );
+    await runStripeSyncPass();
+    const unheld = await recordsNoPersonHolds(ORG, BRAND, since);
+    const refs = (await db.execute(sql`
+      SELECT external_id FROM contacts WHERE id = ANY(${`{${unheld.join(",")}}`}::uuid[]) ORDER BY external_id
+    `)) as unknown as { external_id: string }[];
+    expect(refs.map((r) => r.external_id)).toEqual(["cus_keyless", "cus_stranger"]);
+    // Records written before `since` are not this pass's: nothing to build for them.
+    expect(await recordsNoPersonHolds(ORG, BRAND, new Date(Date.now() + 60_000))).toEqual([]);
+  });
+
+  it("the watch does not re-emit a scope for the build that just emitted it", async () => {
+    const stamp = async () =>
+      ((await db.execute(sql`SELECT facts_stated_through AS t FROM people_scopes WHERE org_id = ${ORG}`)) as unknown as { t: Date | string }[])[0].t;
+    const afterBuild = String(await stamp());
+    await factEmitterPass();
+    expect(String(await stamp())).toBe(afterBuild);
   });
 });
