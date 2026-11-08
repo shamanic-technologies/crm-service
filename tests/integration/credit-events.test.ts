@@ -22,6 +22,8 @@ const CLIENT_ORG = "c3ed1700-1111-4111-8111-000000000004";
 const EPISODE = "c3ed1700-1111-4111-8111-000000000005";
 const OLD_EPISODE = "c3ed1700-1111-4111-8111-000000000006";
 const OFFER = "c3ed1700-1111-4111-8111-000000000007";
+const OFFER_AGENCY = "c3ed1700-1111-4111-8111-00000000000a";
+const OFFER_ANGELS = "c3ed1700-1111-4111-8111-00000000000b";
 const USER = "user-staff-credit";
 const API_KEY = process.env.CRM_SERVICE_API_KEY || "test-crm-key";
 
@@ -42,12 +44,19 @@ process.env.BRAND_SERVICE_API_KEY = "br";
 process.env.CAMPAIGN_SERVICE_URL = "http://campaign.test";
 process.env.CAMPAIGN_SERVICE_API_KEY = "ca";
 process.env.CREDIT_WATCH_REBUILD = "off";
+process.env.HUMAN_SERVICE_URL = "http://human.test";
+process.env.HUMAN_SERVICE_API_KEY = "h";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 let feed: unknown[] = [];
 let doorCalls: Record<string, unknown>[] = [];
+/** ACCOUNT-EVENTS-ONE-OFFER-1108: the staff brand's offers, Jev's offer answer (default down) and the person's memberships. */
+let brandOffers: { offerId: string; name: string; status: string }[] = [];
+let jevAnswer: () => Response = () => json({}, 500);
+let jevCalls: { state: Record<string, unknown> }[] = [];
+let memberships: { audienceId: string; offerId: string | null; provenance: string; joinedAt: string }[] = [];
 
 function installFetchStub() {
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -67,9 +76,27 @@ function installFetchStub() {
     }
     if (url.host === "client.test" && url.pathname === `/internal/orgs/${CLIENT_ORG}`) return json({ externalId: "org_x", name: "Acme" });
     if (url.host === "brand.test" && url.pathname === `/internal/brands/${BRAND}/offers`) {
-      return json({ offers: [{ offerId: OFFER, name: "Product-led", status: "active" }] });
+      return json({ offers: brandOffers });
     }
     if (url.host === "brand.test" && url.pathname === `/internal/brands/${BRAND}`) return json({ brand: { domain: "distribute.you" } });
+    if (url.host === "brand.test" && url.pathname === "/orgs/brands") return json({ brands: [] });
+    if (url.host === "brand.test" && url.pathname.endsWith("/extracted-fields")) return json({ fields: [] });
+    if (url.host === "brand.test" && url.pathname.endsWith("/user-fields")) return json({ fields: {} });
+    if (url.host === "human.test" && url.pathname === `/internal/brands/${BRAND}/memberships/by-email`) {
+      const body = JSON.parse(String(init?.body)) as { emails: string[] };
+      return json({ brandId: BRAND, byEmail: Object.fromEntries(body.emails.map((e) => [e, { personId: "p1", emails: [], memberships }])) });
+    }
+    if (url.host === "human.test" && url.pathname === "/orgs/audiences") {
+      const offerId = url.searchParams.get("offerId");
+      return json({ audiences: [{ id: `aud-${offerId}`, role: "target", targetText: `Audience of ${offerId}` }], total: 1, limit: 200, offset: 0 });
+    }
+    if (url.pathname === "/orgs/judgments") {
+      const body = JSON.parse(String(init?.body)) as { state: Record<string, unknown>; questions: Record<string, unknown> };
+      // Only the offer choice (the people build asks Jev its own questions).
+      if (!body.questions?.offer) return json({}, 500);
+      jevCalls.push(body);
+      return jevAnswer();
+    }
     if (url.host === "campaign.test" && url.pathname === "/internal/trigger-events") {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       doorCalls.push(body);
@@ -128,6 +155,10 @@ describe.skipIf(!RUN)("credit events on the staff Unibox", () => {
     installFetchStub();
     feed = [];
     doorCalls = [];
+    brandOffers = [{ offerId: OFFER, name: "Product-led", status: "active" }];
+    jevAnswer = () => json({}, 500);
+    jevCalls = [];
+    memberships = [];
     await wipe();
   });
   afterAll(wipe);
@@ -220,5 +251,72 @@ describe.skipIf(!RUN)("credit events on the staff Unibox", () => {
         .from(peopleFacts)
         .where(and(eq(peopleFacts.orgId, CUSTOMER_ORG), eq(peopleFacts.source, "billing"))),
     ).toHaveLength(0);
+  }, 60_000);
+  const threeOffers = () => {
+    brandOffers = [
+      { offerId: OFFER, name: "Product", status: "active" },
+      { offerId: OFFER_AGENCY, name: "Agency", status: "active" },
+      { offerId: OFFER_ANGELS, name: "Angels", status: "active" },
+    ];
+  };
+  const startWatch = async () => {
+    await seedJane();
+    const { scope } = await ensureScope(STAFF_ORG, BRAND, USER);
+    expect((await runScopeBuild(scope)).ok).toBe(true);
+    await db.insert(billingFeedCursors).values({ feed: CREDIT_FEED, watchSince: new Date("2026-10-24T11:00:00Z") });
+  };
+  const NOW = Date.parse("2026-10-24T13:00:00Z");
+
+  it("ACCOUNT-EVENTS-ONE-OFFER-1108: 3 offers, a member never reached = ONE Lead event per fact on the offer Jev picks from her words; the next fact follows it", async () => {
+    threeOffers();
+    await startWatch();
+    // Offer keys are o<k> over the offers sorted by id: o0 = Product, o1 = Agency, o2 = Angels.
+    jevAnswer = () => json({ model: "jev-1.13", answers: { offer: { type: "choice", choice: "o1", confidence: 0.71, probabilities: { o0: 0.2, o1: 0.71, o2: 0.09 } } } });
+
+    feed = [ranOut(EPISODE, "2026-10-24T12:00:00.000Z")];
+    await runCreditWatchPass(NOW);
+    expect(doorCalls.map((b) => b.offerId)).toEqual([OFFER_AGENCY]);
+    expect(jevCalls).toHaveLength(1);
+    // Jev read what she said to the Copilot (crm-service's own record of her), not only the event.
+    expect(JSON.stringify(jevCalls[0].state)).toContain("theirCopilotMessages");
+    const [r1] = await db.select().from(creditEventReports);
+    expect(r1).toMatchObject({ status: "reported", orgId: STAFF_ORG, brandId: BRAND, offerId: OFFER_AGENCY, offerBasis: "judged", offerIds: [OFFER_AGENCY] });
+    expect(r1.offerVerdict).toMatchObject({ confidence: 0.71 });
+    expect((r1.offerVerdict as Record<string, unknown>).eventOnly).toBeUndefined();
+
+    // The next fact about her: the offer that already reached her wins, Jev is not asked again.
+    feed = [...feed, restored(EPISODE, "2026-10-24T12:30:00.000Z")];
+    await runCreditWatchPass(NOW);
+    expect(doorCalls.map((b) => [b.offerId, (b.item as { kind: string }).kind])).toEqual([
+      [OFFER_AGENCY, "credit_ran_out"],
+      [OFFER_AGENCY, "credit_restored"],
+    ]);
+    expect(jevCalls).toHaveLength(1);
+    const reports = await db.select().from(creditEventReports).where(eq(creditEventReports.eventId, `${EPISODE}:restored`));
+    expect(reports[0]).toMatchObject({ offerId: OFFER_AGENCY, offerBasis: "person_reached" });
+  }, 60_000);
+
+  it("ACCOUNT-EVENTS-ONE-OFFER-1108: a member an offer audience already served = ONE Lead event on that offer, no Jev", async () => {
+    threeOffers();
+    await startWatch();
+    memberships = [{ audienceId: "aud-angels", offerId: OFFER_ANGELS, provenance: "served", joinedAt: "2026-10-01T00:00:00.000Z" }];
+    feed = [ranOut(EPISODE, "2026-10-24T12:00:00.000Z")];
+    await runCreditWatchPass(NOW);
+    expect(doorCalls.map((b) => b.offerId)).toEqual([OFFER_ANGELS]);
+    expect(jevCalls).toHaveLength(0);
+    const [r] = await db.select().from(creditEventReports);
+    expect(r).toMatchObject({ status: "reported", offerId: OFFER_ANGELS, offerBasis: "person_reached" });
+  }, 60_000);
+
+  it("ACCOUNT-EVENTS-ONE-OFFER-1108: Jev down = loud offer_pick_failed, nothing sent; the retry sends ONE event", async () => {
+    threeOffers();
+    await startWatch();
+    feed = [ranOut(EPISODE, "2026-10-24T12:00:00.000Z")];
+    const first = await runCreditWatchPass(NOW);
+    expect(doorCalls).toHaveLength(0);
+    expect((first as { delivered: unknown[] }).delivered).toEqual([expect.objectContaining({ status: "failed", reason: "offer_pick_failed" })]);
+    jevAnswer = () => json({ model: "jev-1.13", answers: { offer: { type: "choice", choice: "o0", confidence: 0.6, probabilities: { o0: 0.6, o1: 0.3, o2: 0.1 } } } });
+    await runCreditWatchPass(NOW + 5 * 60_000);
+    expect(doorCalls.map((b) => b.offerId)).toEqual([OFFER]);
   }, 60_000);
 });

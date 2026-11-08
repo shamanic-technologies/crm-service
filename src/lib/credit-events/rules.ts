@@ -7,7 +7,8 @@
  *  - a fact on the people fact feed (family `billing_credit`, history: never withdrawn), so lead-service reads it like
  *    any act of theirs;
  *  - ONE occurrence of the GENERIC `account_event` trigger ("Account Event": something happened on the client's account
- *    with us; declared data in features-service, kind `reported`, reportedBy crm-service) per member, which makes it a
+ *    with us; declared data in features-service, kind `reported`, reportedBy crm-service) per member, on ONE offer of the
+ *    staff brand (lib/offer-pick.ts, ACCOUNT-EVENTS-ONE-OFFER-1108: a person is contacted for one offer only), which makes it a
  *    `lead_event` ("Lead event") occurrence like any member trigger. The credit kind rides in `item.kind`; no pipe heads
  *    `account_event` itself.
  * Never history: an event dated before the first pass (`watch_since`) or more than 24 h before it is reported is shown and
@@ -33,6 +34,8 @@ export const CREDIT_REPORT_REASONS = {
   BEFORE_WATCH: "before_watch",
   STALE: "stale",
   OFFER_UNKNOWN: "offer_unknown",
+  /** Placing the event on ONE offer failed (lib/offer-pick.ts: a sibling or Jev down): retried. */
+  OFFER_PICK_FAILED: "offer_pick_failed",
   CAMPAIGN_REFUSED: "campaign_refused",
   CAMPAIGN_UNREACHABLE: "campaign_unreachable",
 } as const;
@@ -104,17 +107,6 @@ export function reportVerdict(
   if (at.getTime() < watchSince.getTime()) return { status: "skipped", reason: CREDIT_REPORT_REASONS.BEFORE_WATCH };
   if (now - at.getTime() > CREDIT_REPORT_FRESH_WINDOW_MS) return { status: "skipped", reason: CREDIT_REPORT_REASONS.STALE };
   return { status: "pending" };
-}
-
-/**
- * PURE: the offers one report is filed under. The person's own offer tags (the registry's Jev on their conversations)
- * among the brand's ACTIVE offers, else every active offer (the fact is about the account, not an offer: lead-service's
- * "one event each" rule). None active = nothing to file under.
- */
-export function reportOffers(personOfferIds: readonly string[], activeOfferIds: readonly string[]): string[] {
-  const active = [...new Set(activeOfferIds)].sort();
-  const tagged = active.filter((o) => personOfferIds.includes(o));
-  return tagged.length > 0 ? tagged : active;
 }
 
 /** PURE: one occurrence per (event, address, offer): a retry replays campaign-service's first event. */

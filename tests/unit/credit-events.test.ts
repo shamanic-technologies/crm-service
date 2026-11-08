@@ -6,7 +6,6 @@ import {
   creditOccurrenceBody,
   memberEmailsOf,
   parseFeedPage,
-  reportOffers,
   reportVerdict,
 } from "../../src/lib/credit-events/rules.js";
 import { creditCandidateFacts } from "../../src/lib/people/facts.js";
@@ -48,12 +47,6 @@ describe("credit events, pure rules (CREDIT-RAN-OUT-UNIBOX-EVENT-1024)", () => {
     expect(reportVerdict(new Date("2026-10-18T09:00:00Z"), watch, now)).toEqual({ status: "skipped", reason: "before_watch" });
     expect(reportVerdict(new Date("2026-10-24T12:30:00Z"), watch, now)).toEqual({ status: "pending" });
     expect(reportVerdict(new Date("2026-10-24T12:30:00Z"), watch, now + 25 * 3600_000)).toEqual({ status: "skipped", reason: "stale" });
-  });
-
-  it("offers: the person's tagged active offers, else every active offer", () => {
-    expect(reportOffers(["o2", "archived"], ["o1", "o2"])).toEqual(["o2"]);
-    expect(reportOffers([], ["o2", "o1"])).toEqual(["o1", "o2"]);
-    expect(reportOffers(["o1"], [])).toEqual([]);
   });
 
   it("the door body: the GENERIC account_event trigger, the credit kind in item, one key per (event, address, offer)", () => {

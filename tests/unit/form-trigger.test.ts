@@ -150,7 +150,9 @@ describe("pickHeldOffer (OFFER-PICK-ALL-1108)", () => {
     const active = new Set(["a", "b"]);
     expect(pickHeldOffer([], null, active)).toBeNull();
     expect(pickHeldOffer(["a", "b"], { a: 0.6, b: 0.9 }, active)).toBe("b");
-    expect(pickHeldOffer(["b", "a"], null, active)).toBe("a");
+    // Several tagged, no score to tell them apart: Jev decides (never an id-order pick, ACCOUNT-EVENTS-ONE-OFFER-1108).
+    expect(pickHeldOffer(["b", "a"], null, active)).toBeNull();
+    expect(pickHeldOffer(["b", "z"], null, active)).toBe("b");
     expect(pickHeldOffer(["z", "a"], { z: 0.99, a: 0.1 }, active)).toBe("a");
     expect(pickHeldOffer(["z"], null, active)).toBeNull();
   });

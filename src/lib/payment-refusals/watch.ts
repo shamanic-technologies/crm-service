@@ -1,7 +1,8 @@
 /**
  * THE REFUSED PAYMENT WATCH (REFUSED-CARD-LEAD-EVENT-1103): every refused charge a brand's Stripe states (mirrored into
  * `stripe_transactions` within a minute by the fast mirror, lib/phone-trigger/) becomes ONE Lead event (`account_event`,
- * `item.kind = payment_refused`) for the person who paid, through campaign-service's trigger door. Rules in rules.ts.
+ * `item.kind = payment_refused`) for the person who paid, on ONE offer of the brand (lib/account-offer.ts ->
+ * lib/offer-pick.ts, ACCOUNT-EVENTS-ONE-OFFER-1108), through campaign-service's trigger door. Rules in rules.ts.
  *
  * Every `PAYMENT_REFUSED_WATCH_INTERVAL_MS` (60 s), first pass 60 s after boot, one at a time; `PAYMENT_REFUSED_WATCH=off`
  * stops it. A pass: record every fresh refused charge not recorded yet (`payment_refusal_reports`, UNIQUE per connection x
@@ -11,10 +12,10 @@
 
 import { and, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { paymentRefusalReports, people, stripeConnections, stripeTransactions, type PaymentRefusalReport } from "../../db/schema.js";
-import { readBrandOffers } from "../form-trigger/offer.js";
-import { reportOffers } from "../credit-events/rules.js";
-import { emailKey, phoneKey } from "../people/identity.js";
+import { paymentRefusalReports, stripeConnections, stripeTransactions, type PaymentRefusalReport } from "../../db/schema.js";
+import { accountPersonOf, resolveAccountFactOffer } from "../account-offer.js";
+import { contactFacts, type OfferPick } from "../offer-pick.js";
+import { formatMoney } from "../stripe/attempts.js";
 import { createRun, updateRun } from "../runs-client.js";
 import { CampaignRefusal, FINAL_REFUSAL_STATUSES, campaignServiceConfigured, recordTriggerEvent } from "../trigger-door.js";
 import {
@@ -110,18 +111,6 @@ async function dueReports(now: number): Promise<PaymentRefusalReport[]> {
   return found.filter((r) => nextAttemptDue(r.attempts, r.lastAttemptAt) <= now);
 }
 
-/** The brand's person holding this address / number: their name and the offers their conversations are about. */
-async function personOf(orgId: string, brandId: string, email: string | null, phone: string | null): Promise<{ name: string | null; offerIds: string[] }> {
-  const key = email ? emailKey(email) : phone ? phoneKey(phone) : null;
-  if (!key) return { name: null, offerIds: [] };
-  const [p] = await db
-    .select({ name: people.displayName, offerIds: people.offerIds })
-    .from(people)
-    .where(and(eq(people.orgId, orgId), eq(people.brandId, brandId), sql`${people.identityKeys} @> ${JSON.stringify([key])}::jsonb`))
-    .limit(1);
-  return { name: p?.name ?? null, offerIds: (p?.offerIds as string[] | undefined) ?? [] };
-}
-
 export interface DeliveredRefusal {
   reportId: string;
   status: string;
@@ -166,7 +155,6 @@ export async function deliverRefusals(now: number = Date.now()): Promise<Deliver
         .where(eq(paymentRefusalReports.id, r.id));
     let failed = false;
     try {
-      const activeOffers = (await readBrandOffers(identity)).filter((o) => o.status === "active").map((o) => o.offerId);
       const charges = new Map(
         (
           await db
@@ -183,45 +171,71 @@ export async function deliverRefusals(now: number = Date.now()): Promise<Deliver
       );
       for (const r of report) {
         const t = charges.get(`${r.connectionId}|${r.chargeId}`);
-        const person = await personOf(orgId, brandId, r.email, r.phone);
-        const offers = reportOffers(person.offerIds, activeOffers);
-        if (offers.length === 0) {
+        const person = await accountPersonOf(orgId, brandId, r.email, r.phone);
+        // ACCOUNT-EVENTS-ONE-OFFER-1108: ONE event on ONE offer (the resolver every trigger shares), never one per offer.
+        let offer: OfferPick;
+        try {
+          const contact = await contactFacts(orgId, t?.contactId ?? null);
+          const charge = {
+            amount: formatMoney(t?.amountMinor ?? null, t?.currency ?? null),
+            description: t?.description ?? null,
+          };
+          offer = await resolveAccountFactOffer(identity, {
+            ledger: "refusal",
+            reportId: r.id,
+            persisted: { offerId: r.offerId, offerBasis: r.offerBasis, offerVerdict: r.offerVerdict },
+            person: { email: r.email, phone: r.phone },
+            who: person,
+            what: "A payment this person made to the brand was just refused by their bank (a card charge on the brand's Stripe).",
+            facts: { name: person.name ?? r.fullName, email: r.email, charge, ...(contact ? { contact } : {}) },
+            hasPersonEvidence: !!charge.description || !!contact,
+          });
+        } catch (err) {
           failed = true;
-          await settle(r, { status: REFUSAL_STATUS.FAILED, reason: REFUSAL_REASONS.OFFER_UNKNOWN, lastError: "the brand has no active offer" });
+          const message = `placing the refusal on an offer failed: ${(err as Error).message}`.slice(0, 1000);
+          console.warn(`[crm-service][payment-refused] ${r.chargeId} for ${r.email ?? r.phone} not reported: ${message}`);
+          await settle(r, { status: REFUSAL_STATUS.FAILED, reason: REFUSAL_REASONS.OFFER_PICK_FAILED, lastError: message });
+          out.push({ reportId: r.id, status: REFUSAL_STATUS.FAILED, reason: REFUSAL_REASONS.OFFER_PICK_FAILED });
+          continue;
+        }
+        if (offer.offerId === null) {
+          failed = true;
+          await settle(r, { status: REFUSAL_STATUS.FAILED, reason: REFUSAL_REASONS.OFFER_UNKNOWN, lastError: offer.detail.replace(/: state it with .*$/, "") });
           out.push({ reportId: r.id, status: REFUSAL_STATUS.FAILED, reason: REFUSAL_REASONS.OFFER_UNKNOWN });
           continue;
         }
+        const offerId = offer.offerId;
+        const placed = { offerId, offerBasis: offer.basis, offerVerdict: offer.verdict, offerIds: [offerId] };
+        // Persisted at once (judged once): a campaign-service failure below retries on the same pick.
+        await db.update(paymentRefusalReports).set(placed).where(eq(paymentRefusalReports.id, r.id));
         try {
-          const recorded: { offerId: string; eventId: string; replayed: boolean }[] = [];
-          for (const offerId of offers) {
-            const rec = await recordTriggerEvent(
-              identity,
-              refusalOccurrenceBody({
-                brandId,
-                offerId,
-                email: r.email,
-                phone: r.phone,
-                name: person.name ?? r.fullName,
-                chargeId: r.chargeId,
-                chargedAt: r.chargedAt,
-                amountMinor: t?.amountMinor ?? null,
-                currency: t?.currency ?? null,
-                description: t?.description ?? null,
-                detail: (t?.detail as Record<string, unknown> | undefined) ?? {},
-                stripeAccountId: conn.get(r.connectionId)?.accountId ?? null,
-              }),
-            );
-            recorded.push({ offerId, eventId: rec.eventId, replayed: rec.replayed });
-          }
-          await settle(r, { status: REFUSAL_STATUS.REPORTED, reason: null, lastError: null, offerIds: offers, campaignEvents: recorded, reportedAt: new Date() });
-          console.log(`[crm-service][payment-refused] reported ${r.chargeId} for ${r.email ?? r.phone} as account_event x${recorded.length}`);
+          const rec = await recordTriggerEvent(
+            identity,
+            refusalOccurrenceBody({
+              brandId,
+              offerId,
+              email: r.email,
+              phone: r.phone,
+              name: person.name ?? r.fullName,
+              chargeId: r.chargeId,
+              chargedAt: r.chargedAt,
+              amountMinor: t?.amountMinor ?? null,
+              currency: t?.currency ?? null,
+              description: t?.description ?? null,
+              detail: (t?.detail as Record<string, unknown> | undefined) ?? {},
+              stripeAccountId: conn.get(r.connectionId)?.accountId ?? null,
+            }),
+          );
+          const recorded = [{ offerId, eventId: rec.eventId, replayed: rec.replayed }];
+          await settle(r, { status: REFUSAL_STATUS.REPORTED, reason: null, lastError: null, ...placed, campaignEvents: recorded, reportedAt: new Date() });
+          console.log(`[crm-service][payment-refused] reported ${r.chargeId} for ${r.email ?? r.phone} as account_event on offer ${offerId} (${offer.basis})`);
           out.push({ reportId: r.id, status: REFUSAL_STATUS.REPORTED, reason: null });
         } catch (err) {
           failed = true;
           const final = err instanceof CampaignRefusal && FINAL_REFUSAL_STATUSES.has(err.status);
           const reason = final ? REFUSAL_REASONS.CAMPAIGN_REFUSED : REFUSAL_REASONS.CAMPAIGN_UNREACHABLE;
           console.warn(`[crm-service][payment-refused] ${r.chargeId} for ${r.email ?? r.phone} not reported (${reason}): ${(err as Error).message}`);
-          await settle(r, { status: REFUSAL_STATUS.FAILED, reason, lastError: (err as Error).message.slice(0, 1000), offerIds: offers });
+          await settle(r, { status: REFUSAL_STATUS.FAILED, reason, lastError: (err as Error).message.slice(0, 1000), ...placed });
           out.push({ reportId: r.id, status: REFUSAL_STATUS.FAILED, reason });
         }
       }

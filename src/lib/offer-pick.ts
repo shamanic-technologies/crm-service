@@ -3,7 +3,9 @@
  * (a form fill, a WhatsApp number given, a message written to the brand). ONE
  * resolver (FORM-OFFER-PICK-1108, extended to every trigger by OFFER-PICK-ALL-1108):
  * a brand sells several offers, each to ONE audience (AUDIENCE-PER-OFFER-1107), and a
- * person is contacted for ONE offer of a brand only. In order, the first that answers:
+ * person is contacted for ONE offer of a brand only. Account facts about a person (a refused
+ * Stripe charge, credit ran out / restored: ACCOUNT-EVENTS-ONE-OFFER-1108) use it too: ONE event
+ * on ONE offer, never one per active offer. In order, the first that answers:
  *
  *  1. an offer STATED for this occurrence (the campaign that wrote in the thread names
  *     its offer; a form's own `form_offer_mappings` row), then the offer stated for
@@ -27,7 +29,7 @@
 import { and, asc, eq, isNotNull, ne, or, type SQL } from "drizzle-orm";
 import type { PgColumn, PgTable } from "drizzle-orm/pg-core";
 import { db } from "../db/index.js";
-import { contacts, formTriggerReports, phoneGivenReports, replyTriggerReports } from "../db/schema.js";
+import { contacts, creditEventReports, formTriggerReports, paymentRefusalReports, phoneGivenReports, replyTriggerReports } from "../db/schema.js";
 import { judgeChoices, type ChoiceQuestion } from "./judgments-client.js";
 import { readBrandContext } from "./people/relevance.js";
 import { siblingGetOk, siblingQuery, type SiblingIdentity } from "./people/siblings.js";
@@ -52,18 +54,21 @@ export interface OfferVerdict {
   /** The offer audience each offer was judged against (null = the offer has no audience text). */
   audiences: Record<string, string | null>;
   judgedAt: string;
+  /** Jev read the event and the brand's offers only: nothing the person said or did was held (loud, persisted). */
+  eventOnly?: true;
 }
 
-/** A verdict the occurrence already held: Jev's offer tags on the person's conversation (people/relevance.ts). */
-export interface HeldVerdict {
-  via: "conversation_verdict";
-  conversationKey: string;
-  scores: Record<string, number> | null;
-}
+/**
+ * A verdict the occurrence already held: Jev's offer tags on the person's conversation (people/relevance.ts), or the
+ * person's offer tags (`people.offer_ids`, the union of their conversations' tags) for an account fact.
+ */
+export type HeldVerdict =
+  | { via: "conversation_verdict"; conversationKey: string; scores: Record<string, number> | null }
+  | { via: "person_offer_tags"; personId: string | null; scores: null };
 
 /** How a person was already reached for an offer (persisted as the verdict of a `person_reached` pick). */
 export interface ReachedEvidence {
-  via: "form_report" | "phone_report" | "reply_report" | "audience_served";
+  via: "form_report" | "phone_report" | "reply_report" | "refusal_report" | "credit_report" | "audience_served";
   /** The earlier report id, or the audience id. */
   ref: string;
   at: string;
@@ -76,7 +81,7 @@ export type OfferPick =
   | { offerId: null; reason: "offer_unknown"; detail: string };
 
 /** The report ledgers a person's occurrences are recorded in. */
-export type Ledger = "form" | "phone" | "reply";
+export type Ledger = "form" | "phone" | "reply" | "refusal" | "credit";
 
 /** What a trigger knows about one occurrence. Every field is evidence; none is a per-trigger rule. */
 export interface Occurrence {
@@ -92,8 +97,12 @@ export interface Occurrence {
   person: { email: string | null; phone: string | null };
   /** A Jev verdict the occurrence already holds (the conversation's offer tags): used before asking Jev. */
   held?: { offerIds: string[]; verdict: HeldVerdict } | null;
-  /** What Jev reads: one sentence saying what happened, and the occurrence's own words. */
-  evidence: { what: string; facts: Record<string, unknown> };
+  /**
+   * What Jev reads: one sentence saying what happened, and the occurrence's own words. `eventOnly` = nothing the person
+   * said or did is in `facts` (an account fact about someone never reached): Jev picks on the event and the offers
+   * alone, logged loud and persisted on the verdict.
+   */
+  evidence: { what: string; facts: Record<string, unknown>; eventOnly?: boolean };
 }
 
 const PERSISTED_BASES = new Set<string>(["person_reached", "judged"]);
@@ -109,10 +118,14 @@ export function pickReachedOffer(
   return live.length > 0 ? { offerId: live[0].offerId, evidence: live[0].evidence } : null;
 }
 
-/** PURE: of the offers a held verdict tagged, the ACTIVE one it is most sure of. */
+/**
+ * PURE: of the offers a held verdict tagged, the ACTIVE one it is most sure of. Several tagged with no score to tell
+ * them apart = null (never an id-order pick): Jev decides, reading those tags as evidence.
+ */
 export function pickHeldOffer(offerIds: string[], scores: Record<string, number> | null, activeOfferIds: Set<string>): string | null {
   const live = offerIds.filter((o) => activeOfferIds.has(o));
   if (live.length === 0) return null;
+  if (live.length > 1 && !scores) return null;
   return [...live].sort((a, b) => (scores?.[b] ?? 0) - (scores?.[a] ?? 0) || (a < b ? -1 : 1))[0];
 }
 
@@ -134,10 +147,13 @@ interface LedgerCols {
   offerId: PgColumn;
   reportedAt: PgColumn;
   email: PgColumn;
-  phone: PgColumn;
+  /** Null = the ledger records no phone (credit reports: members by address). */
+  phone: PgColumn | null;
 }
 
-const cols = (t: typeof formTriggerReports | typeof phoneGivenReports | typeof replyTriggerReports): LedgerCols => ({
+const cols = (
+  t: typeof formTriggerReports | typeof phoneGivenReports | typeof replyTriggerReports | typeof paymentRefusalReports,
+): LedgerCols => ({
   table: t,
   id: t.id,
   orgId: t.orgId,
@@ -153,6 +169,21 @@ const LEDGERS: Record<Ledger, { cols: LedgerCols; via: ReachedEvidence["via"] }>
   form: { cols: cols(formTriggerReports), via: "form_report" },
   phone: { cols: cols(phoneGivenReports), via: "phone_report" },
   reply: { cols: cols(replyTriggerReports), via: "reply_report" },
+  refusal: { cols: cols(paymentRefusalReports), via: "refusal_report" },
+  credit: {
+    cols: {
+      table: creditEventReports,
+      id: creditEventReports.id,
+      orgId: creditEventReports.orgId,
+      brandId: creditEventReports.brandId,
+      status: creditEventReports.status,
+      offerId: creditEventReports.offerId,
+      reportedAt: creditEventReports.reportedAt,
+      email: creditEventReports.email,
+      phone: null,
+    },
+    via: "credit_report",
+  },
 };
 
 /** Every report of this person (any trigger) we already reported on an offer, and the offer audiences that served them. */
@@ -161,7 +192,7 @@ async function reachedCandidates(identity: SiblingIdentity, o: Occurrence) {
   for (const [ledger, { cols: c, via }] of Object.entries(LEDGERS) as [Ledger, (typeof LEDGERS)[Ledger]][]) {
     const who: SQL[] = [];
     if (o.person.email) who.push(eq(c.email, o.person.email));
-    if (o.person.phone) who.push(eq(c.phone, o.person.phone));
+    if (o.person.phone && c.phone) who.push(eq(c.phone, o.person.phone));
     if (who.length === 0) continue;
     const conds: SQL[] = [
       eq(c.orgId, identity.orgId),
@@ -274,6 +305,12 @@ async function judgeOffer(identity: SiblingIdentity, o: Occurrence, active: Bran
     }))
     .sort((a, b) => (a.offerId < b.offerId ? -1 : 1));
   const blind = offers.filter((x) => !x.audienceText).map((x) => x.offerId);
+  if (o.evidence.eventOnly) {
+    console.warn(
+      `[crm-service][offer-pick] brand ${identity.brandId}: ${o.ledger} report ${o.reportId} is about a person never reached ` +
+        `and nothing they said or did is held: Jev picks the offer on the event and the offers alone`,
+    );
+  }
   if (blind.length > 0) {
     console.warn(
       `[crm-service][offer-pick] brand ${identity.brandId}: offer(s) ${blind.join(", ")} have no audience text; ` +
@@ -300,6 +337,7 @@ async function judgeOffer(identity: SiblingIdentity, o: Occurrence, active: Bran
       probabilities,
       audiences: Object.fromEntries(offers.map((x) => [x.offerId, x.audienceId])),
       judgedAt: new Date().toISOString(),
+      ...(o.evidence.eventOnly ? { eventOnly: true as const } : {}),
     },
   };
 }
@@ -322,12 +360,17 @@ export async function resolveOccurrenceOffer(identity: SiblingIdentity, o: Occur
   const reached = pickReachedOffer(await reachedCandidates(identity, o), activeIds);
   if (reached) return { offerId: reached.offerId, basis: "person_reached", verdict: reached.evidence };
 
+  let judgedOn = o;
   if (o.held) {
     const heldOffer = pickHeldOffer(o.held.offerIds, o.held.verdict.scores, activeIds);
     if (heldOffer) return { offerId: heldOffer, basis: "judged", verdict: o.held.verdict };
+    const tagged = active.filter((a) => o.held!.offerIds.includes(a.offerId)).map((a) => a.name);
+    if (tagged.length > 0) {
+      judgedOn = { ...o, evidence: { ...o.evidence, eventOnly: false, facts: { ...o.evidence.facts, offersTheirConversationsAreAbout: tagged } } };
+    }
   }
 
-  const judged = await judgeOffer(identity, o, active);
+  const judged = await judgeOffer(identity, judgedOn, active);
   return { offerId: judged.offerId, basis: "judged", verdict: judged.verdict };
 }
 
