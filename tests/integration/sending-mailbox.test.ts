@@ -5,7 +5,8 @@ import { calendarFeedCursors, mailboxMessages, people } from "../../src/db/schem
 import { ensureScope, runScopeBuild } from "../../src/lib/people/build.js";
 import { emitScopeFacts } from "../../src/lib/people/facts.js";
 import { mailboxItems } from "../../src/lib/people/timeline.js";
-import { MAILBOX_FEED, runMailboxPass } from "../../src/lib/mailbox/feed.js";
+import { MAILBOX_FEED, runMailboxPass, scopeCreatorOf } from "../../src/lib/mailbox/feed.js";
+import { peopleScopes } from "../../src/db/schema.js";
 import type { Presence } from "../../src/lib/people/identity.js";
 
 /**
@@ -135,6 +136,7 @@ const ROBOT_REPLY = msg({
 });
 
 let feed: Record<string, unknown>[] = [];
+let orgUsers: { id: string; email: string }[] = [];
 let threadFeed: Record<string, Record<string, unknown>[]> = {};
 const relevanceInputs: { email: string; messages: { direction: string; from?: string; text: string }[] }[] = [];
 const senderInputs: string[] = [];
@@ -203,7 +205,7 @@ function installFetchStub() {
     if (url.host === "instantly.test") return json({ success: true, count: 0, leads: [], facts: [], nextCursor: "0", hasMore: false });
     if (url.host === "lead.test" && url.pathname === "/orgs/leads/unibox") return json({ rows: [], nextCursor: null });
     if (url.host === "lead.test") return json({ leads: [] });
-    if (url.host === "client.test") return json({ users: [], total: 0 });
+    if (url.host === "client.test") return json({ users: orgUsers, total: orgUsers.length });
     if (url.host === "brand.test" && url.pathname === "/internal/companies/resolve") {
       const body = JSON.parse(String(init!.body)) as { companies: { ref: string; domain: string }[] };
       return json({ companies: body.companies.map((c, index) => ({ index, ref: c.ref, brandId: "5e4d5e4d-2222-4222-8222-000000000009", domain: c.domain, matchedBy: "domain", created: true, unresolvedReason: null })) });
@@ -235,6 +237,7 @@ describe.skipIf(!RUN)("Sending mailboxes: every person on the thread", () => {
   beforeEach(async () => {
     installFetchStub();
     feed = [];
+    orgUsers = [];
     threadFeed = {};
     relevanceInputs.length = 0;
     senderInputs.length = 0;
@@ -370,5 +373,31 @@ describe.skipIf(!RUN)("Sending mailboxes: every person on the thread", () => {
     expect(await runMailboxPass(noRebuild)).toMatchObject({ stored: 1, scopes: [] });
     const n = await db.execute(sql`SELECT count(*)::int AS n FROM mailbox_message_people WHERE message_id = 'test-mb:orphan'`);
     expect((n as unknown as { n: number }[])[0].n).toBe(0);
+  });
+
+  it("a brand nobody opened people for gets its scope opened (under a client member) and built when a person lands", async () => {
+    orgUsers = [
+      { id: "user-staff", email: "kevin@distribute.you" },
+      { id: "user-client", email: "owner@livingvital.test" },
+    ];
+    feed = [COLD, MARKUS_REPLY];
+    const pass = await runMailboxPass(noRebuild);
+    // Other suites share the database: count this brand's scope, not the pass total.
+    expect(pass.scopesOpened).toBeGreaterThanOrEqual(1);
+    const [scope] = await db.select().from(peopleScopes).where(eq(peopleScopes.brandId, BRAND));
+    expect(scope.createdByUserId).toBe("user-client");
+    // The build it kicked holds Markus.
+    for (let i = 0; i < 100; i++) {
+      const rows = await db.select().from(people).where(eq(people.scopeId, scope.id));
+      if (rows.some((r) => (r.emails as string[]).includes(MARKUS))) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error("Markus was never built");
+  }, 30_000);
+
+  it("scopeCreatorOf: a client member first, staff only when no other member", () => {
+    expect(scopeCreatorOf([{ id: "s", email: "kevin@distribute.you" }, { id: "c", email: "a@b.test" }])).toBe("c");
+    expect(scopeCreatorOf([{ id: "s", email: "kevin@distribute.you" }])).toBe("s");
+    expect(scopeCreatorOf([])).toBeNull();
   });
 });
