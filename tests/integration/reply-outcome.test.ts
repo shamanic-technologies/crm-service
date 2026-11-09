@@ -72,7 +72,11 @@ function installFetchStub() {
       const body = JSON.parse(String(init?.body)) as { messages: { from: string }[] };
       return json({ messages: body.messages.map((m) => ({ from: m.from, owner: "none", reason: "no_sequence" })) });
     }
-    if (url.host === "brand.test" && /^\/internal\/brands\/[^/]+$/.test(url.pathname)) return json({ brand: { domain: "brand-outcome.example" } });
+    if (url.host === "brand.test" && /^\/internal\/brands\/[^/]+$/.test(url.pathname)) return json({ brand: { name: "Brand Outcome", domain: "brand-outcome.example", url: null } });
+    // The business Jev reads with each burst (JEV-WHOLE-THREAD-1109).
+    if (url.host === "brand.test" && /^\/internal\/brands\/[^/]+\/offers$/.test(url.pathname)) return json({ offers: [] });
+    if (url.host === "brand.test" && url.pathname.endsWith("/extracted-fields")) return json({ fields: [] });
+    if (url.host === "brand.test" && url.pathname === "/orgs/brands") return json({ brands: [] });
     if (url.host === "google.test" && url.pathname === "/orgs/google/accounts") return json({ accounts: [{ email: OWNER_MAILBOX }] });
     if (url.pathname === "/orgs/judgments") {
       return json({ model: "jev", answers: { reply: { type: "choice", choice: jevChoice, confidence: 0.93, probabilities: { [jevChoice]: 0.93 } } } });

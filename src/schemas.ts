@@ -2863,6 +2863,7 @@ const TimelineItemSchema = z
     text: z.string().nullable(),
     from: z.string().nullable(),
     to: z.array(z.string()),
+    cc: z.array(z.string()).optional().openapi({ description: "Gmail: Cc of the mail as google-service serves it. Absent when none." }),
     ref: z.record(z.string(), z.string().nullable()).openapi({
       description:
         "The source's own ids for this item (thread, message, campaign, contact...). " +
@@ -4800,7 +4801,7 @@ export const ReplyTriggerReportSchema = z.object({
   judgment: z.unknown(),
   status: z.enum(["pending", "reported", "skipped", "failed"]),
   reason: z.string().nullable().describe(
-    "`own_address` (gmail: the brand's own address, its connected mailbox included: our own mail) | `not_addressed_to_brand` (gmail: no mail of the burst names the brand in To) | `own_team` (old rows only) | `automated_reply` | `not_positive` (Jev: a person wrote, no positive answer) | `before_watch` | `no_email_or_phone` (neither an email nor an E.164 phone; older rows `no_email`) | `cold_email_path` (gmail: status `handed_off` = the email path (instantly-service) said it acts on it, its answer stored; status `skipped` = a legacy skip decided on the recipient alone, red on Monitoring until re-checked) | `answered_since` / `other_brand` (re-check only) | `person_not_built` | `offer_unknown` | `offer_pick_failed` (placing the burst on an offer failed: a sibling or Jev down, retried) | `campaign_refused` | `campaign_unreachable`",
+    "`own_address` (gmail: the brand's own address, its connected mailbox included: our own mail) | `not_to_business` (Jev, reading the whole thread with the business: the new words are written to someone else, the business only copied) | `not_addressed_to_brand` (gmail, old rows: no mail of the burst named the brand in To) | `own_team` (old rows only) | `automated_reply` | `not_positive` (Jev: a person wrote, no positive answer) | `before_watch` | `no_email_or_phone` (neither an email nor an E.164 phone; older rows `no_email`) | `cold_email_path` (gmail: status `handed_off` = the email path (instantly-service) said it acts on it, its answer stored; status `skipped` = a legacy skip decided on the recipient alone, red on Monitoring until re-checked) | `answered_since` / `other_brand` (re-check only) | `person_not_built` | `offer_unknown` | `offer_pick_failed` (placing the burst on an offer failed: a sibling or Jev down, retried) | `campaign_refused` | `campaign_unreachable`",
   ),
   lastError: z.string().nullable(),
   attempts: z.number().int(),

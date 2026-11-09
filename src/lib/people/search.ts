@@ -133,6 +133,8 @@ interface GmailConversation {
       direction: "inbound" | "outbound" | "other";
       fromEmail: string | null;
       to: string[];
+      /** Served by google-service once it ships Cc on the conversation (JEV-WHOLE-THREAD-1109); absent before. */
+      cc?: string[];
       subject: string | null;
       snippet: string | null;
       sentAt: string | null;
@@ -201,6 +203,7 @@ async function readUnit(identity: SiblingIdentity, u: Unit, opts: RefreshOptions
           text: m.bodyStatus === "ok" ? m.bodyText : m.snippet,
           from: m.fromEmail,
           to: m.to,
+          ...(Array.isArray(m.cc) && m.cc.length > 0 ? { cc: m.cc } : {}),
           ref: { gmailMessageId: m.gmailMessageId, threadId: m.threadId, bodyStatus: m.bodyStatus },
           textClean: {
             status: m.bodyCleanStatus,

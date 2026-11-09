@@ -864,7 +864,7 @@ export const PERSONAL_CHANNEL_SOURCES = new Set(["gmail", "matrix"]);
 /** Evidence that the person is a business relationship of record. */
 const BUSINESS_EVIDENCE = new Set(["gohighlevel_contact", "csv_contact", "lead_pairing", "stripe_customer"]);
 
-interface PersonLike {
+export interface PersonLike {
   presences: {
     source: string;
     emails: string[];
