@@ -319,7 +319,7 @@ export async function resolvePointCompanies(
 export function pointConversationKeys(r: ContactPointReading): string[] {
   const out = new Set<string>();
   for (const p of r.presences) {
-    if (p.source === "gmail" && p.emails[0]) out.add(`gmail:${p.emails[0]}`);
+    if ((p.source === "gmail" || p.source === "sending_mailbox") && p.emails[0]) out.add(`${p.source}:${p.emails[0]}`);
     else if (p.source === "matrix" && typeof p.detail.conversationId === "string") out.add(`matrix:${p.detail.conversationId}`);
   }
   return [...out];
@@ -338,7 +338,7 @@ export function readPoints(
     const id = presenceStableKey(p);
     let tags = presenceConnectionTags(p, x);
     // An automated sender's address (or chat account: OWN-BOT-HOT-LEAD-1103) is a machine of a company, never a friend.
-    if (x.automated && (p.source === "gmail" || p.source === "matrix") && tags.length === 0) {
+    if (x.automated && (p.source === "gmail" || p.source === "matrix" || p.source === "sending_mailbox") && tags.length === 0) {
       tags = [{ tag: "professional_not_to_brand", userIds: [], brandId: x.brandId, basis: [{ kind: "automated_sender", ref: "sender_verdicts", probability: null }] }];
     }
     const capacity = capacityOf(tags.map((t) => t.tag));

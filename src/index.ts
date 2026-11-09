@@ -27,6 +27,7 @@ import teamMembershipRoutes from "./routes/team-membership.js";
 import calendarRoutes from "./routes/calendar.js";
 import creditEventRoutes from "./routes/credit-events.js";
 import transactionalRoutes from "./routes/transactional.js";
+import mailboxRoutes from "./routes/mailbox.js";
 import accountActivityRoutes from "./routes/account-activity.js";
 import { startFreshnessWatch } from "./lib/people/freshness.js";
 import { startFormWatch } from "./lib/form-trigger/watch.js";
@@ -37,6 +38,7 @@ import { startCalendarWatch } from "./lib/calendar/feed.js";
 import { startCreditWatch } from "./lib/credit-events/feed.js";
 import { startRefusalWatch } from "./lib/payment-refusals/watch.js";
 import { startTxEmailWatch } from "./lib/transactional/sent-emails.js";
+import { startMailboxWatch } from "./lib/mailbox/feed.js";
 import { startActivityWatch } from "./lib/account-activity/activity.js";
 import { startLineWatch } from "./lib/whatsapp/line-health.js";
 import { startOutcomeDeclarations } from "./lib/reply-trigger/outcome.js";
@@ -101,6 +103,7 @@ app.use(triggerHealthRoutes);
 app.use(calendarRoutes);
 app.use(creditEventRoutes);
 app.use(transactionalRoutes);
+app.use(mailboxRoutes);
 app.use(accountActivityRoutes);
 app.use(teamMembershipRoutes);
 
@@ -151,6 +154,8 @@ if (process.env.NODE_ENV !== "test") {
         startRefusalWatch();
         // Mirrors transactional-email-service's sent emails onto each client's staff Unibox thread.
         startTxEmailWatch();
+        // Every person on our sending mailboxes' messages (EVERY-PERSON-ON-THE-THREAD-1109).
+        startMailboxWatch();
         // Retries a client's reported account action (campaign / budget) still waiting to be filed or pinged.
         startActivityWatch();
         // Records every linked WhatsApp line's state (bridge /whoami) as spans + a daily series for Monitoring.

@@ -163,6 +163,9 @@ async function seedBrand(org: string, brand: string, tag: string) {
     INSERT INTO ghl_bookings (org_id, brand_id, idempotency_key, requested_start, email, status)
     VALUES (${org}, ${brand}, ${"occ-" + tag}, '2026-11-05T13:00:00-05:00', 'p@example.com', 'booked')`);
   await db.execute(sql`
+    INSERT INTO mailbox_message_people (message_id, org_id, brand_id, address, role, sequence_lead, occurred_at)
+    VALUES (${"imap:" + tag}, ${org}, ${brand}, 'colleague@example.com', 'from', false, now())`);
+  await db.execute(sql`
     INSERT INTO payment_refusal_reports (org_id, brand_id, connection_id, charge_id, charged_at, email, status)
     VALUES (${org}, ${brand}, gen_random_uuid(), ${"ch_ref_" + tag}, now(), 'payer@example.com', 'reported')`);
   await db.execute(sql`

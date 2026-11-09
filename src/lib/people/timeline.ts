@@ -89,6 +89,7 @@ import {
   sessionsOf,
 } from "../api-calls/calls.js";
 import { siblingGetOk } from "./siblings.js";
+import { directionFor, readMailboxThreads } from "../mailbox/thread.js";
 import { readTxEmailThread, TX_EMAIL_CHANNEL, TX_EMAIL_SENDER_NAME } from "../transactional/sent-emails.js";
 import { ACTIVITY_CHANNEL, activityLine, readActivityThread } from "../account-activity/line.js";
 import { deferApiAnswer } from "./item-fill.js";
@@ -588,6 +589,47 @@ export async function copilotItems(person: Pick<Person, "orgId" | "brandId" | "e
   return { status: items.length ? "ok" : "empty", items, error: null, asked: emails };
 }
 
+// ─── our sending mailboxes (EVERY-PERSON-ON-THE-THREAD-1109) ────────────────
+
+/**
+ * Every message of every thread of our sending (cold-email) mailboxes the person is on for this brand, besides the
+ * sequences they are the lead of (those are the cold-email source's): a colleague's reply in a lead's thread, the cold
+ * email it answered, our answer that Cc'd them. Read from our own bronze, on the spot. `other` = someone else wrote it.
+ */
+export async function mailboxItems(person: Pick<Person, "orgId" | "brandId" | "emails">): Promise<SourceResult> {
+  const emails = person.emails as string[];
+  const messages = await readMailboxThreads(person.orgId, person.brandId, emails);
+  const mine = new Set(emails.map((e) => e.trim().toLowerCase()));
+  const items = messages.map(
+    (m): TimelineItem => ({
+      at: m.occurredAt,
+      source: "sending_mailbox",
+      channel: "email",
+      kind: "message",
+      direction: directionFor(m, mine),
+      subject: m.subject,
+      text: m.text,
+      from: m.from,
+      to: m.to,
+      ...(m.cc.length ? { cc: m.cc } : {}),
+      ref: {
+        mailboxMessageId: m.id,
+        messageId: m.messageId,
+        threadKey: m.threadKey,
+        mailbox: m.mailbox,
+        kind: m.kind,
+        sentBy: m.sentBy,
+        campaignId: m.campaignId,
+        textUnavailableReason: m.textUnavailableReason,
+      },
+      textClean: null,
+      outreachFact: null,
+      event: null,
+    }),
+  );
+  return { status: items.length ? "ok" : "empty", items, error: null, asked: emails };
+}
+
 // ─── transactional emails ───────────────────────────────────────────────────
 
 /**
@@ -1034,6 +1076,10 @@ export function sentByOf(i: TimelineItem, ourWhatsappSends: Set<string>): Timeli
       return "automation";
     case "instantly":
       return i.outreachFact ? "automation" : null;
+    case "sending_mailbox":
+      // A reply someone typed by hand is the feed's `sentBy: human`; every other send of ours is a machine's.
+      if (i.direction !== "outbound") return null;
+      return i.ref.sentBy === "human" ? "person" : "automation";
     case "matrix":
       if (i.direction !== "outbound") return null;
       return i.ref.eventId && ourWhatsappSends.has(i.ref.eventId) ? "automation" : "person";
@@ -1147,7 +1193,7 @@ export async function readTimeline(
   const fromStore = (pick: (t: StoredTimeline) => StoredTimeline["gmail"]) =>
     storedRead.then((t): SourceResult => pick(t)).catch((e) => toFailed(e, emails));
 
-  const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional, onboarding, csv, activity] = await Promise.all([
+  const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional, onboarding, csv, activity, sendingMailbox] = await Promise.all([
     connected("gmail") ? fromStore((t) => t.gmail) : Promise.resolve(notConnected()),
     fromStore((t) => t.instantly),
     connected("matrix") ? matrixItems(of("matrix")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
@@ -1164,8 +1210,12 @@ export async function readTimeline(
     onboardingItems(person, identity).catch((e) => toFailed(e, emails)),
     csvRead,
     activityItems(person).catch((e) => toFailed(e, emails)),
+    mailboxItems(person).catch((e) => toFailed(e, emails)),
   ]);
-  const bySource: Record<PeopleSource, SourceResult> = { gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional, onboarding, csv, activity };
+  const bySource: Record<PeopleSource, SourceResult> = {
+    gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional, onboarding, csv, activity,
+    sending_mailbox: sendingMailbox,
+  };
   // Only mails between the person and us (SOPHIE-WA-HUMAN-1106): never their mail to a third party, nor a newsletter in a mailbox we mirror.
   if (bySource.gmail.items.length) bySource.gmail = await onlyExchangedWithUs(bySource.gmail, emails, identity);
   // A Gmail copy of a transactional email we sent (a staff mailbox holds it) is that email: shown once, as ours.

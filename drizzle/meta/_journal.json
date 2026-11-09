@@ -582,6 +582,13 @@
       "when": 1793600000000,
       "tag": "0083_account_events_one_offer",
       "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1793700000000,
+      "tag": "0084_sending_mailbox_source",
+      "breakpoints": true
     }
   ]
 }

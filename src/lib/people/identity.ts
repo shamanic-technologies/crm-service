@@ -33,8 +33,10 @@
  * `csv` = the contacts a client added ONE BY ONE (the brand's `manual` list, MANUAL-CONTACT-IS-A-PERSON-1024): the
  * client stating "this person matters to my business". A contact of an uploaded FILE is no presence (merge evidence
  * and its `added_to_crm` date only): a file is a list of people to reach, they enter once they act or we write.
+ * `sending_mailbox` = every address on a message of our sending (cold-email) mailboxes besides the sequence's own lead
+ * (EVERY-PERSON-ON-THE-THREAD-1109, lib/mailbox/): a colleague who answers in the lead's thread, a Cc'd person.
  */
-export const PEOPLE_SOURCES = ["gmail", "instantly", "matrix", "gohighlevel", "posthog", "stripe", "clerk", "copilot", "api", "billing", "transactional", "onboarding", "csv", "activity"] as const;
+export const PEOPLE_SOURCES = ["gmail", "instantly", "matrix", "gohighlevel", "posthog", "stripe", "clerk", "copilot", "api", "billing", "transactional", "onboarding", "csv", "activity", "sending_mailbox"] as const;
 export type PeopleSource = (typeof PEOPLE_SOURCES)[number];
 
 export function normalizeEmail(raw: string | null | undefined): string | null {

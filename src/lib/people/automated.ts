@@ -43,6 +43,7 @@
  */
 
 import { and, desc, eq, inArray } from "drizzle-orm";
+import { readMailboxThreads } from "../mailbox/thread.js";
 import { db } from "../../db/index.js";
 import { contacts, conversations, matrixRawEvents, senderVerdicts } from "../../db/schema.js";
 import { foldEdits, humanText } from "../matrix/events.js";
@@ -167,9 +168,29 @@ async function gmailSample(
   };
 }
 
-/** A person Jev may judge: known from Gmail alone (every other source is a recorded human relationship). */
+/**
+ * Mail sources Jev may judge a sender on: the owner's Gmail, and the threads of our sending mailboxes for anyone but
+ * the sequence's lead (EVERY-PERSON-ON-THE-THREAD-1109). Every other source is a recorded human relationship.
+ */
+export const JUDGED_MAIL_SOURCES = new Set(["gmail", "sending_mailbox"]);
+
+/** A person Jev may judge: known from mail sources alone (Gmail, our sending mailboxes). */
 export function isGmailOnly(person: { presences: { source: string }[] }): boolean {
-  return person.presences.length > 0 && person.presences.every((p) => p.source === "gmail");
+  return person.presences.length > 0 && person.presences.every((p) => JUDGED_MAIL_SOURCES.has(p.source));
+}
+
+/**
+ * The latest messages `email` sent our sending mailboxes for the brand, and the latest we sent it, from our own
+ * bronze (lib/mailbox/thread.ts). Same shape as the Gmail sample.
+ */
+async function mailboxSample(orgId: string, brandId: string, email: string): Promise<{ sent: SenderSample[]; ownerSent: SenderSample[] }> {
+  const messages = (await readMailboxThreads(orgId, brandId, [email])).reverse();
+  const sample = (ms: typeof messages, direction: string) =>
+    ms.slice(0, SAMPLE_MESSAGES).map((m) => ({ subject: m.subject, snippet: m.text ? m.text.slice(0, SNIPPET_CHARS) : null, direction }));
+  return {
+    sent: sample(messages.filter((m) => m.direction === "in" && m.from === email), "inbound"),
+    ownerSent: sample(messages.filter((m) => m.direction === "out" && (m.to.includes(email) || m.cc.includes(email) || m.bcc.includes(email))), "outbound"),
+  };
 }
 
 /** The `sender_verdicts` key of a chat account (one Matrix contact = one counterpart on one linked account). */
@@ -323,6 +344,8 @@ export async function resolveSenderVerdicts(
 ): Promise<{ verdicts: Map<string, RecordedVerdict>; summary: Omit<SenderVerdictSummary, "automatedPeople"> }> {
   const inputs = senderInputs(clusters);
   const emails = [...inputs.keys()];
+  // An address the person holds on Gmail is sampled there; one known only from our sending mailboxes, from our bronze.
+  const onGmail = new Set(clusters.flatMap((c) => c.presences.filter((p) => p.source === "gmail").flatMap((p) => p.emails)));
   const verdicts = new Map<string, RecordedVerdict>();
   for (let i = 0; i < emails.length; i += 1000) {
     const rows = await db
@@ -338,9 +361,14 @@ export async function resolveSenderVerdicts(
   const ready: SenderInput[] = [];
   await mapLimit(toJudge, SAMPLE_CONCURRENCY, async (email) => {
     const input = inputs.get(email)!;
-    if (!input.chatChannel && !gmailReadable) return; // judged on a later build, once its mail can be read
+    const fromGmail = !input.chatChannel && onGmail.has(email);
+    if (fromGmail && !gmailReadable) return; // judged on a later build, once its mail can be read
     try {
-      const sample = input.chatChannel ? await matrixSample(email.slice("matrix:".length)) : await gmailSample(identity, email);
+      const sample = input.chatChannel
+        ? await matrixSample(email.slice("matrix:".length))
+        : fromGmail
+          ? await gmailSample(identity, email)
+          : await mailboxSample(identity.orgId, identity.brandId, email);
       input.recentMessages = sample.sent;
       input.messagesOwnerSent = sample.ownerSent;
     } catch (err) {
