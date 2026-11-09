@@ -4,7 +4,8 @@
  * (the people-pool serve in SQL, the WhatsApp send's reply guard in code).
  *
  * A conversation is a channel where two humans write to each other:
- *  - `gmail`, `matrix` (WhatsApp, LinkedIn…): the presence counts messages each way;
+ *  - `gmail`, `matrix` (WhatsApp, LinkedIn…), `sending_mailbox` (anyone on our cold-email threads besides the
+ *    sequence's lead): the presence counts messages each way (inbound = messages they WROTE);
  *  - `instantly` (our cold email): every row is a send of ours; an answer is
  *    `anyReply` (any reply, a "stop" included) or, on a presence built before
  *    that field existed, `replied` (engaged replies only).
@@ -15,7 +16,7 @@
 import { sql } from "drizzle-orm";
 import type { Presence } from "./identity.js";
 
-const MESSAGE_SOURCES = ["gmail", "matrix"] as const;
+const MESSAGE_SOURCES = ["gmail", "matrix", "sending_mailbox"] as const;
 
 export function wroteToPerson(presences: Pick<Presence, "source" | "outboundCount">[]): boolean {
   return presences.some(
@@ -34,7 +35,7 @@ export function personReplied(presences: Pick<Presence, "source" | "inboundCount
 /** SQL twin of `personReplied` over one `people` row (alias `p`). Keep the two identical. */
 export const PERSON_REPLIED_SQL = sql`EXISTS (
   SELECT 1 FROM jsonb_array_elements(p.presences) pr
-  WHERE (pr->>'source' IN ('gmail', 'matrix') AND COALESCE((pr->>'inboundCount')::int, 0) > 0)
+  WHERE (pr->>'source' IN ('gmail', 'matrix', 'sending_mailbox') AND COALESCE((pr->>'inboundCount')::int, 0) > 0)
      OR (pr->>'source' = 'instantly' AND (pr->'detail'->>'anyReply' = 'true' OR pr->'detail'->>'replied' = 'true'))
 )`;
 
@@ -42,5 +43,5 @@ export const PERSON_REPLIED_SQL = sql`EXISTS (
 export const WROTE_TO_PERSON_SQL = sql`EXISTS (
   SELECT 1 FROM jsonb_array_elements(p.presences) pr
   WHERE pr->>'source' = 'instantly'
-     OR (pr->>'source' IN ('gmail', 'matrix') AND COALESCE((pr->>'outboundCount')::int, 0) > 0)
+     OR (pr->>'source' IN ('gmail', 'matrix', 'sending_mailbox') AND COALESCE((pr->>'outboundCount')::int, 0) > 0)
 )`;

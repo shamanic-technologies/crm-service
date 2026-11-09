@@ -265,6 +265,66 @@ export async function readGmail(identity: SiblingIdentity): Promise<SourceRead> 
   }
 }
 
+// ─── crm-service silver: every person on our sending mailboxes' messages ────
+
+/**
+ * EVERY-PERSON-ON-THE-THREAD-1109: one presence per address on the messages of our sending (cold-email) mailboxes
+ * filed on the brand, the sequence's own lead excepted (its conversation is the `instantly` source). Counts: inbound =
+ * messages the address WROTE, outbound = messages we sent with it on To / Cc / Bcc, copied = messages someone else
+ * wrote it was on. Our own mailboxes and the brand's domain are dropped by the build (`withoutOwnAddresses`).
+ */
+export async function readSendingMailbox(orgId: string, brandId: string): Promise<SourceRead> {
+  const base = {
+    source: "sending_mailbox" as const,
+    scope: "brand" as const,
+    sourceCountBasis: "crm-service mailbox_message_people addresses (every person on a sending-mailbox message, sequence lead excepted)",
+  };
+  const rows = (await db.execute(sql`
+    SELECT p.address,
+           (array_agg(p.name ORDER BY p.occurred_at DESC) FILTER (WHERE p.name IS NOT NULL))[1] AS name,
+           min(p.occurred_at) AS first_at, max(p.occurred_at) AS last_at,
+           count(*)::int AS messages,
+           count(*) FILTER (WHERE m.direction = 'in' AND p.role = 'from')::int AS inbound,
+           count(*) FILTER (WHERE m.direction = 'out')::int AS outbound,
+           count(*) FILTER (WHERE m.direction = 'in' AND p.role <> 'from')::int AS copied,
+           array_agg(DISTINCT p.role) AS roles,
+           array_agg(DISTINCT p.thread_key) FILTER (WHERE p.thread_key IS NOT NULL) AS threads,
+           array_agg(DISTINCT m.mailbox) AS mailboxes
+    FROM mailbox_message_people p
+    JOIN mailbox_messages m ON m.id = p.message_id
+    WHERE p.org_id = ${orgId} AND p.brand_id = ${brandId} AND NOT p.sequence_lead
+    GROUP BY p.address
+    ORDER BY p.address
+  `)) as unknown as {
+    address: string;
+    name: string | null;
+    first_at: string | Date;
+    last_at: string | Date;
+    messages: number;
+    inbound: number;
+    outbound: number;
+    copied: number;
+    roles: string[];
+    threads: string[] | null;
+    mailboxes: string[];
+  }[];
+  const presences: Presence[] = rows.map((r) => ({
+    source: "sending_mailbox",
+    sourceRef: r.address,
+    displayName: r.name,
+    company: null,
+    emails: [r.address],
+    phones: [],
+    firstActivityAt: iso(r.first_at),
+    lastActivityAt: iso(r.last_at),
+    messageCount: Number(r.messages),
+    inboundCount: Number(r.inbound),
+    outboundCount: Number(r.outbound),
+    detail: { copied: Number(r.copied), roles: [...r.roles].sort(), threads: (r.threads ?? []).sort(), mailboxes: [...r.mailboxes].sort() },
+  }));
+  return { ...base, status: "ok", presences, sourceCount: rows.length, error: null };
+}
+
 // ─── crm-service silver: Matrix DMs ─────────────────────────────────────────
 
 export async function readMatrix(orgId: string, brandId: string): Promise<SourceRead> {

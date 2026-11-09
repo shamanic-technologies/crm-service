@@ -59,7 +59,8 @@ import { renderThread } from "../matrix/events.js";
 import { overlayVoiceTranscripts } from "../matrix/voice-notes.js";
 import { mapLimit, siblingGet, siblingGetOk, type SiblingIdentity } from "./siblings.js";
 import { accountUserView, readAccountUsers, userIdsOf, type AccountUserView, type AccountUsers } from "./account-users.js";
-import { CONNECTION_TAGS, tagQuestionText, tagsFromScores, type ConnectionTag, type TagScores } from "./connection-tags.js";
+import { readMailboxThreads, directionFor, type MailboxThreadMessage } from "../mailbox/thread.js";
+import { CONNECTION_TAGS, presenceConversationKeys, tagQuestionText, tagsFromScores, type ConnectionTag, type TagScores } from "./connection-tags.js";
 
 export const TOPICS = ["personal", "other_business", "this_brand"] as const;
 export type Topic = (typeof TOPICS)[number];
@@ -229,6 +230,10 @@ export interface ConversationMessage {
   direction: string;
   subject?: string | null;
   text: string;
+  /** Email threads with several people (our sending mailboxes): who wrote it and who it went to. */
+  from?: string | null;
+  to?: string[];
+  cc?: string[];
   /**
    * The message's ORIGINAL body, quoted history included, on the OLDEST message we hold of an
    * email thread when cleaning removed something from it. An earlier message of the thread sent
@@ -250,11 +255,14 @@ export interface PersonView {
 /** What Jev is shown about one conversation. */
 export interface ConversationInput {
   key: string;
-  source: "gmail" | "matrix";
+  source: "gmail" | "matrix" | "sending_mailbox";
   judgedThrough: string;
   channel: string;
-  /** A one-to-one thread on the user's own account (groups are judged in people/group-tags.ts). */
-  kind?: "direct";
+  /**
+   * `direct` = a one-to-one thread on the user's own account (groups are judged in people/group-tags.ts);
+   * `prospecting_mailbox` = email threads on the mailbox we prospect from for the brand, several people possible.
+   */
+  kind?: "direct" | "prospecting_mailbox";
   counterpart: { names: string[]; email: string | null; phone: string | null };
   /** The user who connected the account: who "personal to user" is about (CONNECTION-TAGS-1017). */
   user?: AccountUserView | null;
@@ -344,7 +352,11 @@ export function conversationJudgment(
     user: input.user ?? null,
     counterpartKnownByTheBrand: input.person ?? null,
     conversation: {
-      kind: "direct, one to one, on the user's own account",
+      kind:
+        input.kind === "prospecting_mailbox"
+          ? "email threads on the mailbox the brand prospects from (we write to prospects for the brand from it); the " +
+            "counterpart is ONE person on them, others may write or be copied: judge the counterpart only"
+          : "direct, one to one, on the user's own account",
       channel: input.channel,
       counterpart: { ...input.counterpart, names: input.counterpart.names.map(clip) },
       messages: input.messages.map((m) => ({
@@ -529,6 +541,51 @@ export async function gmailConversationInput(identity: SiblingIdentity, plan: Gm
     kind: "direct",
     counterpart: { names: plan.names, email: plan.email, phone: null },
     messages: gmailMessages(body),
+  };
+}
+
+/** What a sending-mailbox person's conversation is judged on (EVERY-PERSON-ON-THE-THREAD-1109). */
+export interface MailboxPlan {
+  email: string;
+  names: string[];
+  judgedThrough: string;
+}
+
+/**
+ * PURE: what Jev reads of the threads our sending mailboxes hold with one person: every message, oldest first, with
+ * who wrote it and who it went to (a colleague answering in the lead's thread, a Cc'd person), `threadWindow`ed. A
+ * message whose words we do not keep reads by its subject alone; one with neither is dropped.
+ */
+export function mailboxMessages(messages: MailboxThreadMessage[], email: string): ConversationMessage[] {
+  const person = new Set([email]);
+  return threadWindow(
+    messages
+      .map((m): ConversationMessage => ({
+        at: m.occurredAt,
+        direction: directionFor(m, person),
+        subject: m.subject,
+        text: (m.text ?? "").trim(),
+        from: m.from,
+        to: m.to,
+        cc: m.cc,
+      }))
+      .filter((m) => m.text || m.subject?.trim()),
+  );
+}
+
+/** One sending-mailbox person's conversation, from our own bronze. Null = no message holds them any more. */
+export async function mailboxConversationInput(orgId: string, brandId: string, plan: MailboxPlan): Promise<ConversationInput | null> {
+  const messages = await readMailboxThreads(orgId, brandId, [plan.email]);
+  if (messages.length === 0) return null;
+  return {
+    key: `sending_mailbox:${plan.email}`,
+    source: "sending_mailbox",
+    judgedThrough: plan.judgedThrough,
+    channel: "email",
+    kind: "prospecting_mailbox",
+    counterpart: { names: plan.names, email: plan.email, phone: null },
+    // Nothing a person of theirs WROTE (only our sends, words not kept) = no words: recorded without a Jev call.
+    messages: mailboxMessages(messages, plan.email).some((m) => m.text) ? mailboxMessages(messages, plan.email) : [],
   };
 }
 
@@ -861,6 +918,11 @@ export async function judgeAndRecord<P>(
 
 /** Sources a brand owner connects as THEMSELVES: their own mailbox, their own messaging accounts. */
 export const PERSONAL_CHANNEL_SOURCES = new Set(["gmail", "matrix"]);
+/**
+ * Sources whose conversations Jev judges (who the person is to the brand): the owner's own channels, and the threads
+ * of our sending mailboxes for anyone but the sequence's lead (EVERY-PERSON-ON-THE-THREAD-1109).
+ */
+export const JUDGED_CONVERSATION_SOURCES = new Set(["gmail", "matrix", "sending_mailbox"]);
 /** Evidence that the person is a business relationship of record. */
 const BUSINESS_EVIDENCE = new Set(["gohighlevel_contact", "csv_contact", "lead_pairing", "stripe_customer"]);
 
@@ -880,7 +942,7 @@ export interface PersonLike {
 /** PURE: what the brand's own tools know about a person, shown to Jev beside the conversation. */
 export function personView(person: PersonLike): PersonView {
   const knownBy = new Set<string>();
-  for (const p of person.presences) if (!PERSONAL_CHANNEL_SOURCES.has(p.source)) knownBy.add(p.source);
+  for (const p of person.presences) if (!JUDGED_CONVERSATION_SOURCES.has(p.source)) knownBy.add(p.source);
   for (const e of person.evidence ?? []) if (e.kind === "csv_contact") knownBy.add("csv");
   const domains = new Set<string>();
   for (const p of person.presences) for (const e of p.emails) domains.add(e.slice(e.indexOf("@") + 1));
@@ -895,8 +957,7 @@ export function personView(person: PersonLike): PersonView {
 export function conversationKeysOf(person: PersonLike): string[] {
   const keys = new Set<string>();
   for (const p of person.presences) {
-    if (p.source === "gmail") for (const e of p.emails) keys.add(`gmail:${e}`);
-    if (p.source === "matrix" && typeof p.detail.conversationId === "string") keys.add(`matrix:${p.detail.conversationId}`);
+    for (const k of presenceConversationKeys(p)) keys.add(k);
   }
   return [...keys];
 }
@@ -908,7 +969,7 @@ export function conversationKeysOf(person: PersonLike): string[] {
  */
 export function isPersonalChannelOnly(person: PersonLike, isOurLead: boolean): boolean {
   if (isOurLead || person.presences.length === 0) return false;
-  if (!person.presences.every((p) => PERSONAL_CHANNEL_SOURCES.has(p.source))) return false;
+  if (!person.presences.every((p) => JUDGED_CONVERSATION_SOURCES.has(p.source))) return false;
   return !(person.evidence ?? []).some((e) => BUSINESS_EVIDENCE.has(e.kind));
 }
 
@@ -979,9 +1040,17 @@ export async function resolvePeopleRelevance(
   users: AccountUsers | null;
 }> {
   const gmail = new Map<string, GmailPlan>();
+  const mailbox = new Map<string, MailboxPlan>();
   const matrixIds = new Set<string>();
   for (const person of persons) {
     for (const p of person.presences) {
+      if (p.source === "sending_mailbox") {
+        for (const email of p.emails) {
+          const plan = mailbox.get(email) ?? { email, names: [], judgedThrough: `${p.lastActivityAt ?? ""}|${p.messageCount ?? 0}` };
+          if (p.displayName && !plan.names.includes(p.displayName)) plan.names.push(p.displayName);
+          mailbox.set(email, plan);
+        }
+      }
       if (p.source === "gmail") {
         for (const email of p.emails) {
           const plan = gmail.get(email) ?? { email, names: [], judgedThrough: `${p.lastActivityAt ?? ""}|${p.messageCount ?? 0}` };
@@ -992,7 +1061,11 @@ export async function resolvePeopleRelevance(
       if (p.source === "matrix" && typeof p.detail.conversationId === "string") matrixIds.add(p.detail.conversationId);
     }
   }
-  const keys = [...[...gmail.keys()].map((e) => `gmail:${e}`), ...[...matrixIds].map((id) => `matrix:${id}`)];
+  const keys = [
+    ...[...gmail.keys()].map((e) => `gmail:${e}`),
+    ...[...mailbox.keys()].map((e) => `sending_mailbox:${e}`),
+    ...[...matrixIds].map((id) => `matrix:${id}`),
+  ];
   const topicsOf = (verdicts: Map<string, RecordedVerdict>) => {
     const topics = Object.fromEntries(TOPICS.map((t) => [t, 0])) as Record<Topic, number>;
     for (const v of verdicts.values()) if (v.topic) topics[v.topic] += 1;
@@ -1055,7 +1128,7 @@ export async function resolvePeopleRelevance(
     const view = personView(person);
     for (const k of conversationKeysOf(person)) views.set(k, view);
   }
-  type Plan = { kind: "gmail"; gmail: GmailPlan } | { kind: "matrix"; id: string };
+  type Plan = { kind: "gmail"; gmail: GmailPlan } | { kind: "matrix"; id: string } | { kind: "sending_mailbox"; mailbox: MailboxPlan };
   // An unreadable mailbox judges no Gmail thread: its recorded verdicts still apply.
   const plans: { key: string; judgedThrough: string; plan: Plan; contextHash: string }[] = [
     ...[...gmail.values()].filter(() => gmailReadable).map((g) => ({
@@ -1065,6 +1138,12 @@ export async function resolvePeopleRelevance(
       contextHash: `${context.hash}|${users.hash.gmail}`,
     })),
     ...matrixPlans([...matrixIds], markers, context, users).map((p) => ({ ...p, plan: { kind: "matrix" as const, id: p.plan } })),
+    ...[...mailbox.values()].map((m) => ({
+      key: `sending_mailbox:${m.email}`,
+      judgedThrough: m.judgedThrough,
+      plan: { kind: "sending_mailbox" as const, mailbox: m },
+      contextHash: context.hash,
+    })),
   ];
   const gmailUsers = users.gmail.map((g) => g.user);
   const { verdicts, summary, nothingToRead } = await judgeAndRecord(identity, context, plans, async (plan) => {
@@ -1078,6 +1157,11 @@ export async function resolvePeopleRelevance(
         userIds: userIdsOf(gmailUsers),
         person: views.get(input.key) ?? null,
       };
+    }
+    if (plan.kind === "sending_mailbox") {
+      const input = await mailboxConversationInput(identity.orgId, identity.brandId, plan.mailbox);
+      // Our prospecting mailbox is no user's own account: nobody is "the user" on it.
+      return input ? { ...input, user: null, userIds: [], person: views.get(input.key) ?? null } : null;
     }
     return matrixLoader(users, views)(plan.id);
   });

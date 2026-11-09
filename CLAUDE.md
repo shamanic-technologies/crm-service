@@ -18,6 +18,7 @@ feed the same registry, both layered bronze/silver/gold:
 | `api` | PUSHED | each call a client made to our API / MCP server with their own key (request + answer), pushed by api-service, filed ONLY under the staff Unibox scope | NEVER |
 | `google_calendar` | MIRROR | the org's connected Google Calendar (google-service reads it): meetings, attendees, Meet participants; each external attendee a `contacts` row | NEVER |
 | `transactional` | READ | every email the platform SENT a client (transactional-email-service sent-emails feed), shown ONLY on the staff Unibox thread | NEVER |
+| `sending_mailbox` | READ | every message our SENDING (cold-email) mailboxes sent or received (instantly-service `GET /internal/mailbox-messages`, cursor feed, `lib/mailbox/`): EVERY address on it (From, To, Cc, Bcc) is a person of its brand, judged by Jev like a Gmail correspondent; the sequence's own lead stays the `instantly` source's (no 2nd presence / fact); words kept only for threads naming someone else (EVERY-PERSON-ON-THE-THREAD-1109) | NEVER |
 | `activity` | PUSHED | each action a client took on their account (campaign created / edited / paused / resumed, budget changed), reported by the service that performed it, filed ONLY under the staff Unibox scope | NEVER |
 
 As a CSV lead-provider it is a sibling of `apollo-service` / `apify-service`.
@@ -1062,6 +1063,7 @@ never writes to them (no write path to any outside tool, by design).
 | `instantly` | every lead our cold email WROTE to (at least one real send), answered or not (owner 2026-10-09); replied/clicked read only off its `engaged` rows | instantly-service `GET /orgs/written-to-leads?brand_id=` (cursor-paged) |
 | `matrix` | every Matrix conversation of the brand | own silver |
 | `gohighlevel` | every mirrored GoHighLevel contact | own silver |
+| `sending_mailbox` | anyone on a message of our sending mailboxes besides the sequence's lead (a colleague answering in the lead's thread, a Cc'd person); facts `message_in` (they wrote) / `message_out` (we sent, they are on it) / `message_copied` (someone else wrote, they are on To / Cc: context, never their act) | own bronze `mailbox_messages` + `mailbox_message_people` |
 | `csv` | every contact the client ADDED BY HAND (the brand's `manual` list, MANUAL-CONTACT-IS-A-PERSON-1024: "this person matters to my business"); tag `professional_to_brand`, activity = the add date (`contact_rows_raw.fetched_at`), thread entry `added_to_crm` channel `manual` | own silver (`readManualContacts`) |
 
 Contacts of an uploaded FILE are NOT people (a list to reach, nobody talked to them yet); a CSV row holding an

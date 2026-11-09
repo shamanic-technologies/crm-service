@@ -4772,6 +4772,19 @@ registry.registerPath({
   },
 });
 
+registry.registerPath({
+  method: "post",
+  path: "/internal/sending-mailbox/watch",
+  summary:
+    "Read instantly-service's mailbox-messages feed now (the loop runs every minute): every message our sending mailboxes sent or " +
+    "received; every address on it (From, To, Cc, Bcc), the sequence's lead excepted, becomes a person of the brand it is filed on " +
+    "(source `sending_mailbox`), judged by Jev like a Gmail correspondent (EVERY-PERSON-ON-THE-THREAD-1109)",
+  responses: {
+    200: { description: "`{pages, read, stored, threadsFilled, caughtUp, scopes, cursor}`, or `{skipped: \"pass_running\"}`" },
+    502: { description: "The feed could not be read" },
+  },
+});
+
 export const ReplyTriggerReportSchema = z.object({
   id: z.string().uuid(),
   source: z.string().describe("`matrix` (WhatsApp, LinkedIn) | `gmail` (the org's connected mailbox)."),

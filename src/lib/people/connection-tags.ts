@@ -144,16 +144,20 @@ export function isEmptyStripeCustomer(p: PresenceLike): boolean {
   return p.emails.length === 0 && (p.phones ?? []).length === 0 && !p.displayName?.trim();
 }
 
+/** PURE: the conversation keys ONE presence carries (its own threads, judged by Jev). */
+export function presenceConversationKeys(p: { source: string; emails: string[]; detail: Record<string, unknown> }): string[] {
+  if (p.source === "gmail" || p.source === "sending_mailbox") return p.emails.map((e) => `${p.source}:${e}`);
+  if (p.source === "matrix" && typeof p.detail.conversationId === "string") return [`matrix:${p.detail.conversationId}`];
+  return [];
+}
+
 /** PURE: the tags ONE presence earns (its threads, its groups, the brand tool holding it). */
 export function presenceConnectionTags(p: PresenceLike, x: TagLookups): PersonConnectionTag[] {
   return collect((add, addItem) => {
     if (BRAND_TOOL_SOURCES.has(p.source) && !isEmptyStripeCustomer(p)) {
       add("professional_to_brand", [], { kind: "source", ref: p.source, probability: null });
     }
-    const keys: string[] = [];
-    if (p.source === "gmail") for (const e of p.emails) keys.push(`gmail:${e}`);
-    if (p.source === "matrix" && typeof p.detail.conversationId === "string") keys.push(`matrix:${p.detail.conversationId}`);
-    for (const key of keys) {
+    for (const key of presenceConversationKeys(p)) {
       const v = x.conversations.get(key);
       if (!v) continue;
       if ("noWords" in v) add("personal_to_user", v.userIds, { kind: "direct_thread_no_words", ref: key, probability: null });

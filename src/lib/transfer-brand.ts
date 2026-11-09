@@ -87,6 +87,7 @@ import {
   whatsappLineSpans,
   whatsappLineDays,
   ghlBookings,
+  mailboxMessagePeople,
 } from "../db/schema.js";
 
 export const TRANSFER_TABLES: PgTable[] = [
@@ -121,6 +122,8 @@ export const TRANSFER_TABLES: PgTable[] = [
   ghlStageMeanings,
   // Meetings booked for prospects on the brand's calendar (AUTO-BOOK-1103).
   ghlBookings,
+  // Every person on our sending mailboxes' messages, per brand (EVERY-PERSON-ON-THE-THREAD-1109).
+  mailboxMessagePeople,
   crmLabelVerdicts,
   peopleScopes,
   people,

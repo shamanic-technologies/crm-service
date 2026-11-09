@@ -63,6 +63,7 @@ import type { PersonConnectionTag } from "./connection-tags.js";
 import type { PersonOrganization } from "./organizations.js";
 import type { PersonRelation } from "./relations.js";
 import { voiceNoteText } from "../matrix/voice-notes.js";
+import { factTypeFor, type AddressRole } from "../mailbox/rules.js";
 import { meetingFactContext, readOrgEvents } from "../calendar/matching.js";
 import { meetingCandidateFacts } from "../calendar/meetings.js";
 import { isCopilotDestination } from "../copilot/messages.js";
@@ -95,6 +96,9 @@ export const FACT_TYPES = [
   "signup",
   "message_in",
   "message_out",
+  // EVERY-PERSON-ON-THE-THREAD-1109: an email someone ELSE wrote to our sending mailboxes with the person on To / Cc
+  // (a colleague answering in their thread). On their thread as context, never "they wrote to us" (message_in).
+  "message_copied",
   // RELATIONSHIP-TAGS-1014: a message the person wrote in one of the brand's
   // messaging GROUPS (never a DM reply to us), and their membership of it.
   "group_message",
@@ -118,7 +122,7 @@ export const FACT_TYPES = [
 export type FactType = (typeof FACT_TYPES)[number];
 
 // `distribute_platform`: retired (see RETIRED_FAMILIES); kept because the feed still serves the facts it stated.
-export const FACT_SOURCES = ["gohighlevel", "gmail", "matrix", "stripe", "posthog", "clerk", "csv", "crm", "distribute_platform", "google_calendar", "billing"] as const;
+export const FACT_SOURCES = ["gohighlevel", "gmail", "matrix", "stripe", "posthog", "clerk", "csv", "crm", "distribute_platform", "google_calendar", "billing", "sending_mailbox"] as const;
 export type FactSource = (typeof FACT_SOURCES)[number];
 
 /**
@@ -133,6 +137,9 @@ const FAMILIES = {
   matrix_message: { source: "matrix", snapshot: false, immutable: false },
   matrix_membership: { source: "matrix", snapshot: false, immutable: false },
   gmail_message: { source: "gmail", snapshot: false, immutable: false },
+  // EVERY-PERSON-ON-THE-THREAD-1109: one per (address, message) of our sending mailboxes, the sequence's lead excepted
+  // (instantly's outreach facts state that one). History: a message is never withdrawn on absence.
+  mailbox_message: { source: "sending_mailbox", snapshot: false, immutable: false },
   posthog_person: { source: "posthog", snapshot: true, immutable: false },
   posthog_visit: { source: "posthog", snapshot: true, immutable: false },
   posthog_event: { source: "posthog", snapshot: true, immutable: false },
@@ -950,6 +957,79 @@ async function gmailCandidates(scopeId: string): Promise<{ facts: CandidateFact[
   return { facts, skippedOther };
 }
 
+/**
+ * EVERY-PERSON-ON-THE-THREAD-1109: every person on a message of our sending mailboxes filed on the brand (lib/mailbox/),
+ * one fact per (address, message): `message_in` (they wrote it), `message_out` (we sent it, they are on To / Cc / Bcc),
+ * `message_copied` (someone else wrote it, they are on To / Cc). The sequence's own lead states none here: instantly's
+ * outreach facts already do. Payload carries every participant with their role and the thread key, so a reader links
+ * "Markus came in through Thomas's thread".
+ */
+async function mailboxCandidates(orgId: string, brandId: string): Promise<CandidateFact[]> {
+  const stored = await rows<{
+    address: string;
+    name: string | null;
+    role: AddressRole;
+    id: string;
+    mailbox: string;
+    direction: "in" | "out";
+    kind: string;
+    message_id: string | null;
+    in_reply_to: string | null;
+    references: string[];
+    thread_key: string | null;
+    occurred_at: string | Date;
+    subject: string | null;
+    from_address: string | null;
+    participants: { email: string; role: string }[];
+    text: string | null;
+    campaign_id: string | null;
+    instantly_campaign_id: string | null;
+    lead_email: string | null;
+  }>(sql`
+    SELECT p.address, p.name, p.role, m.id, m.mailbox, m.direction, m.kind, m.message_id, m.in_reply_to, m.references,
+           m.thread_key, m.occurred_at, m.subject, m.from_address, m.participants, m.text, m.campaign_id,
+           m.instantly_campaign_id, m.lead_email
+    FROM mailbox_message_people p
+    JOIN mailbox_messages m ON m.id = p.message_id
+    WHERE p.org_id = ${orgId} AND p.brand_id = ${brandId} AND NOT p.sequence_lead
+  `);
+  return stored.map((s) => ({
+    naturalKey: `sending_mailbox|${s.address}|${s.id}`,
+    family: "mailbox_message" as const,
+    type: factTypeFor(s.direction, s.role),
+    source: "sending_mailbox" as const,
+    sourceRef: s.id,
+    sourceContactId: null,
+    crmContactId: null,
+    occurredAt: iso(s.occurred_at),
+    dateBasis: s.direction === "out" ? "sent_at" : "received_at",
+    payload: {
+      channel: "email",
+      mailboxMessageId: s.id,
+      mailbox: s.mailbox,
+      kind: s.kind,
+      role: s.role,
+      messageId: s.message_id,
+      inReplyTo: s.in_reply_to,
+      references: s.references ?? [],
+      threadKey: s.thread_key,
+      subject: s.subject,
+      text: s.text,
+      from: s.from_address,
+      participants: s.participants ?? [],
+      sequence: { campaignId: s.campaign_id, instantlyCampaignId: s.instantly_campaign_id, leadEmail: s.lead_email },
+    },
+    subject: {
+      presence: `sending_mailbox:${s.address}`,
+      keys: [emailKey(s.address)],
+      standalone: false,
+      emails: [s.address],
+      phones: [],
+      fullName: s.name,
+    },
+  }));
+}
+
 async function posthogCandidates(orgId: string, brandId: string): Promise<CandidateFact[]> {
   const out: CandidateFact[] = [];
   const persons = await rows<{ id: string; external_id: string; full_name: string | null; source_created_at: string | Date | null }>(sql`
@@ -1540,7 +1620,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
       .where(eq(people.scopeId, scope.id));
     const index = new PersonIndex(personRows);
 
-    const [ghl, matrix, matrixGroups, gmail, posthog, stripe, clerk, csv, connected, calendar, credit] = await Promise.all([
+    const [ghl, matrix, matrixGroups, gmail, posthog, stripe, clerk, csv, connected, calendar, credit, mailbox] = await Promise.all([
       ghlCandidates(orgId, brandId),
       matrixCandidates(orgId, brandId),
       matrixGroupCandidates(orgId, brandId),
@@ -1552,6 +1632,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
       connectedSources(orgId, brandId),
       calendarCandidates(orgId, brandId, personRows),
       creditCandidates(orgId, brandId),
+      mailboxCandidates(orgId, brandId),
     ]);
     // An auth provider connected = it alone states who signed up (it knows invited
     // teammates and staff; PostHog only knows who was identified). PostHog keeps
@@ -1575,7 +1656,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
     // A record the build has not joined yet (a new Stripe customer, a PostHog person who just typed
     // their email) is filed on the person holding one of its keys now, not held until the next build.
     const recordKeys = await recordKeysByContact(orgId, brandId);
-    const all = [...ghl, ...matrix, ...matrixGroups, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv, ...calendar, ...credit, ...registry]
+    const all = [...ghl, ...matrix, ...matrixGroups, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv, ...calendar, ...credit, ...mailbox, ...registry]
       .filter((c) => !(authStatesSignups && c.family === "posthog_person"))
       .map((c) => withRecordKeys(c, recordKeys));
     const candidates = new Map<string, CandidateFact>();

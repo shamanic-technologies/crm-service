@@ -3238,3 +3238,76 @@ export const ghlBookings = pgTable(
     uniqueIndex("ghl_bookings_org_brand_key_uq").on(table.orgId, table.brandId, table.idempotencyKey),
   ],
 );
+
+/**
+ * Bronze: every message on our SENDING mailboxes (the cold-email mailboxes instantly-service operates), as
+ * instantly-service's `GET /internal/mailbox-messages` feed serves it (EVERY-PERSON-ON-THE-THREAD-1109),
+ * latest version per feed id (the feed re-serves a message when what it says about it changes). `text` is
+ * kept only for a message of a thread that names someone besides our mailbox and the sequence's lead
+ * (`text_kept = false` otherwise: that conversation is already the cold-email source's). Attribution
+ * (org, brands, sequence) is the producer's; a message it cannot attribute is stored, filed on nobody.
+ */
+export const mailboxMessages = pgTable(
+  "mailbox_messages",
+  {
+    id: text("id").primaryKey(),
+    version: text("version").notNull(),
+    mailbox: text("mailbox").notNull(),
+    direction: text("direction").notNull(),
+    kind: text("kind").notNull(),
+    messageId: text("message_id"),
+    inReplyTo: text("in_reply_to"),
+    references: jsonb("references").notNull(),
+    threadKey: text("thread_key"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+    subject: text("subject"),
+    fromAddress: text("from_address"),
+    fromName: text("from_name"),
+    /** `{to, cc, bcc}`: each `[{address, name}]`, as served. */
+    recipients: jsonb("recipients").notNull(),
+    /** `[{email, role}]`, as served (our mailbox included). */
+    participants: jsonb("participants").notNull(),
+    text: text("text"),
+    textKept: boolean("text_kept").notNull().default(false),
+    textUnavailableReason: text("text_unavailable_reason"),
+    sentBy: text("sent_by"),
+    orgId: uuid("org_id"),
+    brandIds: jsonb("brand_ids").notNull(),
+    campaignId: text("campaign_id"),
+    instantlyCampaignId: text("instantly_campaign_id"),
+    leadEmail: text("lead_email"),
+    mirroredAt: timestamp("mirrored_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("mailbox_messages_thread_idx").on(table.threadKey),
+    index("mailbox_messages_org_idx").on(table.orgId, table.occurredAt),
+  ],
+);
+export type MailboxMessage = typeof mailboxMessages.$inferSelect;
+
+/**
+ * Silver: every PERSON on a sending-mailbox message, per brand the message is filed on: one row per (message,
+ * brand, address), our mailbox and staff excluded. `role` = the address's role on the message (from > to > cc >
+ * bcc); `sequence_lead` = the address is the lead of the sequence the message is filed on (its conversation is
+ * the cold-email source's: no presence, no fact from here). Rebuilt for a message each time a new version lands.
+ */
+export const mailboxMessagePeople = pgTable(
+  "mailbox_message_people",
+  {
+    messageId: text("message_id").notNull(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    address: text("address").notNull(),
+    name: text("name"),
+    role: text("role").notNull(),
+    sequenceLead: boolean("sequence_lead").notNull(),
+    threadKey: text("thread_key"),
+    occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("mailbox_message_people_uq").on(table.messageId, table.brandId, table.address),
+    index("mailbox_message_people_scope_idx").on(table.orgId, table.brandId, table.address),
+    index("mailbox_message_people_thread_idx").on(table.threadKey),
+  ],
+);
