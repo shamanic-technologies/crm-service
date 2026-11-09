@@ -19,6 +19,7 @@
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { calendarFeedCursors, mailboxMessagePeople, mailboxMessages, peopleScopes } from "../../db/schema.js";
+import { isStaffEmail } from "../owner-telegram.js";
 import { messagePeople, namesSomeoneElse, parseFeedMailboxMessage, type FeedMailboxMessage } from "./rules.js";
 
 export const MAILBOX_FEED = "mailbox_messages";
@@ -220,11 +221,14 @@ export interface MailboxPassResult {
   caughtUp: boolean;
   scopes: { orgId: string; brandId: string }[];
   cursor: string | null;
+  /** Brands whose people scope this pass opened (it did not exist yet). */
+  scopesOpened: number;
 }
 
 /** One pass: the feed from the stored cursor to its end (bounded), then a rebuild of every scope whose people moved. */
 export async function runMailboxPass(
   rebuild: (scope: { orgId: string; brandId: string }) => Promise<void> = kickScopeBuild,
+  openScopes: () => Promise<{ opened: number; failed: number }> = openMissingScopes,
 ): Promise<MailboxPassResult> {
   const [row] = await db.select().from(calendarFeedCursors).where(eq(calendarFeedCursors.feed, MAILBOX_FEED));
   let cursor = row?.cursor ?? null;
@@ -256,15 +260,76 @@ export async function runMailboxPass(
   for (const s of scopes.values()) {
     await rebuild(s).catch((err) => console.error(`[crm-service][mailbox] rebuild org=${s.orgId} brand=${s.brandId} failed:`, err));
   }
-  return { pages, read, stored, threadsFilled, caughtUp, scopes: [...scopes.values()], cursor };
+  const opened = await openScopes();
+  return { pages, read, stored, threadsFilled, caughtUp, scopes: [...scopes.values()], cursor, scopesOpened: opened.opened };
 }
 
-/** Kick the people build of a scope that exists (a brand nobody opened people for stays unopened). Unawaited build. */
+/** Rebuild a brand's people (unawaited). A brand with no people scope yet gets one (see `openMissingScopes`). */
 async function kickScopeBuild(s: { orgId: string; brandId: string }): Promise<void> {
   const [scope] = await db.select().from(peopleScopes).where(and(eq(peopleScopes.orgId, s.orgId), eq(peopleScopes.brandId, s.brandId)));
-  if (!scope) return;
+  if (!scope) return; // opened by `openMissingScopes` at the end of the pass, which builds it
   const { runScopeBuild } = await import("../people/build.js");
   void runScopeBuild(scope, { followUp: true }).catch((err) => console.error(`[crm-service][mailbox] people build scope=${scope.id} failed:`, err));
+}
+
+/**
+ * PURE: who a scope the registry opens on its own is filed under (its org runs, its Jev calls): a member of the org
+ * (client-service's order: last active first), a client's own member before our staff who set the org up.
+ */
+export function scopeCreatorOf(users: { id?: unknown; email?: unknown }[]): string | null {
+  const withId = users.filter((u): u is { id: string; email?: unknown } => typeof u.id === "string" && u.id.length > 0);
+  const client = withId.find((u) => !isStaffEmail(typeof u.email === "string" ? u.email : null));
+  return (client ?? withId[0])?.id ?? null;
+}
+
+async function orgMemberId(orgId: string): Promise<string | null> {
+  const url = process.env.CLIENT_SERVICE_URL;
+  const key = process.env.CLIENT_SERVICE_API_KEY;
+  if (!url || !key) throw new Error("[crm-service][mailbox] CLIENT_SERVICE_URL and CLIENT_SERVICE_API_KEY are required to open a people scope");
+  const res = await fetch(`${url.replace(/\/+$/, "")}/internal/users?orgId=${encodeURIComponent(orgId)}&allMembers=true`, {
+    headers: { "x-api-key": key },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!res.ok) throw new Error(`client-service GET /internal/users answered ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const body = (await res.json()) as { users?: { id?: unknown; email?: unknown }[] };
+  if (!Array.isArray(body?.users)) throw new Error("client-service GET /internal/users answered no users list");
+  return scopeCreatorOf(body.users);
+}
+
+/**
+ * A person on our sending mailboxes is a person of the brand whether or not anyone opened its people list yet
+ * (EVERY-PERSON-ON-THE-THREAD-1109: Living Vital's scope did not exist, so Markus was mirrored and never built).
+ * Every brand holding such a person and no scope gets one, filed under a member of its org, and is built. A brand
+ * whose org has no member readable stays unopened (logged) and is asked again next pass.
+ */
+export async function openMissingScopes(): Promise<{ opened: number; failed: number }> {
+  const missing = (await db.execute(sql`
+    SELECT DISTINCT p.org_id, p.brand_id FROM mailbox_message_people p
+    WHERE NOT p.sequence_lead
+      AND NOT EXISTS (SELECT 1 FROM people_scopes s WHERE s.org_id = p.org_id AND s.brand_id = p.brand_id)
+  `)) as unknown as { org_id: string; brand_id: string }[];
+  let opened = 0;
+  let failed = 0;
+  const { ensureScope, runScopeBuild } = await import("../people/build.js");
+  for (const m of missing) {
+    try {
+      const userId = await orgMemberId(m.org_id);
+      if (!userId) {
+        console.warn(`[crm-service][mailbox] org=${m.org_id} brand=${m.brand_id}: no member to open its people scope under`);
+        failed++;
+        continue;
+      }
+      const { scope, created } = await ensureScope(m.org_id, m.brand_id, userId);
+      if (created) {
+        opened++;
+        void runScopeBuild(scope, { followUp: true }).catch((err) => console.error(`[crm-service][mailbox] people build scope=${scope.id} failed:`, err));
+      }
+    } catch (err) {
+      failed++;
+      console.error(`[crm-service][mailbox] opening the people scope of org=${m.org_id} brand=${m.brand_id} failed:`, err);
+    }
+  }
+  return { opened, failed };
 }
 
 let running = false;
