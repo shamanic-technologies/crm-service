@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { SwrCache } from "../../src/lib/people/swr.js";
+import { SwrCache, type SwrEntry, type SwrStore } from "../../src/lib/people/swr.js";
 
 const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
 
@@ -53,5 +53,46 @@ describe("SwrCache (DASH-LATENCY-1014)", () => {
     const c = new SwrCache<number>("t", () => 0, () => 0);
     expect(await c.get("k", async (prev) => (prev?.value ?? 0) + 1)).toBe(1);
     expect(await c.get("k", async (prev) => (prev?.value ?? 0) + 1)).toBe(2);
+  });
+
+  it("DASH-SPEED-1110: a stored entry is served when memory is empty (by the same age rules), and every load is stored", async () => {
+    const rows = new Map<string, SwrEntry<number>>([["k", { value: 7, at: Date.now() - 1_000 }]]);
+    let reads = 0;
+    const store: SwrStore<number> = {
+      async read(key) {
+        reads++;
+        return rows.get(key);
+      },
+      async write(key, entry) {
+        rows.set(key, entry);
+      },
+    };
+    let loads = 0;
+    const load = async () => ++loads * 100;
+    const fresh = new SwrCache<number>("t", () => 60_000, () => 120_000, { store });
+    expect(await fresh.get("k", load)).toBe(7); // stored, fresh: served, nothing computed
+    expect(await fresh.get("k", load)).toBe(7);
+    expect([loads, reads]).toEqual([0, 1]); // read from the store once, then memory
+    expect(await fresh.get("other", load)).toBe(100); // nothing stored: computed, then stored
+    expect(rows.get("other")?.value).toBe(100);
+
+    const stale = new SwrCache<number>("t", () => 1, () => 120_000, { store });
+    expect(await stale.get("k", load)).toBe(7); // stale: served while one refresh runs behind it
+    await tick();
+    expect(rows.get("k")?.value).toBe(200);
+    expect(await stale.ageOf("k")).toBeLessThan(1_000);
+
+    const expired = new SwrCache<number>("t", () => 1, () => 1, { store });
+    rows.set("k", { value: 7, at: Date.now() - 1_000 });
+    expect(await expired.get("k", load)).toBe(300); // too old: the caller waits for a fresh load
+  });
+
+  it("DASH-SPEED-1110: maxEntries drops the oldest key", async () => {
+    const c = new SwrCache<string>("t", () => 60_000, () => 120_000, { maxEntries: 2 });
+    for (const k of ["a", "b", "c"]) await c.get(k, async () => k);
+    let reloaded = 0;
+    await c.get("a", async () => (reloaded++, "a"));
+    await c.get("c", async () => (reloaded++, "c"));
+    expect(reloaded).toBe(1);
   });
 });

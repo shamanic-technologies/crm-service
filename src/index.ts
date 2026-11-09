@@ -44,6 +44,7 @@ import { startLineWatch } from "./lib/whatsapp/line-health.js";
 import { startOutcomeDeclarations } from "./lib/reply-trigger/outcome.js";
 import { startLeadIdentifiedDeclarations } from "./lib/people/lead-identified.js";
 import { startClientSatisfactionWatch } from "./lib/people/client-satisfaction.js";
+import { startOutcomesWarm } from "./lib/people/outcomes-warm.js";
 import { startMessageSentDeclarations } from "./lib/whatsapp/message-sent.js";
 import { startFormSubmittedDeclarations } from "./lib/gohighlevel/form-submitted.js";
 
@@ -170,6 +171,8 @@ if (process.env.NODE_ENV !== "test") {
         startMessageSentDeclarations();
         // Declares each CRM form submission crm-service holds as form_submitted on its lead (past and future, one path).
         startFormSubmittedDeclarations();
+        // DASH-SPEED-1110: keeps every brand's Outcomes answer stored and recent (a first visit never waits).
+        startOutcomesWarm();
       })
       .catch((err) => {
         console.error("[crm-service] Migration failed:", err);

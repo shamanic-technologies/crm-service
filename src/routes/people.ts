@@ -34,9 +34,9 @@ import { resolveOneWhatsappPhone } from "../lib/whatsapp/phone-resolution.js";
 import {
   CampaignReachUnavailable,
   cachedOutcomeInputs,
+  cachedOutcomePeople,
   cachedOutcomeCounts,
   OUTCOME_STEPS,
-  readOutcomePeople,
   type OutcomeInputs,
   type OutcomeStep,
 } from "../lib/people/outcomes.js";
@@ -735,7 +735,14 @@ router.get(
       const campaigns = await campaignReachOr502(req, res, brandId, [step]);
       if (!campaigns) return;
       const contactedOnly = parsed.data.contactedByUs === "true";
-      const page = await readOutcomePeople(req.orgId!, brandId, step, limit, offset, campaigns, contactedOnly);
+      const page = await cachedOutcomePeople(
+        { orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId },
+        step,
+        limit,
+        offset,
+        campaigns,
+        contactedOnly,
+      );
       res.json({
         brandId,
         step,

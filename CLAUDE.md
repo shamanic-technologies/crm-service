@@ -1816,6 +1816,10 @@ lead-service serves the overall tag, then go.
   mirrored 05:04:05 reached the feed 05:08:43 + ~50 s commit: held (new customer) until the NEXT build re-read 31k
   people (4 min 12 s), then an emission of 81-107 s (30 s of it reading 413k facts whole). Now live facts without
   payload + ownership GROUPS + a narrow person read: 29-40 s for Distribute.you at box load ~30, Doc Dinners 21 s.
+- **Ownership re-checked only when the people index moved** (DASH-SPEED-1110, `ownershipIndexHash`): the merge / split
+  pass groups EVERY fact ever emitted (1.7M rows on distribute.you, 10-15 s, on every emission back to back). A fact
+  changes owner only when a person's key, identity keys or presences move, so the pass runs only when their digest differs
+  from `people_scopes.ownership_index_hash` (set by the pass that ran). Never re-own on any other input.
 - **Feed order is a guarantee** (UNIBOX-FACT-LAG-1028): the derivation runs under a per-SCOPE lock; every write takes
   the global exclusive `FEED_LOCK` right before the first write, held to commit (seqs commit in order); `readFacts`
   reads under the same lock SHARED, so no page is read while a writer holds seqs uncommitted. Only `facts.ts` writes
@@ -1944,6 +1948,14 @@ this answers the same steps for everyone the brand's own tools state.
   the identity GIN (`?|` prefilter) and the fact scan uses `people_facts_live_type_idx`; JIT is off
   for the whole service (`db/index.ts`: 2-3 s of compile per heavy query). Figures were proven
   byte-equal old vs new SQL on 4 brands in prod before shipping.
+- **Stored, never waited for (DASH-SPEED-1110)**: both caches persist per scope in `outcome_snapshots`
+  (`inputs` = lead-service's buckets, `counts` = steps + fingerprint; keyed on the scope, so a transfer moves it).
+  A key missing from memory (first visit, after a deploy) is served from the row by the same age rules: fresh 60 s,
+  stale up to 60 min while ONE refresh runs behind it, older = the reader waits (lead-service down that long = 502).
+  `outcomes-warm.ts` (every 5 min, first 90 s after boot, `OUTCOMES_WARM=off`) recomputes any scope whose answer is
+  older than 20 min on an org run `people.outcomes.warm`. The step's people list is cached per page (memory, 300 keys).
+  Address matching unnests only the keys of people the GIN `?|` prefilter finds (`emailKeysOfPeopleHolding`): unnesting
+  every key of 41k people was 360 ms per read. Prod 2026-11-09: 0 differences old vs new on 3 brands, every step + list.
 
 ## Leg reach — how the brand's OWN team converts on one leg (`src/lib/people/leg-reach.ts`)
 

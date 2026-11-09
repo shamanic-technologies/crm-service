@@ -1181,11 +1181,32 @@ export const peopleScopes = pgTable(
     // UNIBOX-FACT-LAG-1028: when the last completed fact emission of this scope STARTED reading (DB clock).
     // Every record crm-service held before it is stated on the fact feed (or is no fact by rule).
     factsStatedThrough: timestamp("facts_stated_through", { withTimezone: true }),
+    // DASH-SPEED-1110: the people index (person keys, identity keys, presences) the fact emission last re-owned every
+    // fact under (`ownershipIndexHash`, facts.ts). Unchanged since = no fact can change owner: the ownership pass is skipped.
+    ownershipIndexHash: text("ownership_index_hash"),
 
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [uniqueIndex("people_scopes_org_brand_uq").on(table.orgId, table.brandId)],
 );
+
+/**
+ * DASH-SPEED-1110 — the Outcomes read's last answer per people scope (org x brand), so a dashboard
+ * page never waits for it: lead-service's buckets (`inputs`) and the counts computed from them
+ * (`counts` + the `fingerprint` of what they were computed from). Served at once, refreshed behind
+ * the answer (outcomes.ts). A cache: deleting a row only makes the next read compute again.
+ * Keyed on the scope (no brand column: a brand transfer moves the scope, the snapshot follows).
+ */
+export const outcomeSnapshots = pgTable("outcome_snapshots", {
+  scopeId: uuid("scope_id")
+    .primaryKey()
+    .references(() => peopleScopes.id, { onDelete: "cascade" }),
+  inputs: jsonb("inputs"),
+  inputsAt: timestamp("inputs_at", { withTimezone: true }),
+  counts: jsonb("counts"),
+  countsAt: timestamp("counts_at", { withTimezone: true }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 /**
  * GOLD — one row per merged person of a scope, fully re-derived on every build

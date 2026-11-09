@@ -6,6 +6,7 @@ import { db } from "../../src/db/index.js";
 import { people, peopleFacts, peopleScopes } from "../../src/db/schema.js";
 import peopleRoutes from "../../src/routes/people.js";
 import { clearOutcomesCache } from "../../src/lib/people/outcomes.js";
+import { runOutcomesWarmPass } from "../../src/lib/people/outcomes-warm.js";
 
 /**
  * GET /orgs/people/outcomes + /orgs/people/outcomes/people against a real
@@ -407,6 +408,58 @@ describe.skipIf(!RUN)("people outcomes (all sources)", () => {
     expect(r.body.reason).toBe("campaign_outcomes_unavailable");
     const l = await asOrg(request(app()).get("/orgs/people/outcomes/people").query({ brandId: BRAND, step: "signup" }));
     expect(l.status).toBe(502);
+  });
+
+  it("DASH-SPEED-1110: the answer is STORED: after a restart (memory empty) it is served at once, lead-service not asked", async () => {
+    await seed();
+    const read = () => asOrg(request(app()).get("/orgs/people/outcomes").query({ brandId: BRAND }));
+    const first = await read();
+    expect(first.status).toBe(200);
+    clearOutcomesCache(); // a deploy: the process memory is gone, the stored snapshot stays
+    LEAD_DOWN = true; // nothing to recompute from: the stored answer is all there is
+    const calls = LEAD_CALLS;
+    const after = await read();
+    expect(after.status).toBe(200);
+    expect(after.body.steps).toEqual(first.body.steps);
+    expect(LEAD_CALLS).toBe(calls);
+    // The people list reads the stored inputs too.
+    const list = await asOrg(request(app()).get("/orgs/people/outcomes/people").query({ brandId: BRAND, step: "signup" }));
+    expect(list.status).toBe(200);
+    expect(list.body.total).toBe(first.body.steps.find((s: { step: string }) => s.step === "signup").people);
+    // Never an old figure forever: past the max staleness the reader waits for a fresh one and sees its error.
+    const prev = { fresh: process.env.PEOPLE_OUTCOMES_FRESH_MS, stale: process.env.PEOPLE_OUTCOMES_MAX_STALE_MS };
+    process.env.PEOPLE_OUTCOMES_FRESH_MS = "1";
+    process.env.PEOPLE_OUTCOMES_MAX_STALE_MS = "1";
+    try {
+      clearOutcomesCache();
+      await new Promise((r) => setTimeout(r, 5));
+      const stale = await read();
+      expect(stale.status).toBe(502);
+    } finally {
+      for (const [k, v] of [["PEOPLE_OUTCOMES_FRESH_MS", prev.fresh], ["PEOPLE_OUTCOMES_MAX_STALE_MS", prev.stale]] as const) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
+  it("DASH-SPEED-1110: the warm pass stores a scope nobody read, then leaves a recent one alone", async () => {
+    await seed();
+    const first = await runOutcomesWarmPass();
+    const mine = first!.find((r) => r.brandId === BRAND)!;
+    expect(mine).toMatchObject({ refreshed: true });
+    expect(mine.error).toBeUndefined();
+    const calls = LEAD_CALLS;
+    const second = await runOutcomesWarmPass();
+    expect(second!.find((r) => r.brandId === BRAND)).toMatchObject({ refreshed: false });
+    expect(LEAD_CALLS).toBe(calls);
+    // A read is served from what the pass stored (same figures as a fresh computation), lead-service not asked.
+    clearOutcomesCache();
+    const r = await asOrg(request(app()).get("/orgs/people/outcomes").query({ brandId: BRAND }));
+    expect(r.status).toBe(200);
+    expect(LEAD_CALLS).toBe(calls);
+    const visits = r.body.steps.find((s: { step: string }) => s.step === "website_visit");
+    expect(visits.people).toBe(2);
   });
 
   it("refuses an unknown step and an unauthenticated call", async () => {
