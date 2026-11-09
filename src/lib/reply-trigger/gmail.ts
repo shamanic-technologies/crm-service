@@ -38,10 +38,13 @@
  *    from == address; every `own_team` row ever recorded, 2026-10-21..29, was
  *    the owner's own mail to a client from his connected gmail), a sending
  *    mailbox, the brand's domain.
- *  - WORDS ADDRESSED TO SOMEONE ELSE are not words to the brand: a mail whose
- *    To names none of the brand's addresses (the brand only copied, e.g. a
- *    teammate's pitch to a prospect, mailbox in Cc, OWN-TEAM-GMAIL-1016) is not
- *    counted: `not_addressed_to_brand`. An empty To (Bcc) gets the benefit.
+ *  - WORDS WRITTEN TO SOMEONE ELSE are not words to the brand, and Jev says so:
+ *    it reads the whole stored conversation (From / To of every mail, the
+ *    business, the person: ./burst-context.ts) and answers `not_to_business`
+ *    (JEV-WHOLE-THREAD-1109, owner 2026-11-09: « donne tout le fil »). The old
+ *    To rule (`not_addressed_to_brand`, old rows) counted our SHARED sending
+ *    mailboxes as the brand's: a client's reply-all to HIS prospect, To his
+ *    campaign's mailbox, read as words to Distribute.you.
  *  - A TEAM MEMBER is a person like any other (ONE-AI-CONVERSES-1029, owner
  *    2026-10-29 « tu veux faire un cas particulier ? WTF »): their mail TO the
  *    brand is a Lead event, the "brand's team" play answers them (lead-service
@@ -69,7 +72,9 @@ import {
 } from "../../db/schema.js";
 import { createRun, updateRun } from "../runs-client.js";
 import { normalizeEmail, type Presence } from "../people/identity.js";
-import { addressedToBrand, isBrandAddress, readBrandAddresses, type BrandAddresses } from "../people/brand-addresses.js";
+import { isBrandAddress, readBrandAddresses, type BrandAddresses } from "../people/brand-addresses.js";
+import { personView, readBrandContext, type BrandContext, type PersonLike } from "../people/relevance.js";
+import { emailThreadLines, type BurstContext } from "./burst-context.js";
 import {
   CampaignRefusal,
   campaignServiceConfigured,
@@ -116,7 +121,7 @@ export const GMAIL_REPLY_REASONS = {
   OTHER_BRAND: "other_brand",
   /** The address is the brand's own (its connected mailbox, a sending mailbox, its domain): our own mail. */
   OWN_ADDRESS: "own_address",
-  /** No mail of the burst is addressed TO the brand (its addresses absent from To: only copied). */
+  /** LEGACY (before JEV-WHOLE-THREAD-1109): no mail of the burst named the brand in To. Now Jev's `not_to_business`. */
   NOT_ADDRESSED_TO_BRAND: "not_addressed_to_brand",
 } as const;
 
@@ -152,14 +157,17 @@ export async function storedConversation(scopeId: string, address: string): Prom
     .from(peopleMessageTexts)
     .where(and(eq(peopleMessageTexts.scopeId, scopeId), eq(peopleMessageTexts.source, GMAIL_SOURCE), eq(peopleMessageTexts.address, address)));
   return rows.map((r) => {
-    const item = (r.item ?? {}) as { to?: unknown; ref?: { threadId?: unknown } };
+    const item = (r.item ?? {}) as { from?: unknown; to?: unknown; cc?: unknown; ref?: { threadId?: unknown } };
+    const strings = (v: unknown) => (Array.isArray(v) ? v.filter((t): t is string => typeof t === "string") : []);
     return {
       messageKey: r.messageKey,
       at: r.at,
       direction: r.direction,
       subject: r.subject,
       text: r.body,
-      to: Array.isArray(item.to) ? item.to.filter((t): t is string => typeof t === "string") : [],
+      from: typeof item.from === "string" ? item.from : null,
+      to: strings(item.to),
+      cc: strings(item.cc),
       threadId: typeof item.ref?.threadId === "string" ? item.ref.threadId : null,
     };
   });
@@ -205,6 +213,42 @@ export function ownAddressesOnce(scope: PeopleScope, runId: () => Promise<string
   };
 }
 
+/** The business Jev reads with every burst of a pass (JEV-WHOLE-THREAD-1109), read once. */
+export function brandContextOnce(scope: PeopleScope, runId: () => Promise<string>): () => Promise<BrandContext> {
+  let read: Promise<BrandContext> | null = null;
+  return () =>
+    (read ??= runId().then((id) => readBrandContext({ orgId: scope.orgId, userId: scope.createdByUserId, runId: id, brandId: scope.brandId })));
+}
+
+/** What Jev reads with a Gmail burst (./burst-context.ts): the business, the person, the whole stored conversation. */
+export async function gmailBurstContext(
+  scope: PeopleScope,
+  address: string,
+  newKeys: ReadonlySet<string>,
+  brandContext: () => Promise<BrandContext>,
+  /** The thread as it stood then (the replay eval): mails after this instant are left out. */
+  asOf?: Date,
+): Promise<BurstContext> {
+  const [business, stored, [person]] = await Promise.all([
+    brandContext(),
+    storedConversation(scope.id, address),
+    db
+      .select({ displayName: people.displayName, phones: people.phones, presences: people.presences, evidence: people.mergeEvidence })
+      .from(people)
+      .where(and(eq(people.orgId, scope.orgId), eq(people.brandId, scope.brandId), sql`${people.identityKeys} @> ${JSON.stringify([`email:${address}`])}::jsonb`))
+      .limit(1),
+  ]);
+  const conversation = asOf ? stored.filter((m) => !m.at || m.at.getTime() <= asOf.getTime()) : stored;
+  const knownBy = person
+    ? personView({ presences: person.presences as PersonLike["presences"], evidence: (person.evidence ?? []) as PersonLike["evidence"] })
+    : null;
+  return {
+    business,
+    person: { name: person?.displayName ?? null, email: address, phone: (person?.phones as string[] | undefined)?.[0] ?? null, knownBy },
+    thread: emailThreadLines(conversation, newKeys),
+  };
+}
+
 export type GmailDecision =
   | { kind: "not_owner" }
   /** The email path's answer could not be read: nothing decided, asked again next pass. */
@@ -229,7 +273,13 @@ export async function decideGmailBurst(
   address: string,
   burst: EmailBurstMessage[],
   judged: EmailBurstMessage[],
-  ctx: { runId: () => Promise<string>; judge: ReturnType<typeof lazyJudgeRun>; ownAddresses: OwnAddressesOnce; now: number },
+  ctx: {
+    runId: () => Promise<string>;
+    judge: ReturnType<typeof lazyJudgeRun>;
+    ownAddresses: OwnAddressesOnce;
+    brandContext: () => Promise<BrandContext>;
+    now: number;
+  },
 ): Promise<GmailDecision> {
   const ours = await ctx.ownAddresses();
   type Recorded = Extract<GmailDecision, { kind: "record" }>;
@@ -245,10 +295,9 @@ export async function decideGmailBurst(
   });
   // The brand's own address (its connected mailbox: its own sent mail; a sending mailbox; its domain) is never a person.
   if (isBrandAddress(address, ours)) return skip(GMAIL_REPLY_REASONS.OWN_ADDRESS);
-  // Only words addressed TO the brand count: a mail to someone else, the brand only copied, is not one.
-  burst = burst.filter((m) => addressedToBrand(m.to, ours));
-  judged = judged.filter((m) => addressedToBrand(m.to, ours));
-  if (burst.length === 0) return skip(GMAIL_REPLY_REASONS.NOT_ADDRESSED_TO_BRAND);
+  // Who the words are written to is Jev's reading of the whole thread (`not_to_business`), never a rule on To
+  // (JEV-WHOLE-THREAD-1109: our sending mailboxes are shared by every client, so "To names one of ours" let a client's
+  // reply to HIS prospect through as words to us).
 
   let emailPathAnswer: EmailPathAnswer;
   try {
@@ -278,10 +327,11 @@ export async function decideGmailBurst(
       emailPathAnswer,
     });
   }
+  const judgedKeys = new Set(judged.map((m) => m.messageId));
   const judgment = await judgeBurst(
     { orgId: scope.orgId, userId: scope.createdByUserId, brandId: scope.brandId, channel: CHANNEL, where: `gmail scope ${scope.id}` },
     ctx.judge.runId,
-    judged.map((m) => ({ eventId: m.messageId, at: m.at, text: m.subject ? `${m.subject}\n${m.text}` : m.text })),
+    () => gmailBurstContext(scope, address, judgedKeys, ctx.brandContext),
   );
   const verdict = burstVerdict(judgment);
   return {
@@ -360,6 +410,7 @@ async function detectGmailRepliesOn(
   if (moved.length === 0) return out;
 
   const ownAddresses = ownAddressesOnce(scope, runId);
+  const brandContext = brandContextOnce(scope, runId);
 
   for (const { address } of moved) {
     const reading = readEmailThreadForReply(await storedConversation(scope.id, address));
@@ -388,7 +439,7 @@ async function detectGmailRepliesOn(
     if (fresh.length === 0) {
       decision = { kind: "record", status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.BEFORE_WATCH, judgment: null, judged: false, reported: false, emailPathAnswer: null };
     } else {
-      decision = await decideGmailBurst(scope, address, burst, reading.burst.filter((m) => Date.parse(m.at) >= since), { runId, judge, ownAddresses, now });
+      decision = await decideGmailBurst(scope, address, burst, reading.burst.filter((m) => Date.parse(m.at) >= since), { runId, judge, ownAddresses, brandContext, now });
     }
     if (decision.kind === "not_owner") {
       // Another brand of the org owns this person: nothing recorded here.

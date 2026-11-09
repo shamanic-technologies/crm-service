@@ -65,6 +65,7 @@ import {
   type ReplyTriggerReport,
 } from "../../db/schema.js";
 import type { MatrixEvent } from "../matrix/client.js";
+import { editTarget, foldEdits, isOwnSender, messageWords } from "../matrix/events.js";
 import { judgeChoices } from "../judgments-client.js";
 import { runScopeBuild } from "../people/build.js";
 import { normalizeEmail, type Presence } from "../people/identity.js";
@@ -89,6 +90,9 @@ import { automationOn, isAccountType } from "../matrix/account-types.js";
 import { ourAutomatedEchoesOn } from "./own-automated.js";
 import { lazyJudgeRun, outcomeAtDetection } from "./outcome.js";
 import { matrixSenderKey } from "../people/automated.js";
+import { burstJudgeState, chatThreadLines, type BurstContext } from "./burst-context.js";
+import { personViewOfConversation, readBrandContext, type BrandContext } from "../people/relevance.js";
+import { connectionOwnSenders } from "../matrix/own-senders.js";
 import { matrixContactKeys, statedNotToBrand } from "../people/stated-not-to-brand.js";
 
 const SERVICE_NAME = "crm-service";
@@ -106,6 +110,8 @@ export const REPLY_LOOKBACK_MS = 24 * 3_600_000;
 export const REPORT_RETRY_WINDOW_MS = 24 * 3_600_000;
 const MAX_BACKOFF_MS = 60 * 60_000;
 const IN_FLIGHT_MS = 2 * 60_000;
+/** At or above this, Jev's "not written to this business" skips the burst (no Lead event, JEV-WHOLE-THREAD-1109). */
+export const NOT_TO_BUSINESS_MIN_PROBABILITY = 0.5;
 /** Below this, an `automated` verdict does not silence a person (coin flips stay human). */
 export const AUTOMATED_MIN_CONFIDENCE = 0.75;
 
@@ -126,6 +132,7 @@ export const REPLY_KINDS = [
   "wrong_person",
   "neutral",
   "automated",
+  "not_to_business",
 ] as const;
 export type ReplyKind = (typeof REPLY_KINDS)[number];
 export const POSITIVE_REPLY_KINDS: readonly ReplyKind[] = ["interested", "info_requested", "meeting_requested"];
@@ -145,6 +152,10 @@ const REPLY_KIND_CRITERIA: Record<ReplyKind, string> = {
   automated:
     "No person wrote any of them: automatic replies the account sends on its own (an away message, a greeting " +
     "message, 'thanks for contacting us, we will get back to you', an out-of-office), or a system notice.",
+  not_to_business:
+    "The new messages are not written to this business: the person writes to someone else (their own prospect, " +
+    "client, colleague or another company) and the business only receives a copy, or the words are about a deal " +
+    "between other people. Read who each message is addressed to and what it answers in the thread.",
 };
 
 /** At most this many messages of one burst are carried to campaign-service (the latest ones). */
@@ -158,6 +169,8 @@ export const REPLY_REASONS = {
   OWN_TEAM: "own_team",
   /** Jev: no person wrote it (away message, greeting, auto-reply). */
   AUTOMATED_REPLY: "automated_reply",
+  /** Jev, reading the whole thread: the new words are written to someone else, the business only copied (JEV-WHOLE-THREAD-1109). */
+  NOT_TO_BUSINESS: "not_to_business",
   /** LEGACY (before ONE-AI-CONVERSES-1029): Jev read no positive answer, nothing reported. Now `message_received`. */
   NOT_POSITIVE: "not_positive",
   /** Every message of the burst was mirrored before the watch started. */
@@ -302,6 +315,9 @@ export function triggerOfJudgment(judgment: Judgment | null | undefined): string
 export function burstVerdict(judgment: Judgment): { report: true; triggerId: string; positive: boolean } | { report: false; reason: string } {
   const p = judgment.probabilities ?? {};
   if (judgment.status === "ok" && (p.automated ?? 0) >= AUTOMATED_MIN_CONFIDENCE) return { report: false, reason: REPLY_REASONS.AUTOMATED_REPLY };
+  if (judgment.status === "ok" && (p.not_to_business ?? 0) >= NOT_TO_BUSINESS_MIN_PROBABILITY) {
+    return { report: false, reason: REPLY_REASONS.NOT_TO_BUSINESS };
+  }
   const triggerId = triggerOfJudgment(judgment);
   return { report: true, triggerId, positive: triggerId === POSITIVE_REPLY_TRIGGER };
 }
@@ -316,12 +332,31 @@ export interface BurstJudgeIdentity {
   where: string;
 }
 
-/**
- * Jev: what does this burst say (`REPLY_KINDS`)? One call per burst. The burst
- * judged is every message the person wrote since our last word (and since the
- * watch started), so a later "actually, tell me more" after a "no" is read in
- * its context; the latest words decide.
- */
+/** What Jev reads with a chat burst (./burst-context.ts): the business, the person, the whole thread of the room. */
+export async function matrixBurstContext(
+  conn: Pick<MatrixConnection, "id" | "orgId" | "brandId" | "matrixUserId" | "counterpartPrefix">,
+  conversation: { id: string; contactName: string | null; contactPhone: string | null } | undefined,
+  events: MatrixEvent[],
+  newIds: ReadonlySet<string>,
+  brandContext: () => Promise<BrandContext>,
+): Promise<BurstContext> {
+  const [business, own, knownBy] = await Promise.all([
+    brandContext(),
+    connectionOwnSenders(conn),
+    conversation ? personViewOfConversation(conn.orgId, conn.brandId, conversation.id) : Promise.resolve(null),
+  ]);
+  return {
+    business,
+    person: { name: conversation?.contactName ?? null, phone: conversation?.contactPhone ?? null, knownBy },
+    thread: chatThreadLines(
+      foldEdits(events)
+        .filter((e) => !editTarget(e))
+        .map((e) => ({ eventId: e.event_id, at: e.origin_server_ts, byThePerson: !isOwnSender(e.sender, own), text: messageWords(e.content) })),
+      newIds,
+    ),
+  };
+}
+
 /** The recorded sender verdict of a chat account says automated, confidently (people/automated.ts). */
 async function isAutomatedChatSender(orgId: string, contactId: string): Promise<boolean> {
   const [v] = await db
@@ -331,20 +366,29 @@ async function isAutomatedChatSender(orgId: string, contactId: string): Promise<
   return v?.verdict === "automated" && v.confidence >= AUTOMATED_MIN_CONFIDENCE;
 }
 
-export async function judgeBurst(who: BurstJudgeIdentity, runId: () => Promise<string>, burst: BurstMessage[]): Promise<Judgment> {
+/**
+ * Jev: what does this burst say (`REPLY_KINDS`)? One call per burst. The burst
+ * judged is every message the person wrote since our last word (and since the
+ * watch started), marked `new` in the WHOLE thread Jev reads with the business
+ * and the person (./burst-context.ts, JEV-WHOLE-THREAD-1109): who each message
+ * is written to and what it answers is Jev's reading, never a rule of ours.
+ */
+export async function judgeBurst(
+  who: BurstJudgeIdentity,
+  runId: () => Promise<string>,
+  loadContext: () => Promise<BurstContext>,
+): Promise<Judgment> {
   try {
+    // Inside the try: a business or thread unreadable is a judge unavailable (reported, never silenced).
+    const context = await loadContext();
     const result = await judgeChoices(
-      {
-        context:
-          `A business talks with someone on ${who.channel}. These are the messages that came from that ` +
-          "person's account since the business last wrote (or since the start), in order. The latest ones say " +
-          "where the person stands now.",
-        messages: burst.map((m) => ({ at: m.at, text: m.text })),
-      },
+      burstJudgeState(who.channel, context),
       {
         reply: {
           type: "choice",
-          instructions: "What do these messages say to the business, as of the latest one?",
+          instructions:
+            `What do the new messages say to ${context.business.brand.name}, as of the latest one? ` +
+            "Read the whole thread first: who wrote each message, to whom, and what it answers.",
           criteria: REPLY_KIND_CRITERIA,
         },
       },
@@ -454,6 +498,12 @@ async function detectRepliesOn(
     .limit(1);
 
   const automationAllowed = await automationAllowedOn(conn.id);
+  // The business Jev reads with every burst of the pass (JEV-WHOLE-THREAD-1109): read once, on the judge run.
+  let brandContextRead: Promise<BrandContext> | null = null;
+  const brandContext = () =>
+    (brandContextRead ??= judge
+      .runId()
+      .then((runId) => readBrandContext({ orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId, runId })));
 
   for (const { roomId, campaign } of threads) {
     const since = (campaign ? conn.replyWatchSince : conn.openReplyWatchSince).getTime();
@@ -476,7 +526,13 @@ async function detectRepliesOn(
       );
     out.threadsRead += 1;
     const [conversation] = await db
-      .select({ id: conversations.id, contactId: conversations.contactId, contactPhone: contacts.phoneE164, ghost: contacts.channelHandle })
+      .select({
+        id: conversations.id,
+        contactId: conversations.contactId,
+        contactPhone: contacts.phoneE164,
+        contactName: contacts.fullName,
+        ghost: contacts.channelHandle,
+      })
       .from(conversations)
       .leftJoin(contacts, eq(contacts.id, conversations.contactId))
       .where(and(eq(conversations.connectionId, conn.id), eq(conversations.roomId, roomId)));
@@ -571,10 +627,12 @@ async function detectRepliesOn(
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.AUTOMATED_REPLY;
     } else {
+      const judged = reading.burst.filter((m) => (ingested.get(m.eventId) ?? 0) >= since && !echoes.has(m.eventId));
+      const conv = conversation;
       judgment = await judgeBurst(
         { orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId, channel: conn.channel, where: `connection ${conn.id}` },
         judge.runId,
-        reading.burst.filter((m) => (ingested.get(m.eventId) ?? 0) >= since && !echoes.has(m.eventId)),
+        () => matrixBurstContext(conn, conv, events, new Set(judged.map((m) => m.eventId)), brandContext),
       );
       const verdict = burstVerdict(judgment);
       // Only a POSITIVE reply produces the `conversation` outcome (./outcome.ts); every reported burst is a Lead event.

@@ -1619,13 +1619,22 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   had no words. A connection linked after boot is read by the next live tick (connections re-read each tick); its first
   look is the never-history baseline; any brand
   send `sending` < 2 min holds the pass. Jev (`person|automated`, >= 0.75 silences; down = person) drops auto-replies.
-- **Gmail: our own mail is never a person, words to someone else are not words to us** (ONE-AI-CONVERSES-1029,
-  replaces OWN-TEAM-GMAIL-1016's member skip). `own_address` = the address is the org's CONNECTED MAILBOX
-  (google-service `GET /orgs/google/accounts`: google files the mailbox's own sent mail as `inbound` on the mailbox's
-  address since from == address; all 8 `own_team` rows ever, 2026-10-21..29, were the owner's own mails to clients from
-  his connected gmail), a sending mailbox or the brand's domain. `not_addressed_to_brand` = no mail of the burst names
-  one of those in To (store keeps To only; a teammate's pitch to a prospect, mailbox in Cc; empty To = benefit). Never
-  re-add a member skip: a member's mail TO the brand is a Lead event. Unreadable accounts = the pass records nothing.
+- **Gmail: our own mail is never a person** (ONE-AI-CONVERSES-1029, replaces OWN-TEAM-GMAIL-1016's member skip).
+  `own_address` = the address is the org's CONNECTED MAILBOX (google-service `GET /orgs/google/accounts`: google files
+  the mailbox's own sent mail as `inbound` on the mailbox's address since from == address), a sending mailbox or the
+  brand's domain. Never re-add a member skip: a member's mail TO the brand is a Lead event. Unreadable accounts = the
+  pass records nothing.
+- **Jev reads the WHOLE thread + the business to judge a burst** (`burst-context.ts`, JEV-WHOLE-THREAD-1109, owner
+  2026-11-09 « donne tout le fil et le maximum d'information, dans la limite du context window pour Jev »; no rule of
+  ours on To / Cc / greetings): business (name, site, description, active offers as created, other brands), the person
+  (name, address / phone, the brand's tools knowing them), every message we hold of the conversation (Gmail store:
+  from / to / cc as stored, `writtenBy`; Matrix: the room folded), the burst marked `new`, cut oldest-first to 60k chars
+  (Jev 32k tokens per question). Kind `not_to_business` >= 0.5 = `skipped / not_to_business` (no Lead event, no
+  outcome). Chaim Tesser (2026-11-08, a client) replied-all to HIS prospect "Hi Mario", To his campaign's mailbox: the
+  old To rule (`not_addressed_to_brand`, old rows) took our SHARED sending pool as the brand's, Jev saw his words alone
+  (interested 0.89) and we emailed him; replayed on 90 bursts of 30 days: him 0.96 and Doc Dinners' "Hi Dr. Evans"
+  0.72 skipped, every real prospect still positive, the rest of the skips the owner's personal / other-business mail.
+  Replay door: `.context`-style script over `gmailBurstContext` / `matrixBurstContext` (exported, `asOf`).
   Brand-domain addresses are never people (the build drops them), so they never reach the trigger. **A phone is offered to campaign-service only when DIALABLE**
   (`trigger-door.ts` `dialablePhone`: E.164 + libphonenumber valid; else logged, dropped; phone trigger skips it
   `invalid_number`).

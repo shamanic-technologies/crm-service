@@ -44,6 +44,7 @@ let googleAccountsDown = false;
 let campaignCalls: { headers: Headers; body: Record<string, unknown> }[] = [];
 let jevChoice = "interested";
 let jevCalls = 0;
+let jevStates: Record<string, unknown>[] = [];
 // instantly-service's answer per mail (POST /orgs/reply-ownership): who acts on it. Default: nobody there.
 let ownership: { owner: "email_path" | "none"; reason: string } | "down" = { owner: "none", reason: "no_sequence" };
 let ownershipAsks: { from: string; to: string[]; at: string }[] = [];
@@ -51,6 +52,7 @@ let ownershipAsks: { from: string; to: string[]; at: string }[] = [];
 function installFetchStub() {
   campaignCalls = [];
   jevCalls = 0;
+  jevStates = [];
   ownershipAsks = [];
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
@@ -69,7 +71,16 @@ function installFetchStub() {
       return json({ messages: body.messages.map((m) => ({ from: m.from, ...answer })) });
     }
     if (url.host === "brand.test" && /^\/internal\/brands\/[^/]+$/.test(url.pathname)) {
-      return json({ brand: { domain: "brand-gmail.example" } });
+      return json({ brand: { name: "Brand Gmail", domain: "brand-gmail.example", url: null } });
+    }
+    if (url.host === "brand.test" && /^\/internal\/brands\/[^/]+\/extracted-fields$/.test(url.pathname)) {
+      return json({ fields: [] });
+    }
+    if (url.host === "brand.test" && url.pathname === "/orgs/brands") {
+      return json({ brands: [] });
+    }
+    if (url.host === "brand.test" && /\/offers\/[^/]+\/user-fields$/.test(url.pathname)) {
+      return json({ fields: { services: { value: ["Sales meetings"] } } });
     }
     if (url.host === "brand.test" && /^\/internal\/brands\/[^/]+\/offers$/.test(url.pathname)) {
       return json({ offers: [{ offerId: ONLY_OFFER, name: "Only", status: "active" }] });
@@ -81,6 +92,7 @@ function installFetchStub() {
     }
     if (url.pathname === "/orgs/judgments") {
       jevCalls += 1;
+      jevStates.push((JSON.parse(String(init?.body)) as { state: Record<string, unknown> }).state);
       return json({ model: "jev", answers: { reply: { type: "choice", choice: jevChoice, confidence: 0.93, probabilities: { [jevChoice]: 0.93 } } } });
     }
     if (url.host === "campaign.test" && url.pathname === "/internal/trigger-events") {
@@ -98,12 +110,12 @@ const min = (n: number) => new Date(T0 + n * 60_000);
 let scope: PeopleScope;
 
 /** One stored Gmail mail; addressed to the person = ours (outbound), else the person's (inbound). */
-async function mail(scopeId: string, key: string, at: Date, text: string, to: string[] = [OWNER_MAILBOX], address = PERSON) {
-  const direction = to.includes(address) ? "outbound" : "inbound";
+async function mail(scopeId: string, key: string, at: Date, text: string, to: string[] = [OWNER_MAILBOX], address = PERSON, as?: "other") {
+  const direction = as ?? (to.includes(address) ? "outbound" : "inbound");
   await db.insert(peopleMessageTexts).values({
     scopeId, source: "gmail", unit: address, address, messageKey: key, at, direction, subject: "Your offer", body: text,
     searchText: `Your offer\n${text}`,
-    item: { at: at.toISOString(), source: "gmail", channel: "email", kind: "message", direction, subject: "Your offer", text, from: direction === "inbound" ? address : OWNER_MAILBOX, to, ref: { gmailMessageId: key, threadId: "thread-1" } },
+    item: { at: at.toISOString(), source: "gmail", channel: "email", kind: "message", direction, subject: "Your offer", text, from: direction === "inbound" ? address : direction === "other" ? SENDING_MAILBOX : OWNER_MAILBOX, to, ref: { gmailMessageId: key, threadId: "thread-1" } },
   });
 }
 
@@ -231,17 +243,26 @@ describe.skipIf(!RUN)("Gmail reply trigger", () => {
     expect(campaignCalls[0].body).toMatchObject({ person: { email: TEAMMATE, name: "Teammate" }, idempotencyKey: `crm:gmail:reply:${BRAND}:t1` });
   });
 
-  it("a mail to someone else, the brand only copied (a teammate's pitch to a prospect), is not words to the brand (OWN-TEAM-GMAIL-1016)", async () => {
+  it("JEV-WHOLE-THREAD-1109: Jev reads the whole thread and the business, and says a mail to someone else is not to the brand", async () => {
     const TEAMMATE = "teammate.personal@gmail-like.example";
     await addPerson(TEAMMATE, "Teammate");
     scope = await startWatch(scope);
-    // To holds only the prospect: the mailbox was in Cc (the store keeps To only).
+    // The thread before: the brand wrote to the prospect (stored on the teammate's address as a third-party mail).
+    await mail(scope.id, "k0", min(0), "Hi prospect, here is our scope.", ["prospect@rupi.example"], TEAMMATE, "other");
+    // Then the teammate answers the PROSPECT, the brand only copied: no To rule decides it any more, Jev does.
     await mail(scope.id, "k1", min(1), "Hi RUPI team, We could run that for you. Interested?", ["prospect@rupi.example"], TEAMMATE);
+    jevChoice = "not_to_business";
     const d = await detectGmailReplies(scope, run1);
     expect(d.detected).toBe(0);
-    expect(d.skipped).toEqual([{ reason: "not_addressed_to_brand", address: TEAMMATE }]);
-    expect(jevCalls).toBe(0);
-    expect(ownershipAsks).toEqual([]);
+    expect(d.skipped).toEqual([{ reason: "not_to_business", address: TEAMMATE }]);
+    expect(jevCalls).toBe(1);
+    const state = jevStates[0] as { business: { name: string; offers: { whatWeOffer: string }[] }; thread: Record<string, unknown>[] };
+    expect(state.business).toMatchObject({ name: "Brand Gmail", offers: [{ whatWeOffer: "Sales meetings" }] });
+    // The whole conversation, oldest first, with who wrote each mail and to whom; only the burst is new.
+    expect(state.thread.map((l) => [l.text, l.to, l.new ?? false])).toEqual([
+      ["Hi prospect, here is our scope.", ["prospect@rupi.example"], false],
+      ["Hi RUPI team, We could run that for you. Interested?", ["prospect@rupi.example"], true],
+    ]);
     await deliverDueGmailReplies();
     expect(campaignCalls).toHaveLength(0);
   });

@@ -113,6 +113,8 @@ export interface TimelineItem {
   text: string | null;
   from: string | null;
   to: string[];
+  /** Gmail: Cc as google-service serves it (absent when none or not served yet). */
+  cc?: string[];
   /**
    * The source's own ids for this item (thread, message, campaign, contact...). A message
    * that IS one of our facts (Matrix, Gmail) also carries `factId` = the live fact's id on

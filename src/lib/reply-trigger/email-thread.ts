@@ -20,7 +20,11 @@ export interface StoredEmail {
   direction: string | null;
   subject: string | null;
   text: string | null;
+  /** The sender as the store holds it (null on an item that never carried one). */
+  from?: string | null;
   to: string[];
+  /** Cc as the store holds it (empty until google-service serves it on the conversation). */
+  cc?: string[];
   threadId: string | null;
 }
 
