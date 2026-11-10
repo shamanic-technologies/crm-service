@@ -13,7 +13,17 @@
  * a stale value keeps being served until `maxStaleMs`, then the caller waits for
  * a load and sees its error. `at` is when the load STARTED, so an entry's age is
  * the age of the data it holds.
+ *
+ * DASH-SPEED-1110: an optional `store` keeps each loaded entry beyond the process
+ * (a deploy restarts the container): a key missing from memory is first looked up
+ * there, and a stored entry is served by the same age rules (stale = served while
+ * one refresh runs). `maxEntries` bounds the keys held in memory (oldest dropped).
  */
+export interface SwrStore<T> {
+  read(key: string): Promise<SwrEntry<T> | undefined>;
+  write(key: string, entry: SwrEntry<T>): Promise<void>;
+}
+
 export interface SwrEntry<T> {
   value: T;
   at: number;
@@ -22,14 +32,51 @@ export interface SwrEntry<T> {
 export class SwrCache<T> {
   private readonly entries = new Map<string, SwrEntry<T>>();
   private readonly inflight = new Map<string, Promise<T>>();
+  private readonly seeding = new Map<string, Promise<void>>();
 
   constructor(
     private readonly name: string,
     private readonly freshMs: () => number,
     private readonly maxStaleMs: () => number,
+    private readonly options: { store?: SwrStore<T>; maxEntries?: number } = {},
   ) {}
 
+  /** Age of the entry held for `key` (memory, else the store), undefined when none. */
+  async ageOf(key: string): Promise<number | undefined> {
+    await this.seed(key);
+    const hit = this.entries.get(key);
+    return hit ? Date.now() - hit.at : undefined;
+  }
+
+  /** Load `key` now (shared with a load already running), whatever the age of what is held. */
+  reload(key: string, load: (previous: SwrEntry<T> | undefined) => Promise<T>): Promise<T> {
+    return this.seed(key).then(() => this.refresh(key, load));
+  }
+
+  private seed(key: string): Promise<void> {
+    const store = this.options.store;
+    if (!store || this.entries.has(key)) return Promise.resolve();
+    const running = this.seeding.get(key);
+    if (running) return running;
+    const p = store
+      .read(key)
+      .then((stored) => {
+        if (stored && !this.entries.has(key)) this.set(key, stored);
+      })
+      .finally(() => this.seeding.delete(key));
+    this.seeding.set(key, p);
+    return p;
+  }
+
+  private set(key: string, entry: SwrEntry<T>): void {
+    this.entries.delete(key);
+    this.entries.set(key, entry);
+    const max = this.options.maxEntries;
+    if (max) while (this.entries.size > max) this.entries.delete(this.entries.keys().next().value as string);
+  }
+
   async get(key: string, load: (previous: SwrEntry<T> | undefined) => Promise<T>): Promise<T> {
+    await this.seed(key);
     const hit = this.entries.get(key);
     const age = hit ? Date.now() - hit.at : Infinity;
     if (hit && age < this.freshMs()) return hit.value;
@@ -47,8 +94,10 @@ export class SwrCache<T> {
     if (running) return running;
     const startedAt = Date.now();
     const p = load(this.entries.get(key))
-      .then((value) => {
-        this.entries.set(key, { value, at: startedAt });
+      .then(async (value) => {
+        const entry = { value, at: startedAt };
+        this.set(key, entry);
+        if (this.options.store) await this.options.store.write(key, entry);
         return value;
       })
       .finally(() => {
@@ -58,8 +107,10 @@ export class SwrCache<T> {
     return p;
   }
 
+  /** Memory only: a store keeps its rows (callers clear their store themselves). */
   clear(): void {
     this.entries.clear();
     this.inflight.clear();
+    this.seeding.clear();
   }
 }

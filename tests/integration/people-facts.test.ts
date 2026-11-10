@@ -421,12 +421,30 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
 
   it("a second pass with nothing changed emits nothing", async () => {
     const s = await seed();
-    await emitScopeFacts(s.scope);
+    expect((await emitScopeFacts(s.scope)).ownershipChecked).toBe(true);
     const before = await maxSeq();
     const again = await emitScopeFacts(s.scope);
     expect(again.emitted).toBe(0);
     expect(again.corrected + again.withdrawnGone + again.merged + again.split).toBe(0);
+    // DASH-SPEED-1110: the people index did not move, so no fact can change owner: the ownership pass is skipped.
+    expect(again.ownershipChecked).toBe(false);
     expect(await maxSeq()).toBe(before);
+  });
+
+  it("DASH-SPEED-1110: the ownership pass runs again only when a person's keys or presences move, never for other fields", async () => {
+    const s = await seed();
+    await emitScopeFacts(s.scope);
+    await db.update(people).set({ displayName: "Someone else", state: "won" }).where(eq(people.scopeId, s.scope.id));
+    expect((await emitScopeFacts(s.scope)).ownershipChecked).toBe(false);
+    const [first] = await db.select().from(people).where(eq(people.scopeId, s.scope.id));
+    await db
+      .update(people)
+      .set({ identityKeys: [...(first.identityKeys as string[]), "email:another@x.com"] })
+      .where(eq(people.id, first.id));
+    const moved = await emitScopeFacts(s.scope);
+    expect(moved.ownershipChecked).toBe(true);
+    expect(moved.merged + moved.split).toBe(0);
+    expect((await emitScopeFacts(s.scope)).ownershipChecked).toBe(false);
   });
 
   it("BOX-DB-LOAD-1028-CRM-LOCK: the global feed lock is taken only to write, so a pass with nothing to write never waits on it", async () => {

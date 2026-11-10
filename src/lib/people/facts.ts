@@ -293,6 +293,29 @@ export class PersonIndex {
 }
 
 /**
+ * DASH-SPEED-1110: a digest of exactly what `PersonIndex.resolve` reads to pick a fact's OWNER: each built
+ * person's key, identity keys and presences. A fact changes owner only when it moves: while it is the
+ * digest the scope's last ownership pass ran under (`people_scopes.ownership_index_hash`), every fact
+ * already re-owned resolves to its current owner and every fact written since was owned under the same
+ * index, so the pass (a GROUP BY over every fact ever emitted: 1.7M rows, 10-15 s on distribute.you, on
+ * every emission) is skipped. The human of a standalone subject never moves an owner (it names its humanId).
+ */
+export function ownershipIndexHash(
+  rows: readonly (Pick<Person, "personKey" | "identityKeys" | "presences">)[],
+): string {
+  const h = createHash("sha256");
+  for (const r of [...rows].sort((a, b) => (a.personKey < b.personKey ? -1 : a.personKey > b.personKey ? 1 : 0))) {
+    h.update(r.personKey);
+    h.update("\u0001");
+    for (const k of r.identityKeys as string[]) h.update(`${k}\u0002`);
+    h.update("\u0001");
+    for (const p of r.presences as Presence[]) h.update(`${presenceStableKey(p)}\u0002`);
+    h.update("\u0000");
+  }
+  return h.digest("hex");
+}
+
+/**
  * UNIBOX-FACT-LAG-1028: the identity keys every mirrored contact of the brand states (as the build
  * derives them), by crm contact id. A fact about a record the people build has not joined yet (its
  * presence is unknown: a Stripe customer created at checkout a minute ago) resolves on these keys to
@@ -1452,6 +1475,8 @@ export interface FactEmissionSummary {
   gmailOtherSkipped: number;
   merged: number;
   split: number;
+  /** DASH-SPEED-1110: whether this emission re-checked every fact's owner (the people index moved since the last check). */
+  ownershipChecked: boolean;
   bySource: Record<string, number>;
 }
 
@@ -1619,6 +1644,12 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
       .from(people)
       .where(eq(people.scopeId, scope.id));
     const index = new PersonIndex(personRows);
+    // DASH-SPEED-1110: re-own every fact only when the index that picks owners moved (`ownershipIndexHash`).
+    const indexHash = ownershipIndexHash(personRows);
+    const [ownershipMark] = (await tx.execute(
+      sql`SELECT ownership_index_hash AS "hash" FROM people_scopes WHERE id = ${scope.id}`,
+    )) as unknown as { hash: string | null }[];
+    const ownershipDue = ownershipMark?.hash !== indexHash;
 
     const [ghl, matrix, matrixGroups, gmail, posthog, stripe, clerk, csv, connected, calendar, credit, mailbox] = await Promise.all([
       ghlCandidates(orgId, brandId),
@@ -1679,7 +1710,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
       .where(and(eq(peopleFacts.orgId, orgId), eq(peopleFacts.brandId, brandId), eq(peopleFacts.live, true), sql`${peopleFacts.naturalKey} IS NOT NULL`))
       .orderBy(asc(peopleFacts.feedSeq))) as DiffFact[];
     const liveByKey = new Map(liveFacts.map((f) => [f.naturalKey!, f]));
-    const ownershipGroups = (await tx.execute(sql`
+    const ownershipGroups = !ownershipDue ? [] : (await tx.execute(sql`
       SELECT owner_person_key AS "ownerPersonKey", subject_presence AS "subjectPresence", subject_keys AS "subjectKeys",
              subject_standalone AS "subjectStandalone",
              CASE WHEN subject_standalone THEN emails END AS emails,
@@ -2021,7 +2052,10 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
     }
     await insertAll(tx, withdrawnRows);
     await insertAll(tx, fresh);
-    await tx.update(peopleScopes).set({ factsStatedThrough: new Date(readsFrom) }).where(eq(peopleScopes.id, scope.id));
+    await tx
+      .update(peopleScopes)
+      .set({ factsStatedThrough: new Date(readsFrom), ...(ownershipDue ? { ownershipIndexHash: indexHash } : {}) })
+      .where(eq(peopleScopes.id, scope.id));
 
     return {
       candidates: candidates.size,
@@ -2040,6 +2074,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
       gmailOtherSkipped: gmail.skippedOther,
       merged: ownership.merges.length,
       split: ownership.splits.length,
+      ownershipChecked: ownershipDue,
       bySource,
     };
   });

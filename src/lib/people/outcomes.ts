@@ -50,7 +50,7 @@ import { db } from "../../db/index.js";
 import { normalizeEmail } from "./identity.js";
 import { mapLimit, siblingGetOk, type SiblingIdentity } from "./siblings.js";
 import { readBrandOffers } from "../form-trigger/offer.js";
-import { SwrCache } from "./swr.js";
+import { SwrCache, type SwrStore } from "./swr.js";
 import { createHash } from "node:crypto";
 import { STAFF_DOMAIN, STAFF_EMAIL_LIST } from "../owner-telegram.js";
 
@@ -351,13 +351,28 @@ export async function readServedEmails(identity: SiblingIdentity): Promise<strin
  * `person_key`.
  */
 export function servedPeople(orgId: string, brandId: string, emails: string[]): SQL {
+  const list = JSON.stringify(emails);
   return sql`
     SELECT DISTINCT COALESCE(k.person_key, 'email:' || x.email) AS person_key
-    FROM jsonb_array_elements_text(${JSON.stringify(emails)}::jsonb) AS x(email)
-    LEFT JOIN (
-      SELECT pp.person_key, key FROM people pp, jsonb_array_elements_text(pp.identity_keys) AS key
-      WHERE pp.org_id = ${orgId} AND pp.brand_id = ${brandId} AND key LIKE 'email:%'
-    ) k ON k.key = 'email:' || x.email
+    FROM jsonb_array_elements_text(${list}::jsonb) AS x(email)
+    LEFT JOIN (${emailKeysOfPeopleHolding(orgId, brandId, sql`SELECT 'email:' || y.email FROM jsonb_array_elements_text(${list}::jsonb) AS y(email)`)}) k
+      ON k.key = 'email:' || x.email
+  `;
+}
+
+/**
+ * `(person_key, key)`: every email key of the brand's people holding one of the asked keys (`asked` = a
+ * one-column query of `email:<addr>` keys). The people are found FIRST through the identity-key GIN index
+ * (`?|`, a superset prefilter of the exact key join the caller applies), then only their keys are unnested:
+ * unnesting every key of every person of the brand to match a few hundred addresses was 360 ms on the
+ * distribute.you brand (41k people) on every Outcomes read (DASH-SPEED-1110). Same rows.
+ */
+function emailKeysOfPeopleHolding(orgId: string, brandId: string, asked: SQL): SQL {
+  return sql`
+    SELECT pp.person_key, key FROM people pp, jsonb_array_elements_text(pp.identity_keys) AS key
+    WHERE pp.org_id = ${orgId} AND pp.brand_id = ${brandId}
+      AND pp.identity_keys ?| ARRAY(${asked})
+      AND key LIKE 'email:%'
   `;
 }
 
@@ -368,13 +383,12 @@ export function servedPeople(orgId: string, brandId: string, emails: string[]): 
  * (`email:<addr>`, the evidence's own fallback key).
  */
 function contactedPeople(orgId: string, brandId: string, contacted: ContactedReach[]): SQL {
+  const list = JSON.stringify(contacted);
   return sql`
     SELECT DISTINCT x.step, COALESCE(k.person_key, 'email:' || x.email) AS person_key
-    FROM jsonb_to_recordset(${JSON.stringify(contacted)}::jsonb) AS x(step text, email text)
-    LEFT JOIN (
-      SELECT pp.person_key, key FROM people pp, jsonb_array_elements_text(pp.identity_keys) AS key
-      WHERE pp.org_id = ${orgId} AND pp.brand_id = ${brandId} AND key LIKE 'email:%'
-    ) k ON k.key = 'email:' || x.email
+    FROM jsonb_to_recordset(${list}::jsonb) AS x(step text, email text)
+    LEFT JOIN (${emailKeysOfPeopleHolding(orgId, brandId, sql`SELECT 'email:' || y.email FROM jsonb_to_recordset(${list}::jsonb) AS y(email text)`)}) k
+      ON k.key = 'email:' || x.email
   `;
 }
 
@@ -563,6 +577,8 @@ export async function readOutcomePeople(
   contactedOnly = false,
 ): Promise<{ total: number; people: OutcomePerson[] }> {
   const ev = evidence(orgId, brandId, step, inputs.reach);
+  // Only this step's contacted rows: every read below joins them on the step.
+  inputs = { reach: inputs.reach, contacted: inputs.contacted.filter((c) => c.step === step) };
   const onlyContacted = contactedOnly ? sql`WHERE ${CONTACTED_FOR_STEP}` : sql``;
   const list = await rows<{
     person_key: string;
@@ -581,7 +597,7 @@ export async function readOutcomePeople(
     total: number;
   }>(sql`
     WITH e AS (${ev}),
-    c AS (${contactedPeople(orgId, brandId, inputs.contacted)}),
+    c AS MATERIALIZED (${contactedPeople(orgId, brandId, inputs.contacted)}),
     s AS (
       SELECT person_key, source, min(occurred_at) AS reached_at FROM e GROUP BY person_key, source
     ),
@@ -603,6 +619,9 @@ export async function readOutcomePeople(
     LEFT JOIN c ON c.step = ${step} AND c.person_key = w.person_key
     JOIN latest l ON l.person_key = w.person_key
     LEFT JOIN people p ON p.org_id = ${orgId} AND p.brand_id = ${brandId} AND p.person_key = w.person_key
+      -- The scope too (people_scopes is unique per org x brand): the (scope_id, person_key) index then finds the row
+      -- in one probe; on person_key alone a nested loop walked the whole index per person (9.6 s, DASH-SPEED-1110).
+      AND p.scope_id = (SELECT ps.id FROM people_scopes ps WHERE ps.org_id = ${orgId} AND ps.brand_id = ${brandId})
     ${onlyContacted}
     ORDER BY w.reached_at ASC NULLS LAST, w.person_key
     LIMIT ${limit} OFFSET ${offset}
@@ -614,7 +633,7 @@ export async function readOutcomePeople(
       : contactedOnly
         ? (
             await rows<{ n: number }>(sql`
-              WITH e AS (${ev}), c AS (${contactedPeople(orgId, brandId, inputs.contacted)})
+              WITH e AS (${ev}), c AS MATERIALIZED (${contactedPeople(orgId, brandId, inputs.contacted)})
               SELECT count(DISTINCT e.person_key)::int AS n FROM e
               JOIN c ON c.step = ${step} AND c.person_key = e.person_key`)
           )[0].n
@@ -683,7 +702,7 @@ async function satisfiedMessagesOf(orgId: string, brandId: string, personKeys: s
   return out;
 }
 
-// ─── Cached reads (DASH-LATENCY-1014) ───────────────────────────────────────
+// ─── Cached reads (DASH-LATENCY-1014, DASH-SPEED-1110) ───────────────────────
 //
 // The dashboard reads a brand's outcomes on EVERY brand page, every few seconds per
 // open tab. Both inputs are cached per (org, brand), stale-while-revalidate (swr.ts):
@@ -693,28 +712,79 @@ async function satisfiedMessagesOf(orgId: string, brandId: string, personKeys: s
 //    withdrawal or a re-owning is always written beside a new fact, in the same
 //    transaction), the brand's GoHighLevel calendars (the booking-form rule), or the
 //    campaigns reach. Unchanged inputs reuse the figures, at most `outcomesReuseMaxMs()`.
-// A served figure is at most ~`outcomesFreshMs()` + one refresh old while a tab polls.
+// DASH-SPEED-1110: both are STORED per scope (`outcome_snapshots`), so a first visit and a
+// read after a deploy are served at once (the computation is 5-30 s on a big brand), and a
+// warm loop keeps every scope's answer younger than `outcomesWarmAfterMs()` without a reader.
+// A served figure is at most ~`outcomesFreshMs()` + one refresh old while a tab polls, and
+// never older than `outcomesMaxStaleMs()` (past it, the reader waits for a fresh computation
+// and sees its error: lead-service down for that long = 502, never an old figure forever).
 
-export const outcomesFreshMs = () => Number(process.env.PEOPLE_OUTCOMES_FRESH_MS) || 10_000;
-/** Past fresh and under this age, the cached answer is served while ONE refresh runs behind it. */
-export const outcomesMaxStaleMs = () => Number(process.env.PEOPLE_OUTCOMES_MAX_STALE_MS) || 60_000;
+export const outcomesFreshMs = () => Number(process.env.PEOPLE_OUTCOMES_FRESH_MS) || 60_000;
+/** Past fresh and under this age, the stored answer is served while ONE refresh runs behind it. */
+export const outcomesMaxStaleMs = () => Number(process.env.PEOPLE_OUTCOMES_MAX_STALE_MS) || 60 * 60_000;
 /** Unchanged inputs reuse the figures at most this long (a recompute still happens on a quiet brand). */
 export const outcomesReuseMaxMs = () => Number(process.env.PEOPLE_OUTCOMES_REUSE_MAX_MS) || 300_000;
+/** The warm loop refreshes a scope whose stored answer is older than this (nobody read it lately). */
+export const outcomesWarmAfterMs = () => Number(process.env.PEOPLE_OUTCOMES_WARM_AFTER_MS) || 20 * 60_000;
 
 /** lead-service could not be read: the route answers 502 campaign_outcomes_unavailable. */
 export class CampaignReachUnavailable extends Error {}
 
-const reachCache = new SwrCache<OutcomeInputs>("outcomes campaign reach", outcomesFreshMs, outcomesMaxStaleMs);
+const keyOf = (orgId: string, brandId: string) => `${orgId}|${brandId}`;
+const splitKey = (key: string) => {
+  const [orgId, brandId] = key.split("|");
+  return { orgId, brandId };
+};
+
+/** The stored snapshot column of a scope, as an SWR store (`inputs` or `counts`). No scope row = nothing stored. */
+function snapshotStore<T>(column: "inputs" | "counts"): SwrStore<T> {
+  const value = sql.identifier(column);
+  const at = sql.identifier(`${column}_at`);
+  // What this process last wrote per key: an unchanged value only moves its date (Doc Dinners' inputs are ~1 MB).
+  const written = new Map<string, string>();
+  return {
+    async read(key) {
+      const { orgId, brandId } = splitKey(key);
+      const [r] = await rows<{ value: T | null; at: Date | string | null }>(sql`
+        SELECT o.${value} AS value, o.${at} AS at FROM outcome_snapshots o JOIN people_scopes p ON p.id = o.scope_id
+        WHERE p.org_id = ${orgId} AND p.brand_id = ${brandId}`);
+      if (!r || r.value === null || r.at === null) return undefined;
+      return { value: r.value, at: new Date(r.at).getTime() };
+    },
+    async write(key, entry) {
+      const { orgId, brandId } = splitKey(key);
+      const json = JSON.stringify(entry.value);
+      const digest = createHash("sha256").update(json).digest("hex");
+      const when = new Date(entry.at).toISOString();
+      if (written.get(key) === digest) {
+        await db.execute(sql`
+          UPDATE outcome_snapshots o SET ${at} = ${when}::timestamptz, updated_at = now() FROM people_scopes p
+          WHERE p.id = o.scope_id AND p.org_id = ${orgId} AND p.brand_id = ${brandId} AND o.${value} IS NOT NULL`);
+        return;
+      }
+      await db.execute(sql`
+        INSERT INTO outcome_snapshots (scope_id, ${value}, ${at})
+        SELECT p.id, ${json}::jsonb, ${when}::timestamptz FROM people_scopes p WHERE p.org_id = ${orgId} AND p.brand_id = ${brandId}
+        ON CONFLICT (scope_id) DO UPDATE SET ${value} = EXCLUDED.${value}, ${at} = EXCLUDED.${at}, updated_at = now()`);
+      written.set(key, digest);
+    },
+  };
+}
+
+const reachCache = new SwrCache<OutcomeInputs>("outcomes campaign reach", outcomesFreshMs, outcomesMaxStaleMs, {
+  store: snapshotStore<OutcomeInputs>("inputs"),
+});
+
+const loadInputs = (identity: SiblingIdentity) => () =>
+  Promise.all([readCampaignReach(identity, LEAD_BUCKET_STEPS), readContactedReach(identity, LEAD_BUCKET_STEPS)])
+    .then(([reach, contacted]) => ({ reach, contacted }))
+    .catch((err: Error) => {
+      throw new CampaignReachUnavailable(err.message);
+    });
 
 /** Every step's campaigns reach of the brand (readCampaignReach over all steps) + its contacted leads, cached. */
 export function cachedOutcomeInputs(identity: SiblingIdentity): Promise<OutcomeInputs> {
-  return reachCache.get(`${identity.orgId}|${identity.brandId}`, () =>
-    Promise.all([readCampaignReach(identity, LEAD_BUCKET_STEPS), readContactedReach(identity, LEAD_BUCKET_STEPS)])
-      .then(([reach, contacted]) => ({ reach, contacted }))
-      .catch((err: Error) => {
-        throw new CampaignReachUnavailable(err.message);
-      }),
-  );
+  return reachCache.get(keyOf(identity.orgId, identity.brandId), loadInputs(identity));
 }
 
 /** What the counts are computed from, besides the campaigns reach. One indexed probe. */
@@ -738,24 +808,67 @@ interface CountsEntry {
   computedAt: number;
 }
 
-const countsCache = new SwrCache<CountsEntry>("outcomes counts", outcomesFreshMs, outcomesMaxStaleMs);
+const countsCache = new SwrCache<CountsEntry>("outcomes counts", outcomesFreshMs, outcomesMaxStaleMs, {
+  store: snapshotStore<CountsEntry>("counts"),
+});
 
-/** `readOutcomeCounts` for the brand, cached (figures identical to a fresh computation of the same inputs). */
-export async function cachedOutcomeCounts(identity: SiblingIdentity): Promise<OutcomeStepCount[]> {
-  const { orgId, brandId } = identity;
-  const entry = await countsCache.get(`${orgId}|${brandId}`, async (previous) => {
+const loadCounts =
+  (identity: SiblingIdentity, inputsOf: () => Promise<OutcomeInputs>) =>
+  async (previous: { value: CountsEntry } | undefined): Promise<CountsEntry> => {
+    const { orgId, brandId } = identity;
     const startedAt = Date.now();
-    const inputs = await cachedOutcomeInputs(identity);
+    const inputs = await inputsOf();
     const fingerprint = `${await outcomesFingerprint(orgId, brandId)}|${reachDigest(inputs)}`;
     const prev = previous?.value;
     if (prev && prev.fingerprint === fingerprint && Date.now() - prev.computedAt < outcomesReuseMaxMs()) return prev;
     return { steps: await readOutcomeCounts(orgId, brandId, inputs), fingerprint, computedAt: startedAt };
-  });
+  };
+
+/** `readOutcomeCounts` for the brand, cached (figures identical to a fresh computation of the same inputs). */
+export async function cachedOutcomeCounts(identity: SiblingIdentity): Promise<OutcomeStepCount[]> {
+  const entry = await countsCache.get(keyOf(identity.orgId, identity.brandId), loadCounts(identity, () => cachedOutcomeInputs(identity)));
   return entry.steps;
 }
 
-/** Tests: forget every cached read. */
+type OutcomePage = Awaited<ReturnType<typeof readOutcomePeople>>;
+// The step's people list, per page asked (memory only, its inputs are the stored ones): the same SQL a
+// minute apart answers the same page, and the dashboard polls it.
+const peopleCache = new SwrCache<OutcomePage>("outcomes people", outcomesFreshMs, outcomesMaxStaleMs, { maxEntries: 300 });
+
+/** `readOutcomePeople` on the cached inputs, cached per page asked. */
+export function cachedOutcomePeople(
+  identity: SiblingIdentity,
+  step: OutcomeStep,
+  limit: number,
+  offset: number,
+  inputs: OutcomeInputs,
+  contactedOnly: boolean,
+): Promise<OutcomePage> {
+  const { orgId, brandId } = identity;
+  return peopleCache.get(`${keyOf(orgId, brandId)}|${step}|${limit}|${offset}|${contactedOnly}`, () =>
+    readOutcomePeople(orgId, brandId, step, limit, offset, inputs, contactedOnly),
+  );
+}
+
+/**
+ * Re-read lead-service's buckets and recompute the counts of one brand now, stored (the warm loop).
+ * `identity.runId` is the run the lead-service reads ride.
+ */
+export async function refreshOutcomes(identity: SiblingIdentity): Promise<void> {
+  const key = keyOf(identity.orgId, identity.brandId);
+  const inputs = reachCache.reload(key, loadInputs(identity));
+  await inputs;
+  await countsCache.reload(key, loadCounts(identity, () => inputs));
+}
+
+/** Age of the brand's stored counts (memory, else DB), undefined when never computed. */
+export function outcomesAge(orgId: string, brandId: string): Promise<number | undefined> {
+  return countsCache.ageOf(keyOf(orgId, brandId));
+}
+
+/** Tests: forget every cached read held in memory (stored snapshots go with their scope row). */
 export function clearOutcomesCache(): void {
   reachCache.clear();
   countsCache.clear();
+  peopleCache.clear();
 }
