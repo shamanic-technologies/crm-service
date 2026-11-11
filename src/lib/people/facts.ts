@@ -48,7 +48,6 @@
 
 import { ownSenderSql } from "../matrix/own-senders.js";
 import { createHash } from "node:crypto";
-import type { AnyPgColumn } from "drizzle-orm/pg-core";
 import { and, asc, eq, getTableColumns, gt, inArray, sql, type SQL } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { humanKeys, people, peopleFacts, peopleScopes, personIdAliases, type PeopleFact, type PeopleScope, type Person } from "../../db/schema.js";
@@ -220,21 +219,59 @@ export interface FactPerson {
 const iso = (v: string | Date | null | undefined): string | null =>
   v === null || v === undefined ? null : new Date(v).toISOString();
 
+/** Steps of a long emission loop between two yields to the event loop (MON-PAGE-SPEED-1111). */
+const YIELD_EVERY = 1000;
+const yieldToLoop = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/** An array index key ("0".."4294967294"): an object puts these first, ascending, whatever the insertion order. */
+const isIndexKey = (k: string): boolean => /^(?:0|[1-9]\d{0,9})$/.test(k) && Number(k) < 4294967295;
+
+/**
+ * `JSON.stringify` of the value with every object's keys sorted, written in ONE pass (MON-PAGE-SPEED-1111).
+ * Byte-identical to the former `JSON.stringify(stable(v))` (stable = a sorted-key copy built with
+ * `Object.fromEntries`), so stored hashes still match: index keys first ascending (an object built from sorted
+ * entries orders them so), then the rest sorted; `undefined`/function members dropped from objects and `null`
+ * in arrays; a Date as its JSON. The copy-then-stringify was 11 % of the service's CPU and blocked the event
+ * loop up to 8.5 s per emission of distribute.you (every request waited behind it).
+ */
+export function canonicalJson(v: unknown): string | undefined {
+  if (v === null) return "null";
+  switch (typeof v) {
+    case "string":
+    case "number":
+    case "boolean":
+      return JSON.stringify(v);
+    case "object":
+      break;
+    case "bigint":
+      return JSON.stringify(v); // throws, as before
+    default:
+      return undefined;
+  }
+  if (Array.isArray(v)) {
+    let out = "[";
+    for (let i = 0; i < v.length; i++) out += (i ? "," : "") + (canonicalJson(v[i]) ?? "null");
+    return out + "]";
+  }
+  if (v instanceof Date) return JSON.stringify(v);
+  const keys = Object.keys(v as object).sort();
+  const index = keys.filter(isIndexKey);
+  const ordered = index.length ? [...index.sort((a, b) => Number(a) - Number(b)), ...keys.filter((k) => !isIndexKey(k))] : keys;
+  let out = "{";
+  let first = true;
+  for (const k of ordered) {
+    const member = canonicalJson((v as Record<string, unknown>)[k]);
+    if (member === undefined) continue;
+    out += (first ? "" : ",") + JSON.stringify(k) + ":" + member;
+    first = false;
+  }
+  return out + "}";
+}
+
 /** The content a fact asserts. Same content → same hash → nothing emitted. */
 export function contentHash(c: Pick<CandidateFact, "type" | "occurredAt" | "dateBasis" | "payload" | "sourceContactId">): string {
-  const stable = (v: unknown): unknown => {
-    if (Array.isArray(v)) return v.map(stable);
-    if (v && typeof v === "object" && !(v instanceof Date)) {
-      return Object.fromEntries(
-        Object.keys(v as object)
-          .sort()
-          .map((k) => [k, stable((v as Record<string, unknown>)[k])]),
-      );
-    }
-    return v;
-  };
   return createHash("sha256")
-    .update(JSON.stringify(stable([c.type, c.occurredAt, c.dateBasis, c.sourceContactId, c.payload])))
+    .update(canonicalJson([c.type, c.occurredAt, c.dateBasis, c.sourceContactId, c.payload])!)
     .digest("hex");
 }
 
@@ -1494,31 +1531,20 @@ type FeedFact = Omit<PeopleFact, "payload">;
 const { payload: _payload, ...FEED_COLUMNS } = getTableColumns(peopleFacts);
 
 /** A standalone subject's own column, null on every other fact (the diff resolves only those by subject). */
-const standaloneOnly = <T>(column: AnyPgColumn) => sql<T>`CASE WHEN ${peopleFacts.subjectStandalone} THEN ${column} END`;
 
 /**
  * What the emission's DIFF reads of every live fact (BOX-LOAD-1028-CRM-MEM). The subject's own fields
  * (presence, keys, emails, phones, name) are read only for a standalone subject (a CSV row): the diff
  * resolves no other fact by its subject. A fact withdrawn or re-stated is read whole (`readFeedFacts`).
  */
-const DIFF_COLUMNS = {
-  factId: peopleFacts.factId,
-  naturalKey: peopleFacts.naturalKey,
-  contentHash: peopleFacts.contentHash,
-  family: peopleFacts.family,
-  source: peopleFacts.source,
-  sourceRef: peopleFacts.sourceRef,
-  sourceContactId: peopleFacts.sourceContactId,
-  crmContactId: peopleFacts.crmContactId,
-  ownerPersonKey: peopleFacts.ownerPersonKey,
-  humanId: peopleFacts.humanId,
-  subjectStandalone: peopleFacts.subjectStandalone,
-  subjectPresence: standaloneOnly<string | null>(peopleFacts.subjectPresence),
-  subjectKeys: standaloneOnly<unknown>(peopleFacts.subjectKeys),
-  emails: standaloneOnly<unknown>(peopleFacts.emails),
-  phones: standaloneOnly<unknown>(peopleFacts.phones),
-  fullName: standaloneOnly<string | null>(peopleFacts.fullName),
-};
+const DIFF_SELECT = sql.raw(`fact_id AS "factId", natural_key AS "naturalKey", content_hash AS "contentHash", family, source,
+  source_ref AS "sourceRef", source_contact_id AS "sourceContactId", crm_contact_id AS "crmContactId",
+  owner_person_key AS "ownerPersonKey", human_id AS "humanId", subject_standalone AS "subjectStandalone",
+  CASE WHEN subject_standalone THEN subject_presence END AS "subjectPresence",
+  CASE WHEN subject_standalone THEN subject_keys END AS "subjectKeys",
+  CASE WHEN subject_standalone THEN emails END AS emails,
+  CASE WHEN subject_standalone THEN phones END AS phones,
+  CASE WHEN subject_standalone THEN full_name END AS "fullName"`);
 type DiffFact = Pick<
   FeedFact,
   | "factId"
@@ -1618,6 +1644,9 @@ async function insertAll(tx: Tx, values: (typeof peopleFacts.$inferInsert)[]) {
 export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "brandId">): Promise<FactEmissionSummary> {
   const { orgId, brandId } = scope;
   return db.transaction(async (tx) => {
+    // MON-PAGE-SPEED-1111: the loops below run over every live fact and candidate (~50k for distribute.you);
+    // each yields every YIELD_EVERY steps so the service's requests are answered while an emission runs.
+    let step = 0;
     await tx.execute(brandFeedLock(orgId, brandId));
     // Every record committed before this instant is read below: what `facts_stated_through` promises.
     const [{ readsFrom }] = (await tx.execute(sql`SELECT clock_timestamp() AS "readsFrom"`)) as unknown as { readsFrom: Date | string }[];
@@ -1693,6 +1722,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
     const candidates = new Map<string, CandidateFact>();
     let duplicateKeys = 0;
     for (const c of all) {
+      if (++step % YIELD_EVERY === 0) await yieldToLoop();
       if (candidates.has(c.naturalKey)) duplicateKeys++;
       else candidates.set(c.naturalKey, c);
     }
@@ -1704,11 +1734,13 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
     // BOX-LOAD-1028-CRM-MEM: and only the columns the DIFF reads (a standalone subject's own fields beside).
     // The whole rows of 145k live facts held 413 MB of heap per emission, every minute; this slice holds
     // ~100 MB. The facts withdrawn or re-stated below are read whole on their own (`readFeedFacts`).
-    const liveFacts = (await tx
-      .select(DIFF_COLUMNS)
-      .from(peopleFacts)
-      .where(and(eq(peopleFacts.orgId, orgId), eq(peopleFacts.brandId, brandId), eq(peopleFacts.live, true), sql`${peopleFacts.naturalKey} IS NOT NULL`))
-      .orderBy(asc(peopleFacts.feedSeq))) as DiffFact[];
+    // MON-PAGE-SPEED-1111: raw rows (plain text/uuid/bool/jsonb, the driver's own values): drizzle's per-cell
+    // row mapping of ~50k rows x 16 columns blocked the event loop up to 5 s per emission.
+    const liveFacts = (await tx.execute(sql`
+      SELECT ${DIFF_SELECT} FROM people_facts
+      WHERE org_id = ${orgId} AND brand_id = ${brandId} AND live = true AND natural_key IS NOT NULL
+      ORDER BY feed_seq ASC
+    `)) as unknown as DiffFact[];
     const liveByKey = new Map(liveFacts.map((f) => [f.naturalKey!, f]));
     const ownershipGroups = !ownershipDue ? [] : (await tx.execute(sql`
       SELECT owner_person_key AS "ownerPersonKey", subject_presence AS "subjectPresence", subject_keys AS "subjectKeys",
@@ -1822,6 +1854,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
     let machine = 0;
     let machineWithdrawn = 0;
     for (const c of candidates.values()) {
+      if (++step % YIELD_EVERY === 0) await yieldToLoop();
       const live = liveByKey.get(c.naturalKey);
       if (c.machine) {
         if (live) {
@@ -1874,6 +1907,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
         .filter((ref): ref is string => !!ref),
     );
     for (const [key, live] of liveByKey) {
+      if (++step % YIELD_EVERY === 0) await yieldToLoop();
       if (candidates.has(key)) continue;
       if (goneMachines.has(live.sourceRef ?? "") && (live.family === "posthog_visit" || live.family === "posthog_event")) {
         withdrawals.push({ fact: live, reason: "machine_visit" });
@@ -1913,6 +1947,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
     // Re-stated once the withdrawn facts are read whole (below), in this order.
     const remints: { factId: string; crmContactId: string }[] = [];
     for (const live of liveByKey.values()) {
+      if (++step % YIELD_EVERY === 0) await yieldToLoop();
       if (touched.has(live.factId) || !live.sourceContactId || !live.crmContactId) continue;
       const held = rowNow.get(`${live.source}|${live.sourceContactId}`);
       if (!held || held.has(live.crmContactId)) continue;
@@ -1933,6 +1968,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
     let humanIdentified = 0;
     const humanRestates: { factId: string; owner: string; person: FactPerson }[] = [];
     for (const live of liveByKey.values()) {
+      if (++step % YIELD_EVERY === 0) await yieldToLoop();
       if (restated.has(live.factId)) continue;
       const owner = ownerNow.get(live.factId) ?? live.ownerPersonKey!;
       const person = personByKey.get(owner) ?? (live.subjectStandalone ? index.resolve(subjectOf(live)) : null);
