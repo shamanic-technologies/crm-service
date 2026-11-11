@@ -57,7 +57,8 @@ export function observeLogins(logins: BridgeLogin[], loginId: string, at: Date, 
   const ts = login?.state?.timestamp;
   const stated = typeof ts === "number" ? new Date(ts * 1000) : null;
   if (st.kind === "connected") {
-    return { state: "connected", bridgeState: login?.state?.state_event ?? null, reason: null, since: stated ?? linkedAt, at };
+    // A phone offline for days is connected; its warning stays on the span ("open the app or the device is dropped").
+    return { state: "connected", bridgeState: login?.state?.state_event ?? null, reason: st.phoneOffline ?? null, since: stated ?? linkedAt, at };
   }
   if (st.kind === "logged_out") {
     return { state: "logged_out", bridgeState: st.stateEvent, reason: st.message ?? (login ? null : "The login is gone from the bridge."), since: st.since, at };
@@ -98,7 +99,8 @@ export function applyObservation(prev: Span | null, obs: LineObservation, maxGap
         kind: "extend",
         lastSeenAt: obs.at > prev.lastSeenAt ? obs.at : prev.lastSeenAt,
         bridgeState: obs.bridgeState ?? prev.bridgeState,
-        reason: obs.reason ?? prev.reason,
+        // A connected line's reason is only the phone-offline warning: it ends when the bridge stops saying it.
+        reason: obs.state === "connected" ? obs.reason : (obs.reason ?? prev.reason),
       };
     }
   }

@@ -91,9 +91,19 @@ export async function linkedWhatsappAccounts(orgId: string, brandId: string): Pr
  *  - `logged_out`: BAD_CREDENTIALS / LOGGED_OUT, or the login is gone: only a relink helps;
  *  - `transient`: anything else (CONNECTING, TRANSIENT_DISCONNECT, STARTING,
  *    BRIDGE_UNREACHABLE, UNKNOWN_ERROR, no state yet): the bridge reconnects on its own.
+ *
+ * PHONE OFFLINE IS CONNECTED (MON-CAMPAIGN-FAILING-1111). mautrix-whatsapp states a phone unseen for 12+ days as
+ * `TRANSIENT_DISCONNECT` with `error: wa-phone-offline` while its own message says "The bridge is currently
+ * connected" (it only warns that WhatsApp will drop the device unless the app is opened). Read as transient, every
+ * send of distribute.you's +77776879632 was refused WHATSAPP_RECONNECTING from 2026-11-09 06:24 UTC for 2 days while
+ * the bridge kept receiving its messages. It is `connected`, carrying the bridge's warning (`phoneOffline`).
  */
 export type LoginStatus =
-  | { kind: "connected" }
+  | {
+      kind: "connected";
+      /** The bridge's warning when the phone has not been seen for days (still connected; open the app). */
+      phoneOffline?: string;
+    }
   | { kind: "transient"; stateEvent: string | null }
   | {
       kind: "logged_out";
@@ -108,6 +118,8 @@ export type LoginStatus =
 
 const CONNECTED_STATES = new Set(["CONNECTED", "BACKFILLING"]);
 const LOGGED_OUT_STATES = new Set(["BAD_CREDENTIALS", "LOGGED_OUT"]);
+/** The bridge's error code for "phone not seen for days, bridge still connected" (mautrix-whatsapp `WAPhoneOffline`). */
+export const PHONE_OFFLINE_ERROR = "wa-phone-offline";
 
 /** PURE: one account's status from the bridge's `/whoami` logins. */
 export function loginStatus(logins: BridgeLogin[], loginId: string): LoginStatus {
@@ -115,6 +127,9 @@ export function loginStatus(logins: BridgeLogin[], loginId: string): LoginStatus
   if (!login) return { kind: "logged_out", stateEvent: null, message: null, since: null, reachoutLockedUntil: null };
   const ev = login.state?.state_event ?? null;
   if (ev && CONNECTED_STATES.has(ev)) return { kind: "connected" };
+  if (login.state?.error === PHONE_OFFLINE_ERROR && !(ev && LOGGED_OUT_STATES.has(ev))) {
+    return { kind: "connected", phoneOffline: login.state.message ?? PHONE_OFFLINE_ERROR };
+  }
   if (ev && LOGGED_OUT_STATES.has(ev)) {
     const lock = login.state?.info?.reachout_timelock_until;
     const lockAt = typeof lock === "string" ? new Date(lock) : null;

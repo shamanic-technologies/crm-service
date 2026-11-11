@@ -32,6 +32,10 @@ describe("observeLogins: the line's state is what the bridge says", () => {
   it("a login gone from the bridge reads logged_out", () => {
     expect(observeLogins([], "33770657585", at, null).state).toBe("logged_out");
   });
+  it("a phone offline for days reads connected, the bridge's warning kept as the reason", () => {
+    const o = observeLogins([{ id: "1", name: "", state: { state_event: "TRANSIENT_DISCONNECT", error: "wa-phone-offline", message: "The bridge is currently connected" } }], "1", at, null);
+    expect(o).toMatchObject({ state: "connected", bridgeState: "TRANSIENT_DISCONNECT", reason: "The bridge is currently connected" });
+  });
   it("a transient state reads reconnecting, red only after 15 min", () => {
     const o = observeLogins([{ id: "1", name: "", state: { state_event: "TRANSIENT_DISCONNECT" } }], "1", at, null);
     expect(o.state).toBe("reconnecting");
