@@ -15,7 +15,7 @@ import {
   SERVICE_NAME,
   type AuthenticatedRequest,
 } from "../middleware/auth.js";
-import { createPlatformRun, SUPPORT_RUNS, updatePlatformRun } from "../lib/runs-client.js";
+import { createPlatformRun, SUPPORT_RUNS } from "../lib/runs-client.js";
 import { closePlatformRun } from "../lib/run-close.js";
 import { ensureScope, runPeopleBuildPass, runScopeBuild, type BuildSummary } from "../lib/people/build.js";
 import { PEOPLE_SOURCES, type Presence } from "../lib/people/identity.js";
@@ -1204,9 +1204,8 @@ const factsQuerySchema = z.object({
 
 /**
  * The fact feed after `since` (exclusive), in feed order. Read-only and DB-only (no cost).
- * UNIBOX-FACT-LAG-1028: lead-service asks every 15 s and most answers are empty. A page that
- * serves facts opens its platform run, like every internal route; an EMPTY page served nothing and
- * spent nothing, so it opens none (5,760 empty runs a day otherwise). A read that fails opens one, failed.
+ * MON-CRM-SLOW-READ-1111: a FREE read opens no run (nothing metered to declare; a run cost two runs-service round
+ * trips on every answer). See `answerFreeRead`.
  */
 router.get("/internal/people/facts", apiKeyAuth, async (req, res) => {
   const parsed = factsQuerySchema.safeParse(req.query);
@@ -1219,43 +1218,25 @@ router.get("/internal/people/facts", apiKeyAuth, async (req, res) => {
     page = await readFacts({ since: since ? Number(since) : 0, limit: limit ?? 500, orgId, brandId });
   } catch (err) {
     console.error("[crm-service] people facts read failed:", err);
-    try {
-      const run = await createPlatformRun({ serviceName: SERVICE_NAME, taskName: "people.facts.read" });
-      await updatePlatformRun(run.id, "failed", SERVICE_NAME);
-    } catch (e) {
-      console.error("[crm-service] failed to record the failed people facts read:", e);
-    }
     return res.status(500).json({ type: "internal", error: (err as Error).message });
-  }
-  if (page.facts.length === 0) return res.json(page);
-  try {
-    const run = await createPlatformRun({ serviceName: SERVICE_NAME, taskName: "people.facts.read" });
-    await updatePlatformRun(run.id, "completed", SERVICE_NAME);
-  } catch (err) {
-    return res.status(502).json({ type: "upstream", error: `run tracking unavailable: ${(err as Error).message}` });
   }
   res.json(page);
 });
 
 // ─── GET /internal/people/leg-reach (features-service: the brand's own team per leg) ──
 
-/** One platform run around a read-only internal handler; failures answer 500 and fail the run. */
-async function withPlatformRun(res: Response, taskName: string, handler: () => Promise<void>) {
-  let platformRunId: string;
-  try {
-    platformRunId = (await createPlatformRun({ serviceName: SERVICE_NAME, taskName })).id;
-  } catch (err) {
-    res.status(502).json({ type: "upstream", error: `run tracking unavailable: ${(err as Error).message}` });
-    return;
-  }
+/**
+ * A FREE internal read (DB, or a sibling's free read): no model, no paid API, no cost to declare, so NO run
+ * (MON-CRM-SLOW-READ-1111, owner: cost declaration is for metered spend; no server read over 1 s). The run each of
+ * these used to open cost two runs-service round trips BEFORE the answer, on a box whose crm event loop is busy:
+ * `/internal/people/stated-not-to-brand/email-sets` read 35-60 ms of DB and answered in 1.5 s (over 10 s at load),
+ * and instantly-service's delivery-status read 500'd behind it. A failure answers 500 and logs loud.
+ */
+async function answerFreeRead(res: Response, taskName: string, handler: () => Promise<void>) {
   try {
     await handler();
-    await updatePlatformRun(platformRunId, "completed", SERVICE_NAME);
   } catch (err) {
     console.error(`[crm-service] ${taskName} failed:`, err);
-    await updatePlatformRun(platformRunId, "failed", SERVICE_NAME).catch((e) =>
-      console.error(`[crm-service] failed to close ${taskName} run:`, e),
-    );
     if (!res.headersSent) res.status(500).json({ type: "internal", error: (err as Error).message });
   }
 }
@@ -1282,7 +1263,7 @@ router.get("/internal/people/leg-reach", apiKeyAuth, async (req, res) => {
     return res.status(400).json({ type: "validation", error: `from and to are required, one of: ${LEG_STEPS.join(", ")}` });
   }
   if (from === to) return res.status(400).json({ type: "validation", error: "from and to must differ" });
-  await withPlatformRun(res, "people.leg-reach.read", async () => {
+  await answerFreeRead(res, "people.leg-reach.read", async () => {
     let out: Awaited<ReturnType<typeof readLegReach>>;
     try {
       out = await readLegReach(brand.data, orgId, from, to);
@@ -1307,7 +1288,7 @@ router.get("/internal/people/leg-reach", apiKeyAuth, async (req, res) => {
 
 /** Every (org, brand) the leg read can be asked about, with the steps each can answer. */
 router.get("/internal/people/leg-reach/brands", apiKeyAuth, async (_req, res) => {
-  await withPlatformRun(res, "people.leg-reach.brands", async () => {
+  await answerFreeRead(res, "people.leg-reach.brands", async () => {
     res.json({ steps: LEG_STEPS, brands: await listLegReachBrands() });
   });
 });
@@ -1323,7 +1304,7 @@ router.post("/internal/people/relations/latest-messages", apiKeyAuth, async (req
   if (!parsed.success) {
     return res.status(400).json({ type: "validation", error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   }
-  await withPlatformRun(res, "people.latest-messages.read", async () => {
+  await answerFreeRead(res, "people.latest-messages.read", async () => {
     const { orgId, brandId, relationKeys } = parsed.data;
     const out = await readLatestMessages(orgId, brandId, relationKeys);
     res.json({ orgId, brandId, ...out });
@@ -1341,7 +1322,7 @@ router.post("/internal/people/sent-after", apiKeyAuth, async (req, res) => {
   if (!parsed.success) {
     return res.status(400).json({ type: "validation", error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   }
-  await withPlatformRun(res, "people.sent-after.read", async () => {
+  await answerFreeRead(res, "people.sent-after.read", async () => {
     const { orgId, brandId, people: asks } = parsed.data;
     const out = await readSentAfter(orgId, brandId, asks);
     res.json({ orgId, brandId, ...out });
@@ -1359,8 +1340,7 @@ router.post("/internal/people/stated-not-to-brand", apiKeyAuth, async (req, res)
   if (!parsed.success) {
     return res.status(400).json({ type: "validation", error: parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
   }
-  // Like the fact feed: a run only for an answer that silences someone. instantly-service asks on every status read
-  // (~10/s fleet-wide) and almost every answer is "nobody stated": a platform run each would flood runs-service.
+  // A free read: no run (answerFreeRead, MON-CRM-SLOW-READ-1111). instantly-service asks on every status read.
   const { orgId, brandIds, emails } = parsed.data;
   let stated: Awaited<ReturnType<typeof statedNotToBrandByEmail>>;
   try {
@@ -1368,14 +1348,6 @@ router.post("/internal/people/stated-not-to-brand", apiKeyAuth, async (req, res)
   } catch (err) {
     console.error("[crm-service] people.stated-not-to-brand.read failed:", err);
     return res.status(500).json({ type: "internal", error: (err as Error).message });
-  }
-  if (stated.size > 0) {
-    try {
-      const run = await createPlatformRun({ serviceName: SERVICE_NAME, taskName: "people.stated-not-to-brand.read" });
-      await updatePlatformRun(run.id, "completed", SERVICE_NAME);
-    } catch (err) {
-      return res.status(502).json({ type: "upstream", error: `run tracking unavailable: ${(err as Error).message}` });
-    }
   }
   res.json({
     orgId,
@@ -1405,14 +1377,7 @@ router.post("/internal/people/stated-not-to-brand/email-sets", apiKeyAuth, async
     console.error("[crm-service] people.stated-not-to-brand.email-sets.read failed:", err);
     return res.status(500).json({ type: "internal", error: (err as Error).message });
   }
-  if (statements.length > 0) {
-    try {
-      const run = await createPlatformRun({ serviceName: SERVICE_NAME, taskName: "people.stated-not-to-brand.read" });
-      await updatePlatformRun(run.id, "completed", SERVICE_NAME);
-    } catch (err) {
-      return res.status(502).json({ type: "upstream", error: `run tracking unavailable: ${(err as Error).message}` });
-    }
-  }
+  // A free read: no run (answerFreeRead, MON-CRM-SLOW-READ-1111).
   res.json({ orgId, brandIds, statements });
 });
 

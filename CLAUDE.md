@@ -109,6 +109,12 @@ more; before, the kick was silently skipped until the next cron).
 - Every authenticated request creates its own run (`@ src/lib/runs-client.ts`);
   a runs-service failure fails the request 502. Org routes → org run; `/internal`
   reprocess → platform run. Provenance rows store `run_id` + `parent_run_id`.
+- **EXCEPT a FREE `/internal` read (DB, or a sibling's free read; no model, no paid API): NO run**
+  (`answerFreeRead` in `routes/people.ts`, MON-CRM-SLOW-READ-1111; owner: cost declaration is for metered spend, no
+  server read over 1 s). A run cost two runs-service round trips before the answer on a busy crm event loop:
+  `stated-not-to-brand/email-sets` read 35 ms of DB and answered in 1.5 s (over 10 s at load). Free reads: people
+  `facts`, `stated-not-to-brand` (+ `/email-sets`), `leg-reach` (+ `/brands`), `relations/latest-messages`,
+  `sent-after`, `gohighlevel/funnel-reach`. Never add a run to one.
 - Every `/orgs/*` query filters on `org_id`.
 
 ## Cost
@@ -415,7 +421,7 @@ any sender: message store (gmail when connected, instantly), every Matrix DM of 
 edit, no `m.notice`), our `whatsapp_sends`, Copilot / API / transactional on the staff scope. Per ask `status` `sent`
 (`firstSent {at, source, channel, sentBy, from, text, ref}`, `lastSentAt`, `bySource`) | `nothing_sent` | `unreadable`
 (`gaps`: store unit failed / never read, Matrix mirror `mirror_stale` > 30 min or not active) | `unknown` (`scope_not_built`
-| `not_a_relation_key` | `person_not_found`). Stored data only: no sibling, no model, no cost, platform run.
+| `not_a_relation_key` | `person_not_found`). Stored data only: no sibling, no model, no cost, no run (free read).
 
 ### Reachability (`reachableBy`) — a serve FOR a pipe never burns whom it cannot reach
 
@@ -1790,7 +1796,7 @@ serves it a dated, UNTAGGED fact feed. `people.state` / `state.ts` stay until
 lead-service serves the overall tag, then go.
 
 - `GET /internal/people/facts?since=&limit=&orgId=&brandId=` (apiKeyAuth,
-  platform run) → `{ facts, nextCursor, hasMore }`, total order on
+  free read, no run) → `{ facts, nextCursor, hasMore }`, total order on
   `people_facts.feed_seq`. Fact = `factId, seq, orgId, brandId, personKey,
   emails, phones, fullName, sourceContactId, crmContactId, type, occurredAt,
   dateBasis, source, sourceRef, payload, withdrawnOf?`. `sourceContactId` = the
@@ -1823,8 +1829,7 @@ lead-service serves the overall tag, then go.
 - **Feed order is a guarantee** (UNIBOX-FACT-LAG-1028): the derivation runs under a per-SCOPE lock; every write takes
   the global exclusive `FEED_LOCK` right before the first write, held to commit (seqs commit in order); `readFacts`
   reads under the same lock SHARED, so no page is read while a writer holds seqs uncommitted. Only `facts.ts` writes
-  `people_facts` (pinned by `tests/unit/fact-lag.test.ts`). An EMPTY feed page opens no platform run (lead-service
-  asks every 15 s).
+  `people_facts` (pinned by `tests/unit/fact-lag.test.ts`). The feed read opens no run (free read).
 - **`factFeed` on the person timeline** (UNIBOX-FACT-LAG-1028): `{settled, statedThrough, pending[]}`. Items carry
   `ref.recordedAt` (when crm-service recorded the record: silver `last_rebuilt_at`, Matrix `ingested_at`, store
   `indexed_at`) and, when the record IS a fact, `ref.factKey` (Matrix / Gmail keyed as before). Pending = a fact-able
