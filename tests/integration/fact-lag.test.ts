@@ -153,16 +153,16 @@ describe.skipIf(!RUN)("a fact reaches the feed and the timeline within the minut
     expect(await inputsMark({ id, orgId: ORG, brandId: BRAND })).toBe(mark);
   });
 
-  it("the feed read opens a run only when it serves facts", async () => {
+  it("the feed read is a free read: no run, facts served or not (MON-CRM-SLOW-READ-1111)", async () => {
     const all = await request(app()).get(`/internal/people/facts?brandId=${BRAND}`).set("x-api-key", API_KEY);
     expect(all.status).toBe(200);
     expect(all.body.facts.length).toBeGreaterThan(0);
-    expect(platformRunsOpened).toBe(1);
+    expect(platformRunsOpened).toBe(0);
 
     const empty = await request(app()).get(`/internal/people/facts?brandId=${BRAND}&since=${all.body.nextCursor}`).set("x-api-key", API_KEY);
     expect(empty.status).toBe(200);
     expect(empty.body).toEqual({ facts: [], nextCursor: all.body.nextCursor, hasMore: false });
-    expect(platformRunsOpened).toBe(1);
+    expect(platformRunsOpened).toBe(0);
   });
   // BOX-LOAD-1107-CRM2: the phone watch kicks a people build only for a record no built person holds.
   it("a new record whose key a built person holds needs no build; one nobody holds, or stating no key, does", async () => {

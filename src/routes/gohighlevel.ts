@@ -19,7 +19,7 @@ import { readPipelineView } from "../lib/gohighlevel/view.js";
 import { readFunnelReach } from "../lib/gohighlevel/funnel-reach.js";
 import { STAGE_MEANING_MIN_CONFIDENCE } from "../lib/gohighlevel/stage-meanings.js";
 import { LABEL_VERDICT_MIN_CONFIDENCE, readLabelVerdicts } from "../lib/gohighlevel/label-verdicts.js";
-import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
+import { createPlatformRun } from "../lib/runs-client.js";
 import { closePlatformRun } from "../lib/run-close.js";
 import { bookingView, bookMeeting, checkBookingAccess, GHL_SCOPES } from "../lib/gohighlevel/booking.js";
 
@@ -516,7 +516,7 @@ router.get(
  * The same read for a server-to-server caller with no org identity (a pricing
  * sweep). A brand has one GoHighLevel connection per org; the org is resolved
  * from it, and `orgId` is only needed if two orgs ever connect the same brand.
- * Its own platform run, like every internal route.
+ * A free read: no run.
  */
 router.get("/internal/gohighlevel/funnel-reach", apiKeyAuth, async (req, res, next) => {
   const brandParse = brandIdSchema.safeParse(req.query.brandId);
@@ -533,19 +533,8 @@ router.get("/internal/gohighlevel/funnel-reach", apiKeyAuth, async (req, res, ne
   }
   const brandId = brandParse.data;
 
-  let platformRunId: string;
-  try {
-    const run = await createPlatformRun({
-      serviceName: SERVICE_NAME,
-      taskName: "gohighlevel.funnel-reach.read",
-    });
-    platformRunId = run.id;
-  } catch (err) {
-    return res
-      .status(502)
-      .json({ type: "upstream", error: `run tracking unavailable: ${(err as Error).message}` });
-  }
-
+  // A free DB read: no run (MON-CRM-SLOW-READ-1111, nothing metered to declare; a run cost two runs-service round
+  // trips before the answer).
   try {
     if (orgId === null) {
       const owners = await db
@@ -553,25 +542,18 @@ router.get("/internal/gohighlevel/funnel-reach", apiKeyAuth, async (req, res, ne
         .from(ghlConnections)
         .where(eq(ghlConnections.brandId, brandId));
       if (owners.length > 1) {
-        await updatePlatformRun(platformRunId, "failed", SERVICE_NAME);
         return res.status(409).json({
           type: "ambiguous",
           error: `${owners.length} orgs connect brand ${brandId} to GoHighLevel; pass orgId`,
         });
       }
       if (owners.length === 0) {
-        await updatePlatformRun(platformRunId, "completed", SERVICE_NAME);
         return res.json({ brandId, available: false, reason: "no_connection", coverage: null });
       }
       orgId = owners[0].orgId;
     }
-    const result = await readFunnelReach({ orgId, brandId });
-    await updatePlatformRun(platformRunId, "completed", SERVICE_NAME);
-    res.json(result);
+    res.json(await readFunnelReach({ orgId, brandId }));
   } catch (err) {
-    await updatePlatformRun(platformRunId, "failed", SERVICE_NAME).catch((e) =>
-      console.error("[crm-service][ghl] failed to close funnel-reach run:", e),
-    );
     next(err);
   }
 });

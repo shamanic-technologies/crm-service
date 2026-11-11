@@ -144,13 +144,15 @@ describe.skipIf(!RUN)("POST /internal/people/stated-not-to-brand (DUALIST-WA-SIL
     expect(res.body.results[0]).toMatchObject({ stated: false, correctionId: null });
   });
 
-  it("opens no run for an answer where nobody is stated (asked on every status read); one when someone is", async () => {
+  it("a free read opens no run, someone stated or not, per address or as sets (MON-CRM-SLOW-READ-1111)", async () => {
     runCalls = 0;
     await post({ orgId: ORG, brandIds: [BRAND], emails: ["thierry@dualist.test"] });
-    expect(runCalls).toBe(0);
     await state(ORG, BRAND, ["email:thierry@dualist.test"]);
-    await post({ orgId: ORG, brandIds: [BRAND], emails: ["thierry@dualist.test"] });
-    expect(runCalls).toBeGreaterThan(0);
+    const one = await post({ orgId: ORG, brandIds: [BRAND], emails: ["thierry@dualist.test"] });
+    expect(one.body.results[0].stated).toBe(true);
+    const sets = await request(app()).post("/internal/people/stated-not-to-brand/email-sets").set("x-api-key", API_KEY).send({ orgId: ORG, brandIds: [BRAND] });
+    expect(sets.body.statements).toHaveLength(1);
+    expect(runCalls).toBe(0);
   });
 
   it("email-sets: the whole answer at once agrees with the per-address read (STATUS-CRM-TIMEOUT-1107)", async () => {
