@@ -526,6 +526,7 @@ async function buildScopePeopleOn(
   );
   const humans = await resolveScopeHumans(scope, records, judgments, kindsRead);
   const heldEvidence = allEvidence.filter((e) => isJudgment(e) && humans.heldJudgments.has(judgmentId({ kind: e.kind as Judgment["kind"], ref: e.ref })));
+  const heldSet = new Set(heldEvidence);
   const buildKeys = new Set<string>();
   for (const x of [...presences, ...allEvidence]) for (const k of keysOf(x, null)) buildKeys.add(k);
 
@@ -533,15 +534,12 @@ async function buildScopePeopleOn(
   // their user id, says nothing about who they are: nobody to show (their
   // facts are held). Once the brand's auth provider names them, they join.
   const clusters = clusterPeople(presences, [
-    ...allEvidence.filter((e) => !heldEvidence.includes(e)),
+    ...allEvidence.filter((e) => !heldSet.has(e)),
     ...humanEvidence(buildKeys, humans.humanOf),
   ]).filter((c) => !isUnnamedPosthogOnly(c));
   // A judgment human-service holds no longer ties keys here, but it still
   // describes the person (name, "a CRM contact paired with a lead" = business).
-  for (const e of heldEvidence) {
-    const ks = new Set(keysOf(e, null));
-    for (const c of clusters) if (c.identityKeys.some((k) => ks.has(k))) c.evidence.push(e);
-  }
+  attachHeldEvidence(clusters, heldEvidence, (e) => keysOf(e, null));
 
   // lead-service is asked about every address of every person.
   const wanted = new Map<string, string | null>();
@@ -842,6 +840,28 @@ async function buildScopePeopleOn(
   await db.update(peopleScopes).set({ sourceReads: summary }).where(eq(peopleScopes.id, scope.id));
 
   return summary;
+}
+
+/**
+ * Each held judgment goes to every cluster holding one of its keys, in evidence order (MON-PAGE-SPEED-1111).
+ * Through a key index: the scan of every cluster per judgment (41k people x the held judgments) blocked the
+ * event loop ~2 s per build of distribute.you, and every request of the service waited behind it.
+ */
+export function attachHeldEvidence<E, C extends { identityKeys: string[]; evidence: E[] }>(clusters: C[], held: E[], keysOfEvidence: (e: E) => string[]): void {
+  if (!held.length) return;
+  const byKey = new Map<string, C[]>();
+  for (const c of clusters) {
+    for (const k of c.identityKeys) {
+      const list = byKey.get(k);
+      if (list) list.push(c);
+      else byKey.set(k, [c]);
+    }
+  }
+  for (const e of held) {
+    const hit = new Set<C>();
+    for (const k of keysOfEvidence(e)) for (const c of byKey.get(k) ?? []) hit.add(c);
+    for (const c of hit) c.evidence.push(e);
+  }
 }
 
 const building = new Set<string>();

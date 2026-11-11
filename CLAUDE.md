@@ -1826,6 +1826,12 @@ lead-service serves the overall tag, then go.
   pass groups EVERY fact ever emitted (1.7M rows on distribute.you, 10-15 s, on every emission back to back). A fact
   changes owner only when a person's key, identity keys or presences move, so the pass runs only when their digest differs
   from `people_scopes.ownership_index_hash` (set by the pass that ran). Never re-own on any other input.
+- **An emission never holds the event loop** (MON-PAGE-SPEED-1111): the whole service is ONE Node process, so a
+  synchronous stretch blocks every request (`/health` 4.7 s, a cached Outcomes read 8 s, 2026-11-11). The diff loops
+  yield every `YIELD_EVERY` (1000) steps, the live-fact read is raw rows (drizzle's per-cell mapping of 50k rows = 5 s
+  blocked), `contentHash` is a one-pass `canonicalJson` BYTE-IDENTICAL to the former sorted-copy stringify (stored
+  hashes compare against it: a differing byte re-emits every fact), and the build attaches held judgments through a
+  key index (`attachHeldEvidence`, was clusters x judgments). Profile a live process before adding a loop over facts.
 - **Feed order is a guarantee** (UNIBOX-FACT-LAG-1028): the derivation runs under a per-SCOPE lock; every write takes
   the global exclusive `FEED_LOCK` right before the first write, held to commit (seqs commit in order); `readFacts`
   reads under the same lock SHARED, so no page is read while a writer holds seqs uncommitted. Only `facts.ts` writes
