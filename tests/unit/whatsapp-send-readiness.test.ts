@@ -59,6 +59,16 @@ describe("loginStatus", () => {
   it("a login gone from the bridge is logged out", () => {
     expect(loginStatus([], "77776879632").kind).toBe("logged_out");
   });
+  // MON-CAMPAIGN-FAILING-1111: the bridge's answer for +77776879632 on 2026-11-11, verbatim. Refused for 2 days as
+  // "reconnecting" while the bridge said it was connected.
+  it("a phone offline for days is connected, carrying the bridge's warning", () => {
+    const message = "Your phone hasn't been seen in over 12 days. The bridge is currently connected, but will get disconnected if you don't open the app soon.";
+    const st = loginStatus(login("TRANSIENT_DISCONNECT", { timestamp: 1794363226, error: "wa-phone-offline", message, user_action: "OPEN_NATIVE" }), "77776879632");
+    expect(st).toEqual({ kind: "connected", phoneOffline: message });
+  });
+  it("any other TRANSIENT_DISCONNECT stays transient", () => {
+    expect(loginStatus(login("TRANSIENT_DISCONNECT", { error: "wa-transient-disconnect" }), "77776879632").kind).toBe("transient");
+  });
 });
 
 describe("describeLoggedOut", () => {
@@ -88,6 +98,13 @@ describe("sendReadiness", () => {
     expect(r.connected).toEqual([]);
     expect(r.loggedOut).toEqual([]);
     expect(r.reconnecting).toEqual([{ account, stateEvent: "TRANSIENT_DISCONNECT" }]);
+  });
+
+  it("a phone offline for days sends at once", async () => {
+    bridgeLogins.mockResolvedValue(login("TRANSIENT_DISCONNECT", { error: "wa-phone-offline", message: "The bridge is currently connected" }));
+    const r = await sendReadiness([account]);
+    expect(r.connected).toEqual([account]);
+    expect(bridgeLogins).toHaveBeenCalledTimes(1);
   });
 
   it("logged out answers at once, no wait", async () => {
