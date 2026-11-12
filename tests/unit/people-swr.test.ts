@@ -87,6 +87,51 @@ describe("SwrCache (DASH-LATENCY-1014)", () => {
     expect(await expired.get("k", load)).toBe(300); // too old: the caller waits for a fresh load
   });
 
+  it("MON-PAGE-SPEED-1111 serveAnyAge: an entry past max stale is served at once, refreshed behind; failures retried at most every retryAfterMs", async () => {
+    const rows = new Map<string, SwrEntry<string>>([["k", { value: "stored", at: Date.now() - 10 * 3_600_000 }]]);
+    const store: SwrStore<string> = {
+      async read(key) {
+        return rows.get(key);
+      },
+      async write(key, entry) {
+        rows.set(key, entry);
+      },
+    };
+    let fail = true;
+    let loads = 0;
+    const load = async () => {
+      loads++;
+      await tick(30);
+      if (fail) throw new Error("lead-service timed out");
+      return "new";
+    };
+    const c = new SwrCache<string>("t", () => 1, () => 1, { store, serveAnyAge: true, retryAfterMs: 50 });
+    const t = Date.now();
+    expect(await c.get("k", load)).toBe("stored"); // 10 h old: served at once, never the 30 s wait
+    expect(Date.now() - t).toBeLessThan(25);
+    await tick(40); // the refresh failed
+    expect(await c.get("k", load)).toBe("stored");
+    expect(await c.get("k", load)).toBe("stored");
+    expect(loads).toBe(1); // no retry inside retryAfterMs
+    await tick(60);
+    fail = false;
+    expect(await c.get("k", load)).toBe("stored"); // retried behind
+    await tick(40);
+    expect(loads).toBe(2);
+    expect(await c.get("k", load)).toBe("new");
+    // Nothing held: the caller waits and sees the error.
+    fail = true;
+    await expect(c.get("none", load)).rejects.toThrow("lead-service timed out");
+  });
+
+  it("without serveAnyAge, past max stale the caller still waits (other caches unchanged)", async () => {
+    let loads = 0;
+    const c = new SwrCache<number>("t", () => 1, () => 1);
+    expect(await c.get("k", async () => ++loads)).toBe(1);
+    await tick();
+    expect(await c.get("k", async () => ++loads)).toBe(2);
+  });
+
   it("DASH-SPEED-1110: maxEntries drops the oldest key", async () => {
     const c = new SwrCache<string>("t", () => 60_000, () => 120_000, { maxEntries: 2 });
     for (const k of ["a", "b", "c"]) await c.get(k, async () => k);

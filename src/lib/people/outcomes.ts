@@ -715,12 +715,13 @@ async function satisfiedMessagesOf(orgId: string, brandId: string, personKeys: s
 // DASH-SPEED-1110: both are STORED per scope (`outcome_snapshots`), so a first visit and a
 // read after a deploy are served at once (the computation is 5-30 s on a big brand), and a
 // warm loop keeps every scope's answer younger than `outcomesWarmAfterMs()` without a reader.
-// A served figure is at most ~`outcomesFreshMs()` + one refresh old while a tab polls, and
-// never older than `outcomesMaxStaleMs()` (past it, the reader waits for a fresh computation
-// and sees its error: lead-service down for that long = 502, never an old figure forever).
+// A served figure is at most ~`outcomesFreshMs()` + one refresh old while a tab polls.
+// MON-PAGE-SPEED-1111: a held answer is ALWAYS served, whatever its age, while ONE refresh runs
+// behind it (`serveAnyAge`); past `outcomesMaxStaleMs()` it is logged loud with the refresh's error.
+// Only a brand with nothing stored makes its reader wait (and see lead-service's 502).
 
 export const outcomesFreshMs = () => Number(process.env.PEOPLE_OUTCOMES_FRESH_MS) || 60_000;
-/** Past fresh and under this age, the stored answer is served while ONE refresh runs behind it. */
+/** Past this age the served answer is logged loud (still served, refresh behind: MON-PAGE-SPEED-1111). */
 export const outcomesMaxStaleMs = () => Number(process.env.PEOPLE_OUTCOMES_MAX_STALE_MS) || 60 * 60_000;
 /** Unchanged inputs reuse the figures at most this long (a recompute still happens on a quiet brand). */
 export const outcomesReuseMaxMs = () => Number(process.env.PEOPLE_OUTCOMES_REUSE_MAX_MS) || 300_000;
@@ -773,6 +774,7 @@ function snapshotStore<T>(column: "inputs" | "counts"): SwrStore<T> {
 
 const reachCache = new SwrCache<OutcomeInputs>("outcomes campaign reach", outcomesFreshMs, outcomesMaxStaleMs, {
   store: snapshotStore<OutcomeInputs>("inputs"),
+  serveAnyAge: true,
 });
 
 const loadInputs = (identity: SiblingIdentity) => () =>
@@ -810,6 +812,7 @@ interface CountsEntry {
 
 const countsCache = new SwrCache<CountsEntry>("outcomes counts", outcomesFreshMs, outcomesMaxStaleMs, {
   store: snapshotStore<CountsEntry>("counts"),
+  serveAnyAge: true,
 });
 
 const loadCounts =
@@ -833,7 +836,7 @@ export async function cachedOutcomeCounts(identity: SiblingIdentity): Promise<Ou
 type OutcomePage = Awaited<ReturnType<typeof readOutcomePeople>>;
 // The step's people list, per page asked (memory only, its inputs are the stored ones): the same SQL a
 // minute apart answers the same page, and the dashboard polls it.
-const peopleCache = new SwrCache<OutcomePage>("outcomes people", outcomesFreshMs, outcomesMaxStaleMs, { maxEntries: 300 });
+const peopleCache = new SwrCache<OutcomePage>("outcomes people", outcomesFreshMs, outcomesMaxStaleMs, { maxEntries: 300, serveAnyAge: true });
 
 /** `readOutcomePeople` on the cached inputs, cached per page asked. */
 export function cachedOutcomePeople(
