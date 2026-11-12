@@ -18,6 +18,13 @@
  * (a deploy restarts the container): a key missing from memory is first looked up
  * there, and a stored entry is served by the same age rules (stale = served while
  * one refresh runs). `maxEntries` bounds the keys held in memory (oldest dropped).
+ *
+ * MON-PAGE-SPEED-1111: `serveAnyAge` = an entry held is ALWAYS served, whatever its age,
+ * while ONE refresh runs behind it; only a key with nothing held makes the caller wait.
+ * Past `maxStaleMs` the served entry is logged loud (key, age, the refresh's error). A
+ * failed refresh is retried behind reads at most every `retryAfterMs` (60 s). Before, a
+ * producer failing for over an hour (lead-service timing out at 30 s on one brand's bucket)
+ * made EVERY read wait 30 s and answer 502 for 10 h while a good answer sat stored.
  */
 export interface SwrStore<T> {
   read(key: string): Promise<SwrEntry<T> | undefined>;
@@ -38,8 +45,13 @@ export class SwrCache<T> {
     private readonly name: string,
     private readonly freshMs: () => number,
     private readonly maxStaleMs: () => number,
-    private readonly options: { store?: SwrStore<T>; maxEntries?: number } = {},
+    private readonly options: { store?: SwrStore<T>; maxEntries?: number; serveAnyAge?: boolean; retryAfterMs?: number } = {},
   ) {}
+
+  /** Last failed refresh per key (serveAnyAge): when, and its error. */
+  private readonly failed = new Map<string, { at: number; error: string }>();
+  /** Bumped by clear(): a load started before it never writes its result after it. */
+  private generation = 0;
 
   /** Age of the entry held for `key` (memory, else the store), undefined when none. */
   async ageOf(key: string): Promise<number | undefined> {
@@ -81,22 +93,40 @@ export class SwrCache<T> {
     const age = hit ? Date.now() - hit.at : Infinity;
     if (hit && age < this.freshMs()) return hit.value;
     if (hit && age < this.maxStaleMs()) {
-      this.refresh(key, load).catch((err) =>
-        console.error(`[crm-service] ${this.name} background refresh failed key=${key}:`, (err as Error).message),
+      this.refreshBehind(key, load);
+      return hit.value;
+    }
+    if (hit && this.options.serveAnyAge) {
+      const failed = this.failed.get(key);
+      console.warn(
+        `[crm-service] ${this.name} served an answer ${Math.round(age / 60_000)} min old key=${key}` +
+          (failed ? ` (last refresh failed ${Math.round((Date.now() - failed.at) / 1000)} s ago: ${failed.error})` : ""),
       );
+      if (!failed || Date.now() - failed.at >= (this.options.retryAfterMs ?? 60_000)) this.refreshBehind(key, load);
       return hit.value;
     }
     return this.refresh(key, load);
+  }
+
+  private refreshBehind(key: string, load: (previous: SwrEntry<T> | undefined) => Promise<T>): void {
+    const generation = this.generation;
+    this.refresh(key, load).catch((err) => {
+      if (this.options.serveAnyAge && generation === this.generation) this.failed.set(key, { at: Date.now(), error: (err as Error).message });
+      console.error(`[crm-service] ${this.name} background refresh failed key=${key}:`, (err as Error).message);
+    });
   }
 
   private refresh(key: string, load: (previous: SwrEntry<T> | undefined) => Promise<T>): Promise<T> {
     const running = this.inflight.get(key);
     if (running) return running;
     const startedAt = Date.now();
+    const generation = this.generation;
     const p = load(this.entries.get(key))
       .then(async (value) => {
+        if (generation !== this.generation) return value;
         const entry = { value, at: startedAt };
         this.set(key, entry);
+        this.failed.delete(key);
         if (this.options.store) await this.options.store.write(key, entry);
         return value;
       })
@@ -109,8 +139,10 @@ export class SwrCache<T> {
 
   /** Memory only: a store keeps its rows (callers clear their store themselves). */
   clear(): void {
+    this.generation++;
     this.entries.clear();
     this.inflight.clear();
     this.seeding.clear();
+    this.failed.clear();
   }
 }

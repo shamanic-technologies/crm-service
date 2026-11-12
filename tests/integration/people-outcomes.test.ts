@@ -192,7 +192,13 @@ describe.skipIf(!RUN)("people outcomes (all sources)", () => {
     process.env.PEOPLE_OUTCOMES_MAX_STALE_MS = "1";
     try {
       await new Promise((r) => setTimeout(r, 5));
-      const after = await read();
+      // MON-PAGE-SPEED-1111: the held answer is served at once, the recomputation runs behind it.
+      expect(visits(await read())).toBe(2);
+      let after = await read();
+      for (let i = 0; i < 100 && visits(after) !== 3; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+        after = await read();
+      }
       expect(visits(after)).toBe(3);
       // Everything else unchanged: the cache never changes a figure, it only reuses one.
       expect(after.body.steps.filter((s: { step: string }) => s.step !== "website_visit")).toEqual(
@@ -426,7 +432,8 @@ describe.skipIf(!RUN)("people outcomes (all sources)", () => {
     const list = await asOrg(request(app()).get("/orgs/people/outcomes/people").query({ brandId: BRAND, step: "signup" }));
     expect(list.status).toBe(200);
     expect(list.body.total).toBe(first.body.steps.find((s: { step: string }) => s.step === "signup").people);
-    // Never an old figure forever: past the max staleness the reader waits for a fresh one and sees its error.
+    // MON-PAGE-SPEED-1111: past the max staleness, lead-service still down, the stored answer is still served at
+    // once (a refresh runs behind it); before, every read waited for lead-service and answered 502 for 10 h.
     const prev = { fresh: process.env.PEOPLE_OUTCOMES_FRESH_MS, stale: process.env.PEOPLE_OUTCOMES_MAX_STALE_MS };
     process.env.PEOPLE_OUTCOMES_FRESH_MS = "1";
     process.env.PEOPLE_OUTCOMES_MAX_STALE_MS = "1";
@@ -434,7 +441,10 @@ describe.skipIf(!RUN)("people outcomes (all sources)", () => {
       clearOutcomesCache();
       await new Promise((r) => setTimeout(r, 5));
       const stale = await read();
-      expect(stale.status).toBe(502);
+      expect(stale.status).toBe(200);
+      expect(stale.body.steps).toEqual(first.body.steps);
+      const staleList = await asOrg(request(app()).get("/orgs/people/outcomes/people").query({ brandId: BRAND, step: "signup" }));
+      expect(staleList.status).toBe(200);
     } finally {
       for (const [k, v] of [["PEOPLE_OUTCOMES_FRESH_MS", prev.fresh], ["PEOPLE_OUTCOMES_MAX_STALE_MS", prev.stale]] as const) {
         if (v === undefined) delete process.env[k];

@@ -1961,8 +1961,11 @@ this answers the same steps for everyone the brand's own tools state.
   byte-equal old vs new SQL on 4 brands in prod before shipping.
 - **Stored, never waited for (DASH-SPEED-1110)**: both caches persist per scope in `outcome_snapshots`
   (`inputs` = lead-service's buckets, `counts` = steps + fingerprint; keyed on the scope, so a transfer moves it).
-  A key missing from memory (first visit, after a deploy) is served from the row by the same age rules: fresh 60 s,
-  stale up to 60 min while ONE refresh runs behind it, older = the reader waits (lead-service down that long = 502).
+  A key missing from memory (first visit, after a deploy) is served from the row: fresh 60 s, then served AT ANY AGE
+  while ONE refresh runs behind it (`serveAnyAge`, MON-PAGE-SPEED-1111; past 60 min a warn line names the age and
+  the refresh's error, a failed refresh is retried behind reads at most every 60 s). Only a scope with NOTHING stored
+  waits (lead-service down = 502). Before, lead-service timing out (30 s) on distribute.you's `website_visit` bucket
+  aged the answer past 60 min and EVERY read waited 30 s then 502'd, for 10 h (2026-11-11/12).
   `outcomes-warm.ts` (every 5 min, first 90 s after boot, `OUTCOMES_WARM=off`) recomputes any scope whose answer is
   older than 20 min on an org run `people.outcomes.warm`. The step's people list is cached per page (memory, 300 keys).
   Address matching unnests only the keys of people the GIN `?|` prefilter finds (`emailKeysOfPeopleHolding`): unnesting
