@@ -8,21 +8,44 @@
  *
  * An item never registered is already whole. A whole-thread read registers nothing.
  */
-import { inArray, and, eq } from "drizzle-orm";
+import { inArray, and, eq, or } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { apiCalls, peopleMessageTexts } from "../../db/schema.js";
 import { describeResponse } from "../api-calls/calls.js";
 import type { TimelineItem } from "./timeline.js";
 
+/**
+ * Where a stored message lives: its row id, and the message's own key in its unit. A re-read of
+ * the thread deletes and re-writes every row of the unit (new ids, same keys), often while the
+ * paged read that listed the old ids is still answering, so the key finds the re-written row.
+ */
+export type StoredMessageRef = { rowId: string; scopeId: string; source: string; unit: string; messageKey: string };
+
 type Pending =
-  | { kind: "store"; rowId: string }
+  | ({ kind: "store" } & StoredMessageRef)
   | { kind: "api_answer"; orgId: string; brandId: string; callId: string };
 
 const pending = new WeakMap<TimelineItem, Pending>();
 
 /** The stored message's `text` and `textClean` are read when the item is completed. */
-export function deferStoredText(item: TimelineItem, rowId: string): void {
-  pending.set(item, { kind: "store", rowId });
+export function deferStoredText(item: TimelineItem, ref: StoredMessageRef): void {
+  pending.set(item, { kind: "store", ...ref });
+}
+
+const refKey = (r: { scopeId: string; source: string; unit: string; messageKey: string }) =>
+  `${r.scopeId}|${r.source}|${r.unit}|${r.messageKey}`;
+
+/**
+ * PURE: the whole item for each pending message, by its row id, else (the row was re-written
+ * by a re-read of its thread) by its key in its unit. Null only when the message is gone.
+ */
+export function matchStoredRows(
+  refs: StoredMessageRef[],
+  rows: { id: string; scopeId: string; source: string; unit: string; messageKey: string; item: unknown }[],
+): Map<string, TimelineItem | null> {
+  const byId = new Map(rows.map((r) => [r.id, r.item as TimelineItem | null]));
+  const byKey = new Map(rows.map((r) => [refKey(r), r.item as TimelineItem | null]));
+  return new Map(refs.map((ref) => [ref.rowId, byId.get(ref.rowId) ?? byKey.get(refKey(ref)) ?? null]));
 }
 
 /** The API call's answer summary (`describeResponse`) is computed when the item is completed. */
@@ -32,13 +55,17 @@ export function deferApiAnswer(item: TimelineItem, orgId: string, brandId: strin
 
 /** Fill in every deferred part of these items, in place. */
 export async function completeItems(items: TimelineItem[]): Promise<void> {
-  const store = new Map<string, TimelineItem[]>();
+  const store = new Map<string, { ref: StoredMessageRef; items: TimelineItem[] }>();
   const api = new Map<string, { orgId: string; brandId: string; items: TimelineItem[] }>();
   for (const item of items) {
     const p = pending.get(item);
     if (!p) continue;
-    if (p.kind === "store") store.set(p.rowId, [...(store.get(p.rowId) ?? []), item]);
-    else {
+    if (p.kind === "store") {
+      const { kind: _kind, ...ref } = p;
+      const e = store.get(p.rowId) ?? { ref, items: [] };
+      e.items.push(item);
+      store.set(p.rowId, e);
+    } else {
       const e = api.get(p.callId) ?? { orgId: p.orgId, brandId: p.brandId, items: [] };
       e.items.push(item);
       api.set(p.callId, e);
@@ -47,17 +74,37 @@ export async function completeItems(items: TimelineItem[]): Promise<void> {
   await Promise.all([
     (async () => {
       if (store.size === 0) return;
+      const refs = [...store.values()].map((e) => e.ref);
       const rows = await db
-        .select({ id: peopleMessageTexts.id, item: peopleMessageTexts.item })
+        .select({
+          id: peopleMessageTexts.id,
+          scopeId: peopleMessageTexts.scopeId,
+          source: peopleMessageTexts.source,
+          unit: peopleMessageTexts.unit,
+          messageKey: peopleMessageTexts.messageKey,
+          item: peopleMessageTexts.item,
+        })
         .from(peopleMessageTexts)
-        .where(inArray(peopleMessageTexts.id, [...store.keys()]));
-      const byId = new Map(rows.map((r) => [r.id, r.item as TimelineItem | null]));
-      for (const [id, its] of store) {
-        const whole = byId.get(id);
-        // The row was replaced between the two reads (a re-read of its thread): served without text, never a guess.
+        .where(
+          or(
+            inArray(peopleMessageTexts.id, refs.map((r) => r.rowId)),
+            ...refs.map((r) =>
+              and(
+                eq(peopleMessageTexts.scopeId, r.scopeId),
+                eq(peopleMessageTexts.source, r.source),
+                eq(peopleMessageTexts.unit, r.unit),
+                eq(peopleMessageTexts.messageKey, r.messageKey),
+              ),
+            ),
+          ),
+        );
+      const whole = matchStoredRows(refs, rows);
+      for (const [id, { items: its }] of store) {
+        const w = whole.get(id) ?? null;
+        // The message left the store between the two reads (its thread no longer holds it): served without text, never a guess.
         for (const it of its) {
-          it.text = whole?.text ?? null;
-          it.textClean = whole?.textClean ?? null;
+          it.text = w?.text ?? null;
+          it.textClean = w?.textClean ?? null;
           pending.delete(it);
         }
       }
