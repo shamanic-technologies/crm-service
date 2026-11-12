@@ -174,8 +174,18 @@ async function readBronze(
  */
 async function personsBehindSilver(conn: PosthogConnection): Promise<string[]> {
   const authSources = sql.join(AUTH_PROVIDER_NAMES.map((n) => sql`${n}`), sql`, `);
+  // The brand's auth-provider user ids are read ONCE (`auth`), then each person asks `?|` of that
+  // array. A per-person EXISTS over the brand's auth contacts re-scanned them for every person:
+  // 16.6k persons x 129 auth contacts = 1.9M heap fetches, 2-8 s per derive, once a minute
+  // (MON-DB-HOT-1112). Every row of a connection is the connection's own org and brand, so the
+  // array is scoped on them. Same verdict per person, proven on prod (0 of 16,604 differ).
   const rows = (await db.execute(sql`
+    WITH auth AS MATERIALIZED (
+      SELECT coalesce(array_agg(a.external_id), '{}'::text[]) AS ids FROM contacts a
+      WHERE a.org_id = ${conn.orgId} AND a.brand_id = ${conn.brandId} AND a.source IN (${authSources})
+    )
     SELECT r.external_id FROM posthog_raw_records r
+    CROSS JOIN auth
     LEFT JOIN contacts c
       ON c.org_id = r.org_id AND c.brand_id = r.brand_id AND c.source = ${POSTHOG_SOURCE} AND c.external_id = r.external_id
     WHERE r.connection_id = ${conn.id} AND r.kind = 'person'
@@ -183,11 +193,9 @@ async function personsBehindSilver(conn: PosthogConnection): Promise<string[]> {
         c.id IS NULL OR c.last_rebuilt_at < r.mirrored_at
         OR (coalesce(c.raw_attributes->>'notSignup', 'false') = 'true') = (
           coalesce(r.payload->>'is_identified', '') IN ('1', 'true')
-          OR EXISTS (
-            SELECT 1 FROM contacts a
-            WHERE a.org_id = r.org_id AND a.brand_id = r.brand_id AND a.source IN (${authSources})
-              AND jsonb_typeof(r.payload->'distinct_ids') = 'array'
-              AND (r.payload->'distinct_ids') ? a.external_id
+          OR coalesce(
+            jsonb_typeof(r.payload->'distinct_ids') = 'array' AND (r.payload->'distinct_ids') ?| auth.ids,
+            false
           )
         )
       )
