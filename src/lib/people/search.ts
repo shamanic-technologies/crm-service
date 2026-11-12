@@ -649,7 +649,7 @@ export async function readStoredTimeline(
       // A row stored before format 3 has no outreachFact yet (re-read in the background): served as null.
       if (opts.paged) {
         const lite: TimelineItem = { ...item, text: null, textClean: null, outreachFact: item.outreachFact ?? null };
-        deferStoredText(lite, r.id);
+        deferStoredText(lite, { rowId: r.id, scopeId: scope.id, source: r.source, unit: r.unit, messageKey: r.messageKey });
         items.push(lite);
       } else items.push({ ...item, outreachFact: item.outreachFact ?? null });
     }
