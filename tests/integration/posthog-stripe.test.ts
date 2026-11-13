@@ -697,6 +697,34 @@ describe.skipIf(!RUN)("PostHog + Stripe sources", () => {
     }
   });
 
+  it("UNIBOX-NEWSLETTER-1113: an event the server recorded in no session (a newsletter link identify) never leaves bronze; one already in silver is dropped", async () => {
+    const extraEvents = [
+      { id: "ev-server-1", event: "newsletter_link_identified", timestamp: "2026-09-04T09:00:01Z", person_id: "ph-alice", url: null, path: null, properties: { source: "server" }, session_id: "" },
+      { id: "ev-server-2", event: "newsletter_link_identified", timestamp: "2026-09-04T09:00:01.2Z", person_id: "ph-alice", url: null, path: null, properties: { source: "server" }, session_id: "" },
+    ];
+    EVENTS.push(...extraEvents);
+    try {
+      await connectBoth();
+      await runPosthogSyncPass();
+      const silver = async () => (await db.select().from(posthogActivities)).map((a) => a.externalId).sort();
+      expect(await silver()).toEqual(["ev-1", "ev-2", "s1:ph-alice", "s2:ph-dave"]);
+      // Bronze keeps them (the person and their link are untouched).
+      const raw = (await db.select().from(posthogRawRecords)).map((r) => r.externalId);
+      expect(raw).toEqual(expect.arrayContaining(["ev-server-1", "ev-server-2"]));
+      // A silver row an earlier code wrote is dropped by the next pass; a rebuild from bronze writes none back.
+      const [pc] = await db.select().from(posthogConnections);
+      const [ev1] = await db.select().from(posthogActivities).where(eq(posthogActivities.externalId, "ev-1"));
+      await db.insert(posthogActivities).values({ ...ev1, id: undefined, externalId: "ev-server-1", name: "newsletter_link_identified", detail: { sessionId: null, path: null, properties: {} } });
+      const pass = await runPosthogSyncPass();
+      expect(pass.results[0].machineActivitiesDropped).toBeGreaterThanOrEqual(1);
+      expect(await silver()).toEqual(["ev-1", "ev-2", "s1:ph-alice", "s2:ph-dave"]);
+      await rebuildPosthogFromBronze(pc);
+      expect(await silver()).toEqual(["ev-1", "ev-2", "s1:ph-alice", "s2:ph-dave"]);
+    } finally {
+      EVENTS.splice(EVENTS.length - extraEvents.length);
+    }
+  });
+
   it("POSTHOG-RUNCLOSE-1107: the read succeeds and the run close times out: the connection stays active, no last_error, the failure is logged", async () => {
     await connectBoth();
     const [before] = await db.select().from(posthogConnections).where(eq(posthogConnections.brandId, BRAND));

@@ -54,6 +54,8 @@ import { AUTH_PROVIDER_NAMES } from "../auth/providers.js";
 import { normalizePhone } from "../people/identity.js";
 import {
   BRONZE_MACHINE_VISIT_SQL,
+  SILVER_SESSIONLESS_EVENT_SQL,
+  eventSessionless,
   deriveKeyEvent,
   derivePosthogContact,
   deriveVisit,
@@ -258,6 +260,8 @@ async function deriveActivities(
   let derived = 0;
   const machines = await machineSessions(conn);
   for (const payload of await readBronze(conn, kind, externalIds)) {
+    // A server-recorded event (no session) never leaves bronze (records.ts `eventSessionless`).
+    if (kind === "event" && eventSessionless(payload)) continue;
     const a = kind === "visit" ? deriveVisit(payload) : deriveKeyEvent(payload);
     if (!a) continue;
     const sessionId = (a.detail as { sessionId?: string | null }).sessionId;
@@ -322,7 +326,13 @@ async function dropMachineActivities(conn: PosthogConnection): Promise<number> {
       AND a.detail->>'sessionId' = r.payload->>'session_id'
     RETURNING a.id
   `);
-  return (rows as unknown as unknown[]).length;
+  // UNIBOX-NEWSLETTER-1113: and every server-recorded event (no session, records.ts `eventSessionless`) written before.
+  const sessionless = await db.execute(sql`
+    DELETE FROM posthog_activities a
+    WHERE a.connection_id = ${conn.id} AND a.kind = 'event' AND ${sql.raw(SILVER_SESSIONLESS_EVENT_SQL("a.detail"))}
+    RETURNING a.id
+  `);
+  return (rows as unknown as unknown[]).length + (sessionless as unknown as unknown[]).length;
 }
 
 /**
@@ -340,7 +350,13 @@ async function linkActivities(conn: PosthogConnection): Promise<number> {
       AND c.external_id = a.external_person_id
     RETURNING a.id
   `);
-  return (rows as unknown as unknown[]).length;
+  // UNIBOX-NEWSLETTER-1113: and every server-recorded event (no session, records.ts `eventSessionless`) written before.
+  const sessionless = await db.execute(sql`
+    DELETE FROM posthog_activities a
+    WHERE a.connection_id = ${conn.id} AND a.kind = 'event' AND ${sql.raw(SILVER_SESSIONLESS_EVENT_SQL("a.detail"))}
+    RETURNING a.id
+  `);
+  return (rows as unknown as unknown[]).length + (sessionless as unknown as unknown[]).length;
 }
 
 export function targetOf(conn: Pick<PosthogConnection, "region" | "projectId">, apiKey: string): PosthogTarget {

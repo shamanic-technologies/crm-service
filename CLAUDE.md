@@ -17,7 +17,7 @@ feed the same registry, both layered bronze/silver/gold:
 | `copilot` | PUSHED | each distribute.you Copilot chat turn (user message + answer), pushed by chat-service, filed ONLY under the staff Unibox scope | NEVER |
 | `api` | PUSHED | each call a client made to our API / MCP server with their own key (request + answer), pushed by api-service, filed ONLY under the staff Unibox scope | NEVER |
 | `google_calendar` | MIRROR | the org's connected Google Calendar (google-service reads it): meetings, attendees, Meet participants; each external attendee a `contacts` row | NEVER |
-| `transactional` | READ | every email the platform SENT a client (transactional-email-service sent-emails feed), shown ONLY on the staff Unibox thread | NEVER |
+| `transactional` | READ | every email the platform SENT a client (transactional-email-service sent-emails feed), shown ONLY on the staff Unibox thread; + every NEWSLETTER an org sent (sent-newsletters feed), on the subscriber's thread in that org's scopes + a `message_out` fact | NEVER |
 | `sending_mailbox` | READ | every message our SENDING (cold-email) mailboxes sent or received (instantly-service `GET /internal/mailbox-messages`, cursor feed, `lib/mailbox/`): EVERY address on it (From, To, Cc, Bcc) is a person of its brand, judged by Jev like a Gmail correspondent; the sequence's own lead stays the `instantly` source's (no 2nd presence / fact); words kept only for threads naming someone else; a brand holding such a person and no people scope gets one opened (under a client member of its org) and built (EVERY-PERSON-ON-THE-THREAD-1109) | NEVER |
 | `activity` | PUSHED | each action a client took on their account (campaign created / edited / paused / resumed, budget changed), reported by the service that performed it, filed ONLY under the staff Unibox scope | NEVER |
 
@@ -2071,6 +2071,12 @@ re-derives silver with no vendor call. API reads are free → no cost declared.
   fingerprints (`dropMachineActivities`); their live facts are withdrawn `machine_visit` (facts.ts reads the bronze of a
   gone PostHog fact). Rule twins: records.ts `visitMachine` (TS) / `BRONZE_MACHINE_VISIT_SQL`. A new fingerprint reaches
   old bronze by `POST /internal/posthog/sync {connectionId, rereadSince}` (2026-10-28: since 2026-10-24).
+  **A server-recorded event never leaves bronze either** (UNIBOX-NEWSLETTER-1113, `eventSessionless` / `BRONZE_SESSIONLESS_EVENT_SQL`
+  / `SILVER_SESSIONLESS_EVENT_SQL`): a custom event whose `session_id` column is present and empty was captured by the
+  brand's SERVER (a newsletter link identify: scanners, 3 hits in 0.3 s; an anonymous org minted), not their browser: skipped
+  at derive, dropped from silver by `dropMachineActivities`, never a candidate, live facts withdrawn `sessionless_event`
+  (summary `sessionlessWithdrawn`). The person + distinct ids stay (a later real visit is theirs). Same rule as lead-service
+  `isSessionlessProductEvent`. Prod 2026-11-13: 45,504 `newsletter_link_identified` + 43 `anonymous_org_created`, all sessionless.
   The `website` property a person typed is canonical silver (`contacts.website` + `company_domain`, WA-THREAD-IDENTITY-1023):
   it is company evidence like a CRM contact's website (`organizations.ts` `websiteOfPresence` reads EVERY source's contact,
   it read GoHighLevel only, so a signup known by phone + typed website was served with no company). Migration 0057 carried
@@ -2310,6 +2316,17 @@ created / stopped, reply forwards...) shows on the recipient's thread as an outb
   timeline items (`ref {emailId, eventType, messageSource, billedOrgId}`; `text` = text part, else the HTML's words,
   computed at write) + latest-message preview (`sentBy: automation`). NO presence (a recipient only we wrote to is nobody
   new), NO fact, not in the search index. No template is special. `POST /internal/transactional-emails/watch` = a pass now.
+
+**Newsletters (UNIBOX-NEWSLETTER-1113, `lib/transactional/newsletters.ts`, owner 2026-11-13 « une newsletter envoyée doit
+apparaître dans l'Unibox »)**: transactional-email-service `GET /internal/sent-newsletters` (one per release x subscriber
+sent, `sentAt` = settled) → bronze `newsletter_sends` (insert-only, cursor `transactional_sent_newsletters`, same 15-min settle,
+loop 60 s, `NEWSLETTER_SEND_WATCH=off`, `POST /internal/newsletter-sends/watch` = a pass now). Filed GENERICALLY by the
+SENDING ORG: every (org, brand) scope of `org_id`, only its `brand_ids` when the release names some (`newsletterScopeSql`,
+never a list or brand id in code; a release naming no brand also lands on the org's other brands, e.g. our Loom demo scope).
+Timeline: source `transactional`, `ref.eventType: "newsletter"`, the subject as words; latest-message preview too; NOT in
+`sent-after` (a newsletter answers nobody). Fact: `message_out` (family `newsletter_send`, source `transactional`, payload
+`{channel, kind: "newsletter", newsletter {releaseId, listSlug}, subject, text, from, to}`, NO `role`), on whoever holds the
+address (held until someone does): lead-service dates the row as OUR activity from it. Body never mirrored (one per release).
 
 ## What a client DID on their account, on their staff Unibox thread + one owner Telegram (`src/lib/account-activity/`, CLIENT-ACTIVITY-1030)
 

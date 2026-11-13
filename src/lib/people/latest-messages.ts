@@ -33,6 +33,7 @@ import { apiCalls, copilotMessages, people, transactionalEmails, peopleMessageUn
 import { API_SENDER_NAME, describeResponse } from "../api-calls/calls.js";
 import { COPILOT_CHANNEL, COPILOT_SENDER_NAME, isCopilotDestination } from "../copilot/messages.js";
 import { TX_EMAIL_CHANNEL, TX_EMAIL_SENDER_NAME } from "../transactional/sent-emails.js";
+import { NEWSLETTER_EVENT_TYPE, newsletterScopeSql } from "../transactional/newsletters.js";
 import { readVoiceTranscripts, voiceNoteText } from "../matrix/voice-notes.js";
 import type { BuildSummary } from "./build.js";
 import { presenceStableKey } from "./facts.js";
@@ -513,6 +514,45 @@ async function latestTransactional(emails: string[]): Promise<Map<string, Candid
   return out;
 }
 
+/**
+ * The latest newsletter this (org, brand) sent each address (UNIBOX-NEWSLETTER-1113, lib/transactional/newsletters.ts): an
+ * email WE sent, by a machine, the release's subject as its words. Any scope of the sending org.
+ */
+async function latestNewsletter(orgId: string, brandId: string, emails: string[]): Promise<Map<string, Candidate>> {
+  const out = new Map<string, Candidate>();
+  for (const part of chunks(emails, 1000)) {
+    const rows = (await db.execute(sql`
+      SELECT DISTINCT ON (n.recipient_email) n.id, n.release_id, n.list_slug, n.recipient_email, n.from_address, n.subject, n.sent_at
+      FROM newsletter_sends n
+      WHERE n.recipient_email IN (${sql.join(part.map((e) => sql`${e}`), sql`, `)}) AND ${newsletterScopeSql("n", orgId, brandId)}
+      ORDER BY n.recipient_email, n.sent_at DESC, n.id DESC
+    `)) as unknown as { id: string; release_id: string; list_slug: string; recipient_email: string; from_address: string | null; subject: string; sent_at: string | Date }[];
+    for (const e of rows) {
+      const at = new Date(e.sent_at);
+      const clipped = clipText(e.subject);
+      out.set(e.recipient_email, {
+        at: at.getTime(),
+        key: `transactional|${e.id}`,
+        message: {
+          at: at.toISOString(),
+          source: "transactional",
+          channel: TX_EMAIL_CHANNEL,
+          direction: "outbound",
+          sentBy: "automation",
+          subject: e.subject,
+          text: clipped.text,
+          textBasis: clipped.text === null ? null : "original",
+          textCleanStatus: null,
+          textTruncated: clipped.truncated,
+          from: e.from_address ?? TX_EMAIL_SENDER_NAME,
+          ref: { emailId: e.id, eventType: NEWSLETTER_EVENT_TYPE, releaseId: e.release_id, listSlug: e.list_slug, messageSource: "stored" },
+        },
+      });
+    }
+  }
+  return out;
+}
+
 const emptyCounts = (): Record<LatestMessageStatus, number> => ({ message: 0, no_message: 0, unreadable: 0, unknown: 0 });
 
 /** The latest message of each relation's thread (one answer per DISTINCT key, in the order asked). */
@@ -588,7 +628,7 @@ export async function readLatestMessages(orgId: string, brandId: string, relatio
     }
   }
 
-  const [stored, units, dms, groups, copilot, api, transactional] = await Promise.all([
+  const [stored, units, dms, groups, copilot, api, transactional, newsletters] = await Promise.all([
     addresses.length ? latestStoredPerAddress(scope.id, addresses, gmailConnected) : Promise.resolve(new Map<string, StoreRow>()),
     addresses.length
       ? Promise.all(
@@ -605,6 +645,7 @@ export async function readLatestMessages(orgId: string, brandId: string, relatio
     staffScope && addresses.length ? latestCopilot(orgId, brandId, addresses) : Promise.resolve(new Map<string, Candidate>()),
     staffScope && addresses.length ? latestApiCall(orgId, brandId, addresses) : Promise.resolve(new Map<string, Candidate>()),
     staffScope && addresses.length ? latestTransactional(addresses) : Promise.resolve(new Map<string, Candidate>()),
+    addresses.length ? latestNewsletter(orgId, brandId, addresses) : Promise.resolve(new Map<string, Candidate>()),
   ]);
 
   const matrixRows = [...dms.values(), ...groups.values()];
@@ -629,6 +670,8 @@ export async function readLatestMessages(orgId: string, brandId: string, relatio
       if (a) candidates.push(a);
       const tx = transactional.get(address);
       if (tx) candidates.push(tx);
+      const nl = newsletters.get(address);
+      if (nl) candidates.push(nl);
       // Gaps: a stored thread of the address that failed its last read, or one never read yet.
       const mine = unitsOf.get(address) ?? [];
       for (const u of mine) {
