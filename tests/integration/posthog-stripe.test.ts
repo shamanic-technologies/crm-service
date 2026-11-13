@@ -20,6 +20,7 @@ import { runPosthogSyncPass, rebuildPosthogFromBronze } from "../../src/lib/post
 import { mirrorRecentStripe, runStripeSyncPass, rebuildStripeFromBronze } from "../../src/lib/stripe/sync.js";
 import peopleRoutes from "../../src/routes/people.js";
 import posthogStripeRoutes from "../../src/routes/posthog-stripe.js";
+import { noLeadsByAddress } from "../helpers/lead-by-address.js";
 
 /**
  * PostHog + Stripe as read-only sources of the person thread, against a real
@@ -214,6 +215,7 @@ function installFetchStub() {
   calls = [];
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
+    if (url.host === "lead.test" && url.pathname.endsWith("/leads/by-address")) return noLeadsByAddress(init);
     calls.push(`${init?.method ?? "GET"} ${url.host}${url.pathname}`);
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
       if (runsCloseTimesOut && init?.method === "PATCH") {

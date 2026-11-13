@@ -7,6 +7,7 @@ import { people, peopleFacts, peopleScopes, clientMessageVerdicts } from "../../
 import peopleRoutes from "../../src/routes/people.js";
 import { clearOutcomesCache } from "../../src/lib/people/outcomes.js";
 import { judgeScope, type Judge } from "../../src/lib/people/client-satisfaction.js";
+import { noLeadsByAddress } from "../helpers/lead-by-address.js";
 
 /**
  * CLIENT-SATISFIED-1107: a paying client's positive message = « Client Satisfied », judged by Jev (stubbed), served on
@@ -27,8 +28,9 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 let RUNS_OPENED = 0;
 
 function stubFetch() {
-  vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
+    if (url.host === "lead.test" && url.pathname.endsWith("/leads/by-address")) return noLeadsByAddress(init);
     if (url.pathname === "/v1/runs") {
       RUNS_OPENED++;
       return json({ id: "run-" + Math.random().toString(16).slice(2) });

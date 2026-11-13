@@ -4,6 +4,7 @@ import { db } from "../../src/db/index.js";
 import { contacts, ghlConnections, humanLinkStatements, people, peopleFacts, samePersonVerdicts } from "../../src/db/schema.js";
 import { rejectTwinVerdict } from "../../src/lib/people/name-twins.js";
 import { ensureScope, runScopeBuild } from "../../src/lib/people/build.js";
+import { noLeadsByAddress } from "../helpers/lead-by-address.js";
 
 /**
  * The people build asks human-service "same human?" (people/humans.ts). Every
@@ -188,6 +189,7 @@ const WRITTEN = (email: string) => ({
 function installFetchStub() {
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
+    if (url.host === "lead.test" && url.pathname.endsWith("/leads/by-address")) return noLeadsByAddress(init);
     const method = init?.method ?? "GET";
     if (url.host === "chat.test") {
       const body = JSON.parse(String(init?.body ?? "{}")) as { state: unknown; questions: Record<string, unknown> };

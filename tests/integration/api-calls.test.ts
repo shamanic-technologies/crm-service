@@ -7,6 +7,7 @@ import { apiCalls, people } from "../../src/db/schema.js";
 import { ensureScope, runScopeBuild } from "../../src/lib/people/build.js";
 import apiCallsRoutes from "../../src/routes/api-calls.js";
 import peopleRoutes from "../../src/routes/people.js";
+import { noLeadsByAddress } from "../helpers/lead-by-address.js";
 
 /**
  * Calls to our API / MCP server as a source of the staff Unibox, against a real
@@ -38,8 +39,9 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 function installFetchStub() {
-  vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
+    if (url.host === "lead.test" && url.pathname.endsWith("/leads/by-address")) return noLeadsByAddress(init);
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
       return json({ id: "run-" + Math.random().toString(16).slice(2) });
     }

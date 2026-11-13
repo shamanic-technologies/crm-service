@@ -11,6 +11,7 @@ import { runPosthogSyncPass } from "../../src/lib/posthog/sync.js";
 import authProviderRoutes from "../../src/routes/auth-providers.js";
 import posthogStripeRoutes from "../../src/routes/posthog-stripe.js";
 import peopleRoutes from "../../src/routes/people.js";
+import { noLeadsByAddress } from "../helpers/lead-by-address.js";
 
 /**
  * Clerk as the brand's auth provider (every signup of its product), against a
@@ -164,6 +165,7 @@ function installFetchStub() {
   calls = [];
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
+    if (url.host === "lead.test" && url.pathname.endsWith("/leads/by-address")) return noLeadsByAddress(init);
     calls.push(`${init?.method ?? "GET"} ${url.host}${url.pathname}${url.search}`);
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
       return json({ id: "run-" + Math.random().toString(16).slice(2) });

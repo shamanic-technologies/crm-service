@@ -24,7 +24,7 @@ import {
   type PeopleSource,
   type Presence,
 } from "./identity.js";
-import { siblingGet, siblingGetOk, type SiblingIdentity } from "./siblings.js";
+import { siblingGet, siblingGetOk, siblingQuery, type SiblingIdentity } from "./siblings.js";
 import { handleOf } from "../matrix/events.js";
 import type { GhlDeal, LeadCompanyTags, LeadDisqualification, LeadHumanTags } from "./state.js";
 import { copilotPresences, isCopilotDestination, readCopilotRows } from "../copilot/messages.js";
@@ -1278,7 +1278,7 @@ export async function readLeadPairingEvidence(
 // ─── lead-service: one address's lead row ────────────────────────────────────
 
 /**
- * One row of lead-service's lead list (`GET /orgs/leads?view=basic`). Read for WHICH lead the address is
+ * One row of lead-service's lead list (`GET /orgs/leads?view=basic`), as its by-address read serves it. Read for WHICH lead the address is
  * (row id, lead id, campaigns) and the marks on it; its old `standing` is NOT read (LEAD-GENERIC-1106: the lead's
  * verdict is lead-service's `leadState`, read off its Unibox, lead-state.ts).
  */
@@ -1417,65 +1417,76 @@ export function leadFromRows(rows: LeadRow[]): LeadAnswer {
   };
 }
 
-const leadsPath = (identity: SiblingIdentity, extra: string) =>
-  `/orgs/leads?brandId=${encodeURIComponent(identity.brandId)}${extra}&view=basic&sort=activity&status=all`;
+/** lead-service's cap per call is 5000; 1000 keeps one live read well inside the sibling timeout. */
+export const LEADS_BY_ADDRESS_BATCH = Number(process.env.PEOPLE_LEADS_BY_ADDRESS_BATCH) || 1000;
 
 /**
- * Which lead of the brand one address is, per lead-service. Its own search, in
- * its own `sort=activity` order (newest proving evidence first), filtered to
- * the EXACT address (the search is a substring match).
+ * Which lead of the brand each address is, per lead-service's by-address read
+ * (`POST /internal/brands/{brandId}/leads/by-address`, MON-DB-HOT-1112-CRM-WALK): for each address,
+ * EXACTLY the rows its `GET /orgs/leads?view=basic&sort=activity&status=all` list holds for it, in
+ * that order, read LIVE (a lead served a second ago is in it), without opening, refreshing or
+ * marking read any read model of the brand. Before, every build with 200+ addresses to ask walked
+ * the brand's WHOLE sorted list (up to 19.5k rows, hourly per brand) and that walk alone kept every
+ * brand read model on lead-service's 3-minute whole-population refresh, read by nobody else.
+ * Only the addresses due are asked, in batches. A batch failing fails its addresses, loud (they read
+ * `unavailable`, never a guess); an address the answer omits, or a row for another address, fails
+ * the batch (never a silent "not a lead"); a malformed row fails only its own address.
  */
-export async function lookupLead(identity: SiblingIdentity, email: string): Promise<LeadAnswer> {
-  const r = await siblingGet("lead", `${leadsPath(identity, `&q=${encodeURIComponent(email)}`)}&limit=50`, identity);
-  if (r.status < 200 || r.status >= 300) {
-    throw new Error(`lead-service GET /orgs/leads returned ${r.status}: ${JSON.stringify(r.body).slice(0, 300)}`);
-  }
-  return leadFromRows(((r.body as { leads: LeadRow[] }).leads ?? []).filter((row) => normalizeEmail(row.email) === email));
-}
-
-const LEAD_WALK_PAGE = 2000;
-
-/**
- * The same answer as `lookupLead`, for MANY addresses in one walk of
- * the brand's whole lead list (same view, same `sort=activity` order, paged).
- * Taking each address's rows in list order gives exactly the rows its own
- * search would return, in the same order. Built for a brand whose cold email
- * wrote to thousands of people: one lookup per address was ~50 ms each, so
- * 17.5k addresses cost ~15 minutes of lead-service searches per build; the
- * walk is ~10 pages. An address absent from the list is not one of our leads.
- * Any page failing fails the walk, loud (every address it was for reads
- * `unavailable`, never a guess); a malformed row fails only its own address.
- */
-export async function walkLeads(
+export async function readLeadsByAddress(
   identity: SiblingIdentity,
-  wanted: Set<string>,
+  emails: Iterable<string>,
 ): Promise<Map<string, LeadAnswer | Error>> {
-  const rowsByEmail = new Map<string, LeadRow[]>();
-  for (let offset = 0; ; offset += LEAD_WALK_PAGE) {
-    const page = await siblingGetOk<{ leads: LeadRow[] }>(
-      "lead",
-      `${leadsPath(identity, "")}&limit=${LEAD_WALK_PAGE}&offset=${offset}`,
-      identity,
-    );
-    const leads = page.leads ?? [];
-    for (const row of leads) {
-      const email = normalizeEmail(row.email);
-      if (!email || !wanted.has(email)) continue;
-      const list = rowsByEmail.get(email) ?? [];
-      list.push(row);
-      rowsByEmail.set(email, list);
-    }
-    if (leads.length < LEAD_WALK_PAGE) break;
-  }
+  const asked = [...new Set(emails)];
   const answers = new Map<string, LeadAnswer | Error>();
-  for (const email of wanted) {
+  const path = `/internal/brands/${encodeURIComponent(identity.brandId)}/leads/by-address`;
+  for (let i = 0; i < asked.length; i += LEADS_BY_ADDRESS_BATCH) {
+    const batch = asked.slice(i, i + LEADS_BY_ADDRESS_BATCH);
+    let rowsByEmail: Map<string, LeadRow[]>;
     try {
-      answers.set(email, leadFromRows(rowsByEmail.get(email) ?? []));
+      const body = await siblingQuery<{ addresses?: { email: string; leads: LeadRow[] }[] }>("lead", path, identity, { emails: batch });
+      rowsByEmail = rowsByAskedAddress(batch, body);
     } catch (err) {
-      answers.set(email, err as Error);
+      for (const email of batch) answers.set(email, err as Error);
+      continue;
+    }
+    for (const email of batch) {
+      try {
+        answers.set(email, leadFromRows(rowsByEmail.get(email)!));
+      } catch (err) {
+        answers.set(email, err as Error);
+      }
     }
   }
   return answers;
+}
+
+/**
+ * PURE: lead-service's by-address answer, keyed on the addresses asked (normalized). Every asked
+ * address must be answered and every row must carry its address: anything else throws.
+ */
+export function rowsByAskedAddress(asked: string[], body: { addresses?: { email: string; leads: LeadRow[] }[] }): Map<string, LeadRow[]> {
+  if (!Array.isArray(body?.addresses)) throw new Error("lead-service leads/by-address answered no addresses array");
+  const out = new Map<string, LeadRow[]>();
+  for (const a of body.addresses) {
+    const email = normalizeEmail(a.email);
+    if (!email || !Array.isArray(a.leads)) throw new Error(`lead-service leads/by-address answered an unreadable address: ${JSON.stringify(a).slice(0, 200)}`);
+    for (const row of a.leads) {
+      if (normalizeEmail(row.email) !== email) {
+        throw new Error(`lead-service leads/by-address answered row ${row.id} (${row.email}) under ${email}`);
+      }
+    }
+    out.set(email, [...(out.get(email) ?? []), ...a.leads]);
+  }
+  const missing = asked.filter((e) => !out.has(e));
+  if (missing.length) throw new Error(`lead-service leads/by-address left ${missing.length} address(es) unanswered, e.g. ${missing[0]}`);
+  return out;
+}
+
+/** One address's lead (the Unibox thread's background campaign discovery). */
+export async function lookupLead(identity: SiblingIdentity, email: string): Promise<LeadAnswer> {
+  const answer = (await readLeadsByAddress(identity, [email])).get(email)!;
+  if (answer instanceof Error) throw answer;
+  return answer;
 }
 
 // ─── the brand's OWN addresses: never a person it is in conversation with ───

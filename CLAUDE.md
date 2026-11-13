@@ -1260,9 +1260,12 @@ owner had written to. A recorded fact, never an address-shape guess.
   conversation, fit, interest, client status, next follow-up) is READ off its Unibox (`lead-state.ts`: every page of
   `GET /orgs/leads/unibox`, one shared walk per (org, brand), fresh 5 min / stale 30 min) and relayed verbatim:
   person `state` = `won | hot | lost`, else `open` (lead-service's word), `stateSource: lead_service`, `leadState`
-  served on the person. Matched by the person's lead id (lead-service's lead list `GET /orgs/leads?view=basic`, one
-  walk from `PEOPLE_STANDING_WALK_MIN` (200) addresses, else one search per address; cached 1 h in
-  `lead_standing_observations`, a historical table name) else the human's first Unibox row. The lead row's own marks
+  served on the person. Matched by the person's lead id (lead-service's `POST /internal/brands/{b}/leads/by-address`:
+  per address the rows of its `view=basic&sort=activity&status=all` list, read live, batches of 1000
+  (`readLeadsByAddress`), only the addresses due; cached 1 h in `lead_standing_observations`, a historical table name)
+  else the human's first Unibox row. ⚠️ Never walk the brand's whole list nor search it by `q=` per address again
+  (MON-DB-HOT-1112-CRM-WALK): those reads open lead-service's brand read model and mark it read, so our hourly walk
+  alone kept every brand model on its 3-minute whole-population refresh (the box Postgres's largest consumer). The lead row's own marks
   ride beside it verbatim (`disqualification`, `company` -> `companyTags`, `human` -> `humanTags`, served only for
   `lead_service`). The row's old `standing` / buckets / stage / "cold" are NEVER read: crm keeps no copy of
   lead-service's vocabulary. A failed lead read or Unibox walk = `unavailable` (never a guess). Nobody lead-service

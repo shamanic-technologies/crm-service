@@ -26,13 +26,12 @@ import {
   type Presence,
   presenceFallbackKey,
 } from "./identity.js";
-import { mapLimit, type SiblingIdentity } from "./siblings.js";
+import { type SiblingIdentity } from "./siblings.js";
 import { replaceScopePeople } from "./write.js";
 import { readBrandLeadStates } from "./lead-state.js";
 import {
   cachedAnswerIsCurrent,
-  lookupLead,
-  walkLeads,
+  readLeadsByAddress,
   type LeadAnswer,
   readCsvEvidence,
   readWhatsappSendEvidence,
@@ -110,13 +109,6 @@ import {
 
 /** How long lead-service's answer about an address is reused. */
 export const STANDING_TTL_MS = 60 * 60 * 1000;
-const STANDING_CONCURRENCY = 6;
-/**
- * From this many addresses to ask, lead-service is read in ONE walk of the
- * brand's lead list instead of one search per address (a brand whose cold email
- * wrote to 17.5k people would otherwise make 17.5k searches every hour).
- */
-export const standingWalkMin = () => Number(process.env.PEOPLE_STANDING_WALK_MIN) || 200;
 
 /** Display-name / company precedence: the CRM first, then address books, then the rest. */
 const NAME_PRECEDENCE: (PeopleSource | Evidence["kind"])[] = [
@@ -259,22 +251,8 @@ async function observeStandings(
     }
   }
   let failed = 0;
-  const answers = new Map<string, LeadAnswer | Error>();
-  if (toAsk.length >= standingWalkMin()) {
-    try {
-      for (const [email, answer] of await walkLeads(identity, new Set(toAsk))) answers.set(email, answer);
-    } catch (err) {
-      for (const email of toAsk) answers.set(email, err as Error);
-    }
-  } else {
-    await mapLimit(toAsk, STANDING_CONCURRENCY, async (email) => {
-      try {
-        answers.set(email, await lookupLead(identity, email));
-      } catch (err) {
-        answers.set(email, err as Error);
-      }
-    });
-  }
+  // Only the addresses due, by batch, off lead-service's by-address read (no whole-list walk, no read model warmed).
+  const answers = toAsk.length ? await readLeadsByAddress(identity, toAsk) : new Map<string, LeadAnswer | Error>();
   const observedAt = new Date();
   const records: (typeof leadStandingObservations.$inferInsert)[] = [];
   for (const [email, answer] of answers) {

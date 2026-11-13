@@ -129,6 +129,11 @@ let extraWritten: Record<string, unknown>[] = [];
 let writtenPageSize = 1000;
 /** Rows of the brand's whole lead list, in lead-service's `sort=activity` order (the walk). */
 let leadList: Record<string, unknown>[] = [];
+/** lead-service's list rows by default: jimbob is NOT bob (a substring of the address is no match). */
+const DEFAULT_LEAD_ROWS: Record<string, unknown>[] = [
+  { id: "lc-0", leadId: "l-0", email: "jimbob@y.com", campaignId: "camp-9", disqualification: null, company: null, human: null },
+  { id: "lc-2", leadId: "l-2", email: "bob@y.com", campaignId: "camp-2", disqualification: { level: "lead", offerId: null, note: "Runs a construction company, we sell to supermarkets.", source: "manual", statedByUserId: "user-1", statedAt: "2026-10-13T09:00:00.000Z" }, company: { id: "c0c0c0c0-1111-4111-8111-000000000001", key: "c0c0c0c0-1111-4111-8111-000000000001", isClient: true, signedUp: true, disqualification: { level: "company", offerId: null, note: "Not our target.", source: "manual", statedByUserId: "user-1", statedAt: "2026-10-13T10:00:00.000Z" } }, human: { optedOut: true, doNotContact: false } },
+];
 
 /** instantly-service written-to-leads rows: alice replied, bob clicked (both engaged). */
 const WRITTEN = [
@@ -415,24 +420,12 @@ function installFetchStub() {
         const at = Number(url.searchParams.get("cursor") ?? "0");
         return json({ rows: uniboxRows.slice(at, at + 1), total: uniboxRows.length, nextCursor: at + 1 < uniboxRows.length ? String(at + 1) : null });
       }
-      if (url.pathname === "/orgs/leads") {
-        const q = url.searchParams.get("q");
-        if (q === null) {
-          // The whole-brand walk: same order, paged on offset.
-          const offset = Number(url.searchParams.get("offset"));
-          const limit = Number(url.searchParams.get("limit"));
-          return json({ leads: leadList.slice(offset, offset + limit), total: leadList.length });
-        }
-        if (q === "bob@y.com") {
-          return json({
-            leads: [
-              // A substring hit that is NOT bob, first in lead-service's order: must be ignored.
-              { id: "lc-0", leadId: "l-0", email: "jimbob@y.com", campaignId: "camp-9", disqualification: null, company: null, human: null },
-              { id: "lc-2", leadId: "l-2", email: "bob@y.com", campaignId: "camp-2", disqualification: { level: "lead", offerId: null, note: "Runs a construction company, we sell to supermarkets.", source: "manual", statedByUserId: "user-1", statedAt: "2026-10-13T09:00:00.000Z" }, company: { id: "c0c0c0c0-1111-4111-8111-000000000001", key: "c0c0c0c0-1111-4111-8111-000000000001", isClient: true, signedUp: true, disqualification: { level: "company", offerId: null, note: "Not our target.", source: "manual", statedByUserId: "user-1", statedAt: "2026-10-13T10:00:00.000Z" } }, human: { optedOut: true, doNotContact: false } },
-            ],
-          });
-        }
-        return json({ leads: [] });
+      if (url.pathname === `/internal/brands/${BRAND}/leads/by-address`) {
+        // lead-service's by-address read: per asked address, the list's rows for it, in the list's order.
+        const rows = leadList.length ? leadList : DEFAULT_LEAD_ROWS;
+        const emails = (JSON.parse(String(init?.body)) as { emails: string[] }).emails.map((e) => e.trim().toLowerCase());
+        const addresses = [...new Set(emails)].map((email) => ({ email, leads: rows.filter((r) => String(r.email).toLowerCase() === email) }));
+        return json({ brandId: BRAND, addresses, count: addresses.length });
       }
       if (url.pathname === "/orgs/leads/crm-pairings") {
         const states = (url.searchParams.get("state") ?? "").split(",");
@@ -576,7 +569,6 @@ describe.skipIf(!RUN)("person layer", () => {
     extraWritten = [];
     writtenPageSize = 1000;
     leadList = [];
-    delete process.env.PEOPLE_STANDING_WALK_MIN;
     uniboxRows = defaultUniboxRows();
     clearLeadStatesCache();
     installFetchStub();
@@ -636,8 +628,7 @@ describe.skipIf(!RUN)("person layer", () => {
       written("erin@v.com", "camp-4", { replied: true, unsubscribed: true, firstRepliedAt: "2026-09-07T08:00:00.000Z", replyClassification: "negative" }),
     ];
     writtenPageSize = 1; // every row on its own page: the cursor is walked to the end
-    // The whole-brand walk answers which lead every address is, at once.
-    process.env.PEOPLE_STANDING_WALK_MIN = "1";
+    // lead-service's by-address read answers which lead every address is, in one call.
     leadList = [
       { id: "lc-0", leadId: "l-0", email: "jimbob@y.com", campaignId: "camp-9", disqualification: null, company: null, human: null },
       { id: "lc-2", leadId: "l-2", email: "bob@y.com", campaignId: "camp-2", disqualification: null, company: null, human: null },
@@ -662,7 +653,9 @@ describe.skipIf(!RUN)("person layer", () => {
     expect((erin.presences as { detail: { replied: boolean } }[])[0].detail.replied).toBe(false);
 
     expect(summary.standing).toMatchObject({ asked: 4, failed: 0 });
-    expect(calls.filter((c) => c === "lead.test/orgs/leads")).toHaveLength(1);
+    expect(calls.filter((c) => c === `lead.test/internal/brands/${BRAND}/leads/by-address`)).toHaveLength(1);
+    // No whole-list walk of the brand (it kept lead-service's read model on its 3-min refresh).
+    expect(calls.filter((c) => c === "lead.test/orgs/leads")).toHaveLength(0);
     const instantly = summary.sources.find((s) => s.source === "instantly")!;
     expect(instantly).toMatchObject({ status: "ok", presences: 4, sourceCount: 4 });
     expect(calls.filter((c) => c === "instantly.test/orgs/written-to-leads")).toHaveLength(4);
@@ -680,8 +673,7 @@ describe.skipIf(!RUN)("person layer", () => {
     ]);
   });
 
-  it("a lead-service walk that fails reads every address unavailable, never a guess", async () => {
-    process.env.PEOPLE_STANDING_WALK_MIN = "1";
+  it("a lead-service by-address read that fails reads every address unavailable, never a guess", async () => {
     leadServiceDown = true;
     const summary = await buildNow();
     const rows = await db.select().from(people).orderBy(people.personKey);
@@ -2020,7 +2012,7 @@ describe.skipIf(!RUN)("person layer", () => {
         .set("x-org-id", ORG)
         .set("x-user-id", USER);
     const siblingReads = () =>
-      calls.filter((c) => c.endsWith("/orgs/google/conversation") || c.endsWith("/orgs/conversations") || c.endsWith("/orgs/leads"));
+      calls.filter((c) => c.endsWith("/orgs/google/conversation") || c.endsWith("/orgs/conversations") || c.endsWith("/leads/by-address"));
     const texts = (res: { body: { items: { text: string | null }[] } }) => res.body.items.map((i) => i.text);
 
     beforeEach(async () => {

@@ -11,6 +11,7 @@ import { transactionalItems } from "../../src/lib/people/timeline.js";
 import { runTxEmailPass, TX_EMAIL_FEED, type FeedEmail } from "../../src/lib/transactional/sent-emails.js";
 import copilotRoutes from "../../src/routes/copilot.js";
 import peopleRoutes from "../../src/routes/people.js";
+import { noLeadsByAddress } from "../helpers/lead-by-address.js";
 
 /**
  * TX-EMAIL-IN-UNIBOX-1024: transactional-email-service's sent-emails feed mirrored onto the staff Unibox
@@ -74,6 +75,7 @@ const feedCalls: (string | null)[] = [];
 function installFetchStub() {
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
+    if (url.host === "lead.test" && url.pathname.endsWith("/leads/by-address")) return noLeadsByAddress(init);
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
       return json({ id: "run-" + Math.random().toString(16).slice(2) });
     }
