@@ -19,7 +19,7 @@ const SUB = "jmatuszak@excelsiorortho.test";
 
 process.env.TRANSACTIONAL_EMAIL_SERVICE_URL = "http://tx.test";
 process.env.TRANSACTIONAL_EMAIL_SERVICE_API_KEY = "tx-key";
-// Not the staff Unibox: a newsletter is filed in any scope of the org that sent it.
+// Not the staff Unibox: a newsletter is filed on the brand it was sent for, whatever the scope.
 process.env.COPILOT_UNIBOX_ORG_ID = "4e754e75-1111-4111-8111-0000000000ff";
 process.env.COPILOT_UNIBOX_BRAND_ID = "4e754e75-1111-4111-8111-0000000000fe";
 
@@ -30,7 +30,7 @@ const send = (over: Partial<FeedNewsletter> & { id: string }): FeedNewsletter =>
   listSlug: "newsletter",
   recipientEmail: "JMatuszak@ExcelsiorOrtho.test",
   orgId: ORG,
-  brandIds: null,
+  brandIds: [BRAND],
   from: "Kevin from distribute.you <kevin@distribute.you>",
   subject: "When positive replies to cold email arrive",
   sentAt: "2026-10-26T22:07:25.748Z",
@@ -41,6 +41,8 @@ const N1 = send({ id: "4e754e75-1111-4111-8111-0000000000a1" });
 const N2 = send({ id: "4e754e75-1111-4111-8111-0000000000a2", releaseId: "4e754e75-1111-4111-8111-0000000000b2", subject: "Signups and meetings start with the right people", sentAt: "2026-11-02T04:00:02.503Z" });
 const N3 = send({ id: "4e754e75-1111-4111-8111-0000000000a3", subject: "Another org's letter", orgId: OTHER_ORG, sentAt: "2026-11-03T04:00:00Z" });
 const N4 = send({ id: "4e754e75-1111-4111-8111-0000000000a4", subject: "Other brand only", brandIds: [OTHER_BRAND], sentAt: "2026-11-04T04:00:00Z" });
+// Release and list both brandless: filed nowhere.
+const N5 = send({ id: "4e754e75-1111-4111-8111-0000000000a5", subject: "No brand known", brandIds: null, sentAt: "2026-11-05T04:00:00Z" });
 
 let pages: Record<string, { emails: FeedNewsletter[]; nextCursor: string | null }> = {};
 const asked: (string | null)[] = [];
@@ -74,12 +76,14 @@ describe.skipIf(!RUN)("newsletter sends on the subscriber's thread (real DB)", (
     await wipe();
   });
 
-  it("mirrors each sent newsletter once, then files it on the subscriber's thread in the sending org's scopes only", async () => {
-    pages = { "": { emails: [N1, N2], nextCursor: "c1" }, c1: { emails: [N3, N4], nextCursor: "c2" } };
+  it("mirrors each sent newsletter once, then files it ONLY on the brand it was sent for; no brand = nowhere, logged", async () => {
+    pages = { "": { emails: [N1, N2], nextCursor: "c1" }, c1: { emails: [N3, N4, N5], nextCursor: "c2" } };
     const now = Date.parse("2026-11-13T12:00:00Z");
-    expect(await runNewsletterPass(now)).toMatchObject({ read: 4, stored: 4, caughtUp: true, cursor: "c2" });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    expect(await runNewsletterPass(now)).toMatchObject({ read: 5, stored: 5, noBrand: 1, caughtUp: true, cursor: "c2" });
+    expect(errors.mock.calls.some((c) => String(c[0]).includes("1 sent newsletter(s) name no brand"))).toBe(true);
+    errors.mockRestore();
     // A re-read stores nothing twice.
-    pages[""] = { emails: [N1, N2], nextCursor: "c1" };
     await db.delete(calendarFeedCursors).where(eq(calendarFeedCursors.feed, NEWSLETTER_FEED));
     expect(await runNewsletterPass(now)).toMatchObject({ stored: 0 });
     const [row] = await db.select().from(newsletterSends).where(eq(newsletterSends.id, N1.id));
@@ -92,14 +96,20 @@ describe.skipIf(!RUN)("newsletter sends on the subscriber's thread (real DB)", (
       ["2026-11-02T04:00:02.503Z", "Signups and meetings start with the right people", "outbound", "newsletter"],
     ]);
     expect(thread.items[0]).toMatchObject({ source: "transactional", channel: "email", kind: "message", to: [SUB], from: "Kevin from distribute.you <kevin@distribute.you>" });
-    // The other brand of the org also gets the org's letters, plus its own.
-    expect((await transactionalItems({ orgId: ORG, brandId: OTHER_BRAND, emails: [SUB] })).items.map((i) => i.subject)).toEqual([
-      "When positive replies to cold email arrive",
-      "Signups and meetings start with the right people",
-      "Other brand only",
-    ]);
-    // A scope of an org that sent nothing to them: nothing, as before.
-    expect(await transactionalItems({ orgId: "4e754e75-1111-4111-8111-000000000009", brandId: BRAND, emails: [SUB] })).toMatchObject({ status: "not_connected", items: [] });
+    // The other brand of the org: only what was sent for it (never the first brand's, never the brandless one).
+    expect((await transactionalItems({ orgId: ORG, brandId: OTHER_BRAND, emails: [SUB] })).items.map((i) => i.subject)).toEqual(["Other brand only"]);
+    // A brand nothing was sent for: nothing, as before.
+    expect(await transactionalItems({ orgId: ORG, brandId: "4e754e75-1111-4111-8111-000000000009", emails: [SUB] })).toMatchObject({ status: "not_connected", items: [] });
+  });
+
+  it("a brand stated later re-states the stored send (reread): it moves to that brand's thread", async () => {
+    pages = { "": { emails: [N5], nextCursor: "c1" } };
+    await runNewsletterPass(Date.parse("2026-11-13T12:00:00Z"));
+    expect((await transactionalItems({ orgId: ORG, brandId: BRAND, emails: [SUB] })).items).toEqual([]);
+    pages = { "": { emails: [{ ...N5, brandIds: [BRAND] }], nextCursor: "c1" } };
+    await db.delete(calendarFeedCursors).where(eq(calendarFeedCursors.feed, NEWSLETTER_FEED));
+    expect(await runNewsletterPass(Date.parse("2026-11-13T12:00:00Z"))).toMatchObject({ stored: 0, noBrand: 0 });
+    expect((await transactionalItems({ orgId: ORG, brandId: BRAND, emails: [SUB] })).items.map((i) => i.subject)).toEqual(["No brand known"]);
   });
 
   it("holds the cursor over a page younger than the settle margin (a late commit is re-read)", async () => {

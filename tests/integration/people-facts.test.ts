@@ -635,18 +635,23 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
     expect((await allFacts()).filter((f) => f.type === "product_event" && f.sourceRef === "ev-human")).toHaveLength(1);
   });
 
-  it("UNIBOX-NEWSLETTER-1113: each newsletter the org sent a person is a message_out of ours, dated at its send, stated once", async () => {
+  it("UNIBOX-NEWSLETTER-1113: each newsletter sent FOR this brand is a message_out of ours, dated at its send; one naming another brand or none is not, and is withdrawn once it says so", async () => {
     const s = await seed();
     const OTHER_BRAND = "fac7fac7-1111-4111-8111-000000000009";
+    const nl = (n: string, over: Record<string, unknown>) => ({
+      id: `fac7fac7-1111-4111-8111-0000000000a${n}`, releaseId: `fac7fac7-1111-4111-8111-0000000000b${n}`, listSlug: "newsletter",
+      recipientEmail: "alice@x.com", orgId: ORG, brandIds: [BRAND], fromAddress: null, subject: `Letter ${n}`, sentAt: new Date(`2026-10-2${n}T10:00:00Z`), ...over,
+    });
     await db.insert(newsletterSends).values([
-      // The org's newsletter (no brand named): on every brand of the org.
-      { id: "fac7fac7-1111-4111-8111-0000000000a1", releaseId: "fac7fac7-1111-4111-8111-0000000000b1", listSlug: "newsletter", recipientEmail: "alice@x.com", orgId: ORG, brandIds: null, fromAddress: "Kevin <k@x.com>", subject: "When positive replies arrive", sentAt: new Date("2026-10-26T22:07:25.748Z") },
-      // Sent for another brand of the org only: not this brand's.
-      { id: "fac7fac7-1111-4111-8111-0000000000a2", releaseId: "fac7fac7-1111-4111-8111-0000000000b2", listSlug: "other", recipientEmail: "alice@x.com", orgId: ORG, brandIds: [OTHER_BRAND], fromAddress: null, subject: "Other brand", sentAt: new Date("2026-10-27T10:00:00Z") },
+      nl("1", { fromAddress: "Kevin <k@x.com>", subject: "When positive replies arrive", sentAt: new Date("2026-10-26T22:07:25.748Z") }),
+      // Sent for another brand of the org: never this brand's.
+      nl("2", { brandIds: [OTHER_BRAND] }),
+      // No brand known (release and list brandless): on no thread.
+      nl("3", { brandIds: null }),
       // Another org's newsletter to the same address: never this scope's.
-      { id: "fac7fac7-1111-4111-8111-0000000000a3", releaseId: "fac7fac7-1111-4111-8111-0000000000b3", listSlug: "newsletter", recipientEmail: "alice@x.com", orgId: "fac7fac7-1111-4111-8111-00000000000f", brandIds: null, fromAddress: null, subject: "Another org", sentAt: new Date("2026-10-28T10:00:00Z") },
+      nl("4", { orgId: "fac7fac7-1111-4111-8111-00000000000f" }),
       // A subscriber nobody in the scope is: held, never emitted.
-      { id: "fac7fac7-1111-4111-8111-0000000000a4", releaseId: "fac7fac7-1111-4111-8111-0000000000b1", listSlug: "newsletter", recipientEmail: "stranger@x.com", orgId: ORG, brandIds: null, fromAddress: null, subject: "When positive replies arrive", sentAt: new Date("2026-10-26T22:07:26Z") },
+      nl("5", { recipientEmail: "stranger@x.com" }),
     ]);
     await emitScopeFacts(s.scope);
     const sends = (await allFacts()).filter((f) => f.source === "transactional");
@@ -661,8 +666,15 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
     });
     expect((sends[0].payload as Record<string, unknown>).role).toBeUndefined();
     const before = await maxSeq();
-    expect(await emitScopeFacts(s.scope)).toMatchObject({ emitted: 0 });
+    expect(await emitScopeFacts(s.scope)).toMatchObject({ emitted: 0, notThisBrand: 0 });
     expect(await maxSeq()).toBe(before);
+
+    // The producer now states the send was for another brand (a list's brand stated later): the fact is withdrawn.
+    await db.update(newsletterSends).set({ brandIds: [OTHER_BRAND] }).where(eq(newsletterSends.id, "fac7fac7-1111-4111-8111-0000000000a1"));
+    expect(await emitScopeFacts(s.scope)).toMatchObject({ notThisBrand: 1, emitted: 0, withdrawnGone: 0 });
+    const added = (await readFacts({ since: before, limit: 100 })).facts;
+    expect(added).toHaveLength(1);
+    expect(added[0]).toMatchObject({ type: "withdrawn", withdrawnOf: sends[0].factId, payload: { reason: "not_this_brand", withdrawnType: "message_out" } });
   });
 
   it("a changed vendor record is withdrawn and re-stated; a vanished snapshot record is withdrawn", async () => {

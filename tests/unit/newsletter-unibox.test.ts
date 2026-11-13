@@ -20,15 +20,14 @@ describe("eventSessionless", () => {
 
 describe("newsletterScopeMatches", () => {
   const ORG = "o1";
-  it("the org's newsletter (no brand named) is on every brand of that org, never another org's", () => {
-    expect(newsletterScopeMatches({ orgId: ORG, brandIds: null }, ORG, "b1")).toBe(true);
-    expect(newsletterScopeMatches({ orgId: ORG, brandIds: [] }, ORG, "b2")).toBe(true);
-    expect(newsletterScopeMatches({ orgId: "o2", brandIds: null }, ORG, "b1")).toBe(false);
-    expect(newsletterScopeMatches({ orgId: null, brandIds: null }, ORG, "b1")).toBe(false);
-  });
-  it("a release naming brands is on those brands only", () => {
+  it("a send lands only on the brand(s) it names, in the sending org", () => {
     expect(newsletterScopeMatches({ orgId: ORG, brandIds: ["b1"] }, ORG, "b1")).toBe(true);
     expect(newsletterScopeMatches({ orgId: ORG, brandIds: ["b1"] }, ORG, "b2")).toBe(false);
+    expect(newsletterScopeMatches({ orgId: "o2", brandIds: ["b1"] }, ORG, "b1")).toBe(false);
+  });
+  it("no brand known = no thread at all, on any brand of the org", () => {
+    expect(newsletterScopeMatches({ orgId: ORG, brandIds: null }, ORG, "b1")).toBe(false);
+    expect(newsletterScopeMatches({ orgId: ORG, brandIds: [] }, ORG, "b2")).toBe(false);
   });
 });
 

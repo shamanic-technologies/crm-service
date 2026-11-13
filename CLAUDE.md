@@ -2321,8 +2321,11 @@ created / stopped, reply forwards...) shows on the recipient's thread as an outb
 apparaître dans l'Unibox »)**: transactional-email-service `GET /internal/sent-newsletters` (one per release x subscriber
 sent, `sentAt` = settled) → bronze `newsletter_sends` (insert-only, cursor `transactional_sent_newsletters`, same 15-min settle,
 loop 60 s, `NEWSLETTER_SEND_WATCH=off`, `POST /internal/newsletter-sends/watch` = a pass now). Filed GENERICALLY by the
-SENDING ORG: every (org, brand) scope of `org_id`, only its `brand_ids` when the release names some (`newsletterScopeSql`,
-never a list or brand id in code; a release naming no brand also lands on the org's other brands, e.g. our Loom demo scope).
+BRAND IT WAS SENT FOR: the producer's `brandIds` (the release's own, else its list's stated brand, transactional-email-service
+`PUT /mailing-lists/:slug/brand`), in the sending org (`newsletterScopeSql`, never a list or brand id in code). No brand known =
+filed NOWHERE, logged loud each pass (`noBrand`): "every brand of the org" put our newsletter on 149 Loom demo people
+(2026-11-13). A brand stated later: `POST /internal/newsletter-sends/watch {reread: true}` (the store re-states org + brands);
+a live fact no longer filed in its scope is withdrawn `not_this_brand`.
 Timeline: source `transactional`, `ref.eventType: "newsletter"`, the subject as words; latest-message preview too; NOT in
 `sent-after` (a newsletter answers nobody). Fact: `message_out` (family `newsletter_send`, source `transactional`, payload
 `{channel, kind: "newsletter", newsletter {releaseId, listSlug}, subject, text, from, to}`, NO `role`), on whoever holds the

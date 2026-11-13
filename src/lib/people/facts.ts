@@ -1095,8 +1095,8 @@ async function mailboxCandidates(orgId: string, brandId: string): Promise<Candid
 }
 
 /**
- * UNIBOX-NEWSLETTER-1113: every newsletter this (org, brand) sent a person is OUR message to them, `message_out` dated
- * at its send (lead-service dates the row as our activity from it). Filed on whoever holds the address; nobody yet =
+ * UNIBOX-NEWSLETTER-1113: every newsletter sent FOR this brand (lib/transactional/newsletters.ts) is OUR message to the
+ * person, `message_out` dated at its send (lead-service dates the row as our activity from it). Filed on whoever holds the address; nobody yet =
  * held until someone does. No `role` (a send TO them, never a copy).
  */
 async function newsletterCandidates(orgId: string, brandId: string): Promise<CandidateFact[]> {
@@ -1572,6 +1572,8 @@ export interface FactEmissionSummary {
   machineWithdrawn: number;
   /** Live facts of server-recorded PostHog events (no session) withdrawn (`sessionless_event`, UNIBOX-NEWSLETTER-1113). */
   sessionlessWithdrawn: number;
+  /** Live newsletter `message_out` facts withdrawn because the send names another brand or none (`not_this_brand`). */
+  notThisBrand: number;
   duplicateKeys: number;
   gmailOtherSkipped: number;
   merged: number;
@@ -1910,7 +1912,8 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
         | "human_identified"
         | "subject_changed"
         | "machine_visit"
-        | "sessionless_event";
+        | "sessionless_event"
+        | "not_this_brand";
     }[] = [];
     const fresh: (typeof peopleFacts.$inferInsert)[] = [];
     let unchanged = 0;
@@ -1982,6 +1985,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
         .filter((ref): ref is string => !!ref),
     );
     let sessionlessWithdrawn = 0;
+    let notThisBrand = 0;
     for (const [key, live] of liveByKey) {
       if (++step % YIELD_EVERY === 0) await yieldToLoop();
       if (candidates.has(key)) continue;
@@ -1998,6 +2002,13 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
       if (authStatesSignups && live.family === "posthog_person") {
         withdrawals.push({ fact: live, reason: "signup_stated_by_auth_provider" });
         retired++;
+        continue;
+      }
+      // UNIBOX-NEWSLETTER-1113: a newsletter send no longer filed in this scope (it names another brand, or none) was
+      // never this brand's message: withdrawn. The send itself never leaves bronze, so absence here is only that.
+      if (live.family === "newsletter_send") {
+        withdrawals.push({ fact: live, reason: "not_this_brand" });
+        notThisBrand++;
         continue;
       }
       if (RETIRED_FAMILIES.has(live.family ?? "")) {
@@ -2178,9 +2189,10 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
       candidates: candidates.size,
       emitted: fresh.length,
       unchanged,
-      corrected: withdrawals.length - withdrawnGone - reminted - retired - humanIdentified - machineWithdrawn - sessionlessWithdrawn,
+      corrected: withdrawals.length - withdrawnGone - reminted - retired - humanIdentified - machineWithdrawn - sessionlessWithdrawn - notThisBrand,
       machineWithdrawn,
       sessionlessWithdrawn,
+      notThisBrand,
       unattributed,
       machine,
       withdrawnGone,
