@@ -9,9 +9,9 @@
  * `newsletter_sends`, one row per producer id, insert-only; the stored cursor never moves past a page holding an
  * email younger than TX_EMAIL_SETTLE_MS (the producer commits slightly out of order, the tail is re-read).
  *
- * Filed GENERICALLY, never on one list or brand: a send belongs to the ORG that sent it (the list's owner); it shows
- * on the subscriber's thread in every (org, brand) scope of that org, or only the release's brands when it names some
- * (`newsletterScopeMatches`). Matched on the recipient address. On the thread it is an outbound email of ours
+ * Filed GENERICALLY, never on one list or brand: a send shows on the subscriber's thread ONLY in the scope(s) of the
+ * brand(s) it was sent for, as the producer states them (`brandIds`: the release's own, else its list's stated brand),
+ * in the sending org (`newsletterScopeMatches`). No brand known = filed nowhere, logged loud each pass. Matched on the recipient address. On the thread it is an outbound email of ours
  * (source `transactional`: the producer, `sentBy: automation`) with the release's subject; and it is a fact
  * `message_out` (people/facts.ts `newsletterCandidates`) so lead-service dates the row as OUR activity.
  *
@@ -76,16 +76,20 @@ export function parseFeedNewsletter(raw: unknown): FeedNewsletter {
   };
 }
 
-/** PURE: does a send belong on a thread of this (org, brand)? The sending org's scopes; only its named brands if any. */
+/**
+ * PURE: does a send belong on a thread of this (org, brand)? Only the brand(s) it was SENT FOR (the producer's `brandIds`:
+ * the release's own, else its list's stated brand), in the sending org. No brand known = no thread at all (logged loud by
+ * the pass): filing it on every brand of the org put our newsletter on 149 people of our Loom demo brand (2026-11-13).
+ */
 export function newsletterScopeMatches(send: { orgId: string | null; brandIds: unknown }, orgId: string, brandId: string): boolean {
   if (send.orgId !== orgId) return false;
   const brands = Array.isArray(send.brandIds) ? (send.brandIds as string[]) : [];
-  return brands.length === 0 || brands.includes(brandId);
+  return brands.includes(brandId);
 }
 
 /** SQL twin of `newsletterScopeMatches` on a `newsletter_sends` row alias. */
 export const newsletterScopeSql = (alias: string, orgId: string, brandId: string) =>
-  sql`${sql.raw(alias)}.org_id = ${orgId} AND (${sql.raw(alias)}.brand_ids IS NULL OR jsonb_array_length(${sql.raw(alias)}.brand_ids) = 0 OR ${sql.raw(alias)}.brand_ids ? ${brandId})`;
+  sql`${sql.raw(alias)}.org_id = ${orgId} AND ${sql.raw(alias)}.brand_ids ? ${brandId}`;
 
 async function fetchPage(cursor: string | null): Promise<{ emails: FeedNewsletter[]; nextCursor: string | null }> {
   const url = process.env.TRANSACTIONAL_EMAIL_SERVICE_URL;
@@ -118,12 +122,23 @@ export async function storeNewsletterSends(emails: FeedNewsletter[]): Promise<nu
     subject: stripNul(e.subject)!,
     sentAt: new Date(e.sentAt),
   }));
-  const inserted = await db
+  // Insert-only, except the producer's statement of WHO sent it (org, brands): a list's brand stated later re-states
+  // every past send of it, read again from a reset cursor (`rereadFromStart`).
+  const written = (await db
     .insert(newsletterSends)
     .values(rows)
-    .onConflictDoNothing({ target: newsletterSends.id })
-    .returning({ id: newsletterSends.id });
-  return inserted.length;
+    .onConflictDoUpdate({
+      target: newsletterSends.id,
+      set: { orgId: sql`excluded.org_id`, brandIds: sql`excluded.brand_ids` },
+      setWhere: sql`${newsletterSends.orgId} IS DISTINCT FROM excluded.org_id OR ${newsletterSends.brandIds} IS DISTINCT FROM excluded.brand_ids`,
+    })
+    .returning({ id: newsletterSends.id, inserted: sql<boolean>`(xmax = 0)` })) as { id: string; inserted: boolean }[];
+  return written.filter((w) => w.inserted).length;
+}
+
+/** Forget the cursor: the next pass reads the whole feed again (a list's brand was stated after its sends were read). */
+export async function rereadFromStart(): Promise<void> {
+  await db.delete(calendarFeedCursors).where(eq(calendarFeedCursors.feed, NEWSLETTER_FEED));
 }
 
 async function saveCursor(cursor: string | null, caughtUp: boolean): Promise<void> {
@@ -140,6 +155,8 @@ export interface NewsletterPassResult {
   pages: number;
   read: number;
   stored: number;
+  /** Rows read that name no brand: filed nowhere (logged). */
+  noBrand: number;
   caughtUp: boolean;
   cursor: string | null;
 }
@@ -154,10 +171,12 @@ export async function runNewsletterPass(now: number = Date.now()): Promise<Newsl
   let read = 0;
   let stored = 0;
   let caughtUp = false;
+  let noBrand = 0;
   while (pages < MAX_PAGES_PER_PASS) {
     const page = await fetchPage(cursor);
     pages++;
     read += page.emails.length;
+    noBrand += page.emails.filter((e) => !e.brandIds?.length).length;
     stored += await storeNewsletterSends(page.emails);
     if (page.emails.length === 0) {
       caughtUp = true;
@@ -173,7 +192,13 @@ export async function runNewsletterPass(now: number = Date.now()): Promise<Newsl
     cursor = page.nextCursor;
   }
   await saveCursor(settledCursor, caughtUp);
-  return { pages, read, stored, caughtUp, cursor: settledCursor };
+  if (noBrand > 0) {
+    console.error(
+      `[crm-service][newsletter] ${noBrand} sent newsletter(s) name no brand (release and list both brandless): filed on NO thread. ` +
+        "State the list's brand (transactional-email-service PUT /mailing-lists/:slug/brand), then POST /internal/newsletter-sends/watch {reread: true}.",
+    );
+  }
+  return { pages, read, stored, noBrand, caughtUp, cursor: settledCursor };
 }
 
 let running = false;
@@ -199,10 +224,11 @@ export function startNewsletterWatch(): void {
 }
 
 /** A pass now, unless one runs. */
-export async function runNewsletterPassNow(): Promise<NewsletterPassResult | { skipped: "pass_running" }> {
+export async function runNewsletterPassNow(opts: { reread?: boolean } = {}): Promise<NewsletterPassResult | { skipped: "pass_running" }> {
   if (running) return { skipped: "pass_running" };
   running = true;
   try {
+    if (opts.reread) await rereadFromStart();
     return await runNewsletterPass();
   } finally {
     running = false;

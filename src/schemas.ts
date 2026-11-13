@@ -4778,9 +4778,10 @@ registry.registerPath({
   summary:
     "Read transactional-email-service's sent-newsletters feed now (the loop runs every minute): every newsletter email an org sent a " +
     "subscriber, shown on their thread in that org's scopes (source `transactional`, `ref.eventType` `newsletter`, the release's subject) " +
-    "and stated as a `message_out` fact (UNIBOX-NEWSLETTER-1113)",
+    "and stated as a `message_out` fact (UNIBOX-NEWSLETTER-1113). Filed only on the brand(s) the send names; none = nowhere (logged). " +
+    "Body `{reread: true}` reads the whole feed again (a list's brand stated after its sends were read)",
   responses: {
-    200: { description: "`{pages, read, stored, caughtUp, cursor}` (stored = new emails), or `{skipped: \"pass_running\"}`" },
+    200: { description: "`{pages, read, stored, noBrand, caughtUp, cursor}` (stored = new emails, noBrand = filed nowhere), or `{skipped: \"pass_running\"}`" },
     502: { description: "The feed could not be read" },
   },
 });

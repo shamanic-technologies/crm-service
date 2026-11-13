@@ -18,9 +18,10 @@ router.post("/internal/transactional-emails/watch", apiKeyAuth, async (_req, res
   }
 });
 
-router.post("/internal/newsletter-sends/watch", apiKeyAuth, async (_req, res) => {
+router.post("/internal/newsletter-sends/watch", apiKeyAuth, async (req, res) => {
   try {
-    res.json(await runNewsletterPassNow());
+    // {reread: true}: from the first send again (a list's brand stated after its sends were read).
+    res.json(await runNewsletterPassNow({ reread: req.body?.reread === true }));
   } catch (err) {
     console.error("[crm-service][newsletter] manual pass failed:", err);
     res.status(502).json({ type: "upstream", error: (err as Error).message });
