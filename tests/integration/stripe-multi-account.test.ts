@@ -8,6 +8,7 @@ import { ensureScope, runScopeBuild } from "../../src/lib/people/build.js";
 import { emitScopeFacts } from "../../src/lib/people/facts.js";
 import { runStripeSyncPass } from "../../src/lib/stripe/sync.js";
 import posthogStripeRoutes from "../../src/routes/posthog-stripe.js";
+import { noLeadsByAddress } from "../helpers/lead-by-address.js";
 
 /**
  * A brand connects SEVERAL Stripe accounts, each with its own restricted key
@@ -71,6 +72,7 @@ ACCOUNTS.rk_live_eu_again = ACCOUNTS.rk_live_eu;
 function installFetchStub() {
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
+    if (url.host === "lead.test" && url.pathname.endsWith("/leads/by-address")) return noLeadsByAddress(init);
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
       return json({ id: "run-" + Math.random().toString(16).slice(2) });
     }

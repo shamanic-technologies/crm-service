@@ -9,6 +9,7 @@ import { recordsNoPersonHolds } from "../../src/lib/people/facts.js";
 import { runStripeSyncPass } from "../../src/lib/stripe/sync.js";
 import peopleRoutes from "../../src/routes/people.js";
 import posthogStripeRoutes from "../../src/routes/posthog-stripe.js";
+import { noLeadsByAddress } from "../helpers/lead-by-address.js";
 
 /**
  * UNIBOX-FACT-LAG-1028 (prod 2026-10-28, tari@slipless.ng): a person already known to the brand pays at
@@ -41,6 +42,7 @@ let platformRunsOpened = 0;
 function installFetchStub() {
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
+    if (url.host === "lead.test" && url.pathname.endsWith("/leads/by-address")) return noLeadsByAddress(init);
     if (url.pathname === "/v1/platform-runs" && init?.method === "POST") platformRunsOpened++;
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
       return json({ id: "run-" + Math.random().toString(16).slice(2) });

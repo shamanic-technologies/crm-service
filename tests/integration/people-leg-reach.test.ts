@@ -6,6 +6,7 @@ import { db } from "../../src/db/index.js";
 import { ghlConnections, ghlRawRecords, people, peopleFacts, peopleScopes } from "../../src/db/schema.js";
 import peopleRoutes from "../../src/routes/people.js";
 import { clearLegReachCache } from "../../src/lib/people/leg-reach.js";
+import { noLeadsByAddress } from "../helpers/lead-by-address.js";
 
 /**
  * GET /internal/people/leg-reach (+ /brands) against a real Postgres (gated on
@@ -33,8 +34,9 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 function stubRuns() {
-  vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+  vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
+    if (url.host === "lead.test" && url.pathname.endsWith("/leads/by-address")) return noLeadsByAddress(init);
     if (url.pathname.startsWith("/v1/runs") || url.pathname.startsWith("/v1/platform-runs")) {
       return json({ id: "run-" + Math.random().toString(16).slice(2) });
     }
