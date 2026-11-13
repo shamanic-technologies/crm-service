@@ -63,6 +63,7 @@ import {
   people,
   posthogActivities,
   stripeTransactions,
+  type NewsletterSend,
   type PeopleScope,
   type Person,
 } from "../../db/schema.js";
@@ -91,6 +92,7 @@ import {
 import { siblingGetOk } from "./siblings.js";
 import { directionFor, readMailboxThreads } from "../mailbox/thread.js";
 import { readTxEmailThread, TX_EMAIL_CHANNEL, TX_EMAIL_SENDER_NAME } from "../transactional/sent-emails.js";
+import { NEWSLETTER_EVENT_TYPE, readNewsletterThread } from "../transactional/newsletters.js";
 import { ACTIVITY_CHANNEL, activityLine, readActivityThread } from "../account-activity/line.js";
 import { deferApiAnswer } from "./item-fill.js";
 import { ACCOUNT_CHANNEL, creditDateBasis, creditEventText } from "../credit-events/rules.js";
@@ -637,11 +639,17 @@ export async function mailboxItems(person: Pick<Person, "orgId" | "brandId" | "e
  * addresses, read on the spot: an outbound email FROM US with its subject and words at its send time.
  * `ref.messageSource` is the producer's word on the body (`stored` = as sent, `replayed` = re-rendered
  * from its template, `unavailable` = template gone, no subject / body). Staff Unibox scope only.
+ * Plus every NEWSLETTER the scope's org sent them (UNIBOX-NEWSLETTER-1113, lib/transactional/newsletters.ts):
+ * same producer, any scope of the sending org, `ref.eventType` = `newsletter`, the release's subject as its words.
  */
 export async function transactionalItems(person: Pick<Person, "orgId" | "brandId" | "emails">): Promise<SourceResult> {
-  if (!isCopilotDestination(person.orgId, person.brandId)) return notConnected();
   const emails = person.emails as string[];
-  const rows = await readTxEmailThread(person.orgId, person.brandId, emails);
+  const staff = isCopilotDestination(person.orgId, person.brandId);
+  const [rows, newsletters] = await Promise.all([
+    staff ? readTxEmailThread(person.orgId, person.brandId, emails) : Promise.resolve([]),
+    readNewsletterThread(person.orgId, person.brandId, emails),
+  ]);
+  if (!staff && newsletters.length === 0) return notConnected();
   const items = rows.map(
     (e): TimelineItem => ({
       at: e.sentAt.toISOString(),
@@ -659,7 +667,28 @@ export async function transactionalItems(person: Pick<Person, "orgId" | "brandId
       event: null,
     }),
   );
+  for (const n of newsletters) items.push(newsletterItem(n));
+  items.sort((a, b) => Date.parse(a.at!) - Date.parse(b.at!));
   return { status: items.length ? "ok" : "empty", items, error: null, asked: emails };
+}
+
+/** PURE: one newsletter we sent, as an outbound email of ours on the subscriber's thread. */
+export function newsletterItem(n: Pick<NewsletterSend, "id" | "releaseId" | "listSlug" | "recipientEmail" | "fromAddress" | "subject" | "sentAt">): TimelineItem {
+  return {
+    at: n.sentAt.toISOString(),
+    source: "transactional",
+    channel: TX_EMAIL_CHANNEL,
+    kind: "message",
+    direction: "outbound",
+    subject: n.subject,
+    text: n.subject,
+    from: n.fromAddress ?? TX_EMAIL_SENDER_NAME,
+    to: [n.recipientEmail],
+    ref: { emailId: n.id, eventType: NEWSLETTER_EVENT_TYPE, releaseId: n.releaseId, listSlug: n.listSlug, messageSource: "stored" },
+    textClean: null,
+    outreachFact: null,
+    event: null,
+  };
 }
 
 // ─── account events (billing-service) ───────────────────────────────────────

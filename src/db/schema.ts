@@ -2780,6 +2780,34 @@ export const transactionalEmails = pgTable(
 );
 export type TransactionalEmail = typeof transactionalEmails.$inferSelect;
 
+/**
+ * Bronze: every newsletter email transactional-email-service SENT a subscriber (`GET /internal/sent-newsletters`,
+ * UNIBOX-NEWSLETTER-1113), one row per producer recipient row id, never rewritten. Filed on the subscriber's thread in
+ * every scope of the sending org (`org_id`; only its `brand_ids` when the release names some), matched on
+ * `recipient_email`, and stated `message_out` (lib/transactional/newsletters.ts).
+ */
+export const newsletterSends = pgTable(
+  "newsletter_sends",
+  {
+    id: uuid("id").primaryKey(),
+    releaseId: uuid("release_id").notNull(),
+    listSlug: text("list_slug").notNull(),
+    recipientEmail: text("recipient_email").notNull(),
+    // The producer's internal org uuid (text: null when the release named none).
+    orgId: text("org_id"),
+    brandIds: jsonb("brand_ids"),
+    fromAddress: text("from_address"),
+    subject: text("subject").notNull(),
+    sentAt: timestamp("sent_at", { withTimezone: true }).notNull(),
+    mirroredAt: timestamp("mirrored_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index("newsletter_sends_recipient_idx").on(table.recipientEmail, table.sentAt),
+    index("newsletter_sends_org_idx").on(table.orgId, table.mirroredAt),
+  ],
+);
+export type NewsletterSend = typeof newsletterSends.$inferSelect;
+
 /** Bronze: google-service's calendar event, verbatim (latest served version), keyed on its own row id. */
 export const calendarEvents = pgTable(
   "calendar_events",

@@ -157,6 +157,26 @@ export const BRONZE_MACHINE_VISIT_SQL = (payload: string) =>
   ` OR (${payload}->>'entry_url' ~ '${NEWSLETTER_LANDING_SQL}' AND ${payload}->>'pageviews' IN ('1', '1.0')` +
   ` AND ${payload}->>'started_at' = ${payload}->>'ended_at'))`;
 
+/**
+ * UNIBOX-NEWSLETTER-1113 (owner 2026-10-28 « Un robot n'est PAS un clic : filtré à la source, il ne sort jamais du
+ * bronze »): a custom event its source records in NO session (the `session_id` column present, empty) was captured by
+ * the brand's own SERVER about the person, never by their browser: an identify when a newsletter link is hit (mail
+ * scanners hit every link, three times in a second), an org minted for an anonymous visitor. Identity plumbing, not
+ * their act: it stays in bronze (the person and their distinct ids, so a later real visit is theirs, are untouched).
+ * A real visit through the link is its own session (a `visit`), kept as ever. A payload with no `session_id` key at all
+ * is left alone (nothing positive says it was a server). Same rule as lead-service `isSessionlessProductEvent`.
+ * Prod 2026-11-13: 45,504 `newsletter_link_identified` + 43 `anonymous_org_created`, every other event has a session.
+ */
+export function eventSessionless(payload: Record<string, unknown>): boolean {
+  return "session_id" in payload && !str(payload.session_id);
+}
+
+/** SQL twin of `eventSessionless` over a bronze event payload (jsonb). */
+export const BRONZE_SESSIONLESS_EVENT_SQL = (payload: string) => `(${payload} ? 'session_id' AND COALESCE(${payload}->>'session_id', '') = '')`;
+
+/** The same rule over a SILVER `posthog_activities.detail` (where `deriveKeyEvent` stored the session as `sessionId`). */
+export const SILVER_SESSIONLESS_EVENT_SQL = (detail: string) => `(${detail} ? 'sessionId' AND COALESCE(${detail}->>'sessionId', '') = '')`;
+
 export function deriveVisit(payload: Record<string, unknown>): DerivedActivity | null {
   const personId = str(payload.person_id);
   const sessionId = str(payload.session_id);

@@ -19,8 +19,10 @@ import {
   peopleFacts,
   peopleMessageTexts,
   peopleScopes,
+  newsletterSends,
   posthogActivities,
   posthogConnections,
+  posthogRawRecords,
   stripeConnections,
   stripeTransactions,
   type PeopleScope,
@@ -328,7 +330,7 @@ const maxSeq = async () => {
 describe.skipIf(!RUN)("people fact feed (real DB)", () => {
   // Leave nothing behind: other suites share these tables (and once shared a brand id).
   const wipe = () =>
-    db.execute(sql`TRUNCATE people_facts, people_scopes, people, people_message_texts, matrix_raw_events, conversations, matrix_connections, ghl_appointments, ghl_form_submissions, ghl_opportunity_history, ghl_stage_meanings, ghl_opportunities, ghl_connections, posthog_activities, posthog_connections, stripe_transactions, stripe_connections, contact_uploads, contacts CASCADE`);
+    db.execute(sql`TRUNCATE people_facts, people_scopes, people, people_message_texts, matrix_raw_events, conversations, matrix_connections, ghl_appointments, ghl_form_submissions, ghl_opportunity_history, ghl_stage_meanings, ghl_opportunities, ghl_connections, posthog_activities, posthog_raw_records, posthog_connections, stripe_transactions, stripe_connections, contact_uploads, contacts, newsletter_sends CASCADE`);
   beforeEach(async () => {
     stubRuns();
     await wipe();
@@ -597,6 +599,70 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
     expect(await emitScopeFacts(s.scope)).toMatchObject({ machine: 4, machineWithdrawn: 2, emitted: 0 });
     const added = (await readFacts({ since: before, limit: 100 })).facts;
     expect(added.map((f) => (f.payload as { withdrawnType?: string }).withdrawnType).sort()).toEqual(["product_event", "website_visit"]);
+  });
+
+  it("UNIBOX-NEWSLETTER-1113: an event the brand's SERVER recorded in no session is no fact; one stated before is withdrawn; an event in a session stays", async () => {
+    const s = await seed();
+    const [phc] = await db.select().from(posthogConnections).where(eq(posthogConnections.orgId, ORG));
+    const event = (externalId: string, sessionId: string | null, name: string) => ({
+      orgId: ORG, brandId: BRAND, connectionId: phc.id, kind: "event", externalId, externalPersonId: "ph-alice", contactId: s.posthogContact,
+      occurredAt: new Date("2026-10-26T22:07:52Z"), endedAt: null, name, url: null, pageviews: null,
+      detail: { sessionId, path: null, properties: { source: "server", newsletter_list: "newsletter" } },
+    });
+    // A server identify (no session) and a real click in a session.
+    await db.insert(posthogActivities).values([event("ev-server", null, "newsletter_link_identified"), event("ev-human", "s1", "get_started_step_done")]);
+    await emitScopeFacts(s.scope);
+    const productEvents = (await allFacts()).filter((f) => f.type === "product_event");
+    expect(productEvents.map((f) => f.sourceRef)).toEqual(["ev-human"]);
+
+    // An event stated before the rule (in a session at the time), now read off bronze as server-recorded: withdrawn.
+    await db.insert(posthogActivities).values(event("ev-old", "s9", "newsletter_link_identified"));
+    await emitScopeFacts(s.scope);
+    const old = (await allFacts()).find((f) => f.sourceRef === "ev-old")!;
+    expect(old.type).toBe("product_event");
+    await db.insert(posthogRawRecords).values({
+      orgId: ORG, brandId: BRAND, connectionId: phc.id, kind: "event", externalId: "ev-old", contentHash: "h",
+      payload: { id: "ev-old", event: "newsletter_link_identified", person_id: "ph-alice", timestamp: "2026-10-26T22:07:52Z", session_id: "" },
+    });
+    await db.delete(posthogActivities).where(eq(posthogActivities.externalId, "ev-old"));
+    const before = await maxSeq();
+    const summary = await emitScopeFacts(s.scope);
+    expect(summary).toMatchObject({ sessionlessWithdrawn: 1, withdrawnGone: 0, emitted: 0 });
+    const added = (await readFacts({ since: before, limit: 100 })).facts;
+    expect(added).toHaveLength(1);
+    expect(added[0]).toMatchObject({ type: "withdrawn", withdrawnOf: old.factId, payload: { reason: "sessionless_event", withdrawnType: "product_event" } });
+    // The real click is still theirs.
+    expect((await allFacts()).filter((f) => f.type === "product_event" && f.sourceRef === "ev-human")).toHaveLength(1);
+  });
+
+  it("UNIBOX-NEWSLETTER-1113: each newsletter the org sent a person is a message_out of ours, dated at its send, stated once", async () => {
+    const s = await seed();
+    const OTHER_BRAND = "fac7fac7-1111-4111-8111-000000000009";
+    await db.insert(newsletterSends).values([
+      // The org's newsletter (no brand named): on every brand of the org.
+      { id: "fac7fac7-1111-4111-8111-0000000000a1", releaseId: "fac7fac7-1111-4111-8111-0000000000b1", listSlug: "newsletter", recipientEmail: "alice@x.com", orgId: ORG, brandIds: null, fromAddress: "Kevin <k@x.com>", subject: "When positive replies arrive", sentAt: new Date("2026-10-26T22:07:25.748Z") },
+      // Sent for another brand of the org only: not this brand's.
+      { id: "fac7fac7-1111-4111-8111-0000000000a2", releaseId: "fac7fac7-1111-4111-8111-0000000000b2", listSlug: "other", recipientEmail: "alice@x.com", orgId: ORG, brandIds: [OTHER_BRAND], fromAddress: null, subject: "Other brand", sentAt: new Date("2026-10-27T10:00:00Z") },
+      // Another org's newsletter to the same address: never this scope's.
+      { id: "fac7fac7-1111-4111-8111-0000000000a3", releaseId: "fac7fac7-1111-4111-8111-0000000000b3", listSlug: "newsletter", recipientEmail: "alice@x.com", orgId: "fac7fac7-1111-4111-8111-00000000000f", brandIds: null, fromAddress: null, subject: "Another org", sentAt: new Date("2026-10-28T10:00:00Z") },
+      // A subscriber nobody in the scope is: held, never emitted.
+      { id: "fac7fac7-1111-4111-8111-0000000000a4", releaseId: "fac7fac7-1111-4111-8111-0000000000b1", listSlug: "newsletter", recipientEmail: "stranger@x.com", orgId: ORG, brandIds: null, fromAddress: null, subject: "When positive replies arrive", sentAt: new Date("2026-10-26T22:07:26Z") },
+    ]);
+    await emitScopeFacts(s.scope);
+    const sends = (await allFacts()).filter((f) => f.source === "transactional");
+    expect(sends).toHaveLength(1);
+    expect(sends[0]).toMatchObject({
+      type: "message_out",
+      personKey: "email:alice@x.com",
+      sourceRef: "fac7fac7-1111-4111-8111-0000000000a1",
+      occurredAt: "2026-10-26T22:07:25.748Z",
+      dateBasis: "sent_at",
+      payload: { channel: "email", kind: "newsletter", subject: "When positive replies arrive", to: ["alice@x.com"], newsletter: { listSlug: "newsletter" } },
+    });
+    expect((sends[0].payload as Record<string, unknown>).role).toBeUndefined();
+    const before = await maxSeq();
+    expect(await emitScopeFacts(s.scope)).toMatchObject({ emitted: 0 });
+    expect(await maxSeq()).toBe(before);
   });
 
   it("a changed vendor record is withdrawn and re-stated; a vanished snapshot record is withdrawn", async () => {

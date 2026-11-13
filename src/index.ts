@@ -38,6 +38,7 @@ import { startCalendarWatch } from "./lib/calendar/feed.js";
 import { startCreditWatch } from "./lib/credit-events/feed.js";
 import { startRefusalWatch } from "./lib/payment-refusals/watch.js";
 import { startTxEmailWatch } from "./lib/transactional/sent-emails.js";
+import { startNewsletterWatch } from "./lib/transactional/newsletters.js";
 import { startMailboxWatch } from "./lib/mailbox/feed.js";
 import { startActivityWatch } from "./lib/account-activity/activity.js";
 import { startLineWatch } from "./lib/whatsapp/line-health.js";
@@ -155,6 +156,8 @@ if (process.env.NODE_ENV !== "test") {
         startRefusalWatch();
         // Mirrors transactional-email-service's sent emails onto each client's staff Unibox thread.
         startTxEmailWatch();
+        // Mirrors every newsletter email we sent onto the subscriber's thread + states it message_out (UNIBOX-NEWSLETTER-1113).
+        startNewsletterWatch();
         // Every person on our sending mailboxes' messages (EVERY-PERSON-ON-THE-THREAD-1109).
         startMailboxWatch();
         // Retries a client's reported account action (campaign / budget) still waiting to be filed or pinged.

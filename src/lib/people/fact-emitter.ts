@@ -63,7 +63,7 @@ export function requestEmission(scope: EmitScope): Promise<FactEmissionSummary> 
 /**
  * The scope's INPUTS MARK: the latest write to every table a fact of the scope is derived from
  * (silver contacts and activities, Matrix events, the Gmail / cold-email store, CRM funnel records,
- * calendar meetings, credit events) + the last build + the contacts count (a deleted record). Same
+ * calendar meetings, credit events, newsletters sent) + the last build + the contacts count (a deleted record). Same
  * mark = nothing new to state. Each part reads one index (migration 0069) or a small table.
  */
 export async function inputsMark(scope: EmitScope): Promise<string> {
@@ -84,7 +84,8 @@ export async function inputsMark(scope: EmitScope): Promise<string> {
       (SELECT max(last_rebuilt_at) FROM ghl_form_submissions WHERE ${ob}),
       (SELECT max(observed_at) FROM ghl_opportunity_history WHERE ${ob}),
       (SELECT max(mirrored_at) FROM calendar_events WHERE org_id = ${orgId}),
-      (SELECT max(greatest(received_at, members_resolved_at)) FROM credit_events)
+      (SELECT max(greatest(received_at, members_resolved_at)) FROM credit_events),
+      (SELECT max(mirrored_at) FROM newsletter_sends WHERE org_id = ${orgId}::text)
     ) AS mark
   `)) as unknown as { mark: string }[];
   return row.mark;

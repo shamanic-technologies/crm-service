@@ -55,7 +55,7 @@ import { LATE_JOIN_SOURCES, mirrorContactKeys } from "./record-keys.js";
 import { eventsQuery, type FunnelEventSource } from "../gohighlevel/funnel-events.js";
 import { labelEventsQuery, type LabelEventRow } from "../gohighlevel/label-verdicts.js";
 import { GHL_SOURCE } from "../gohighlevel/records.js";
-import { BRONZE_MACHINE_VISIT_SQL, POSTHOG_SOURCE, brandEventProperties, describeKeyEvent } from "../posthog/records.js";
+import { BRONZE_MACHINE_VISIT_SQL, BRONZE_SESSIONLESS_EVENT_SQL, POSTHOG_SOURCE, SILVER_SESSIONLESS_EVENT_SQL, brandEventProperties, describeKeyEvent } from "../posthog/records.js";
 import { STRIPE_SOURCE } from "../stripe/records.js";
 import { emailKey, keysOf, normalizeEmail, pickPersonKey, type Presence } from "./identity.js";
 import type { PersonConnectionTag } from "./connection-tags.js";
@@ -66,6 +66,7 @@ import { factTypeFor, type AddressRole } from "../mailbox/rules.js";
 import { meetingFactContext, readOrgEvents } from "../calendar/matching.js";
 import { meetingCandidateFacts } from "../calendar/meetings.js";
 import { isCopilotDestination } from "../copilot/messages.js";
+import { newsletterScopeSql } from "../transactional/newsletters.js";
 import { creditDateBasis } from "../credit-events/rules.js";
 import type { CreditEventType } from "../credit-events/rules.js";
 
@@ -121,7 +122,7 @@ export const FACT_TYPES = [
 export type FactType = (typeof FACT_TYPES)[number];
 
 // `distribute_platform`: retired (see RETIRED_FAMILIES); kept because the feed still serves the facts it stated.
-export const FACT_SOURCES = ["gohighlevel", "gmail", "matrix", "stripe", "posthog", "clerk", "csv", "crm", "distribute_platform", "google_calendar", "billing", "sending_mailbox"] as const;
+export const FACT_SOURCES = ["gohighlevel", "gmail", "matrix", "stripe", "posthog", "clerk", "csv", "crm", "distribute_platform", "google_calendar", "billing", "sending_mailbox", "transactional"] as const;
 export type FactSource = (typeof FACT_SOURCES)[number];
 
 /**
@@ -155,6 +156,9 @@ const FAMILIES = {
   calendar_meeting: { source: "google_calendar", snapshot: true, immutable: false },
   // CREDIT-RAN-OUT-UNIBOX-EVENT-1024: one per (billing event, member address); history, stated once, never withdrawn.
   billing_credit: { source: "billing", snapshot: false, immutable: true },
+  // UNIBOX-NEWSLETTER-1113: one `message_out` per newsletter email the org sent the person (lib/transactional/newsletters.ts);
+  // history, stated once, never withdrawn.
+  newsletter_send: { source: "transactional", snapshot: false, immutable: true },
 } as const;
 export type FactFamily = keyof typeof FAMILIES;
 
@@ -1090,6 +1094,44 @@ async function mailboxCandidates(orgId: string, brandId: string): Promise<Candid
   }));
 }
 
+/**
+ * UNIBOX-NEWSLETTER-1113: every newsletter this (org, brand) sent a person is OUR message to them, `message_out` dated
+ * at its send (lead-service dates the row as our activity from it). Filed on whoever holds the address; nobody yet =
+ * held until someone does. No `role` (a send TO them, never a copy).
+ */
+async function newsletterCandidates(orgId: string, brandId: string): Promise<CandidateFact[]> {
+  const sends = await rows<{ id: string; release_id: string; list_slug: string; recipient_email: string; from_address: string | null; subject: string; sent_at: string | Date }>(sql`
+    SELECT n.id, n.release_id, n.list_slug, n.recipient_email, n.from_address, n.subject, n.sent_at
+    FROM newsletter_sends n WHERE ${newsletterScopeSql("n", orgId, brandId)}
+  `);
+  return sends.map((n) => newsletterCandidate(n));
+}
+
+/** PURE: one newsletter send as the fact it is. */
+export function newsletterCandidate(n: { id: string; release_id: string; list_slug: string; recipient_email: string; from_address: string | null; subject: string; sent_at: string | Date }): CandidateFact {
+  return {
+    naturalKey: `transactional|newsletter|${n.id}`,
+    family: "newsletter_send",
+    type: "message_out",
+    source: "transactional",
+    sourceRef: n.id,
+    sourceContactId: null,
+    crmContactId: null,
+    occurredAt: iso(n.sent_at),
+    dateBasis: "sent_at",
+    payload: {
+      channel: "email",
+      kind: "newsletter",
+      newsletter: { releaseId: n.release_id, listSlug: n.list_slug },
+      subject: n.subject,
+      text: n.subject,
+      from: n.from_address,
+      to: [n.recipient_email],
+    },
+    subject: { presence: null, keys: [emailKey(n.recipient_email)], standalone: false, emails: [n.recipient_email], phones: [], fullName: null },
+  };
+}
+
 async function posthogCandidates(orgId: string, brandId: string): Promise<CandidateFact[]> {
   const out: CandidateFact[] = [];
   const persons = await rows<{ id: string; external_id: string; full_name: string | null; source_created_at: string | Date | null }>(sql`
@@ -1178,6 +1220,8 @@ async function posthogCandidates(orgId: string, brandId: string): Promise<Candid
       ) AS machine
     FROM posthog_activities a JOIN contacts c ON c.id = a.contact_id
     WHERE a.org_id = ${orgId} AND a.brand_id = ${brandId} AND a.kind = 'event'
+      -- UNIBOX-NEWSLETTER-1113: a server-recorded event (no session) is no act of theirs (posthog/records.ts eventSessionless).
+      AND NOT ${sql.raw(SILVER_SESSIONLESS_EVENT_SQL("a.detail"))}
   `);
   for (const e of events) {
     const properties = brandEventProperties(e.detail?.properties);
@@ -1415,6 +1459,24 @@ async function machinePosthogIds(tx: Tx, orgId: string, brandId: string, ids: st
 }
 
 /**
+ * UNIBOX-NEWSLETTER-1113: of these PostHog event ids, those the brand's SERVER recorded in no session (bronze,
+ * posthog/records.ts `eventSessionless`): never their act, gone from silver; their live facts are withdrawn
+ * `sessionless_event` (what they were), not `vendor_record_gone`.
+ */
+async function sessionlessPosthogIds(tx: Tx, orgId: string, brandId: string, ids: string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  for (let i = 0; i < ids.length; i += 1000) {
+    const found = (await tx.execute(sql`
+      SELECT DISTINCT external_id FROM posthog_raw_records
+      WHERE org_id = ${orgId} AND brand_id = ${brandId} AND kind = 'event' AND ${sql.raw(BRONZE_SESSIONLESS_EVENT_SQL("payload"))}
+        AND external_id IN (${sql.join(ids.slice(i, i + 1000).map((id) => sql`${id}`), sql`, `)})
+    `)) as unknown as { external_id: string }[];
+    for (const r of found) out.add(r.external_id);
+  }
+  return out;
+}
+
+/**
  * Which snapshot sources are connected AND fully synced at least once (so an
  * absent record may be withdrawn). A connection still on its first pass, e.g.
  * right after a reconnect, has not re-mirrored everything yet: nothing is gone.
@@ -1508,6 +1570,8 @@ export interface FactEmissionSummary {
   machine: number;
   /** Of them, live facts withdrawn (`machine_visit`). */
   machineWithdrawn: number;
+  /** Live facts of server-recorded PostHog events (no session) withdrawn (`sessionless_event`, UNIBOX-NEWSLETTER-1113). */
+  sessionlessWithdrawn: number;
   duplicateKeys: number;
   gmailOtherSkipped: number;
   merged: number;
@@ -1680,7 +1744,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
     )) as unknown as { hash: string | null }[];
     const ownershipDue = ownershipMark?.hash !== indexHash;
 
-    const [ghl, matrix, matrixGroups, gmail, posthog, stripe, clerk, csv, connected, calendar, credit, mailbox] = await Promise.all([
+    const [ghl, matrix, matrixGroups, gmail, posthog, stripe, clerk, csv, connected, calendar, credit, mailbox, newsletters] = await Promise.all([
       ghlCandidates(orgId, brandId),
       matrixCandidates(orgId, brandId),
       matrixGroupCandidates(orgId, brandId),
@@ -1693,6 +1757,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
       calendarCandidates(orgId, brandId, personRows),
       creditCandidates(orgId, brandId),
       mailboxCandidates(orgId, brandId),
+      newsletterCandidates(orgId, brandId),
     ]);
     // An auth provider connected = it alone states who signed up (it knows invited
     // teammates and staff; PostHog only knows who was identified). PostHog keeps
@@ -1716,7 +1781,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
     // A record the build has not joined yet (a new Stripe customer, a PostHog person who just typed
     // their email) is filed on the person holding one of its keys now, not held until the next build.
     const recordKeys = await recordKeysByContact(orgId, brandId);
-    const all = [...ghl, ...matrix, ...matrixGroups, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv, ...calendar, ...credit, ...mailbox, ...registry]
+    const all = [...ghl, ...matrix, ...matrixGroups, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv, ...calendar, ...credit, ...mailbox, ...newsletters, ...registry]
       .filter((c) => !(authStatesSignups && c.family === "posthog_person"))
       .map((c) => withRecordKeys(c, recordKeys));
     const candidates = new Map<string, CandidateFact>();
@@ -1844,7 +1909,8 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
         | "signup_stated_by_auth_provider"
         | "human_identified"
         | "subject_changed"
-        | "machine_visit";
+        | "machine_visit"
+        | "sessionless_event";
     }[] = [];
     const fresh: (typeof peopleFacts.$inferInsert)[] = [];
     let unchanged = 0;
@@ -1906,9 +1972,24 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
         .map(([, live]) => live.sourceRef)
         .filter((ref): ref is string => !!ref),
     );
+    const goneSessionless = await sessionlessPosthogIds(
+      tx,
+      orgId,
+      brandId,
+      [...liveByKey.entries()]
+        .filter(([key, live]) => !candidates.has(key) && live.family === "posthog_event" && !goneMachines.has(live.sourceRef ?? ""))
+        .map(([, live]) => live.sourceRef)
+        .filter((ref): ref is string => !!ref),
+    );
+    let sessionlessWithdrawn = 0;
     for (const [key, live] of liveByKey) {
       if (++step % YIELD_EVERY === 0) await yieldToLoop();
       if (candidates.has(key)) continue;
+      if (live.family === "posthog_event" && goneSessionless.has(live.sourceRef ?? "")) {
+        withdrawals.push({ fact: live, reason: "sessionless_event" });
+        sessionlessWithdrawn++;
+        continue;
+      }
       if (goneMachines.has(live.sourceRef ?? "") && (live.family === "posthog_visit" || live.family === "posthog_event")) {
         withdrawals.push({ fact: live, reason: "machine_visit" });
         machineWithdrawn++;
@@ -2097,8 +2178,9 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
       candidates: candidates.size,
       emitted: fresh.length,
       unchanged,
-      corrected: withdrawals.length - withdrawnGone - reminted - retired - humanIdentified - machineWithdrawn,
+      corrected: withdrawals.length - withdrawnGone - reminted - retired - humanIdentified - machineWithdrawn - sessionlessWithdrawn,
       machineWithdrawn,
+      sessionlessWithdrawn,
       unattributed,
       machine,
       withdrawnGone,

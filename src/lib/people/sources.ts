@@ -13,6 +13,7 @@
 
 import { and, eq, isNotNull, isNull, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
+import { newsletterScopeSql } from "../transactional/newsletters.js";
 import { authConnections, contacts, ghlConnections, matrixConnections, posthogConnections, stripeConnections, personMerges, personContactHandles, transactionalEmails, whatsappSends, creditEvents } from "../../db/schema.js";
 import { GHL_SOURCE } from "../gohighlevel/records.js";
 import { POSTHOG_SOURCE } from "../posthog/records.js";
@@ -874,13 +875,18 @@ export async function readTransactional(orgId: string, brandId: string): Promise
   const base = {
     source: "transactional" as const,
     scope: "brand" as const,
-    sourceCountBasis: "crm-service mirrored transactional emails (staff Unibox only; thread items, no presences)",
+    sourceCountBasis:
+      "crm-service mirrored transactional emails (staff Unibox only) + newsletters this org sent (UNIBOX-NEWSLETTER-1113); thread items, no presences",
   };
+  const [{ newsletters }] = (await db.execute(
+    sql`SELECT count(*)::int AS newsletters FROM newsletter_sends n WHERE ${newsletterScopeSql("n", orgId, brandId)}`,
+  )) as unknown as { newsletters: number }[];
   if (!isCopilotDestination(orgId, brandId)) {
-    return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
+    if (newsletters === 0) return { ...base, status: "not_connected", presences: [], sourceCount: null, error: null };
+    return { ...base, status: "ok", presences: [], sourceCount: newsletters, error: null };
   }
   const [{ n }] = await db.select({ n: sql<number>`count(*)::int` }).from(transactionalEmails);
-  return { ...base, status: "ok", presences: [], sourceCount: n, error: null };
+  return { ...base, status: "ok", presences: [], sourceCount: n + newsletters, error: null };
 }
 
 // ─── what a client DID on their account (staff Unibox only) ────────────────
