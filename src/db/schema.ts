@@ -1919,6 +1919,10 @@ export const peopleFacts = pgTable(
     index("people_facts_live_type_idx")
       .on(table.orgId, table.brandId, table.type)
       .where(sql`${table.live} AND ${table.ownerPersonKey} IS NOT NULL`),
+    // Per-person fact reads: timeline settlement, client-satisfaction, segment (MON-PAGE-SPEED-1114).
+    index("people_facts_live_owner_idx")
+      .on(table.orgId, table.brandId, table.ownerPersonKey)
+      .where(sql`${table.live}`),
   ],
 );
 

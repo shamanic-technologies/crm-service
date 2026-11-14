@@ -642,9 +642,11 @@ router.get(
       return res.status(400).json({ type: "validation", error: "brandId (uuid) query is required" });
     }
     try {
-      const scope = await openScope(req, parsed.data.brandId);
-      // Cached per brand (DASH-LATENCY-1014): recomputed only when its inputs moved.
-      const steps = await cachedOutcomeCounts({ orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId: parsed.data.brandId });
+      // MON-PAGE-SPEED-1114: parallelize scope open and cached counts read.
+      const [scope, steps] = await Promise.all([
+        openScope(req, parsed.data.brandId),
+        cachedOutcomeCounts({ orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId: parsed.data.brandId }),
+      ]);
       res.json({ brandId: parsed.data.brandId, scope, steps });
     } catch (err) {
       if (err instanceof CampaignReachUnavailable) return campaignOutcomesUnavailable(res, err);
@@ -674,13 +676,16 @@ router.get(
       const { brandId } = parsed.data;
       const limit = parsed.data.limit ?? 100;
       const offset = parsed.data.offset ?? 0;
-      const scope = await openScope(req, brandId);
-      const links = (await db.execute(sql`
-        SELECT o->>'companyId' AS company_id, o->>'domain' AS domain,
-               COALESCE((SELECT jsonb_agg(t->>'tag') FROM jsonb_array_elements(o->'tags') t), '[]'::jsonb) AS tags
-        FROM people p, jsonb_array_elements(p.organizations) o
-        WHERE p.org_id = ${req.orgId!} AND p.brand_id = ${brandId}
-      `)) as unknown as { company_id: string; domain: string; tags: string[] }[];
+      // MON-PAGE-SPEED-1114: parallelize scope open and organizations query.
+      const [scope, links] = await Promise.all([
+        openScope(req, brandId),
+        db.execute(sql`
+          SELECT o->>'companyId' AS company_id, o->>'domain' AS domain,
+                 COALESCE((SELECT jsonb_agg(t->>'tag') FROM jsonb_array_elements(o->'tags') t), '[]'::jsonb) AS tags
+          FROM people p, jsonb_array_elements(p.organizations) o
+          WHERE p.org_id = ${req.orgId!} AND p.brand_id = ${brandId}
+        `) as unknown as Promise<{ company_id: string; domain: string; tags: string[] }[]>,
+      ]);
       res.json({ brandId, scope, ...organizationsView(links, limit, offset) });
     } catch (err) {
       next(err);
@@ -731,8 +736,8 @@ router.get(
     const limit = parsed.data.limit ?? 100;
     const offset = parsed.data.offset ?? 0;
     try {
-      await openScope(req, brandId);
-      const campaigns = await campaignReachOr502(req, res, brandId, [step]);
+      // MON-PAGE-SPEED-1114: parallelize scope open and campaigns reach read.
+      const [, campaigns] = await Promise.all([openScope(req, brandId), campaignReachOr502(req, res, brandId, [step])]);
       if (!campaigns) return;
       const contactedOnly = parsed.data.contactedByUs === "true";
       const page = await cachedOutcomePeople(
