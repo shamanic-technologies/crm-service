@@ -308,21 +308,18 @@ function evidence(orgId: string, brandId: string, step: OutcomeStep | null, camp
   // A campaigns reach is the person whose identity holds that address, else a
   // person of its own (`email:<addr>`, the key the people index would give them).
   //
-  // The people holding one of those addresses are found FIRST, through the identity-key GIN
-  // index (`?|`), then each address is matched among them only: the plain join tested every
-  // address against every person of the brand (296 x 28,691 jsonb containment checks, 17-35 s
-  // on the distribute.you brand, DASH-LATENCY-1014). Same rows: `?|` is a superset prefilter
-  // of the very `@>` the join still applies.
+  // MON-PAGE-SPEED-1114: use the same `emailKeysOfPeopleHolding` hash-join pattern
+  // as `contactedPeople`. The old `@>` containment join did 322 × 301 nested-loop
+  // checks (96k rows removed by join filter); the hash join on `key = 'email:' || l.email`
+  // is O(N + M) and lets Postgres use a hash table instead of per-row containment.
+  const reachKeys = sql`SELECT 'email:' || x.email FROM jsonb_to_recordset(${reach}::jsonb) AS x(email text)`;
   return sql`
-    SELECT COALESCE(p.person_key, 'email:' || l.email) AS person_key, l.step, ${CAMPAIGNS_SOURCE}::text AS source,
+    SELECT COALESCE(k.person_key, 'email:' || l.email) AS person_key, l.step, ${CAMPAIGNS_SOURCE}::text AS source,
            NULL::timestamptz AS occurred_at, 0::bigint AS feed_seq,
            jsonb_build_array(l.email) AS emails, l.name AS full_name
     FROM jsonb_to_recordset(${reach}::jsonb) AS l(step text, email text, name text)
-    LEFT JOIN (
-      SELECT pp.person_key, pp.identity_keys FROM people pp
-      WHERE pp.org_id = ${orgId} AND pp.brand_id = ${brandId}
-        AND pp.identity_keys ?| ARRAY(SELECT 'email:' || x.email FROM jsonb_to_recordset(${reach}::jsonb) AS x(email text))
-    ) p ON p.identity_keys @> jsonb_build_array('email:' || l.email)
+    LEFT JOIN (${emailKeysOfPeopleHolding(orgId, brandId, reachKeys)}) k
+      ON k.key = 'email:' || l.email
     ${facts}
     ${satisfied}
   `;
