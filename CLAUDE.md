@@ -1825,6 +1825,13 @@ lead-service serves the overall tag, then go.
   mirrored 05:04:05 reached the feed 05:08:43 + ~50 s commit: held (new customer) until the NEXT build re-read 31k
   people (4 min 12 s), then an emission of 81-107 s (30 s of it reading 413k facts whole). Now live facts without
   payload + ownership GROUPS + a narrow person read: 29-40 s for Distribute.you at box load ~30, Doc Dinners 21 s.
+- **The emission runs in a WORKER THREAD** (`fact-emission-worker.ts`, MON-PAGE-SPEED-1114): the service is one Node
+  process and distribute.you's emission (~290k candidates, 15-38 s, back to back whenever an input moved) held every page
+  read behind it (`/health` p90 1.1 s, max 2.4 s, prod 2026-11-14; CPU profile: emission + its row parsing + GC = most of
+  the busy thread). Same `emitScopeFacts`, own heap / GC / DB pool; its locks are Postgres advisory locks, so they hold
+  across threads. Measured on prod data: caller loop lag max 24 ms in the worker vs 985 ms inline. From source (tsx,
+  vitest) it stays inline; `FACT_EMIT_WORKER=off` = inline in prod (emergency switch). Call emissions through
+  `requestEmission`, never `emitScopeFacts` directly in a request path. People BUILDS still run on the request thread.
 - **Ownership re-checked only when the people index moved** (DASH-SPEED-1110, `ownershipIndexHash`): the merge / split
   pass groups EVERY fact ever emitted (1.7M rows on distribute.you, 10-15 s, on every emission back to back). A fact
   changes owner only when a person's key, identity keys or presences move, so the pass runs only when their digest differs

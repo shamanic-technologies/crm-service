@@ -18,12 +18,14 @@
  *   (a vendor record deleted, a judgment stored) is stated at the next build, as before.
  *
  * The emission itself is a diff (facts.ts): a scope whose records moved without changing a fact writes
- * nothing.
+ * nothing. It runs in a worker thread (fact-emission-worker.ts, MON-PAGE-SPEED-1114): distribute.you's
+ * 15-38 s emissions held every page read of the service behind them.
  */
 import { sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { peopleScopes, type PeopleScope } from "../../db/schema.js";
-import { emitScopeFacts, type FactEmissionSummary } from "./facts.js";
+import type { FactEmissionSummary } from "./facts.js";
+import { emitScopeFactsOffThread } from "./fact-emission-worker.js";
 
 export const FACT_EMIT_INTERVAL_MS = Number(process.env.FACT_EMIT_INTERVAL_MS) || 10_000;
 const FIRST_PASS_DELAY_MS = 60_000;
@@ -34,7 +36,8 @@ const running = new Map<string, Promise<FactEmissionSummary>>();
 const queued = new Map<string, Promise<FactEmissionSummary>>();
 
 function start(scope: EmitScope): Promise<FactEmissionSummary> {
-  const run = emitScopeFacts(scope).finally(() => {
+  // MON-PAGE-SPEED-1114: in a worker thread, so a long emission never holds a page read.
+  const run = emitScopeFactsOffThread(scope).finally(() => {
     if (running.get(scope.id) === run) running.delete(scope.id);
   });
   running.set(scope.id, run);
