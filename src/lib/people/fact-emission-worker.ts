@@ -56,6 +56,8 @@ function failAll(err: Error): void {
 function getWorker(): Worker {
   if (worker) return worker;
   const w = new Worker(new URL(import.meta.url), {
+    // Never the parent's flags (--import ./dist/instrument.js, --max-old-space-size): proven bare, as measured.
+    execArgv: [],
     // Its own heap: the emission's reads are big (the main thread runs with --max-old-space-size=1280).
     resourceLimits: { maxOldGenerationSizeMb: 1024 },
   });
