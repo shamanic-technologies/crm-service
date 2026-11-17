@@ -1338,6 +1338,9 @@ owner had written to. A recorded fact, never an address-shape guess.
   plans can never be read; strict would block every writer on them). A
   background pass after the answer does lead-service campaign discovery only.
   Sources carry `servedFrom: store|mirror` + `readAt` + `refreshing`.
+- **`excludeSources=api,copilot`** (TIMELINE-EXCLUDE-SOURCES-1117): sources a reader leaves out, never read, absent from
+  `sources[]` and `items` (unknown name = 400). A writer reading a team member's thread for its words passes `api`: a staff
+  person carried 34k API / MCP call logs (26 MB), over a workflow script's 64 MB, and every « Assistant for brand team » run crashed.
 - **Paged timeline** (`limit` / `before`, DASH-LATENCY-1014, the Unibox: latest 10 first, older on
   scroll): same merged thread, total order `(at, itemKey)`, opaque `page.olderCursor`. It waits only
   `PEOPLE_TIMELINE_PAGE_FRESH_WAIT_MS` (150 ms) for the re-reads, then serves the store snapshot read

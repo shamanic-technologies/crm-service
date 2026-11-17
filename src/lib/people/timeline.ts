@@ -1174,6 +1174,13 @@ export async function onlyExchangedWithUs(source: SourceResult, emails: string[]
   return { ...source, items, status: source.status === "ok" && items.length === 0 ? "empty" : source.status };
 }
 
+/** TIMELINE-EXCLUDE-SOURCES-1117: `api,copilot` -> the sources a reader leaves out; unknown names are returned apart (400). */
+export function parseExcludeSources(raw: string | undefined): { sources: PeopleSource[]; unknown: string[] } {
+  const list = [...new Set((raw ?? "").split(",").map((x) => x.trim()).filter(Boolean))];
+  const known = (x: string): x is PeopleSource => (PEOPLE_SOURCES as readonly string[]).includes(x);
+  return { sources: list.filter(known), unknown: list.filter((x) => !known(x)) };
+}
+
 export async function readTimeline(
   scope: PeopleScope,
   person: Person,
@@ -1182,6 +1189,11 @@ export async function readTimeline(
   opts: StoredReadOptions & {
     /** false = do not read records not yet joined (a relation's thread: only its own contact points). */
     lateJoin?: boolean;
+    /**
+     * TIMELINE-EXCLUDE-SOURCES-1117: sources the caller does not want, never read, absent from `sources` and `items`.
+     * A writer reading a team member's thread skips `api` (34k API / MCP call logs, 26 MB: over a script's 64 MB).
+     */
+    excludeSources?: readonly PeopleSource[];
   } = {},
 ): Promise<{ sources: TimelineSource[]; items: TimelineItem[]; indexCurrent: boolean }> {
   const presences = person.presences as Presence[];
@@ -1222,6 +1234,8 @@ export async function readTimeline(
   const fromStore = (pick: (t: StoredTimeline) => StoredTimeline["gmail"]) =>
     storedRead.then((t): SourceResult => pick(t)).catch((e) => toFailed(e, emails));
 
+  const excluded = new Set<PeopleSource>(opts.excludeSources ?? []);
+  const want = <T,>(s: PeopleSource, read: () => Promise<T>, skip: T): Promise<T> => (excluded.has(s) ? Promise.resolve(skip) : read());
   const [gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional, onboarding, csv, activity, sendingMailbox] = await Promise.all([
     connected("gmail") ? fromStore((t) => t.gmail) : Promise.resolve(notConnected()),
     fromStore((t) => t.instantly),
@@ -1232,19 +1246,21 @@ export async function readTimeline(
     connected("posthog") ? posthogItems(of("posthog"), connected("clerk")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
     connected("stripe") ? stripeItems(of("stripe")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
     connected("clerk") ? authItems("clerk", of("clerk")).catch((e) => toFailed(e)) : Promise.resolve(notConnected()),
-    copilotItems(person).catch((e) => toFailed(e, emails)),
-    apiCallItems(person, identity, { deferAnswers: opts.paged }).catch((e) => toFailed(e, emails)),
-    billingItems(person).catch((e) => toFailed(e, emails)),
-    transactionalItems(person).catch((e) => toFailed(e, emails)),
-    onboardingItems(person, identity).catch((e) => toFailed(e, emails)),
+    want("copilot", () => copilotItems(person).catch((e) => toFailed(e, emails)), notConnected()),
+    want("api", () => apiCallItems(person, identity, { deferAnswers: opts.paged }).catch((e) => toFailed(e, emails)), notConnected()),
+    want("billing", () => billingItems(person).catch((e) => toFailed(e, emails)), notConnected()),
+    want("transactional", () => transactionalItems(person).catch((e) => toFailed(e, emails)), notConnected()),
+    want("onboarding", () => onboardingItems(person, identity).catch((e) => toFailed(e, emails)), notConnected()),
     csvRead,
-    activityItems(person).catch((e) => toFailed(e, emails)),
-    mailboxItems(person).catch((e) => toFailed(e, emails)),
+    want("activity", () => activityItems(person).catch((e) => toFailed(e, emails)), notConnected()),
+    want("sending_mailbox", () => mailboxItems(person).catch((e) => toFailed(e, emails)), notConnected()),
   ]);
   const bySource: Record<PeopleSource, SourceResult> = {
     gmail, instantly, matrix, gohighlevel, posthog, stripe, clerk, copilot, api, billing, transactional, onboarding, csv, activity,
     sending_mailbox: sendingMailbox,
   };
+  for (const s of excluded) bySource[s] = notConnected();
+  const served = PEOPLE_SOURCES.filter((s) => !excluded.has(s));
   // Only mails between the person and us (SOPHIE-WA-HUMAN-1106): never their mail to a third party, nor a newsletter in a mailbox we mirror.
   if (bySource.gmail.items.length) bySource.gmail = await onlyExchangedWithUs(bySource.gmail, emails, identity);
   // A Gmail copy of a transactional email we sent (a staff mailbox holds it) is that email: shown once, as ours.
@@ -1280,7 +1296,7 @@ export async function readTimeline(
   });
 
   return {
-    sources: PEOPLE_SOURCES.map((s) => ({
+    sources: served.map((s) => ({
       source: s,
       status: bySource[s].status,
       items: bySource[s].items.length,
