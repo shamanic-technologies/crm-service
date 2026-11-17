@@ -177,7 +177,7 @@ run = `refused`. `POST /internal/outcomes/lead-identified` = a pass now. Not dec
 group tags, earlier runs of a re-judged thread (only the latest verdict run is recorded). Other sessions' probes parented
 on crm runs are not crm's spend.
 **`message_sent` + support runs (LEDGER-HISTORY-1024, `lib/whatsapp/message-sent.ts`, `runs-client.ts SUPPORT_RUNS`)**: a
-WhatsApp message a CAMPAIGN sent (`whatsapp_sends.campaign_id` set, status sent) PRODUCES `message_sent` on its send run
+WhatsApp message a CAMPAIGN sent (`whatsapp_sends.campaign_id` set, status sent) PRODUCES `message_sent` on its send run and CONSUMES the `message_written` of the same lead (UNIT-LINK-COVERAGE-1117: a Unit declares every Unit it was made from, as an email send does; without it no stored link led to a WhatsApp send)
 (`whatsapp.send`, subject = lead-service lead), one per run (bubbles = one message), ledger `message_sent_declarations`,
 loop every 60 s (`MESSAGE_SENT_DECLARATIONS=off`), `occurredAt` = `sent_at`: ONE path past and future;
 `POST /internal/outcomes/message-sent` = a pass now. A send with no campaign (Copilot answers, probes) states nothing.

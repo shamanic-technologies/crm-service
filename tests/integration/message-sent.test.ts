@@ -77,7 +77,8 @@ describe.skipIf(!RUN)("message_sent declared on the run that sent a campaign's W
       { orgId: ORG, brandIds: [BRAND], phone: "+33600000002" },
     ]);
     expect(batches).toEqual([
-      { runs: [{ runId: RUN_A, produced: [{ outcomeKey: "message_sent", subjectService: "lead-service", subjectId: LEAD_ANN }], occurredAt: "2026-10-12T14:00:00.000Z" }] },
+      // UNIT-LINK-COVERAGE-1117: the send consumes the message written for the same lead (the ledger links written -> sent).
+      { runs: [{ runId: RUN_A, produced: [{ outcomeKey: "message_sent", subjectService: "lead-service", subjectId: LEAD_ANN }], consumed: [{ outcomeKey: "message_written", subjectService: "lead-service", subjectId: LEAD_ANN }], occurredAt: "2026-10-12T14:00:00.000Z" }] },
     ]);
     const rows = await db.select().from(messageSentDeclarations).where(eq(messageSentDeclarations.brandId, BRAND));
     expect(Object.fromEntries(rows.map((r) => [r.runId, [r.status, r.reason]]))).toEqual({
