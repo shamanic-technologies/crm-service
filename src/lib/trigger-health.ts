@@ -88,6 +88,8 @@ const SOURCES: { trigger: string; table: string; at: string; scoped: boolean; wh
   },
   { trigger: "account_event", table: "credit_event_reports", at: "created_at", scoped: false, who: "NULL::text AS p_name, email AS p_email, NULL::text AS p_phone" },
   { trigger: "payment_refused", table: "payment_refusal_reports", at: "created_at", scoped: true, who: "full_name AS p_name, email AS p_email, phone AS p_phone" },
+  // DISTRY-WEB-CHAT-EMAIL-1117: a web chat conversation handed over with the visitor's email (lib/copilot/web-handoffs.ts).
+  { trigger: "web_chat_handoff", table: "web_chat_handoffs", at: "detected_at", scoped: true, who: "full_name AS p_name, email AS p_email, phone AS p_phone" },
 ];
 
 const BRAND_NAME_TTL_MS = 60 * 60_000;

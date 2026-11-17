@@ -2241,8 +2241,31 @@ always safe.
   the person's addresses, so a turn shows on the next open; the people LIST picks up a
   brand-new chatter at the next build (cron 15 min). Chatters on the brand's own
   domain (staff) are own addresses: nobody, like any source.
-- No cost (DB only, platform run), no customer org billed, no facts emitted (not in
-  the lead-service fact feed yet), not in the message search index yet.
+- No cost (DB only, platform run), no customer org billed, no facts emitted for dashboard `chat` turns (web hand-offs
+  do: see below), not in the message search index yet.
+
+## Web chat hand-off — a visitor of our site gives their email (`src/lib/copilot/web-handoffs.ts`, DISTRY-WEB-CHAT-EMAIL-1117)
+
+Owner 2026-11-17 (« parler au client comme sur WA ou par email, tout centralisé »): chat-service serves our assistant in
+the chat window of distribute.you's public site (guest conversation per anonymous visitor). When the visitor gives their
+EMAIL, chat-service calls `POST /internal/copilot/web-conversations` (`x-api-key`, body `{conversationId, visitorId, email,
+phone?, displayName?, messages: [{messageId, role, text, at}] (1..500)}`) → 202 `{handoffId, stored, duplicates, duplicate,
+status}`; 503 when the staff scope (or its people scope) is not set up.
+- Messages go to `copilot_messages` (channel `web`, `visitor_id`, session = conversation id, `chat_org_id`/`chat_user_id`
+  null), on the address, staff Unibox scope only: the visitor is a person (source `copilot`), the page conversation is on
+  their thread (timeline / latest message / sent-after channel `web`) AND on the fact feed (`message_in` / `message_out`,
+  family `web_chat_message`, source `copilot`, history; the dashboard Copilot's `chat` rows still state no fact).
+- ONE Lead event per (conversation, address) (`web_chat_handoffs`, key `crm:web_chat:<conversation>:<sha16(email)>`):
+  `message_received`, offer = `resolveOccurrenceOffer` (ledger `web_chat`), `item {kind: "web_chat", source: "copilot",
+  channel: "web", text, personId, conversationId, visitorId, firstMessageAt, lastMessageAt, messages (the visitor's words
+  since the assistant last spoke), thread (the page conversation, latest 40)}`. The Lead event campaign writes next (by
+  email); their reply lands in the same person's thread like any mail. No send here, no per-channel case in the writer.
+- Delivery waits for the person to be built (`person_not_built` → the staff build is kicked → retried); the route kicks a
+  build then a pass; loop every 60 s (`WEB_CHAT_HANDOFF_WATCH=off` stops loop + kick). Retries 1 → 60 min for 24 h,
+  400/422 final. Handed over again = messages added, no second Lead event. Monitoring: trigger `web_chat_handoff` on
+  `GET /internal/ops/trigger-reports`. `GET /internal/copilot/web-conversations` lists the latest 200.
+- A phone-only visitor is NOT handled here yet (chat-service continues on WhatsApp itself); a phone given WITH the email
+  rides on the occurrence (dialable only).
 
 ## API / MCP calls — the staff Unibox's API source (`src/lib/api-calls/calls.ts`)
 

@@ -2239,9 +2239,14 @@ export const copilotMessages = pgTable(
     // The staff Unibox scope the turn is filed under (never the chatting org).
     orgId: uuid("org_id").notNull(),
     brandId: uuid("brand_id").notNull(),
-    // Who chatted: chat-service's org / user ids and the user's email (the match key).
-    chatOrgId: uuid("chat_org_id").notNull(),
-    chatUserId: uuid("chat_user_id").notNull(),
+    // Who chatted: chat-service's org / user ids and the user's email (the match key). Null for a visitor of our
+    // public site (DISTRY-WEB-CHAT-EMAIL-1117: a guest, no account), who is named by `visitor_id` instead.
+    chatOrgId: uuid("chat_org_id"),
+    chatUserId: uuid("chat_user_id"),
+    // 'chat' (the Copilot inside the dashboard / API) | 'web' (the chat window of our public site, a visitor)
+    channel: text("channel").notNull().default("chat"),
+    // chat-service's anonymous visitor id of a web conversation; null on 'chat' rows.
+    visitorId: text("visitor_id"),
     email: text("email").notNull(),
     displayName: text("display_name"),
     sessionId: text("session_id").notNull(),
@@ -2256,6 +2261,8 @@ export const copilotMessages = pgTable(
   (table) => [
     uniqueIndex("copilot_messages_message_uq").on(table.messageId),
     index("copilot_messages_scope_email_idx").on(table.orgId, table.brandId, table.email, table.sentAt),
+    // DISTRY-WEB-CHAT-EMAIL-1117: the fact emitter's inputs mark reads the latest web chat row (index-only).
+    index("copilot_messages_web_received_idx").on(table.orgId, table.brandId, table.receivedAt).where(sql`${table.channel} = 'web'`),
   ],
 );
 
@@ -3093,6 +3100,40 @@ export const creditEventReports = pgTable(
   },
   (table) => [uniqueIndex("credit_event_reports_event_email_uq").on(table.eventId, table.email)],
 );
+/**
+ * DISTRY-WEB-CHAT-EMAIL-1117: a visitor of our public site gave their email in the chat window: their web conversation
+ * (stored in `copilot_messages`, channel 'web') is now part of their person's thread on the staff Unibox, and reported
+ * ONCE to campaign-service as a Lead event (`message_received`) so the Lead event campaign writes them the next message
+ * (lib/copilot/web-handoffs.ts). One row per (scope, conversation, address).
+ */
+export const webChatHandoffs = pgTable(
+  "web_chat_handoffs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    brandId: uuid("brand_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    visitorId: text("visitor_id").notNull(),
+    email: text("email").notNull(),
+    phone: text("phone"),
+    fullName: text("full_name"),
+    // 'pending' | 'reported' | 'failed'
+    status: text("status").notNull(),
+    reason: text("reason"),
+    attempts: integer("attempts").notNull().default(0),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    offerId: uuid("offer_id"),
+    offerBasis: text("offer_basis"),
+    offerVerdict: jsonb("offer_verdict"),
+    campaignEventId: text("campaign_event_id"),
+    runId: text("run_id"),
+    reportedAt: timestamp("reported_at", { withTimezone: true }),
+    detectedAt: timestamp("detected_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("web_chat_handoffs_conversation_email_uq").on(table.orgId, table.brandId, table.conversationId, table.email)],
+);
+export type WebChatHandoff = typeof webChatHandoffs.$inferSelect;
 /**
  * REFUSED-CARD-LEAD-EVENT-1103: each refused charge on a brand's Stripe reported ONCE to campaign-service as an
  * `account_event` (Lead event) for the person who paid (lib/payment-refusals/). One row per (connection, charge);

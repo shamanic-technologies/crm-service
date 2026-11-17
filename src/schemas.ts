@@ -895,6 +895,66 @@ registry.registerPath({
   },
 });
 
+// ─── Web chat hand-off (a visitor of our public site gave their email, DISTRY-WEB-CHAT-EMAIL-1117) ─
+
+export const WebConversationRequestSchema = z
+  .object({
+    conversationId: z.string().min(1).max(200).openapi({ description: "chat-service's guest conversation id. With the email, the hand-off's identity: handed over twice = reported once." }),
+    visitorId: z.string().min(1).max(200).openapi({ description: "chat-service's anonymous visitor id of the page (recorded on each message)." }),
+    email: z.string().email().max(320).openapi({ description: "The address the visitor gave: the key that makes them a person of distribute.you's brand, and where the next message goes." }),
+    phone: z.string().max(50).nullable().optional().openapi({ description: "A phone the visitor gave too (E.164), when they did: carried to the Lead event, offered only when dialable." }),
+    displayName: z.string().max(500).nullable().optional().openapi({ description: "The visitor's name, when they gave it." }),
+    messages: z
+      .array(
+        z.object({
+          messageId: z.string().min(1).max(200).openapi({ description: "chat-service's message id. The idempotency key: a message pushed twice is stored once." }),
+          role: z.enum(["user", "assistant"]).openapi({ description: "user = the visitor wrote (inbound); assistant = our assistant answered (outbound, shown from \"AI Copilot\")." }),
+          text: z.string().min(1).max(200_000).openapi({ description: "The message text, verbatim." }),
+          at: z.string().datetime({ offset: true }).openapi({ description: "When the message was written (ISO 8601)." }),
+        }),
+      )
+      .min(1)
+      .max(500)
+      .openapi({ description: "The page conversation so far (every message, or whichever are new: a later push adds to the same thread)." }),
+  })
+  .openapi("WebConversationRequest");
+
+const WebConversationResponseSchema = z
+  .object({
+    handoffId: z.string().uuid().openapi({ description: "The hand-off's id (`GET /internal/copilot/web-conversations` lists them)." }),
+    stored: z.number().int().openapi({ description: "Messages stored by this call." }),
+    duplicates: z.number().int().openapi({ description: "Messages already stored (same messageId): ignored." }),
+    duplicate: z.boolean().openapi({ description: "True when this conversation was already handed over with this address: messages added to the thread, no second Lead event." }),
+    status: z.enum(["pending", "reported", "failed"]).openapi({ description: "pending = the Lead event goes out within about a minute (once the visitor is a person of the brand); reported = campaign-service took it." }),
+  })
+  .openapi("WebConversationResponse");
+
+registry.registerPath({
+  method: "post",
+  path: "/internal/copilot/web-conversations",
+  summary: "Hand a web chat conversation over to the visitor's person, by the email they gave",
+  description:
+    "chat-service calls this when a visitor of our public site gives their email in the chat window. Every message is stored on that address under the staff Unibox scope " +
+    "(distribute.you's brand): it shows on the person's thread (`GET /orgs/people/timeline`, source `copilot`, channel `web`) and on the people fact feed (`message_in` / `message_out`, family `web_chat_message`). " +
+    "Then ONE Lead event (`message_received`, item `kind: \"web_chat\"` with the page conversation as `thread`) is reported to campaign-service on one offer of the brand, so the Lead event campaign writes them the next message (by email). " +
+    "Their email reply lands in the same thread like any mail. Idempotent on messageId and on (conversationId, email). No send here, no cost.",
+  request: { body: { content: { "application/json": { schema: WebConversationRequestSchema } }, required: true } },
+  responses: {
+    202: { description: "Stored; the Lead event is on its way", content: { "application/json": { schema: WebConversationResponseSchema } } },
+    400: { description: "Validation error" },
+    401: { description: "Missing or wrong x-api-key" },
+    502: { description: "Run tracking unavailable (nothing stored; retry)" },
+    503: { description: "The staff Unibox scope (or its people scope) is not configured on crm-service (nothing stored)" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/internal/copilot/web-conversations",
+  summary: "The web chat hand-offs and what became of each (latest 200)",
+  responses: { 200: { description: "`{ handoffs: [...] }`" }, 401: { description: "Missing or wrong x-api-key" } },
+});
+
 // ─── Account activity (what a client DID on their account, the staff Unibox) ─
 
 export const AccountActivityRequestSchema = z

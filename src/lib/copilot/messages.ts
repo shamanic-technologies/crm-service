@@ -27,6 +27,11 @@ import { normalizeEmail, type Presence } from "../people/identity.js";
 export const COPILOT_SENDER_NAME = "AI Copilot";
 /** The channel of a Copilot turn (a chat inside the dashboard or through the API). */
 export const COPILOT_CHANNEL = "chat";
+/**
+ * The channel of a conversation in the chat window of our public site (DISTRY-WEB-CHAT-EMAIL-1117): the same assistant
+ * talking with a visitor, stored once the visitor gives their email (lib/copilot/web-handoffs.ts).
+ */
+export const WEB_CHAT_CHANNEL = "web";
 
 export const COPILOT_ROLES = ["user", "assistant"] as const;
 export type CopilotRole = (typeof COPILOT_ROLES)[number];
@@ -102,6 +107,67 @@ export async function storeCopilotTurn(
   };
 }
 
+export interface WebConversationInput {
+  conversationId: string;
+  visitorId: string;
+  email: string;
+  displayName?: string | null;
+  messages: { messageId: string; role: CopilotRole; text: string; at: string }[];
+}
+
+/**
+ * Store a web conversation of our public site under the staff scope, on the visitor's address (channel 'web', session =
+ * the conversation id). Same table and idempotency as a Copilot turn: one row per chat-service message id.
+ */
+export async function storeWebConversation(
+  input: WebConversationInput,
+  runId: string | null,
+): Promise<{ stored: number; duplicates: number; newMessageIds: string[]; email: string }> {
+  const destination = copilotDestination();
+  if (!destination) throw new CopilotDestinationMissingError();
+  const email = normalizeEmail(input.email);
+  if (!email) throw new Error(`not an email address: ${input.email}`);
+  const rows = input.messages.map((m) => ({
+    orgId: destination.orgId,
+    brandId: destination.brandId,
+    chatOrgId: null,
+    chatUserId: null,
+    channel: WEB_CHAT_CHANNEL,
+    visitorId: input.visitorId,
+    email,
+    displayName: input.displayName?.trim() ? stripNul(input.displayName.trim()) : null,
+    sessionId: input.conversationId,
+    messageId: m.messageId,
+    role: m.role,
+    text: stripNul(m.text),
+    sentAt: new Date(m.at),
+    runId,
+  }));
+  const inserted = await db
+    .insert(copilotMessages)
+    .values(rows)
+    .onConflictDoNothing({ target: copilotMessages.messageId })
+    .returning({ messageId: copilotMessages.messageId });
+  return { stored: inserted.length, duplicates: rows.length - inserted.length, newMessageIds: inserted.map((r) => r.messageId), email };
+}
+
+/** The stored messages of one web conversation, oldest first. */
+export async function readWebConversation(orgId: string, brandId: string, conversationId: string): Promise<CopilotMessage[]> {
+  if (!isCopilotDestination(orgId, brandId)) return [];
+  return db
+    .select()
+    .from(copilotMessages)
+    .where(
+      and(
+        eq(copilotMessages.orgId, orgId),
+        eq(copilotMessages.brandId, brandId),
+        eq(copilotMessages.channel, WEB_CHAT_CHANNEL),
+        eq(copilotMessages.sessionId, conversationId),
+      ),
+    )
+    .orderBy(asc(copilotMessages.sentAt), sql`CASE ${copilotMessages.role} WHEN 'user' THEN 0 ELSE 1 END`, asc(copilotMessages.id));
+}
+
 /** PURE: one presence per chatting address, from that address's stored turns. */
 export function copilotPresences(rows: CopilotMessage[]): Presence[] {
   const byEmail = new Map<string, CopilotMessage[]>();
@@ -125,8 +191,9 @@ export function copilotPresences(rows: CopilotMessage[]): Presence[] {
         outboundCount: sorted.filter((m) => m.role === "assistant").length,
         detail: {
           channel: COPILOT_CHANNEL,
-          chatOrgIds: [...new Set(sorted.map((m) => m.chatOrgId))].sort(),
-          chatUserIds: [...new Set(sorted.map((m) => m.chatUserId))].sort(),
+          channels: [...new Set(sorted.map((m) => m.channel))].sort(),
+          chatOrgIds: [...new Set(sorted.map((m) => m.chatOrgId).filter((x): x is string => !!x))].sort(),
+          chatUserIds: [...new Set(sorted.map((m) => m.chatUserId).filter((x): x is string => !!x))].sort(),
           sessions: new Set(sorted.map((m) => m.sessionId)).size,
         },
       };
