@@ -4,7 +4,7 @@ import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { copilotDestination, storeCopilotTurn } from "../lib/copilot/messages.js";
 import { CopilotTurnRequestSchema, WebConversationRequestSchema } from "../schemas.js";
 import { storeWebConversation } from "../lib/copilot/messages.js";
-import { kickStaffBuild, recordWebHandoff, webHandoffScope, webHandoffsNow } from "../lib/copilot/web-handoffs.js";
+import { kickStaffBuild, passAfterBuild, recordWebHandoff, webHandoffScope } from "../lib/copilot/web-handoffs.js";
 import { db } from "../db/index.js";
 import { webChatHandoffs } from "../db/schema.js";
 import { desc } from "drizzle-orm";
@@ -93,9 +93,7 @@ router.post("/internal/copilot/web-conversations", apiKeyAuth, async (req, res) 
     // The visitor becomes a person of the staff scope with its next build; report as soon as it is done.
     // `WEB_CHAT_HANDOFF_WATCH=off` stops it with the loop (the next build and an owner pass still deliver).
     if ((stored.stored > 0 || handoff.status !== "reported") && process.env.WEB_CHAT_HANDOFF_WATCH !== "off") {
-      kickStaffBuild(scope.scopeId, () => {
-        webHandoffsNow().catch((e) => console.error("[crm-service][web-chat] pass after hand-off failed:", e));
-      });
+      kickStaffBuild(scope.scopeId, passAfterBuild);
     }
     return;
   } catch (err) {
