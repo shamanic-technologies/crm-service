@@ -22,7 +22,7 @@ import { PEOPLE_SOURCES, type Presence } from "../lib/people/identity.js";
 import type { PossibleLead } from "../lib/people/sources.js";
 import type { LeadCompanyTags, LeadDisqualification, LeadHumanTags } from "../lib/people/state.js";
 import type { PersonRelevance } from "../lib/people/relevance.js";
-import { decodeCursor, findPerson, pageOf, readTimeline, type TimelineItem } from "../lib/people/timeline.js";
+import { decodeCursor, findPerson, pageOf, parseExcludeSources, readTimeline, type TimelineItem } from "../lib/people/timeline.js";
 import { attachFactIds, factFeedSettlement, type FactFeedSettlement } from "../lib/people/fact-ids.js";
 import { completeItems } from "../lib/people/item-fill.js";
 import { readFacts } from "../lib/people/facts.js";
@@ -484,6 +484,19 @@ const timelineQuerySchema = z
     // Neither = the whole thread, unchanged (every writer reads it whole).
     limit: z.coerce.number().int().min(1).max(500).optional(),
     before: z.string().min(1).max(2000).optional(),
+    // TIMELINE-EXCLUDE-SOURCES-1117: comma list of sources never read nor served (a writer skips `api` call logs).
+    excludeSources: z
+      .string()
+      .max(500)
+      .optional()
+      .transform((v, ctx) => {
+        const { sources, unknown } = parseExcludeSources(v);
+        if (unknown.length) {
+          ctx.addIssue({ code: "custom", message: `excludeSources: unknown source(s) ${unknown.join(", ")} (one of ${PEOPLE_SOURCES.join(", ")})` });
+          return z.NEVER;
+        }
+        return sources;
+      }),
   })
   .refine((q) => [q.personKey, q.personId, q.relationKey].filter((x) => x !== undefined).length === 1, {
     message: "exactly one of personId (uuid), personKey or relationKey is required",
@@ -550,7 +563,7 @@ router.get(
         scoped,
         scope.sourceReads as BuildSummary | null,
         { orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId },
-        { paged, lateJoin: !relationKey },
+        { paged, lateJoin: !relationKey, excludeSources: parsed.data.excludeSources },
       );
       // A record read through (not yet joined): bring the index up to date now, not at the next cron.
       if (!timeline.indexCurrent) {

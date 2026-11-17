@@ -3078,6 +3078,11 @@ registry.registerPath({
           "(`sources[].refreshing`). Absent with `before` absent = the whole thread, read-through as before (writers).",
       }),
       before: z.string().optional().openapi({ description: "PAGED read: the previous page's `page.olderCursor`; returns the items just older than it." }),
+      excludeSources: z.string().optional().openapi({
+        description:
+          "TIMELINE-EXCLUDE-SOURCES-1117: comma list of people sources (e.g. `api,copilot`) never read nor served: absent from `sources[]` and `items`. " +
+          "A writer reading a thread for its words skips `api` (one staff person carried 34k API / MCP call logs, 26 MB). Unknown source = 400. Absent = every source, unchanged.",
+      }),
     }),
   },
   responses: {
