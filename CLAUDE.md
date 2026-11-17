@@ -2261,7 +2261,10 @@ status}`; 503 when the staff scope (or its people scope) is not set up.
   since the assistant last spoke), thread (the page conversation, latest 40)}`. The Lead event campaign writes next (by
   email); their reply lands in the same person's thread like any mail. No send here, no per-channel case in the writer.
 - Delivery waits for the person to be built (`person_not_built` → the staff build is kicked → retried); the route kicks a
-  build then a pass; loop every 60 s (`WEB_CHAT_HANDOFF_WATCH=off` stops loop + kick). Retries 1 → 60 min for 24 h,
+  build then a pass; loop every 60 s (`WEB_CHAT_HANDOFF_WATCH=off` stops loop + kick). The pass runs when the NEXT build
+  ENDS (`afterNextScopeBuild`, build.ts), those waiting hand-offs due at once (DISTRY-WEB-CHAT-EMAIL-1117-PERSON: the staff
+  scope is almost always building, the old "then" fired at once behind the running build, 7 min for a visitor).
+  An address of the brand itself (domain, sending / connected mailbox: never a person) = final `skipped / own_address`. Retries 1 → 60 min for 24 h,
   400/422 final. Handed over again = messages added, no second Lead event. Monitoring: trigger `web_chat_handoff` on
   `GET /internal/ops/trigger-reports`. `GET /internal/copilot/web-conversations` lists the latest 200.
 - A phone-only visitor is NOT handled here yet (chat-service continues on WhatsApp itself); a phone given WITH the email

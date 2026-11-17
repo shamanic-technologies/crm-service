@@ -845,6 +845,23 @@ export function attachHeldEvidence<E, C extends { identityKeys: string[]; eviden
 const building = new Set<string>();
 /** Scopes asked to build again once the running build ends (`followUp`). */
 const buildAgain = new Set<string>();
+/**
+ * Callbacks waiting for a build of the scope that STARTS after they were registered (DISTRY-WEB-CHAT-EMAIL-1117-PERSON):
+ * a caller that just stored a record the running build cannot hold (it read its sources before) needs the NEXT one.
+ * Each build takes the waiters present when it starts and calls them once it ends (ok or failed).
+ */
+const nextBuildWaiters = new Map<string, (() => void)[]>();
+
+/** Call `then` once a build of the scope that starts after this call has ended. */
+export function afterNextScopeBuild(scopeId: string, then: () => void): void {
+  nextBuildWaiters.set(scopeId, [...(nextBuildWaiters.get(scopeId) ?? []), then]);
+}
+
+function takeBuildWaiters(scopeId: string): (() => void)[] {
+  const waiters = nextBuildWaiters.get(scopeId) ?? [];
+  nextBuildWaiters.delete(scopeId);
+  return waiters;
+}
 
 /**
  * One build of one scope under its own ORG run (the org that owns the scope,
@@ -862,6 +879,7 @@ export async function runScopeBuild(
     return { scopeId: scope.id, ok: true, skipped: true };
   }
   building.add(scope.id);
+  const waiters = takeBuildWaiters(scope.id);
   let runId: string | null = null;
   try {
     const run = await createRun({
@@ -895,6 +913,13 @@ export async function runScopeBuild(
     return { scopeId: scope.id, ok: false, error: message };
   } finally {
     building.delete(scope.id);
+    for (const w of waiters) {
+      try {
+        w();
+      } catch (err) {
+        console.error(`[crm-service] after-build callback failed scope=${scope.id}:`, err);
+      }
+    }
     if (buildAgain.delete(scope.id)) void runScopeBuild(scope);
   }
 }

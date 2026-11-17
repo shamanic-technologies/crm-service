@@ -24,7 +24,8 @@ import { db } from "../../db/index.js";
 import { peopleScopes, webChatHandoffs, type CopilotMessage, type WebChatHandoff } from "../../db/schema.js";
 import { accountPersonOf, type AccountPerson } from "../account-offer.js";
 import { resolveOccurrenceOffer, type OfferPick } from "../offer-pick.js";
-import { runScopeBuild } from "../people/build.js";
+import { afterNextScopeBuild, runScopeBuild } from "../people/build.js";
+import { cachedBrandAddresses, isBrandAddress } from "../people/brand-addresses.js";
 import { createRun, updateRun } from "../runs-client.js";
 import { CampaignRefusal, FINAL_REFUSAL_STATUSES, campaignServiceConfigured, dialablePhone, recordTriggerEvent, type DoorIdentity } from "../trigger-door.js";
 import { COPILOT_SENDER_NAME, WEB_CHAT_CHANNEL, copilotDestination, readWebConversation } from "./messages.js";
@@ -40,10 +41,15 @@ const MAX_LINES = 40;
 const LINE_MAX_CHARS = 2000;
 const ITEM_MAX_CHARS = 19_000;
 
-export const WEB_HANDOFF_STATUS = { PENDING: "pending", REPORTED: "reported", FAILED: "failed" } as const;
+export const WEB_HANDOFF_STATUS = { PENDING: "pending", REPORTED: "reported", FAILED: "failed", SKIPPED: "skipped" } as const;
 export const WEB_HANDOFF_REASONS = {
   /** The staff scope's people build has not made the visitor a person yet: rebuilt, retried. */
   PERSON_NOT_BUILT: "person_not_built",
+  /**
+   * The address is the brand's own (its domain, a sending mailbox, its connected Gmail): the people build never makes
+   * it a person (people/sources.ts withoutOwnAddresses), so the hand-off would wait for nothing. Final, never retried.
+   */
+  OWN_ADDRESS: "own_address",
   OFFER_UNKNOWN: "offer_unknown",
   OFFER_PICK_FAILED: "offer_pick_failed",
   CAMPAIGN_REFUSED: "campaign_refused",
@@ -182,7 +188,11 @@ export async function recordWebHandoff(input: {
   return { handoff: existing, duplicate: true };
 }
 
-async function dueHandoffs(orgId: string, brandId: string, now: number): Promise<WebChatHandoff[]> {
+/**
+ * `afterBuild`: the pass runs because a people build just ended; a hand-off that waited for the person to be built is
+ * due at once (its backoff was waiting for that build), any other one keeps its backoff.
+ */
+async function dueHandoffs(orgId: string, brandId: string, now: number, afterBuild = false): Promise<WebChatHandoff[]> {
   const found = await db
     .select()
     .from(webChatHandoffs)
@@ -196,7 +206,9 @@ async function dueHandoffs(orgId: string, brandId: string, now: number): Promise
       ),
     )
     .orderBy(webChatHandoffs.detectedAt, webChatHandoffs.id);
-  return found.filter((r) => nextAttemptDue(r.attempts, r.lastAttemptAt) <= now);
+  return found.filter(
+    (r) => (afterBuild && r.reason === WEB_HANDOFF_REASONS.PERSON_NOT_BUILT) || nextAttemptDue(r.attempts, r.lastAttemptAt) <= now,
+  );
 }
 
 export interface DeliveredHandoff {
@@ -210,9 +222,10 @@ export async function deliverWebHandoffs(
   scope: { orgId: string; brandId: string; userId: string },
   runId: string,
   now: number = Date.now(),
+  afterBuild = false,
 ): Promise<DeliveredHandoff[]> {
   if (!campaignServiceConfigured()) return [];
-  const due = await dueHandoffs(scope.orgId, scope.brandId, now);
+  const due = await dueHandoffs(scope.orgId, scope.brandId, now, afterBuild);
   const identity: DoorIdentity = { orgId: scope.orgId, userId: scope.userId, runId, brandId: scope.brandId };
   const settle = (r: WebChatHandoff, set: Partial<WebChatHandoff>) =>
     db
@@ -228,6 +241,21 @@ export async function deliverWebHandoffs(
     };
     const who: AccountPerson = await accountPersonOf(scope.orgId, scope.brandId, r.email, null);
     if (!who.personId) {
+      // The brand's own address is never a person: say so and stop, never wait for a build that will not make it one.
+      let own: boolean;
+      try {
+        own = isBrandAddress(r.email, await cachedBrandAddresses(identity, now));
+      } catch (err) {
+        await fail(WEB_HANDOFF_REASONS.PERSON_NOT_BUILT, `not a person yet, and the brand's own addresses are unreadable: ${(err as Error).message}`);
+        continue;
+      }
+      if (own) {
+        const error = `${r.email} is an address of the brand itself (its domain, a sending mailbox or its connected mailbox): the people build never makes it a person, so no Lead event is reported`;
+        console.warn(`[crm-service][web-chat] hand-off ${r.id} skipped (${WEB_HANDOFF_REASONS.OWN_ADDRESS}): ${error}`);
+        await settle(r, { status: WEB_HANDOFF_STATUS.SKIPPED, reason: WEB_HANDOFF_REASONS.OWN_ADDRESS, lastError: error });
+        out.push({ handoffId: r.id, status: WEB_HANDOFF_STATUS.SKIPPED, reason: WEB_HANDOFF_REASONS.OWN_ADDRESS });
+        continue;
+      }
       await fail(WEB_HANDOFF_REASONS.PERSON_NOT_BUILT, "the visitor is not a person of the staff scope yet: waiting for the people build");
       continue;
     }
@@ -277,16 +305,27 @@ export async function deliverWebHandoffs(
   return out;
 }
 
-/** One pass: deliver the due hand-offs; a visitor not built yet rebuilds the staff people (the next pass delivers). */
-export async function runWebHandoffPass(now: number = Date.now()): Promise<{ delivered: DeliveredHandoff[] } | { skipped: "not_configured" | "nothing_due" }> {
+/**
+ * One pass: deliver the due hand-offs. A visitor not built yet rebuilds the staff people and a pass runs the moment
+ * that build ENDS (`afterBuild`, the waiting hand-offs due at once). An `afterBuild` pass never kicks another build
+ * (a person the build did not make is retried on its backoff, never in a build loop).
+ */
+export async function runWebHandoffPass(
+  now: number = Date.now(),
+  opts: { afterBuild?: boolean } = {},
+): Promise<{ delivered: DeliveredHandoff[] } | { skipped: "not_configured" | "nothing_due" }> {
+  const afterBuild = opts.afterBuild === true;
   const scope = await webHandoffScope();
   if (!scope) return { skipped: "not_configured" };
-  if ((await dueHandoffs(scope.orgId, scope.brandId, now)).length === 0) return { skipped: "nothing_due" };
+  if ((await dueHandoffs(scope.orgId, scope.brandId, now, afterBuild)).length === 0) return { skipped: "nothing_due" };
   const run = await createRun({ orgId: scope.orgId, userId: scope.userId, brandIds: [scope.brandId], serviceName: SERVICE_NAME, taskName: "web-chat.handoffs" });
   const runIdentity = { orgId: scope.orgId, userId: scope.userId, runId: run.id, brandIds: [scope.brandId] };
   try {
-    const delivered = await deliverWebHandoffs(scope, run.id, now);
-    if (delivered.some((d) => d.reason === WEB_HANDOFF_REASONS.PERSON_NOT_BUILT)) kickStaffBuild(scope.scopeId);
+    const delivered = await deliverWebHandoffs(scope, run.id, now, afterBuild);
+    // `WEB_CHAT_HANDOFF_WATCH=off` stops the kick with the loop (the scope's cron build and an owner pass still deliver).
+    if (!afterBuild && process.env.WEB_CHAT_HANDOFF_WATCH !== "off" && delivered.some((d) => d.reason === WEB_HANDOFF_REASONS.PERSON_NOT_BUILT)) {
+      kickStaffBuild(scope.scopeId, passAfterBuild);
+    }
     await updateRun(run.id, delivered.some((d) => d.status === WEB_HANDOFF_STATUS.FAILED) ? "failed" : "completed", runIdentity);
     return { delivered };
   } catch (err) {
@@ -295,26 +334,46 @@ export async function runWebHandoffPass(now: number = Date.now()): Promise<{ del
   }
 }
 
-/** Rebuild the staff scope's people (one more after a running build), never awaited. */
+/**
+ * Rebuild the staff scope's people, never awaited; `then` runs once a build that STARTED after this call has ended.
+ * DISTRY-WEB-CHAT-EMAIL-1117-PERSON: the staff scope builds almost all the time (42k people, minutes per build); `then`
+ * used to fire as soon as `runScopeBuild` returned, which is AT ONCE when a build is already running (it only queues a
+ * follow-up), so the pass found no person and waited on backoff while the follow-up build made them one: 7 min for
+ * a visitor of the site in prod (2026-11-17). Now it waits for the build that can hold the new record.
+ */
 export function kickStaffBuild(scopeId: string, then?: () => void): void {
   void (async () => {
     const [s] = await db.select().from(peopleScopes).where(eq(peopleScopes.id, scopeId));
     if (!s) return;
+    if (then) afterNextScopeBuild(s.id, then);
     await runScopeBuild(s, { followUp: true });
-    then?.();
   })().catch((err) => console.error("[crm-service][web-chat] staff people build failed:", err));
 }
 
+/** The pass a finished staff build triggers (the route and a pass that found a visitor not built yet). */
+export function passAfterBuild(): void {
+  webHandoffsNow({ afterBuild: true }).catch((e) => console.error("[crm-service][web-chat] pass after build failed:", e));
+}
+
 let running = false;
+/** An after-build pass asked while another pass ran: run it once that pass ends (never lost). */
+let afterBuildAsked = false;
 
 /** Run one pass now unless one is running. */
-export async function webHandoffsNow(): Promise<Awaited<ReturnType<typeof runWebHandoffPass>> | { skipped: "pass_running" }> {
-  if (running) return { skipped: "pass_running" };
+export async function webHandoffsNow(opts: { afterBuild?: boolean } = {}): Promise<Awaited<ReturnType<typeof runWebHandoffPass>> | { skipped: "pass_running" }> {
+  if (running) {
+    if (opts.afterBuild) afterBuildAsked = true;
+    return { skipped: "pass_running" };
+  }
   running = true;
   try {
-    return await runWebHandoffPass();
+    return await runWebHandoffPass(Date.now(), opts);
   } finally {
     running = false;
+    if (afterBuildAsked) {
+      afterBuildAsked = false;
+      passAfterBuild();
+    }
   }
 }
 

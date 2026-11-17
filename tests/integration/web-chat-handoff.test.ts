@@ -5,7 +5,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
 import { copilotMessages, people, peopleFacts, webChatHandoffs } from "../../src/db/schema.js";
 import { emitScopeFacts } from "../../src/lib/people/facts.js";
-import { ensureScope, runScopeBuild } from "../../src/lib/people/build.js";
+import { afterNextScopeBuild, ensureScope, runScopeBuild } from "../../src/lib/people/build.js";
 import { runWebHandoffPass } from "../../src/lib/copilot/web-handoffs.js";
 import copilotRoutes from "../../src/routes/copilot.js";
 import peopleRoutes from "../../src/routes/people.js";
@@ -68,6 +68,8 @@ function installFetchStub() {
       doorCalls.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       return json({ event: { id: `ev-${doorCalls.length}`, status: "fired" }, replayed: false });
     }
+    // The org connected no Gmail mailbox (the brand's own addresses are its domain + sending mailboxes).
+    if (url.host === "google.test" && url.pathname === "/orgs/google/accounts") return json({ accounts: [] });
     if (url.host === "google.test") return json({ error: "none", reason: "no_google_account_connected" }, 404);
     if (url.host === "instantly.test") return json({ success: true, count: 0, leads: [], accounts: [] });
     if (url.host === "lead.test" && url.pathname === "/orgs/leads/unibox") return json({ rows: [], nextCursor: null });
@@ -191,6 +193,47 @@ describe.skipIf(!RUN)("web chat hand-off: the page conversation joins the person
     });
     expect(again.body).toMatchObject({ stored: 1, duplicates: 3, duplicate: true, status: "reported", handoffId: h.id });
     expect(await runWebHandoffPass(Date.now() + 10 * 60_000)).toEqual({ skipped: "nothing_due" });
+    expect(doorCalls).toHaveLength(1);
+  }, 60_000);
+
+  // DISTRY-WEB-CHAT-EMAIL-1117-PERSON (prod 2026-11-17): k.lourd+distryweb1118@distribute.you waited `person_not_built`
+  // until its window closed: an address on the brand's own domain is never a person (withoutOwnAddresses).
+  it("an address of the brand itself ends `skipped / own_address`, never waits for a build", async () => {
+    const { scope } = await ensureScope(STAFF_ORG, BRAND, USER);
+    expect((await push({ ...conversation, conversationId: "webconv-own", email: "k.lourd+test@distribute.you" })).status).toBe(202);
+    expect((await runScopeBuild(scope)).ok).toBe(true);
+    expect(await db.select().from(people).where(eq(people.scopeId, scope.id))).toHaveLength(0);
+
+    const pass = await runWebHandoffPass();
+    expect(pass).toMatchObject({ delivered: [{ status: "skipped", reason: "own_address" }] });
+    const [h] = await db.select().from(webChatHandoffs).where(eq(webChatHandoffs.brandId, BRAND));
+    expect(h).toMatchObject({ status: "skipped", reason: "own_address", attempts: 1 });
+    expect(h.lastError).toContain("address of the brand itself");
+    expect(doorCalls).toHaveLength(0);
+    expect(await runWebHandoffPass(Date.now() + 60 * 60_000)).toEqual({ skipped: "nothing_due" });
+  }, 60_000);
+
+  // kevin.lourd+distryweb1118b@gmail.com took 7 min: the pass "after the build" ran the moment a build was QUEUED behind
+  // the running one, found no person, then waited on backoff while the follow-up build made them one.
+  it("a hand-off waiting for its person is reported by the pass that runs when the next build ENDS", async () => {
+    const { scope } = await ensureScope(STAFF_ORG, BRAND, USER);
+    expect((await push(conversation)).status).toBe(202);
+    expect(await runWebHandoffPass()).toMatchObject({ delivered: [{ status: "failed", reason: "person_not_built" }] });
+
+    // A build already running: a waiter registered now fires only after the FOLLOW-UP build (the one that can hold it).
+    const running = runScopeBuild(scope);
+    let called = false;
+    afterNextScopeBuild(scope.id, () => {
+      called = true;
+    });
+    expect(await runScopeBuild(scope, { followUp: true })).toMatchObject({ skipped: true });
+    await running;
+    expect(called).toBe(false);
+    await vi.waitFor(() => expect(called).toBe(true), { timeout: 30_000, interval: 50 });
+
+    // Its backoff is not over, but it waited for exactly this build: the after-build pass delivers it now.
+    expect(await runWebHandoffPass(Date.now())).toEqual({ skipped: "nothing_due" });
+    expect(await runWebHandoffPass(Date.now(), { afterBuild: true })).toMatchObject({ delivered: [{ status: "reported", reason: null }] });
     expect(doorCalls).toHaveLength(1);
   }, 60_000);
 });
