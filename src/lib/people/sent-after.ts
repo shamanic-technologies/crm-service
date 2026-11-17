@@ -453,7 +453,7 @@ export async function readSentAfter(orgId: string, brandId: string, asks: SentAf
     }
     for (const c of copilot) {
       if (!emails.includes(c.email) || c.sentAt.getTime() <= after) continue;
-      found.push({ at: c.sentAt.toISOString(), source: "copilot", channel: COPILOT_CHANNEL, sentBy: "automation", from: COPILOT_SENDER_NAME, text: clip(c.text), ref: { messageId: c.messageId, sessionId: c.sessionId } });
+      found.push({ at: c.sentAt.toISOString(), source: "copilot", channel: c.channel ?? COPILOT_CHANNEL, sentBy: "automation", from: COPILOT_SENDER_NAME, text: clip(c.text), ref: { messageId: c.messageId, sessionId: c.sessionId } });
     }
     for (const c of api) {
       const answeredAt = c.calledAt.getTime() + c.durationMs;

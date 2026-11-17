@@ -50,7 +50,7 @@ import { ownSenderSql } from "../matrix/own-senders.js";
 import { createHash } from "node:crypto";
 import { and, asc, eq, getTableColumns, gt, inArray, sql, type SQL } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { humanKeys, people, peopleFacts, peopleScopes, personIdAliases, type PeopleFact, type PeopleScope, type Person } from "../../db/schema.js";
+import { copilotMessages, humanKeys, people, peopleFacts, peopleScopes, personIdAliases, type PeopleFact, type PeopleScope, type Person } from "../../db/schema.js";
 import { LATE_JOIN_SOURCES, mirrorContactKeys } from "./record-keys.js";
 import { eventsQuery, type FunnelEventSource } from "../gohighlevel/funnel-events.js";
 import { labelEventsQuery, type LabelEventRow } from "../gohighlevel/label-verdicts.js";
@@ -65,7 +65,7 @@ import { voiceNoteText } from "../matrix/voice-notes.js";
 import { factTypeFor, type AddressRole } from "../mailbox/rules.js";
 import { meetingFactContext, readOrgEvents } from "../calendar/matching.js";
 import { meetingCandidateFacts } from "../calendar/meetings.js";
-import { isCopilotDestination } from "../copilot/messages.js";
+import { COPILOT_SENDER_NAME, WEB_CHAT_CHANNEL, isCopilotDestination } from "../copilot/messages.js";
 import { newsletterScopeSql } from "../transactional/newsletters.js";
 import { creditDateBasis } from "../credit-events/rules.js";
 import type { CreditEventType } from "../credit-events/rules.js";
@@ -122,7 +122,7 @@ export const FACT_TYPES = [
 export type FactType = (typeof FACT_TYPES)[number];
 
 // `distribute_platform`: retired (see RETIRED_FAMILIES); kept because the feed still serves the facts it stated.
-export const FACT_SOURCES = ["gohighlevel", "gmail", "matrix", "stripe", "posthog", "clerk", "csv", "crm", "distribute_platform", "google_calendar", "billing", "sending_mailbox", "transactional"] as const;
+export const FACT_SOURCES = ["gohighlevel", "gmail", "matrix", "stripe", "posthog", "clerk", "csv", "crm", "distribute_platform", "google_calendar", "billing", "sending_mailbox", "transactional", "copilot"] as const;
 export type FactSource = (typeof FACT_SOURCES)[number];
 
 /**
@@ -159,6 +159,10 @@ const FAMILIES = {
   // UNIBOX-NEWSLETTER-1113: one `message_out` per newsletter email the org sent the person (lib/transactional/newsletters.ts);
   // history, stated once, never withdrawn.
   newsletter_send: { source: "transactional", snapshot: false, immutable: true },
+  // DISTRY-WEB-CHAT-EMAIL-1117: one `message_in` / `message_out` per message of a conversation in our public site's chat
+  // window, once the visitor gave their email (lib/copilot/web-handoffs.ts). Staff Unibox scope only; history, never
+  // withdrawn. The Copilot's dashboard chat states none (it is product use, not yet on the feed).
+  web_chat_message: { source: "copilot", snapshot: false, immutable: true },
 } as const;
 export type FactFamily = keyof typeof FAMILIES;
 
@@ -947,6 +951,56 @@ async function creditCandidates(orgId: string, brandId: string): Promise<Candida
       memberEmails: e.member_emails,
     })),
   );
+}
+
+/**
+ * DISTRY-WEB-CHAT-EMAIL-1117: each message of a web conversation the visitor handed over with their email, as the fact it
+ * is (the visitor wrote = `message_in`, the assistant answered = `message_out`), on the visitor's Copilot presence (its
+ * address as fallback: held until a built person holds it). PURE.
+ */
+export function webChatCandidateFacts(
+  messages: { messageId: string; sessionId: string; visitorId: string | null; email: string; displayName: string | null; role: string; text: string; sentAt: Date }[],
+): CandidateFact[] {
+  return messages.map((m) => {
+    const inbound = m.role === "user";
+    return {
+      naturalKey: `copilot|web|${m.messageId}`,
+      family: "web_chat_message" as const,
+      type: inbound ? ("message_in" as const) : ("message_out" as const),
+      source: "copilot" as const,
+      sourceRef: m.messageId,
+      sourceContactId: null,
+      crmContactId: null,
+      occurredAt: iso(m.sentAt),
+      dateBasis: "sent_at",
+      payload: {
+        channel: WEB_CHAT_CHANNEL,
+        text: m.text,
+        direction: inbound ? "inbound" : "outbound",
+        conversationId: m.sessionId,
+        visitorId: m.visitorId,
+        from: inbound ? m.email : COPILOT_SENDER_NAME,
+        to: [inbound ? COPILOT_SENDER_NAME : m.email],
+      },
+      subject: {
+        presence: `copilot:${m.email}`,
+        keys: [emailKey(m.email)],
+        standalone: false,
+        emails: [m.email],
+        phones: [],
+        fullName: m.displayName,
+      },
+    };
+  });
+}
+
+async function webChatCandidates(orgId: string, brandId: string): Promise<CandidateFact[]> {
+  if (!isCopilotDestination(orgId, brandId)) return [];
+  const found = await db
+    .select()
+    .from(copilotMessages)
+    .where(and(eq(copilotMessages.orgId, orgId), eq(copilotMessages.brandId, brandId), eq(copilotMessages.channel, WEB_CHAT_CHANNEL)));
+  return webChatCandidateFacts(found);
 }
 
 /** Gmail messages from the scope's message store; `other` (a third party in the thread) is not the person. */
@@ -1746,7 +1800,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
     )) as unknown as { hash: string | null }[];
     const ownershipDue = ownershipMark?.hash !== indexHash;
 
-    const [ghl, matrix, matrixGroups, gmail, posthog, stripe, clerk, csv, connected, calendar, credit, mailbox, newsletters] = await Promise.all([
+    const [ghl, matrix, matrixGroups, gmail, posthog, stripe, clerk, csv, connected, calendar, credit, mailbox, newsletters, webChat] = await Promise.all([
       ghlCandidates(orgId, brandId),
       matrixCandidates(orgId, brandId),
       matrixGroupCandidates(orgId, brandId),
@@ -1760,6 +1814,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
       creditCandidates(orgId, brandId),
       mailboxCandidates(orgId, brandId),
       newsletterCandidates(orgId, brandId),
+      webChatCandidates(orgId, brandId),
     ]);
     // An auth provider connected = it alone states who signed up (it knows invited
     // teammates and staff; PostHog only knows who was identified). PostHog keeps
@@ -1783,7 +1838,7 @@ export async function emitScopeFacts(scope: Pick<PeopleScope, "id" | "orgId" | "
     // A record the build has not joined yet (a new Stripe customer, a PostHog person who just typed
     // their email) is filed on the person holding one of its keys now, not held until the next build.
     const recordKeys = await recordKeysByContact(orgId, brandId);
-    const all = [...ghl, ...matrix, ...matrixGroups, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv, ...calendar, ...credit, ...mailbox, ...newsletters, ...registry]
+    const all = [...ghl, ...matrix, ...matrixGroups, ...gmail.facts, ...posthog, ...stripe, ...clerk, ...csv, ...calendar, ...credit, ...mailbox, ...newsletters, ...webChat, ...registry]
       .filter((c) => !(authStatesSignups && c.family === "posthog_person"))
       .map((c) => withRecordKeys(c, recordKeys));
     const candidates = new Map<string, CandidateFact>();

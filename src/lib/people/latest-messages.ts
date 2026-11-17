@@ -418,7 +418,7 @@ async function latestCopilot(orgId: string, brandId: string, emails: string[]): 
         message: {
           at: m.sentAt.toISOString(),
           source: "copilot",
-          channel: COPILOT_CHANNEL,
+          channel: m.channel ?? COPILOT_CHANNEL,
           direction: inbound ? "inbound" : "outbound",
           sentBy: inbound ? null : "automation",
           subject: null,

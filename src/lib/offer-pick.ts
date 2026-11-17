@@ -29,7 +29,7 @@
 import { and, asc, eq, isNotNull, ne, or, type SQL } from "drizzle-orm";
 import type { PgColumn, PgTable } from "drizzle-orm/pg-core";
 import { db } from "../db/index.js";
-import { contacts, creditEventReports, formTriggerReports, paymentRefusalReports, phoneGivenReports, replyTriggerReports } from "../db/schema.js";
+import { contacts, creditEventReports, formTriggerReports, paymentRefusalReports, phoneGivenReports, replyTriggerReports, webChatHandoffs } from "../db/schema.js";
 import { judgeChoices, type ChoiceQuestion } from "./judgments-client.js";
 import { readBrandContext } from "./people/relevance.js";
 import { siblingGetOk, siblingQuery, type SiblingIdentity } from "./people/siblings.js";
@@ -68,7 +68,7 @@ export type HeldVerdict =
 
 /** How a person was already reached for an offer (persisted as the verdict of a `person_reached` pick). */
 export interface ReachedEvidence {
-  via: "form_report" | "phone_report" | "reply_report" | "refusal_report" | "credit_report" | "audience_served";
+  via: "form_report" | "phone_report" | "reply_report" | "refusal_report" | "credit_report" | "web_chat_report" | "audience_served";
   /** The earlier report id, or the audience id. */
   ref: string;
   at: string;
@@ -81,7 +81,7 @@ export type OfferPick =
   | { offerId: null; reason: "offer_unknown"; detail: string };
 
 /** The report ledgers a person's occurrences are recorded in. */
-export type Ledger = "form" | "phone" | "reply" | "refusal" | "credit";
+export type Ledger = "form" | "phone" | "reply" | "refusal" | "credit" | "web_chat";
 
 /** What a trigger knows about one occurrence. Every field is evidence; none is a per-trigger rule. */
 export interface Occurrence {
@@ -183,6 +183,21 @@ const LEDGERS: Record<Ledger, { cols: LedgerCols; via: ReachedEvidence["via"] }>
       phone: null,
     },
     via: "credit_report",
+  },
+  // DISTRY-WEB-CHAT-EMAIL-1117: a web conversation handed over with the visitor's email (lib/copilot/web-handoffs.ts).
+  web_chat: {
+    cols: {
+      table: webChatHandoffs,
+      id: webChatHandoffs.id,
+      orgId: webChatHandoffs.orgId,
+      brandId: webChatHandoffs.brandId,
+      status: webChatHandoffs.status,
+      offerId: webChatHandoffs.offerId,
+      reportedAt: webChatHandoffs.reportedAt,
+      email: webChatHandoffs.email,
+      phone: webChatHandoffs.phone,
+    },
+    via: "web_chat_report",
   },
 };
 

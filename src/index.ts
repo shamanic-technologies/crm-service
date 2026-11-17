@@ -35,6 +35,7 @@ import { startFactEmitter } from "./lib/people/fact-emitter.js";
 import { startPhoneWatch } from "./lib/phone-trigger/watch.js";
 import { startMatrixLiveWatch } from "./lib/matrix/sync.js";
 import { startCalendarWatch } from "./lib/calendar/feed.js";
+import { startWebHandoffWatch } from "./lib/copilot/web-handoffs.js";
 import { startCreditWatch } from "./lib/credit-events/feed.js";
 import { startRefusalWatch } from "./lib/payment-refusals/watch.js";
 import { startTxEmailWatch } from "./lib/transactional/sent-emails.js";
@@ -152,6 +153,8 @@ if (process.env.NODE_ENV !== "test") {
         startCalendarWatch();
         // Mirrors billing-service's credit events: "Credit ran out" / "Credit restored" on the client's staff Unibox thread.
         startCreditWatch();
+        // Reports each web chat conversation a visitor handed over with their email as a Lead event (DISTRY-WEB-CHAT-EMAIL-1117).
+        startWebHandoffWatch();
         // Reports each refused charge on a brand's Stripe as a Lead event for the person who paid.
         startRefusalWatch();
         // Mirrors transactional-email-service's sent emails onto each client's staff Unibox thread.
