@@ -33,13 +33,25 @@ export function sendResolveItem(r: Pick<MessageSentDeclaration, "orgId" | "brand
   return { orgId: r.orgId, brandIds: [r.brandId], ...(r.email ? { email: r.email } : {}), ...(phone ? { phone } : {}) };
 }
 
-/** PURE: one batch entry per send run, its message on its lead, dated when it was sent. */
+/** The Unit a sent message is made from: the message written for that lead (the writer declares it on the same lead). */
+export const MESSAGE_WRITTEN_OUTCOME = "message_written";
+
+/**
+ * PURE: one batch entry per send run, its message on its lead, dated when it was sent. UNIT-LINK-COVERAGE-1117: a Unit
+ * declares every Unit it was made from, so the send CONSUMES the `message_written` of the same lead, exactly as an email
+ * send does (the ledger then links written -> sent; before, 25 of 25 sends in 14 days declared nothing and no link led to
+ * them). A lead with no written message standing resolves to nothing in the ledger: the declaration is still true.
+ */
 export function messageSentBatchBody(rows: Array<{ runId: string; leadId: string; sentAt: Date }>): BatchRunOutcomes[] {
-  return rows.map((r) => ({
-    runId: r.runId,
-    produced: [{ outcomeKey: MESSAGE_SENT_OUTCOME, subjectService: LEAD_SUBJECT_SERVICE, subjectId: r.leadId }],
-    occurredAt: r.sentAt.toISOString(),
-  }));
+  return rows.map((r) => {
+    const subject = { subjectService: LEAD_SUBJECT_SERVICE, subjectId: r.leadId };
+    return {
+      runId: r.runId,
+      produced: [{ outcomeKey: MESSAGE_SENT_OUTCOME, ...subject }],
+      consumed: [{ outcomeKey: MESSAGE_WRITTEN_OUTCOME, ...subject }],
+      occurredAt: r.sentAt.toISOString(),
+    };
+  });
 }
 
 /** Record every campaign send not recorded yet (one row per send run, its first bubble). */
