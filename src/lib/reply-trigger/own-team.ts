@@ -97,3 +97,41 @@ export async function readTeamPeoplePhones(identity: SiblingIdentity): Promise<O
   }
   return team;
 }
+
+/**
+ * WHO OF THE BUSINESS'S OWN TEAM IS WRITING (OWNER-TO-SOPHIE-1117): the fact Jev reads with a burst.
+ *
+ * Prod 2026-11-17: the owner answered his assistant's alert on her WhatsApp line ("Réponds-lui toi-même, envoie-lui
+ * un lien de paiement pour démarrer avec $10"). Jev, shown no fact about who he is, read an order about another
+ * person's deal as words "not written to this business" (0.70) and the instruction was dropped. A team member
+ * (one of the brand's linked accounts, its sales rep, any org member by phone or address) writing to the business is
+ * the business's own people talking to it: Jev is SHOWN it (burst-context.ts `person.ownTeam`), no rule of ours
+ * decides the verdict.
+ */
+export interface BusinessTeam {
+  /** digits -> role (linked account, sales rep, org member). */
+  phones: OwnTeam;
+  /** every org member's address, normalized. */
+  emails: Set<string>;
+}
+
+/** Read once per pass (lazy): the brand's own numbers and the org members' addresses. Throws like `readOwnTeam`. */
+export function businessTeamOnce(identity: () => Promise<SiblingIdentity>): () => Promise<BusinessTeam> {
+  let read: Promise<BusinessTeam> | null = null;
+  return () =>
+    (read ??= identity().then(async (id) => {
+      const [phones, members] = await Promise.all([readOwnTeam(id), readOrgMembers(id)]);
+      return { phones, emails: members.emails };
+    }));
+}
+
+/** PURE: what this person is to the business's own team (the role in words), or null when they are not on it. */
+export function teamRoleOf(person: { phones: (string | null | undefined)[]; emails: (string | null | undefined)[] }, team: BusinessTeam): string | null {
+  const byPhone = ownTeamMatch(person.phones, team.phones);
+  if (byPhone) return byPhone.role;
+  for (const e of person.emails) {
+    const n = e?.trim().toLowerCase();
+    if (n && team.emails.has(n)) return OWN_TEAM_ROLES.org_member;
+  }
+  return null;
+}

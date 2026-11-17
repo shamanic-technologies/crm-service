@@ -25,6 +25,8 @@ const PERSON = "qa+reply-outcome@distribute.you";
 const OWNER_MAILBOX = "owner@brand-outcome.example";
 
 process.env.BRAND_SERVICE_URL = "http://brand.test";
+process.env.CLIENT_SERVICE_URL = "http://client.test";
+process.env.CLIENT_SERVICE_API_KEY = "client-key";
 process.env.BRAND_SERVICE_API_KEY = "brand-key";
 process.env.INSTANTLY_SERVICE_URL = "http://instantly.test";
 process.env.INSTANTLY_SERVICE_API_KEY = "instantly-key";
@@ -78,6 +80,9 @@ function installFetchStub() {
     if (url.host === "brand.test" && url.pathname.endsWith("/extracted-fields")) return json({ fields: [] });
     if (url.host === "brand.test" && url.pathname === "/orgs/brands") return json({ brands: [] });
     if (url.host === "google.test" && url.pathname === "/orgs/google/accounts") return json({ accounts: [{ email: OWNER_MAILBOX }] });
+    // The business's own team Jev is shown (OWNER-TO-SOPHIE-1117): nobody on it here.
+    if (url.host === "brand.test" && /^\/orgs\/brands\/[^/]+\/sales-rep$/.test(url.pathname)) return json({ salesRepEmail: null, salesRepPhone: null });
+    if (url.host === "client.test" && url.pathname === "/internal/users") return json({ users: [], total: 0 });
     if (url.pathname === "/orgs/judgments") {
       return json({ model: "jev", answers: { reply: { type: "choice", choice: jevChoice, confidence: 0.93, probabilities: { [jevChoice]: 0.93 } } } });
     }

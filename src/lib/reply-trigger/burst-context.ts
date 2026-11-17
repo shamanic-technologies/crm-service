@@ -33,7 +33,17 @@ export interface BurstThreadLine {
 
 export interface BurstContext {
   business: BrandContext;
-  person: { name?: string | null; email?: string | null; phone?: string | null; knownBy?: PersonView | null };
+  person: {
+    name?: string | null;
+    email?: string | null;
+    phone?: string | null;
+    knownBy?: PersonView | null;
+    /**
+     * The person is on the business's OWN team, in words (one of its linked accounts, its sales rep, a member of the
+     * org: own-team.ts `teamRoleOf`); null / absent = not on it (OWNER-TO-SOPHIE-1117).
+     */
+    ownTeam?: string | null;
+  };
   /** Oldest first, the whole conversation we hold. */
   thread: BurstThreadLine[];
 }
@@ -71,7 +81,10 @@ export function burstJudgeState(channel: string, ctx: BurstContext): Record<stri
       `The business below receives messages on ${channel}. "thread" is the whole conversation we hold with this ` +
       "person, oldest first: who wrote each message and, for email, to whom (from, to, cc). The messages marked " +
       '"new": true are the ones being judged: what the person wrote since the business last wrote. Read the whole ' +
-      "thread to know who the person is, who each message is addressed to, and what it answers.",
+      "thread to know who the person is, who each message is addressed to, and what it answers. When " +
+      '"person.ownTeam" is set, the person is one of the business\'s own people (its owner, a member, its sales ' +
+      "rep): what they write to the business is written to the business, an instruction, a question or an answer " +
+      "about a lead included.",
     business: {
       name: b.brand.name,
       website: b.brand.website,
@@ -85,6 +98,7 @@ export function burstJudgeState(channel: string, ctx: BurstContext): Record<stri
       phone: ctx.person.phone ?? null,
       knownByTheBusinessTools: ctx.person.knownBy?.knownBy ?? [],
       company: ctx.person.knownBy?.company ?? null,
+      ...(ctx.person.ownTeam ? { ownTeam: `one of the business's own people: ${ctx.person.ownTeam}` } : {}),
     },
     ...(olderOmitted > 0 ? { olderMessagesOmitted: olderOmitted } : {}),
     thread: lines.map((l) => ({

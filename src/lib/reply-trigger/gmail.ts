@@ -75,6 +75,7 @@ import { normalizeEmail, type Presence } from "../people/identity.js";
 import { isBrandAddress, readBrandAddresses, type BrandAddresses } from "../people/brand-addresses.js";
 import { personView, readBrandContext, type BrandContext, type PersonLike } from "../people/relevance.js";
 import { emailThreadLines, type BurstContext } from "./burst-context.js";
+import { businessTeamOnce, teamRoleOf, type BusinessTeam } from "./own-team.js";
 import {
   CampaignRefusal,
   campaignServiceConfigured,
@@ -220,16 +221,23 @@ export function brandContextOnce(scope: PeopleScope, runId: () => Promise<string
     (read ??= runId().then((id) => readBrandContext({ orgId: scope.orgId, userId: scope.createdByUserId, runId: id, brandId: scope.brandId })));
 }
 
+/** The business's own team (OWNER-TO-SOPHIE-1117), read once per pass, only when Jev is asked. */
+export function scopeTeamOnce(scope: PeopleScope, runId: () => Promise<string>): () => Promise<BusinessTeam> {
+  return businessTeamOnce(async () => ({ orgId: scope.orgId, userId: scope.createdByUserId, runId: await runId(), brandId: scope.brandId }));
+}
+
 /** What Jev reads with a Gmail burst (./burst-context.ts): the business, the person, the whole stored conversation. */
 export async function gmailBurstContext(
   scope: PeopleScope,
   address: string,
   newKeys: ReadonlySet<string>,
   brandContext: () => Promise<BrandContext>,
+  /** The business's own team (OWNER-TO-SOPHIE-1117): Jev is shown when the writer is on it. */
+  team: () => Promise<BusinessTeam>,
   /** The thread as it stood then (the replay eval): mails after this instant are left out. */
   asOf?: Date,
 ): Promise<BurstContext> {
-  const [business, stored, [person]] = await Promise.all([
+  const [business, stored, [person], businessTeam] = await Promise.all([
     brandContext(),
     storedConversation(scope.id, address),
     db
@@ -237,6 +245,7 @@ export async function gmailBurstContext(
       .from(people)
       .where(and(eq(people.orgId, scope.orgId), eq(people.brandId, scope.brandId), sql`${people.identityKeys} @> ${JSON.stringify([`email:${address}`])}::jsonb`))
       .limit(1),
+    team(),
   ]);
   const conversation = asOf ? stored.filter((m) => !m.at || m.at.getTime() <= asOf.getTime()) : stored;
   const knownBy = person
@@ -244,7 +253,13 @@ export async function gmailBurstContext(
     : null;
   return {
     business,
-    person: { name: person?.displayName ?? null, email: address, phone: (person?.phones as string[] | undefined)?.[0] ?? null, knownBy },
+    person: {
+      name: person?.displayName ?? null,
+      email: address,
+      phone: (person?.phones as string[] | undefined)?.[0] ?? null,
+      knownBy,
+      ownTeam: teamRoleOf({ phones: (person?.phones as string[] | undefined) ?? [], emails: [address] }, businessTeam),
+    },
     thread: emailThreadLines(conversation, newKeys),
   };
 }
@@ -278,6 +293,7 @@ export async function decideGmailBurst(
     judge: ReturnType<typeof lazyJudgeRun>;
     ownAddresses: OwnAddressesOnce;
     brandContext: () => Promise<BrandContext>;
+    team: () => Promise<BusinessTeam>;
     now: number;
   },
 ): Promise<GmailDecision> {
@@ -331,7 +347,7 @@ export async function decideGmailBurst(
   const judgment = await judgeBurst(
     { orgId: scope.orgId, userId: scope.createdByUserId, brandId: scope.brandId, channel: CHANNEL, where: `gmail scope ${scope.id}` },
     ctx.judge.runId,
-    () => gmailBurstContext(scope, address, judgedKeys, ctx.brandContext),
+    () => gmailBurstContext(scope, address, judgedKeys, ctx.brandContext, ctx.team),
   );
   const verdict = burstVerdict(judgment);
   return {
@@ -411,6 +427,7 @@ async function detectGmailRepliesOn(
 
   const ownAddresses = ownAddressesOnce(scope, runId);
   const brandContext = brandContextOnce(scope, runId);
+  const team = scopeTeamOnce(scope, runId);
 
   for (const { address } of moved) {
     const reading = readEmailThreadForReply(await storedConversation(scope.id, address));
@@ -439,7 +456,7 @@ async function detectGmailRepliesOn(
     if (fresh.length === 0) {
       decision = { kind: "record", status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.BEFORE_WATCH, judgment: null, judged: false, reported: false, emailPathAnswer: null };
     } else {
-      decision = await decideGmailBurst(scope, address, burst, reading.burst.filter((m) => Date.parse(m.at) >= since), { runId, judge, ownAddresses, brandContext, now });
+      decision = await decideGmailBurst(scope, address, burst, reading.burst.filter((m) => Date.parse(m.at) >= since), { runId, judge, ownAddresses, brandContext, team, now });
     }
     if (decision.kind === "not_owner") {
       // Another brand of the org owns this person: nothing recorded here.
