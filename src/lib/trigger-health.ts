@@ -9,6 +9,9 @@
  * `skipped / cold_email_path` Gmail row (decided on the recipient alone, no answer from the email path, before
  * EMAIL-REPLY-ORPHAN-1027) is a DROPPED reply until re-checked: stuck, red, never a quiet skip.
  *
+ * A burst of the business's OWN team (its owner answering his assistant's alert) that Jev filed `not_to_business` is a
+ * DROPPED instruction too (OWNER-TO-SOPHIE-1117, `judgment.senderOwnTeam`): stuck, red, never a quiet skip.
+ *
  * Read-only, fleet-wide, from the report rows themselves (each is dated: the daily series is recomputed from
  * them, nothing else to store). Sends nothing: red on the Monitoring hub is the alert (owner rule).
  */
@@ -76,7 +79,11 @@ const SOURCES: { trigger: string; table: string; at: string; scoped: boolean; wh
     at: "detected_at",
     scoped: true,
     who: "full_name AS p_name, COALESCE(email, address) AS p_email, phone AS p_phone",
-    dropped: "source = 'gmail' AND status = 'skipped' AND reason = 'cold_email_path' AND email_path_answer IS NULL",
+    // A legacy cold-email skip with no answer, or a message of the business's OWN team (its owner, a member) Jev
+    // filed `not_to_business`: an instruction dropped (OWNER-TO-SOPHIE-1117), red until handled.
+    dropped:
+      "(source = 'gmail' AND status = 'skipped' AND reason = 'cold_email_path' AND email_path_answer IS NULL) OR " +
+      "(status = 'skipped' AND reason = 'not_to_business' AND judgment ? 'senderOwnTeam')",
     handOff: "source = 'gmail' AND status = 'handed_off' AND reason = 'cold_email_path'",
   },
   { trigger: "account_event", table: "credit_event_reports", at: "created_at", scoped: false, who: "NULL::text AS p_name, email AS p_email, NULL::text AS p_phone" },

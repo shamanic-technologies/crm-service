@@ -29,6 +29,8 @@ const OWNER_MAILBOX = "owner@brand-gmail.example";
 process.env.CAMPAIGN_SERVICE_URL = "http://campaign.test";
 process.env.CAMPAIGN_SERVICE_API_KEY = "campaign-key";
 process.env.BRAND_SERVICE_URL = "http://brand.test";
+process.env.CLIENT_SERVICE_URL = "http://client.test";
+process.env.CLIENT_SERVICE_API_KEY = "client-key";
 process.env.BRAND_SERVICE_API_KEY = "brand-key";
 process.env.INSTANTLY_SERVICE_URL = "http://instantly.test";
 process.env.INSTANTLY_SERVICE_API_KEY = "instantly-key";
@@ -90,6 +92,9 @@ function installFetchStub() {
       if (googleAccountsDown) return json({ error: "db down" }, 500);
       return json({ accounts: [{ email: "Owner.Personal@gmail-like.example", status: "active" }] });
     }
+    // The business's own team Jev is shown (OWNER-TO-SOPHIE-1117): nobody on it here.
+    if (url.host === "brand.test" && /^\/orgs\/brands\/[^/]+\/sales-rep$/.test(url.pathname)) return json({ salesRepEmail: null, salesRepPhone: null });
+    if (url.host === "client.test" && url.pathname === "/internal/users") return json({ users: [], total: 0 });
     if (url.pathname === "/orgs/judgments") {
       jevCalls += 1;
       jevStates.push((JSON.parse(String(init?.body)) as { state: Record<string, unknown> }).state);

@@ -24,6 +24,7 @@ import {
   GMAIL_SOURCE,
   ownAddressesOnce,
   brandContextOnce,
+  scopeTeamOnce,
   storedConversation,
 } from "./gmail.js";
 import { lazyJudgeRun, outcomeAtDetection } from "./outcome.js";
@@ -111,6 +112,7 @@ async function recheckScope(scope: PeopleScope, reports: ReplyTriggerReport[], d
   const judge = lazyJudgeRun(runId, { orgId: scope.orgId, userId: scope.createdByUserId, brandId: scope.brandId });
   const ownAddresses = ownAddressesOnce(scope, runId);
   const brandContext = brandContextOnce(scope, runId);
+  const team = scopeTeamOnce(scope, runId);
   const out: RecheckRow[] = [];
   let failed = false;
   try {
@@ -146,7 +148,7 @@ async function recheckScope(scope: PeopleScope, reports: ReplyTriggerReport[], d
         }
         continue;
       }
-      const decision = await decideGmailBurst(scope, r.address!, burst, burst, { runId, judge, ownAddresses, brandContext, now });
+      const decision = await decideGmailBurst(scope, r.address!, burst, burst, { runId, judge, ownAddresses, brandContext, team, now });
       if (decision.kind === "unreadable") {
         row.outcome = "unreadable";
         row.error = decision.error;

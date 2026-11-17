@@ -93,6 +93,7 @@ import { matrixSenderKey } from "../people/automated.js";
 import { burstJudgeState, chatThreadLines, type BurstContext } from "./burst-context.js";
 import { personViewOfConversation, readBrandContext, type BrandContext } from "../people/relevance.js";
 import { connectionOwnSenders } from "../matrix/own-senders.js";
+import { businessTeamOnce, teamRoleOf, type BusinessTeam } from "./own-team.js";
 import { matrixContactKeys, statedNotToBrand } from "../people/stated-not-to-brand.js";
 
 const SERVICE_NAME = "crm-service";
@@ -133,6 +134,7 @@ export const REPLY_KINDS = [
   "neutral",
   "automated",
   "not_to_business",
+  "own_team",
 ] as const;
 export type ReplyKind = (typeof REPLY_KINDS)[number];
 export const POSITIVE_REPLY_KINDS: readonly ReplyKind[] = ["interested", "info_requested", "meeting_requested"];
@@ -155,7 +157,14 @@ const REPLY_KIND_CRITERIA: Record<ReplyKind, string> = {
   not_to_business:
     "The new messages are not written to this business: the person writes to someone else (their own prospect, " +
     "client, colleague or another company) and the business only receives a copy, or the words are about a deal " +
-    "between other people. Read who each message is addressed to and what it answers in the thread.",
+    "between other people. Read who each message is addressed to and what it answers in the thread. Never this " +
+    "kind when the person is one of the business's own people (person.ownTeam) writing to the business: an order, a " +
+    "question or an answer about someone else's deal is written TO the business, for it to act on.",
+  // OWNER-TO-SOPHIE-1117: the owner's order to his assistant fit no lead kind, Jev filed it `not_to_business`
+  // (0.70) and it was dropped; with this kind, 3/3 replays read `own_team`. Reported like any word (message_received).
+  own_team:
+    "The person is one of the business's own people (person.ownTeam: its owner, a member, its sales rep) writing to " +
+    "the business: an instruction, a question or an answer to the business's own message, about a lead or anything else.",
 };
 
 /** At most this many messages of one burst are carried to campaign-service (the latest ones). */
@@ -271,6 +280,11 @@ export interface Judgment {
   probabilities?: Record<string, number>;
   /** P(interested) + P(info_requested) + P(meeting_requested). */
   positive?: number;
+  /**
+   * What the writer is to the business's own team, as Jev was shown it (OWNER-TO-SOPHIE-1117); absent = not on it.
+   * A burst of the own team skipped `not_to_business` is a DROPPED instruction: red on Monitoring (trigger-health.ts).
+   */
+  senderOwnTeam?: string;
 }
 
 /** A recorded reason that does not END a burst: a person may still write in it, and the burst is judged again. */
@@ -339,15 +353,22 @@ export async function matrixBurstContext(
   events: MatrixEvent[],
   newIds: ReadonlySet<string>,
   brandContext: () => Promise<BrandContext>,
+  team: () => Promise<BusinessTeam>,
 ): Promise<BurstContext> {
-  const [business, own, knownBy] = await Promise.all([
+  const [business, own, knownBy, businessTeam] = await Promise.all([
     brandContext(),
     connectionOwnSenders(conn),
     conversation ? personViewOfConversation(conn.orgId, conn.brandId, conversation.id) : Promise.resolve(null),
+    team(),
   ]);
   return {
     business,
-    person: { name: conversation?.contactName ?? null, phone: conversation?.contactPhone ?? null, knownBy },
+    person: {
+      name: conversation?.contactName ?? null,
+      phone: conversation?.contactPhone ?? null,
+      knownBy,
+      ownTeam: teamRoleOf({ phones: [conversation?.contactPhone], emails: [] }, businessTeam),
+    },
     thread: chatThreadLines(
       foldEdits(events)
         .filter((e) => !editTarget(e))
@@ -407,6 +428,7 @@ export async function judgeBurst(
       error: null,
       probabilities: a.probabilities,
       positive,
+      ...(context.person.ownTeam ? { senderOwnTeam: context.person.ownTeam } : {}),
     };
   } catch (err) {
     // Jev down = reported (never silence someone because a judge was unavailable).
@@ -504,6 +526,8 @@ async function detectRepliesOn(
     (brandContextRead ??= judge
       .runId()
       .then((runId) => readBrandContext({ orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId, runId })));
+  // Who of the business's own team writes (OWNER-TO-SOPHIE-1117): read once, on the judge run, only when Jev is asked.
+  const team = businessTeamOnce(async () => ({ orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId, runId: await judge.runId() }));
 
   for (const { roomId, campaign } of threads) {
     const since = (campaign ? conn.replyWatchSince : conn.openReplyWatchSince).getTime();
@@ -632,7 +656,7 @@ async function detectRepliesOn(
       judgment = await judgeBurst(
         { orgId: conn.orgId, userId: conn.createdByUserId, brandId: conn.brandId, channel: conn.channel, where: `connection ${conn.id}` },
         judge.runId,
-        () => matrixBurstContext(conn, conv, events, new Set(judged.map((m) => m.eventId)), brandContext),
+        () => matrixBurstContext(conn, conv, events, new Set(judged.map((m) => m.eventId)), brandContext, team),
       );
       const verdict = burstVerdict(judgment);
       // Only a POSITIVE reply produces the `conversation` outcome (./outcome.ts); every reported burst is a Lead event.

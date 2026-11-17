@@ -1646,6 +1646,12 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   (interested 0.89) and we emailed him; replayed on 90 bursts of 30 days: him 0.96 and Doc Dinners' "Hi Dr. Evans"
   0.72 skipped, every real prospect still positive, the rest of the skips the owner's personal / other-business mail.
   Replay door: `.context`-style script over `gmailBurstContext` / `matrixBurstContext` (exported, `asOf`).
+  **The business's own people are SHOWN to Jev** (OWNER-TO-SOPHIE-1117, `own-team.ts businessTeamOnce / teamRoleOf`):
+  `person.ownTeam` = linked account / sales rep / org member (phone or address), + kind `own_team` (reported as
+  `message_received`, never positive, never skipped). Kevin answered Sophie's « A lead needs your answer » alert with an
+  order about Ethan's deal; no lead kind fit, Jev read `not_to_business` 0.70, dropped; replayed 3/3 `own_team`, Ethan's
+  own message still positive 3/3, a client's reply-all to his prospect still `not_to_business` 0.85. An own-team burst
+  skipped `not_to_business` anyway (`judgment.senderOwnTeam`) is a DROPPED instruction: red on `trigger-reports`.
   Brand-domain addresses are never people (the build drops them), so they never reach the trigger. **A phone is offered to campaign-service only when DIALABLE**
   (`trigger-door.ts` `dialablePhone`: E.164 + libphonenumber valid; else logged, dropped; phone trigger skips it
   `invalid_number`).
