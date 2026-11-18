@@ -1524,6 +1524,14 @@ export const phoneGivenReports = pgTable(
     campaignEventId: text("campaign_event_id"),
     campaignRecordedAt: timestamp("campaign_recorded_at", { withTimezone: true }),
     campaignOutcome: jsonb("campaign_outcome"),
+    // TRIGGER-OUTCOME-1118 (lib/phone-trigger/outcome.ts): the Unit « WhatsApp number given » declared on the person's
+    // lead, on the reporting run. NULL status = reported before it shipped: never declared (migration 0090).
+    outcomeStatus: text("outcome_status"),
+    outcomeReason: text("outcome_reason"),
+    outcomeLeadId: text("outcome_lead_id"),
+    outcomeAttempts: integer("outcome_attempts").notNull().default(0),
+    outcomeNextAt: timestamp("outcome_next_at", { withTimezone: true }),
+    outcomeDeclaredAt: timestamp("outcome_declared_at", { withTimezone: true }),
   },
   (table) => [
     uniqueIndex("phone_given_reports_phone_uq").on(table.orgId, table.brandId, table.phone),

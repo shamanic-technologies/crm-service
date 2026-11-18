@@ -1538,6 +1538,12 @@ in a brand's CRM is reported to campaign-service's generic trigger door
 
 ## Phone given trigger — a person giving the brand their number is reported (`src/lib/phone-trigger/`)
 
+**The number given is also a UNIT of the ledger (TRIGGER-OUTCOME-1118, owner 2026-11-18, `outcome.ts`): each report made
+declares one `whatsapp_number_given` on the person's lead, PRODUCED by the reporting run (`phone-trigger.report`), dated
+when reported, consuming nothing (a root), once lead-service names the lead (backoff, `no_lead` after 7 days; columns
+`outcome_*`, migration 0090; reports made before it keep a NULL status and are never declared). The fact that fires a
+reactive campaign is declared by whoever reports it, so the message written because of it consumes it like any step.**
+
 WA-GIVEN-TRIGGER-1015 (owner 2026-10-15: « dès qu'un lead nous donne son WA, une campagne WA lui écrit »): the first
 time ANY connector of a brand states a phone on a person (PostHog person property, Clerk profile, GoHighLevel / Stripe
 contact...), campaign-service's trigger door gets ONE `whatsapp_number_given` occurrence (declared in features-service,
