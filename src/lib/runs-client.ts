@@ -404,6 +404,48 @@ export async function declareOutcomesBatch(runs: BatchRunOutcomes[]): Promise<Ba
   });
 }
 
+/** One occurrence as the ledger serves it (`GET /internal/outcome-occurrences`); `reversal` null = it stands. */
+export interface LedgerOccurrence {
+  id: string;
+  runId: string;
+  direction: "produced" | "consumed";
+  outcomeKey: string;
+  subjectService: string;
+  subjectId: string;
+  declaredAt: string;
+  reversal: unknown | null;
+}
+
+/**
+ * What the ledger holds for runs or subjects (runs-service `GET /internal/outcome-occurrences`, every page). Throws on
+ * any failure or a malformed answer: an unreadable ledger is never "nothing declared".
+ */
+export async function listLedgerOccurrences(filter: {
+  runIds?: string[];
+  subjectService?: string;
+  subjectIds?: string[];
+  outcomeKey?: string;
+  direction?: "produced" | "consumed";
+}): Promise<LedgerOccurrence[]> {
+  const all: LedgerOccurrence[] = [];
+  let cursor: string | null = null;
+  for (let page = 0; page < 50; page++) {
+    const qs = new URLSearchParams({ limit: "1000" });
+    if (filter.runIds?.length) qs.set("runIds", filter.runIds.join(","));
+    if (filter.subjectService) qs.set("subjectService", filter.subjectService);
+    if (filter.subjectIds?.length) qs.set("subjectIds", filter.subjectIds.join(","));
+    if (filter.outcomeKey) qs.set("outcomeKey", filter.outcomeKey);
+    if (filter.direction) qs.set("direction", filter.direction);
+    if (cursor) qs.set("cursor", cursor);
+    const answer: { occurrences?: LedgerOccurrence[]; nextCursor?: string | null } = await runsRequest(`/internal/outcome-occurrences?${qs}`);
+    if (!Array.isArray(answer.occurrences)) throw new Error("runs-service outcome occurrences read: no occurrences array");
+    all.push(...answer.occurrences);
+    if (!answer.nextCursor) return all;
+    cursor = answer.nextCursor;
+  }
+  throw new Error("runs-service outcome occurrences read: more than 50 pages");
+}
+
 /** PURE: the runs a 409 `performer_conflict` names (runs-service holds another performer, never overwritten), or null. */
 export function performerConflictRunsOf(err: unknown): string[] | null {
   if (!(err instanceof RunsServiceError) || err.kind !== "http" || err.status !== 409 || !err.body) return null;
