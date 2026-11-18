@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { planSend, planRelink, relinkSend } from "../../src/lib/whatsapp/relink-sends.js";
-import { messageSentBatchBody } from "../../src/lib/whatsapp/message-sent.js";
+import { messageSentBatchBody, writtenMessageStands } from "../../src/lib/whatsapp/message-sent.js";
 import type { LedgerOccurrence } from "../../src/lib/runs-client.js";
 
 /**
@@ -38,6 +38,25 @@ describe("planSend", () => {
   });
 });
 
+describe("writtenMessageStands (the one rule the live pass and the re-attachment read)", () => {
+  it("stands: same lead, never reversed, declared before the end of the send's UTC day", () => {
+    const at = new Date("2026-10-27T17:46:19.000Z");
+    expect(writtenMessageStands(LEAD, at, [written("2026-10-27T10:00:00.000Z")])).toBe(true);
+    expect(writtenMessageStands(LEAD, at, [written("2026-10-27T23:59:59.999Z")])).toBe(true);
+    expect(writtenMessageStands(LEAD, at, [])).toBe(false);
+    expect(writtenMessageStands(LEAD, at, [written("2026-10-28T00:00:00.000Z")])).toBe(false);
+    expect(writtenMessageStands(LEAD, at, [written("2026-10-20T00:00:00.000Z", { reversal: { reversedAt: "x" } })])).toBe(false);
+    expect(writtenMessageStands(LEAD, at, [written("2026-10-20T00:00:00.000Z", { subjectId: "other" })])).toBe(false);
+    expect(writtenMessageStands(LEAD, at, [occ({ declaredAt: "2026-10-20T00:00:00.000Z" })])).toBe(false);
+  });
+
+  it("the live body consumes the written message only when told it stands", () => {
+    const row = { runId: RUN, leadId: LEAD, sentAt: new Date("2026-10-27T17:46:19.000Z") };
+    expect(messageSentBatchBody([{ ...row, consumesWritten: false }])[0].consumed).toEqual([]);
+    expect(messageSentBatchBody([{ ...row, consumesWritten: true }])[0].consumed).toEqual([{ outcomeKey: "message_written", subjectService: "lead-service", subjectId: LEAD }]);
+  });
+});
+
 describe("planRelink + relinkSend against runs-service", () => {
   afterEach(() => vi.unstubAllGlobals());
   const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -66,7 +85,7 @@ describe("planRelink + relinkSend against runs-service", () => {
 
     await relinkSend(plans[0]);
     // Exactly what the live pass declares for that send (imported rule), nothing else.
-    expect(posted).toEqual([{ runs: messageSentBatchBody([{ runId: RUN, leadId: LEAD, sentAt: new Date("2026-10-27T17:46:19.000Z") }]) }]);
+    expect(posted).toEqual([{ runs: messageSentBatchBody([{ runId: RUN, leadId: LEAD, sentAt: new Date("2026-10-27T17:46:19.000Z"), consumesWritten: true }]) }]);
     expect((posted[0] as { runs: Array<{ consumed: unknown[] }> }).runs[0].consumed).toEqual([{ outcomeKey: "message_written", subjectService: "lead-service", subjectId: LEAD }]);
 
     // Anything but "consumed recorded + produced replayed" stops.

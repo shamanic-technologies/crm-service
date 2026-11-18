@@ -11,13 +11,15 @@
  * - One occurrence per send RUN: several bubbles of one send are one message (one run, one subject).
  * - ONE path for past and future: every pass records each campaign send not recorded yet, names its lead (lead-service
  *   `POST /internal/leads/ids/resolve`, nothing minted) and declares through runs-service's batch door with
- *   `occurredAt` = the send's `sent_at`, so a message sent on Oct 12 counts on Oct 12. Not a lead yet = asked again
+ *   `occurredAt` = the send's `sent_at`, so a message sent on Oct 12 counts on Oct 12. It consumes its lead's written
+ *   message only when one stands on the ledger; none yet within the hour of the send = asked again; an unreadable
+ *   ledger = asked again; none after the hour = declared consuming nothing, logged loud (WHATSAPP-SEND-STANDING-1118). Not a lead yet = asked again
  *   (backoff to 1 h), `no_lead` 7 days after it was first recorded; a 422 run = `refused` (kept, logged).
  */
 import { and, asc, eq, inArray, lte, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { messageSentDeclarations, type MessageSentDeclaration } from "../../db/schema.js";
-import { declareOutcomesBatch, invalidRunsOf, type BatchRunOutcomes } from "../runs-client.js";
+import { declareOutcomesBatch, invalidRunsOf, listLedgerOccurrences, type BatchRunOutcomes, type LedgerOccurrence } from "../runs-client.js";
 import { siblingQuery } from "../people/siblings.js";
 import { LEAD_SUBJECT_SERVICE, MESSAGE_SENT_OUTCOME, OUTCOME_GIVE_UP_MS, outcomeBackoffMs } from "../reply-trigger/outcome.js";
 
@@ -36,19 +38,45 @@ export function sendResolveItem(r: Pick<MessageSentDeclaration, "orgId" | "brand
 /** The Unit a sent message is made from: the message written for that lead (the writer declares it on the same lead). */
 export const MESSAGE_WRITTEN_OUTCOME = "message_written";
 
+/** How long a send waits for its written message to reach the ledger before it is declared without one. */
+export const WRITTEN_MESSAGE_WAIT_MS = 60 * 60_000;
+
+/**
+ * PURE: does a written message of the lead STAND on the ledger for a send at `sentAt`? runs-service's own resolution
+ * rule: a produced `message_written` on the same lead, never reversed, declared before the end of the send's UTC day.
+ * The one rule both the live pass and the one-time re-attachment (relink-sends.ts) read.
+ */
+export function writtenMessageStands(leadId: string, sentAt: Date | string, writtenOfLead: LedgerOccurrence[]): boolean {
+  const iso = typeof sentAt === "string" ? sentAt : sentAt.toISOString();
+  const endOfDay = Date.parse(`${iso.slice(0, 10)}T00:00:00.000Z`) + 24 * 60 * 60_000;
+  return writtenOfLead.some(
+    (o) =>
+      o.direction === "produced" &&
+      o.outcomeKey === MESSAGE_WRITTEN_OUTCOME &&
+      o.subjectService === LEAD_SUBJECT_SERVICE &&
+      o.subjectId === leadId &&
+      !o.reversal &&
+      Date.parse(o.declaredAt) < endOfDay,
+  );
+}
+
 /**
  * PURE: one batch entry per send run, its message on its lead, dated when it was sent. UNIT-LINK-COVERAGE-1117: a Unit
  * declares every Unit it was made from, so the send CONSUMES the `message_written` of the same lead, exactly as an email
- * send does (the ledger then links written -> sent; before, 25 of 25 sends in 14 days declared nothing and no link led to
- * them). A lead with no written message standing resolves to nothing in the ledger: the declaration is still true.
+ * send does (the ledger then links written -> sent). WHATSAPP-SEND-STANDING-1118: only when that written message STANDS
+ * on the ledger (`consumesWritten`, decided by `writtenMessageStands`): a consumption naming a Unit nobody produced links
+ * to nothing. A send with no written message standing consumes NOTHING, never a lower step of the lead (the lead found,
+ * identified: those are what the WRITING is made from, the writer consumes them; stated here they would be consumed twice
+ * and say the send was made without a message). Prod 2026-11-18, the 5 such sends: 4 were typed by hand in a responder
+ * test (`wa-responder-test-brand-N`, no writer ran), 1 was written by a workflow version that never declared its message.
  */
-export function messageSentBatchBody(rows: Array<{ runId: string; leadId: string; sentAt: Date }>): BatchRunOutcomes[] {
+export function messageSentBatchBody(rows: Array<{ runId: string; leadId: string; sentAt: Date; consumesWritten: boolean }>): BatchRunOutcomes[] {
   return rows.map((r) => {
     const subject = { subjectService: LEAD_SUBJECT_SERVICE, subjectId: r.leadId };
     return {
       runId: r.runId,
       produced: [{ outcomeKey: MESSAGE_SENT_OUTCOME, ...subject }],
-      consumed: [{ outcomeKey: MESSAGE_WRITTEN_OUTCOME, ...subject }],
+      consumed: r.consumesWritten ? [{ outcomeKey: MESSAGE_WRITTEN_OUTCOME, ...subject }] : [],
       occurredAt: r.sentAt.toISOString(),
     };
   });
@@ -141,11 +169,38 @@ export async function declareDueSends(now: number = Date.now(), pass: MessageSen
     }
   }
 
-  for (let start = 0; start < named.length; start += MAX_RUNS) {
-    let batch = named.slice(start, start + MAX_RUNS);
+  // WHATSAPP-SEND-STANDING-1118: what each send consumes is read off the ledger, once per lead per pass.
+  const ready: Array<{ r: MessageSentDeclaration; leadId: string; consumesWritten: boolean }> = [];
+  const writtenByLead = new Map<string, LedgerOccurrence[]>();
+  for (const { r, leadId } of named) {
+    let written = writtenByLead.get(leadId);
+    if (!written) {
+      try {
+        written = await listLedgerOccurrences({ subjectService: LEAD_SUBJECT_SERVICE, subjectIds: [leadId], outcomeKey: MESSAGE_WRITTEN_OUTCOME, direction: "produced" });
+        writtenByLead.set(leadId, written);
+      } catch (err) {
+        // An unreadable ledger is never "no written message": nothing declared for this send this pass.
+        await waitOrGiveUp(r, now, "ledger_unreadable", (err as Error).message.slice(0, 1000), false, pass);
+        continue;
+      }
+    }
+    const consumesWritten = writtenMessageStands(leadId, r.sentAt, written);
+    if (!consumesWritten && now - r.sentAt.getTime() < WRITTEN_MESSAGE_WAIT_MS) {
+      // The writer declares its message on its own run: within the hour it may simply not have landed yet.
+      await waitOrGiveUp(r, now, "written_message_not_on_ledger_yet", null, false, pass);
+      continue;
+    }
+    if (!consumesWritten) {
+      console.error(`${LOG} send run ${r.runId} (brand ${r.brandId}, lead ${leadId}, sent ${r.sentAt.toISOString()}): no written message stands on the ledger for the lead, message_sent declared consuming NOTHING (it will link to no source Unit)`);
+    }
+    ready.push({ r, leadId, consumesWritten });
+  }
+
+  for (let start = 0; start < ready.length; start += MAX_RUNS) {
+    let batch = ready.slice(start, start + MAX_RUNS);
     for (let tries = 0; batch.length > 0 && tries < 3; tries++) {
       try {
-        const answer = await declareOutcomesBatch(messageSentBatchBody(batch.map(({ r, leadId }) => ({ runId: r.runId, leadId, sentAt: r.sentAt }))));
+        const answer = await declareOutcomesBatch(messageSentBatchBody(batch.map(({ r, leadId, consumesWritten }) => ({ runId: r.runId, leadId, sentAt: r.sentAt, consumesWritten }))));
         for (const { r, leadId } of batch) {
           await db
             .update(messageSentDeclarations)
