@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { PHONE_GIVEN_TRIGGER, phoneOccurrenceBody } from "../../src/lib/phone-trigger/rules.js";
 import { nextAttemptDue } from "../../src/lib/phone-trigger/watch.js";
+import { NUMBER_GIVEN_OUTCOME, numberGivenBatchBody, numberGivenOutcomePending, numberGivenResolveItem } from "../../src/lib/phone-trigger/outcome.js";
 import { derivePosthogContact } from "../../src/lib/posthog/records.js";
 
 describe("phone given rules (WA-GIVEN-TRIGGER-1015)", () => {
@@ -36,5 +37,21 @@ describe("PostHog person phone", () => {
     expect(derivePosthogContact({ id: "p2", email: "a@x.com", prop_phone: "+447911123001" })).toMatchObject({ phoneOnly: false });
     expect(derivePosthogContact({ id: "p3", is_identified: true, prop_phone: "+447911123001" })).toMatchObject({ phoneOnly: false });
     expect(derivePosthogContact({ id: "p4", email: "a@x.com" })).toMatchObject({ phones: [], phoneOnly: false });
+  });
+});
+
+describe("the number given is a Unit of the ledger (TRIGGER-OUTCOME-1118)", () => {
+  it("one occurrence of the trigger's own outcome on the person's lead, on the reporting run, dated when reported; it consumes nothing", () => {
+    const at = new Date("2026-11-18T09:00:00.000Z");
+    expect(NUMBER_GIVEN_OUTCOME).toBe(PHONE_GIVEN_TRIGGER);
+    expect(numberGivenBatchBody([{ runId: "run-1", leadId: "lead-1", reportedAt: at }])).toEqual([
+      { runId: "run-1", produced: [{ outcomeKey: "whatsapp_number_given", subjectService: "lead-service", subjectId: "lead-1" }], occurredAt: "2026-11-18T09:00:00.000Z" },
+    ]);
+  });
+  it("a report just made waits for its lead from now; the lead is asked by number and lowercased email", () => {
+    const at = new Date("2026-11-18T09:00:00.000Z");
+    expect(numberGivenOutcomePending(at)).toEqual({ outcomeStatus: "pending", outcomeNextAt: at, outcomeAttempts: 0, outcomeReason: null });
+    expect(numberGivenResolveItem({ orgId: "o", brandId: "b", email: "Ann@Acme.example", phone: "+33600000001" })).toEqual({ orgId: "o", brandIds: ["b"], email: "ann@acme.example", phone: "+33600000001" });
+    expect(numberGivenResolveItem({ orgId: "o", brandId: "b", email: null, phone: "not-a-number" })).toBeNull();
   });
 });

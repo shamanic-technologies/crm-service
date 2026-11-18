@@ -19,6 +19,9 @@
  *     contact (Matrix) counts once the person WROTE in a one-to-one thread (a silent
  *     group member gave nothing). No WHO filter (staff, own team, already wrote): the
  *     answering pipe's strategy decides (WA-GIVEN-PURE-FACT-1017).
+ *  4. DECLARE (TRIGGER-OUTCOME-1118, ./outcome.ts): each number reported is one Unit of the outcome
+ *     `whatsapp_number_given` on the person's lead, produced by the run that reported it, so the message a
+ *     campaign writes because of it consumes it like any other step.
  *  3. DELIVER every pending / failed-and-due report: one ORG run per (org, brand),
  *     an impossible number dropped (`invalid_number`), the offer placed by lib/offer-pick.ts (the
  *     resolver every trigger shares: stated for every form, else the only active offer, else the
@@ -47,6 +50,7 @@ import { recordsNoPersonHolds } from "../people/facts.js";
 import { phoneKey } from "../people/identity.js";
 import { statedNotToBrand } from "../people/stated-not-to-brand.js";
 import { createRun, updateRun } from "../runs-client.js";
+import { declareDueNumbersGiven, numberGivenOutcomePending } from "./outcome.js";
 import { contactFacts, resolveOccurrenceOffer, type OfferPick } from "../offer-pick.js";
 import {
   CampaignRefusal,
@@ -296,7 +300,7 @@ async function brandActor(orgId: string, brandId: string): Promise<string | null
 async function settle(
   r: PhoneGivenReport,
   now: number,
-  set: Partial<Pick<PhoneGivenReport, "status" | "reason" | "lastError" | "offerId" | "offerBasis" | "offerVerdict" | "runId" | "reportedAt" | "campaignEventId" | "campaignRecordedAt" | "campaignOutcome">>,
+  set: Partial<Pick<PhoneGivenReport, "status" | "reason" | "lastError" | "offerId" | "offerBasis" | "offerVerdict" | "runId" | "reportedAt" | "campaignEventId" | "campaignRecordedAt" | "campaignOutcome" | "outcomeStatus" | "outcomeNextAt" | "outcomeAttempts" | "outcomeReason">>,
 ): Promise<void> {
   await db
     .update(phoneGivenReports)
@@ -436,6 +440,9 @@ async function deliverOne(
       campaignEventId: recorded.eventId,
       campaignRecordedAt: recorded.recordedAt,
       campaignOutcome: recorded.event,
+      // TRIGGER-OUTCOME-1118: the fact reported is also a Unit of the ledger, declared on THIS run once the person's
+      // lead is named (./outcome.ts). A replay re-states it on the replaying run.
+      ...numberGivenOutcomePending(reportedAt),
     });
     console.log(
       `[crm-service][phone-trigger] reported number ${r.id} (brand ${r.brandId}, ${r.source}) as event ${recorded.eventId}` +
@@ -575,6 +582,8 @@ export async function runPhoneWatchPass(now: number = Date.now()): Promise<Phone
     }
   }
   const delivered = await deliverDue(now);
+  // 4. Declare the Unit of every number reported whose lead is now named (never fails the pass).
+  await declareDueNumbersGiven(now).catch((e) => console.error("[crm-service][phone-trigger] outcome declarations failed:", e));
   return { mirrored, ...detected, delivered };
 }
 
