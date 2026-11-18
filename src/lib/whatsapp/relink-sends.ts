@@ -12,7 +12,7 @@
  */
 import { declareOutcomesBatch, listLedgerOccurrences, type LedgerOccurrence } from "../runs-client.js";
 import { LEAD_SUBJECT_SERVICE, MESSAGE_SENT_OUTCOME } from "../reply-trigger/outcome.js";
-import { MESSAGE_WRITTEN_OUTCOME, messageSentBatchBody } from "./message-sent.js";
+import { MESSAGE_WRITTEN_OUTCOME, messageSentBatchBody, writtenMessageStands } from "./message-sent.js";
 
 export interface DeclaredSend {
   runId: string;
@@ -47,7 +47,7 @@ export function planSend(send: DeclaredSend, onRun: LedgerOccurrence[], writtenO
     .map((o) => o.declaredAt)
     .sort();
   if (written.length === 0) return { ...send, verdict: "no_written_message", sentAt, detail: "no written message stands on the lead" };
-  if (Date.parse(written[0]) >= endOfUtcDay(sentAt)) {
+  if (!writtenMessageStands(send.leadId, sentAt, writtenOfLead)) {
     return { ...send, verdict: "written_after_send_day", sentAt, detail: `the lead's first written message is dated ${written[0]}, after the send's day` };
   }
   return { ...send, verdict: "link", sentAt, detail: `${written.filter((w) => Date.parse(w) < endOfUtcDay(sentAt)).length} written message(s) stand before the end of the send's day` };
@@ -82,7 +82,7 @@ export interface RelinkResult {
  */
 export async function relinkSend(plan: SendPlan): Promise<RelinkResult> {
   if (plan.verdict !== "link" || !plan.sentAt) throw new Error(`send run ${plan.runId} is not planned for a re-declaration (${plan.verdict})`);
-  const answer = await declareOutcomesBatch(messageSentBatchBody([{ runId: plan.runId, leadId: plan.leadId, sentAt: new Date(plan.sentAt) }]));
+  const answer = await declareOutcomesBatch(messageSentBatchBody([{ runId: plan.runId, leadId: plan.leadId, sentAt: new Date(plan.sentAt), consumesWritten: true }]));
   if (answer.recordedCount !== 1 || answer.alreadyRecordedCount !== 1) {
     throw new Error(`send run ${plan.runId}: expected 1 recorded (consumed) + 1 already recorded (produced), got ${answer.recordedCount} + ${answer.alreadyRecordedCount}`);
   }
