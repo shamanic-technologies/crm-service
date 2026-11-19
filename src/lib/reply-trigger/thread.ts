@@ -14,8 +14,8 @@
  *    messages in a row are one answer to give, not three;
  *  - ANY outbound message ends the burst: one of our sends, or a message the
  *    account typed by hand on the phone (the person's next words are a new
- *    burst; that burst is then skipped `human_in_conversation` by the watch:
- *    a human of the brand took the conversation, HUMAN-IN-THREAD-1016);
+ *    burst, reported like any other: the answering AI reads the hand message in
+ *    the thread and decides, SOPHIE-NEVER-SENT-1119 retired HUMAN-IN-THREAD-1016's skip);
  *  - but one of our sends answers only what was written BEFORE it was decided
  *    (its `createdAt`, the moment the writer queued it): a multi-part answer is
  *    queued at once and delivered a few seconds apart, so a message the person

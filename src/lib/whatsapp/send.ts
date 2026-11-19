@@ -29,7 +29,7 @@ import { alertRefusal } from "./staff-alert.js";
 import { describeLoggedOut, linkedWhatsappAccounts, sendReadiness, personaOf, type SenderPersona, type WhatsappAccount } from "./accounts.js";
 import { recordGhostPhone, resolveOneWhatsappPhone } from "./phone-resolution.js";
 import { automationOn, narrowByType, type SendingAccountType } from "../matrix/account-types.js";
-import { humanTypedTo } from "../matrix/human-takeover.js";
+import { accountsLeftToAutomation, handTypedByAccount } from "../matrix/human-takeover.js";
 import { joinRoom, readRoomBridgeInfo, sendText, setTyping } from "../matrix/client.js";
 import { expectedChannelIds, roomDeliversTo } from "./room-check.js";
 import { endTypingIn, startTyping, stopTyping, typingKey } from "./typing.js";
@@ -58,9 +58,10 @@ export const SEND_REFUSAL_CODES = [
   /** `skipIfReplied` and the person has written to the brand on some channel. */
   "person_replied",
   /**
-   * A human of the brand typed a message by hand to this person on WhatsApp
-   * (any linked account): the conversation is theirs, automation never writes
-   * into it (HUMAN-IN-THREAD-1016, lib/matrix/human-takeover.ts). Brand-side:
+   * A human of the brand typed a message by hand to this person on WhatsApp from
+   * EVERY account this send could write from: automation never writes from a human's
+   * own account in their place; the brand's pro_ai accounts are never taken
+   * (SOPHIE-NEVER-SENT-1119, lib/matrix/human-takeover.ts). Brand-side:
    * nothing is wrong with the number. Nothing is sent.
    */
   "human_in_conversation",
@@ -483,8 +484,9 @@ function ghostsOfPerson(person: PersonView | null): string[] {
  * phone (`no_phone_known`), `skipIfReplied` (`person_replied`), the brand's
  * linked + connected accounts (`whatsapp_not_linked` / `whatsapp_not_connected`),
  * then ONE bridge `resolve_identifier` (`not_on_whatsapp`, a number that cannot
- * exist included), then a human of the brand already typing to them by hand
- * (`human_in_conversation`). Throws the SendRefusal the send answers; a bridge failure on
+ * exist included), then the accounts a human of the brand typed to them by hand on
+ * are dropped (never written from in their place; a pro_ai account stays): none left =
+ * `human_in_conversation` (SOPHIE-NEVER-SENT-1119). Throws the SendRefusal the send answers; a bridge failure on
  * a valid number propagates as BridgeError. `onPhone` lets the send record the
  * phone on its row the moment it is known. Sends nothing.
  */
@@ -557,19 +559,24 @@ async function resolveReach(req: ReachRequest, onPhone?: (phone: string, source:
   if (await statedNotToBrand(req.orgId, req.brandId, [...(person?.identityKeys ?? []), phoneKey(phone), ...(email ? [emailKey(email)] : []), ...handles])) {
     throw new SendRefusal("stated_not_to_brand", `The brand stated that the person on ${phone} is not someone of theirs: no automated message is sent.`);
   }
-  const human = await humanTypedTo({
+  // SOPHIE-NEVER-SENT-1119: a human who typed to this person by hand keeps THEIR account; the
+  // brand's other accounts (its pro_ai line) still write. Only none left = refused.
+  const handTyped = await handTypedByAccount({
     orgId: req.orgId,
     brandId: req.brandId,
     channel: "whatsapp",
     ghosts: [who.mxid, ...ghosts.map((g) => g.ghost_mxid)],
   });
-  if (human) {
+  const left = accountsLeftToAutomation(accounts, handTyped);
+  if (left.length === 0) {
+    const last = [...handTyped.values()].sort((x, y) => Date.parse(y.at) - Date.parse(x.at))[0];
     throw new SendRefusal(
       "human_in_conversation",
-      `Someone of the brand wrote to ${phone} by hand on WhatsApp (last on ${human.at}): the conversation is theirs, no automated message is sent.`,
+      `Someone of the brand wrote to ${phone} by hand on WhatsApp (last on ${last.at}) from ${accounts.map((a) => `+${digitsOf(a.loginId)}`).join(", ")}: ` +
+        "automation never writes from a human's own account in their place, and no other account of the brand may send automated messages to them.",
     );
   }
-  return { phone, phoneSource, accounts, who, personGhosts: ghostsOfPerson(person) };
+  return { phone, phoneSource, accounts: left, who, personGhosts: ghostsOfPerson(person) };
 }
 
 export interface ReachResult {

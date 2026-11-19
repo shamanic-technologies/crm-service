@@ -1381,7 +1381,7 @@ newest first, a person with none absent; a send with no campaign never matches. 
   multi messages pour faire plus naturel ? »): body `messages: string[1..5]` instead of `text` (exactly one of the two). Checks
   + room decided ONCE before bubble 1 (same codes, `resolveReach` + `openRoom`); bubbles 2+ go out on bubble 1's account and room,
   never re-checked. Each bubble = its OWN send row, key `bubbleKey` (bubble 1 = the caller's key, then `<key>#bubble-N`), own
-  text + event id, so every reader matching send rows (sends list, `[automated WhatsApp]`, human takeover, echo, pings) sees each.
+  text + event id, so every reader matching send rows (sends list, `[automated WhatsApp]`, hand-typed check, echo, pings) sees each.
   Rows 2..N claimed before bubble 1 (a concurrent retry = 409 `send_in_progress`); a retry answers sent bubbles `duplicate` and
   sends the rest, unchecked. Pause before bubble 2+ = "typing..." (`setTyping`, bridged as WhatsApp composing) for 1 s + 40 ms/char
   within 2..6 s + up to 0.8 s jitter (`bubbleDelayMs`); synchronous (5 bubbles ~30 s, callers wait 600 s). Response = the single
@@ -1437,19 +1437,19 @@ newest first, a person with none absent; a send with no campaign never matches. 
   (spans `source=backfill`, replaced whole, only before the first watched span) from our sends, refusals naming the number and
   relink times, then every day recomputed. Read `GET /internal/ops/whatsapp-lines?days=` (gateway staff route). SENDS NOTHING:
   red on the Monitoring hub is the alert (owner rule). Prod 2026-10-19 → 10-22: +77776879632 logged out 3 days, nobody saw it.
-- **Human takeover = forever** (`lib/matrix/human-takeover.ts`, HUMAN-IN-THREAD-1016, owner 2026-10-16: « je ne veux plus
-  que ça lui autoréponde à ma place, mais pour un nouveau lead et un premier message de bienvenue oui »): a message the brand's
-  account TYPED (sender = the account, human words, not an edit, not one of our sends by event id or by text) in ANY of the
-  brand's threads on the channel with the person's ghost(s) = the human's conversation. Send + reach refuse
-  `human_in_conversation` (after `not_on_whatsapp`, no staff alert); the reply trigger skips `human_in_conversation` (before
-  Jev, not pass-through). No timer: chatbot handover convention (respond.io, Chatfuel, Intercom) keeps the bot silent until
-  handed back, timed pauses (Jelou 15 min-4 h) cannot cover a multi-day talk; we have no hand-back. A new lead (no thread,
-  or only our automated messages) still gets the welcome. Gmail not covered (crm sends no email; a responder mail and a
-  typed one look the same in the store). Reverses REPLY-ANY-LEAD-1015's "a hand-typed message is just one of ours" (10-15).
-  The brand's OWN linked accounts are never taken over (`isOwnLinkedAccount`, SOPHIE-COPILOT-WA-1018): a person whose
-  ghost's number (ghost phones, mirrored contact, phone ghost) is a `linked` login of the brand's channel is never
-  `human_in_conversation`, at send nor at the reply trigger (the owner typing between his own two linked numbers made
-  both "taken" and silenced the Copilot for him).
+- **A hand reply keeps the human's ACCOUNT, never the person** (`lib/matrix/human-takeover.ts`, SOPHIE-NEVER-SENT-1119, owner
+  2026-10-16 « je ne veux plus que ça lui autoréponde à ma place, mais pour un nouveau lead et un premier message de bienvenue
+  oui » + owner 2026-11-05, newer: « A hand reply by Kevin never locks a thread: it sits in the Unibox timeline and the AI
+  weighs it to write now or later »). A message an account TYPED (sender = the account, human words, not an edit, not one of
+  our sends by event id or text) to the person's ghost(s) makes THAT account theirs: automation never writes from it to them
+  (`handTypedByAccount` + `accountsLeftToAutomation`, applied in `resolveReach`: send, reach, typing), EXCEPT an account typed
+  `pro_ai` (the AI's own line, never taken). The brand's other accounts still write; none left (or `fromAccount` names a taken
+  one) = `human_in_conversation` (no staff alert). The reply trigger NEVER skips for it any more: every burst is a Lead event,
+  the answering AI reads the hand messages in the thread and decides now / later / nothing. Retired HUMAN-IN-THREAD-1016's
+  person-level "forever" (2026-11-19: the owner typed to hello@youcreatives.se on his founder line, the takeover closed the
+  assistant line too, the AI answered by email a lead who wrote on WhatsApp; 70 bursts / 7 days never reached the AI).
+  Old reports keep `skipped / human_in_conversation`. The brand's OWN linked accounts are never a person typed to
+  (`isOwnLinkedAccount`, SOPHIE-COPILOT-WA-1018: the owner typing between his own two linked numbers).
 - **Which account writes** (owner 2026-10-12: the pro number, not the personal one,
   unless a conversation already exists there): the account whose conversation with the
   ghost HAS MESSAGES (latest), else the link marked `outreach_default` (`PATCH
@@ -1591,7 +1591,7 @@ kind `reported`, reportedBy crm-service, fromStep `lead_found`), within ~1 min. 
 
 REPLY-ANY-LEAD-1015 (owner 2026-10-15, « NE CRÉE PLUS JAMAIS DES CAS PARTICULIERS »; replaces WA-RESPONDER-1012's
 campaign-thread gate): every human burst in ANY one-to-one thread (a campaign opened it, or the person wrote first; one
-a human of the brand typed in is theirs, skipped `human_in_conversation`, HUMAN-IN-THREAD-1016) is reported to campaign-service's trigger door as
+a human of the brand typed in too, SOPHIE-NEVER-SENT-1119) is reported to campaign-service's trigger door as
 `positive_reply_received` (Jev reads it positive) or `message_received` (anything else: "ok", "?", a code, a "no thanks",
 Jev down), both members of "Lead event" (ONE-AI-CONVERSES-1029, owner 2026-10-29 « Quand un lead nous écrit c'est un lead
 event non ? »): ONE Lead event per burst, the Lead event writer decides whether and how to answer. `message_received`
@@ -1631,7 +1631,7 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   human words since our last outbound = ONE burst = ONE row (`reply_trigger_reports`, UNIQUE on its first message,
   `idempotencyKey crm:matrix:reply:<event>`); ANY outbound ends it: one of our sends (only for words written before it was
   QUEUED, `createdAt` − 2 s: a word typed between the parts of a multi-part answer still waits, WA-REPLY-DROPPED-1101) OR a message typed by hand on the
-  account (it ends the burst; the person's later bursts are then skipped `human_in_conversation`: a human took it, see "Human takeover"); bridge notices / uncaptioned video or files are no answer, a photo IS one (SOPHIE-WA-HUMAN-1106); an edit is
+  account (it ends the burst; the person's next words are a new burst, reported like any: see "A hand reply keeps the human's ACCOUNT"); bridge notices / uncaptioned video or files are no answer, a photo IS one (SOPHIE-WA-HUMAN-1106); an edit is
   FOLDED into the message it rewrites (`foldEdits`, events.ts, same sender only): WhatsApp delivers a message the bridge
   could not decrypt yet (common right after a relink) as an `m.notice` placeholder then the words as an EDIT of it; read
   as "notice + edit = nothing", the Copilot line's 18:26 question of 2026-10-18 was never handed off (follow-up 3). Every

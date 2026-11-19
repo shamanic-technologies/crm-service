@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { lastHandTyped } from "../../src/lib/matrix/human-takeover.js";
+import { accountsLeftToAutomation, lastHandTyped } from "../../src/lib/matrix/human-takeover.js";
 import type { MatrixEvent } from "../../src/lib/matrix/client.js";
 
 const OWN = "@crm_own:hs";
@@ -31,5 +31,25 @@ describe("lastHandTyped (HUMAN-IN-THREAD-1016)", () => {
       msg("$f", OWN, 3, { msgtype: "m.image", body: "photo.jpg", filename: "photo.jpg" }),
     ];
     expect(lastHandTyped(events, OWN, [])).toBeNull();
+  });
+});
+
+describe("accountsLeftToAutomation (SOPHIE-NEVER-SENT-1119)", () => {
+  const hand = (connectionId: string) => [connectionId, { connectionId, roomId: "!r", eventId: "$h", at: "2026-11-19T09:04:37Z" }] as const;
+  const founder = { connectionId: "c-founder", accountType: "pro_human" };
+  const sophie = { connectionId: "c-sophie", accountType: "pro_ai" };
+  const other = { connectionId: "c-other", accountType: null };
+
+  it("nobody typed by hand: every account stays", () => {
+    expect(accountsLeftToAutomation([founder, sophie, other], new Map())).toEqual([founder, sophie, other]);
+  });
+  it("a hand message on the founder line takes only that line", () => {
+    expect(accountsLeftToAutomation([founder, sophie, other], new Map([hand("c-founder")]))).toEqual([sophie, other]);
+  });
+  it("a pro_ai line is never taken, even typed on by hand", () => {
+    expect(accountsLeftToAutomation([sophie], new Map([hand("c-sophie")]))).toEqual([sophie]);
+  });
+  it("the only account typed on by hand: nothing left", () => {
+    expect(accountsLeftToAutomation([other], new Map([hand("c-other")]))).toEqual([]);
   });
 });
