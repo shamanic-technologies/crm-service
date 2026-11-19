@@ -552,32 +552,29 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
     expect((await reach({})).body).toMatchObject({ reachable: false, code: "automation_not_allowed" });
   });
 
-  it("refuses human_in_conversation, nothing sent, when someone of the brand typed to the person by hand on any linked account (HUMAN-IN-THREAD-1016)", async () => {
-    const personal = await linkAccount(ACCOUNT, { linkedAt: new Date("2026-10-01T00:00:00Z") });
-    await linkAccount(ACCOUNT_PRO, { linkedAt: new Date("2026-10-02T00:00:00Z") });
-    await mirroredThread(personal.connectionId, "@whatsapp_lid-1:matrix.test", 3);
+  it("a hand-typed message keeps only the human's own account: the brand's other accounts (its pro_ai line) still reach the person (SOPHIE-NEVER-SENT-1119)", async () => {
+    const founder = await linkAccount(ACCOUNT, { linkedAt: new Date("2026-10-01T00:00:00Z") });
+    await mirroredThread(founder.connectionId, "@whatsapp_lid-1:matrix.test", 3);
+    const send = (body: Record<string, unknown>) =>
+      request(app()).post("/orgs/whatsapp/messages").set(headers).send({ brandId: BRAND, phone: "+33600000001", ...body });
+    const reach = (body: Record<string, unknown> = {}) =>
+      request(app()).post("/orgs/whatsapp/reach").set(headers).send({ brandId: BRAND, phone: "+33600000001", ...body });
 
     // Only our own automated messages in the thread (one mirrored back by event id, one by its text before
     // its event id was recorded): the person still gets the follow-up.
     await db.insert(whatsappSends).values({
       orgId: ORG, brandId: BRAND, idempotencyKey: "k-earlier", phone: "+33600000001", text: "Welcome to Acme!", status: "sent",
-      connectionId: personal.connectionId, roomId: `!room-${personal.connectionId}`, eventId: "$ours-1", sentAt: new Date("2026-09-02T00:00:00Z"),
+      connectionId: founder.connectionId, roomId: `!room-${founder.connectionId}`, eventId: "$ours-1", sentAt: new Date("2026-09-02T00:00:00Z"),
     });
-    await ownMessage(personal.connectionId, ACCOUNT, "$ours-1", "Welcome to Acme!");
-    await ownMessage(personal.connectionId, ACCOUNT, "$ours-2-mirrored-before-recorded", "Welcome to Acme!");
-    const automatedOnly = await request(app())
-      .post("/orgs/whatsapp/messages")
-      .set(headers)
-      .send({ brandId: BRAND, phone: "+33600000001", text: "Following up", idempotencyKey: "k-follow" });
-    expect(automatedOnly.status).toBe(200);
+    await ownMessage(founder.connectionId, ACCOUNT, "$ours-1", "Welcome to Acme!");
+    await ownMessage(founder.connectionId, ACCOUNT, "$ours-2-mirrored-before-recorded", "Welcome to Acme!");
+    expect((await send({ text: "Following up", idempotencyKey: "k-follow" })).status).toBe(200);
     expect(sends).toHaveLength(1);
 
-    // The owner typed to them by hand (on his personal account): his conversation now, on every account.
-    await ownMessage(personal.connectionId, ACCOUNT, "$hand-1", "Hey Noah, Kevin here, let's talk tomorrow");
-    const res = await request(app())
-      .post("/orgs/whatsapp/messages")
-      .set(headers)
-      .send({ brandId: BRAND, phone: "+33600000001", text: "Following up again", idempotencyKey: "k-follow-2" });
+    // The owner typed to them by hand on his account: automation never writes from it in his place.
+    // It is the brand's only account: nothing left to write from.
+    await ownMessage(founder.connectionId, ACCOUNT, "$hand-1", "Hey Noah, Kevin here, let's talk tomorrow");
+    const res = await send({ text: "Following up again", idempotencyKey: "k-follow-2" });
     expect(res.status).toBe(422);
     expect(res.body).toMatchObject({ type: "refused", code: "human_in_conversation" });
     expect(sends).toHaveLength(1);
@@ -585,18 +582,34 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
     expect(row).toMatchObject({ status: "refused", errorCode: "human_in_conversation" });
     // A brand-side refusal the brand chose: no staff alert.
     expect(telegrams).toEqual([]);
+    expect((await reach()).body).toMatchObject({ reachable: false, code: "human_in_conversation" });
 
-    // The reach check answers the same, before any model writes a message.
-    const reach = await request(app()).post("/orgs/whatsapp/reach").set(headers).send({ brandId: BRAND, phone: "+33600000001" });
-    expect(reach.body).toMatchObject({ reachable: false, code: "human_in_conversation" });
-
-    // A brand-new lead (no thread at all) still gets the welcome.
+    // A brand-new lead (no thread at all) still gets the welcome from the same account.
     const newcomer = await request(app())
       .post("/orgs/whatsapp/messages")
       .set(headers)
       .send({ brandId: BRAND, phone: "+33600000002", text: "Welcome!", idempotencyKey: "k-new" });
     expect(newcomer.status).toBe(200);
     expect(sends).toHaveLength(2);
+
+    // The brand links its AI line: the hand message never closes it. Reach + send write from it.
+    const ai = await linkAccount(ACCOUNT_PRO, { linkedAt: new Date("2026-10-02T00:00:00Z") });
+    await request(app()).patch(`/orgs/matrix/links/${ai.linkId}`).set(headers).send({ brandId: BRAND, accountType: "pro_ai" }).expect(200);
+    expect((await reach()).body).toMatchObject({ reachable: true, fromAccount: "+33622222222" });
+    const fromAi = await send({ text: "Sophie here, happy to help", idempotencyKey: "k-ai" });
+    expect(fromAi.status).toBe(200);
+    expect(fromAi.body).toMatchObject({ fromAccount: "+33622222222" });
+    expect(sends.at(-1)!.auth).toBe("Bearer tok-33622222222");
+
+    // Naming the human's own account is still refused: never written from in his place.
+    await request(app()).patch(`/orgs/matrix/links/${founder.linkId}`).set(headers).send({ brandId: BRAND, accountType: "pro_human" }).expect(200);
+    expect((await reach({ fromAccount: "+33611111111" })).body).toMatchObject({ reachable: false, code: "human_in_conversation" });
+    expect((await reach({ fromAccountType: "pro_human" })).body).toMatchObject({ reachable: false, code: "human_in_conversation" });
+
+    // A human typing on the AI line itself never takes it from the AI.
+    await mirroredThread(ai.connectionId, "@whatsapp_lid-1:matrix.test", 2);
+    await ownMessage(ai.connectionId, ACCOUNT_PRO, "$hand-on-ai", "Kevin on Sophie's phone: I will call you");
+    expect((await reach()).body).toMatchObject({ reachable: true, fromAccount: "+33622222222" });
   });
 
   it("refuses stated_not_to_brand, nothing sent, when the brand stated the person is not someone of theirs, found by their WhatsApp handle; others unchanged (DUALIST-WA-SILENCE-1104)", async () => {

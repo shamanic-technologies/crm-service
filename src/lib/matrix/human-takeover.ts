@@ -1,16 +1,23 @@
 /**
- * HUMAN TAKEOVER (HUMAN-IN-THREAD-1016, owner 2026-10-16: « je ne veux plus que
- * ça lui autoréponde à ma place, mais pour un nouveau lead et un premier message
- * de bienvenue oui »): once a human of the brand has typed a message by hand to a
- * person on a mirrored channel, that conversation is the human's. Automation
- * never writes into it again: the send route refuses `human_in_conversation`,
- * the reply trigger skips the burst `human_in_conversation`.
+ * HAND-TYPED ACCOUNTS (SOPHIE-NEVER-SENT-1119, replaces HUMAN-IN-THREAD-1016's
+ * "forever, person-level" takeover).
  *
- * Forever, not a timed pause: the chatbot-handover convention is that the bot
- * stays silent once a human took the conversation, until someone hands it back
- * (respond.io, Chatfuel, Intercom assignment); timed pauses (Jelou: 15 min to
- * 4 h) cannot cover a conversation that runs over days, which is the case the
- * owner described. We have no "hand back" control, so there is no end.
+ * Owner 2026-10-16: « je ne veux plus que ça lui autoréponde à ma place, mais pour
+ * un nouveau lead et un premier message de bienvenue oui ». Owner 2026-11-05 (newer):
+ * « A hand reply by Kevin never locks a thread: it sits in the Unibox timeline and
+ * the AI weighs it to write now or later ». Both hold together:
+ *  - automation never writes FROM a human's account once that human typed to the
+ *    person by hand on it (that would be writing « à ma place », as him);
+ *  - but a hand reply never silences the brand's OTHER accounts (its `pro_ai` line
+ *    answers the person there) and never hides the person's messages from the
+ *    answering AI: the reply trigger reports every burst, the AI reads the whole
+ *    thread (hand messages included) and decides now / later / nothing.
+ * Before (2026-11-19, youcreatives.se): the owner typed by hand on his founder line,
+ * the person-level takeover closed the assistant line too, the AI answered by email
+ * a lead who wrote on WhatsApp; 70 bursts in 7 days never reached it.
+ *
+ * A `pro_ai` account is the AI's own line by the brand's statement (ACCOUNT-TYPES-1028):
+ * a human typing on it joins the AI's conversation, it is never taken from the AI.
  *
  * Which message is HAND-TYPED: an `m.room.message` sent as the brand's own
  * linked account (with double puppeting the phone's own messages arrive as the
@@ -18,16 +25,10 @@
  * one of our automated sends (its event id, or its text when the send's event
  * id is not recorded yet: a send in flight is mirrored before it finishes).
  *
- * Person-level, not room-level: every conversation the brand's accounts of that
- * channel hold with the person's ghost(s) counts. The owner talking to a lead by
- * hand on his personal number makes that lead his on the assistant number too.
- *
- * The brand's OWN linked accounts are never a lead a human took over
- * (SOPHIE-COPILOT-WA-1018): the owner typing between his own two linked numbers
- * made each of them "taken", so the Copilot neither answered them on its line
- * nor could reply. A person whose ghost stands for a number linked on the
- * brand's channel (`matrix_ghost_phones`, the mirrored contact's phone, or a
- * phone ghost) is never in a human's conversation.
+ * The brand's OWN linked accounts are never a person a human typed to
+ * (SOPHIE-COPILOT-WA-1018): the owner typing between his own two linked numbers.
+ * A person whose ghost stands for a number linked on the brand's channel
+ * (`matrix_ghost_phones`, the mirrored contact's phone, or a phone ghost) holds none.
  */
 import { sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
@@ -62,19 +63,21 @@ export interface HandTyped {
 }
 
 /**
- * The latest hand-typed message any linked account of the brand on `channel`
- * sent to the person behind these ghosts, or null when every outbound message
- * there is one of our automated sends (or there is no conversation at all).
+ * Per linked account (connection) of the brand on `channel`: the latest message a
+ * human typed by hand on THAT account to the person behind these ghosts. An account
+ * absent from the map holds no hand-typed message to them (only our automated sends,
+ * or no conversation at all).
  */
-export async function humanTypedTo(input: {
+export async function handTypedByAccount(input: {
   orgId: string;
   brandId: string;
   channel: string;
   ghosts: string[];
-}): Promise<HandTyped | null> {
+}): Promise<Map<string, HandTyped>> {
+  const found = new Map<string, HandTyped>();
   const ghosts = [...new Set(input.ghosts.filter((g) => !!g))];
-  if (ghosts.length === 0) return null;
-  if (await isOwnLinkedAccount({ ...input, ghosts })) return null;
+  if (ghosts.length === 0) return found;
+  if (await isOwnLinkedAccount({ ...input, ghosts })) return found;
   const rooms = (await db.execute(sql`
     SELECT DISTINCT v.connection_id, v.room_id, m.matrix_user_id
     FROM conversations v
@@ -85,7 +88,6 @@ export async function humanTypedTo(input: {
       AND c.channel_handle IN (${sql.join(ghosts.map((g) => sql`${g}`), sql`, `)})
   `)) as unknown as { connection_id: string; room_id: string; matrix_user_id: string }[];
 
-  let found: HandTyped | null = null;
   for (const r of rooms) {
     const events = (await db.execute(sql`
       SELECT payload FROM matrix_raw_events
@@ -103,11 +105,24 @@ export async function humanTypedTo(input: {
       r.matrix_user_id,
       ours.map((s) => ({ eventId: s.event_id, text: s.text })),
     );
-    if (hit && (!found || Date.parse(found.at) < hit.origin_server_ts)) {
-      found = { connectionId: r.connection_id, roomId: r.room_id, eventId: hit.event_id, at: new Date(hit.origin_server_ts).toISOString() };
+    const prev = found.get(r.connection_id);
+    if (hit && (!prev || Date.parse(prev.at) < hit.origin_server_ts)) {
+      found.set(r.connection_id, { connectionId: r.connection_id, roomId: r.room_id, eventId: hit.event_id, at: new Date(hit.origin_server_ts).toISOString() });
     }
   }
   return found;
+}
+
+/**
+ * PURE: the accounts automation may still write from to this person. An account a
+ * human of the brand typed to them by hand on is theirs (never written from « à ma
+ * place »), unless it is typed `pro_ai` (the AI's own line).
+ */
+export function accountsLeftToAutomation<A extends { connectionId: string; accountType: string | null }>(
+  accounts: A[],
+  handTyped: Map<string, HandTyped>,
+): A[] {
+  return accounts.filter((a) => a.accountType === "pro_ai" || !handTyped.has(a.connectionId));
 }
 
 /**

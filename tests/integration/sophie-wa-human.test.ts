@@ -69,7 +69,9 @@ vi.mock("../../src/lib/whatsapp/phone-resolution.js", async (orig) => ({
 }));
 vi.mock("../../src/lib/matrix/human-takeover.js", async (orig) => ({
   ...(await orig<typeof import("../../src/lib/matrix/human-takeover.js")>()),
-  humanTypedTo: vi.fn(async () => (state.humanTyped ? { at: "2026-11-06T10:00:00Z" } : null)),
+  handTypedByAccount: vi.fn(
+    async () => new Map(state.humanTyped ? [[CONNECTION, { connectionId: CONNECTION, roomId: "!r", eventId: "$h", at: "2026-11-06T10:00:00Z" }]] : []),
+  ),
 }));
 vi.mock("../../src/lib/whatsapp/staff-alert.js", async (orig) => ({
   ...(await orig<typeof import("../../src/lib/whatsapp/staff-alert.js")>()),

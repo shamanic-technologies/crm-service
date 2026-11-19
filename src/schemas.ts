@@ -4177,7 +4177,7 @@ const WhatsappRefusalSchema = z.object({
     "wrong_room",
   ]).openapi({
     description:
-      "`human_in_conversation`: someone of the brand typed a message by hand to this person on WhatsApp (any linked account); the conversation is theirs and automation never writes into it. Brand-side, not the number's fault. `stated_not_to_brand`: the brand's user stated this person is not someone of the brand (a `tag_add professional_not_to_brand` correction on POST /orgs/people/corrections); nothing automated writes to them until it is undone.",
+      "`human_in_conversation`: someone of the brand typed a message by hand to this person on WhatsApp from every account this send could write from: automation never writes from a human's own account in their place (the brand's pro_ai accounts are never taken, and a hand message on one account never closes the others). Brand-side, not the number's fault. `stated_not_to_brand`: the brand's user stated this person is not someone of the brand (a `tag_add professional_not_to_brand` correction on POST /orgs/people/corrections); nothing automated writes to them until it is undone.",
   }),
   error: z.string(),
 });

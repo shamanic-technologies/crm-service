@@ -84,7 +84,6 @@ import {
 import { overlayVoiceTranscripts, transcribeVoiceNote, untranscribedVoiceNotesInBurst } from "../matrix/voice-notes.js";
 import { burstFacts, resolveOccurrenceOffer, type OfferPick } from "../offer-pick.js";
 import { readThreadForReply, type BurstMessage, type RoomSend } from "./thread.js";
-import { humanTypedTo } from "../matrix/human-takeover.js";
 import { HANDOFF_STATUS, readLineContext, type LineContext } from "./line-context.js";
 import { automationOn, isAccountType } from "../matrix/account-types.js";
 import { ourAutomatedEchoesOn } from "./own-automated.js";
@@ -197,9 +196,9 @@ export const REPLY_REASONS = {
    */
   AUTOMATION_NOT_ALLOWED: "automation_not_allowed",
   /**
-   * A human of the brand typed a message by hand to this person on the channel
-   * (any linked account, HUMAN-IN-THREAD-1016, lib/matrix/human-takeover.ts):
-   * the conversation is theirs, never answered automatically.
+   * OLD ROWS ONLY (HUMAN-IN-THREAD-1016, retired by SOPHIE-NEVER-SENT-1119 2026-11-19): a burst
+   * from a person a human of the brand had typed to by hand was dropped. Now every such burst
+   * is reported: the answering AI reads the hand messages in the thread and decides.
    */
   HUMAN_IN_CONVERSATION: "human_in_conversation",
   /**
@@ -636,16 +635,6 @@ async function detectRepliesOn(
     } else if (notToBrand) {
       status = REPLY_STATUS.SKIPPED;
       reason = REPLY_REASONS.STATED_NOT_TO_BRAND;
-    } else if (
-      await humanTypedTo({
-        orgId: conn.orgId,
-        brandId: conn.brandId,
-        channel: conn.channel,
-        ghosts: [conversation?.ghost ?? "", ...rows.map((r) => r.sender).filter((x) => x !== conn.matrixUserId)],
-      })
-    ) {
-      status = REPLY_STATUS.SKIPPED;
-      reason = REPLY_REASONS.HUMAN_IN_CONVERSATION;
     } else if (conversation && (await isAutomatedChatSender(conn.orgId, conversation.contactId))) {
       // A chat account the people build judged automated (a bot, an alert line) writes no Lead event (OWN-BOT-HOT-LEAD-1103).
       status = REPLY_STATUS.SKIPPED;
