@@ -1678,6 +1678,12 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   campaign|not_campaign, personId, conversationId, roomId, firstMessageAt, lastMessageAt, messages, line, sender, thread}`
   (latest 10, 2000 chars each). Delivery waits until `people` hold the conversation (`person_not_built` → rebuild → deliver).
   Retries 1→60 min for 24h; 400/422 final. Read: `GET /orgs/matrix/reply-triggers?brandId=`.
+  ⚠️ **The `outcome` our "reported" log line prints is the MEMBER event's** (`positive_reply_received` / `message_received`),
+  usually `skipped/no_workflow` (your-team pipes) or `no_leg`: that is NOT "nobody answers". The answer rides the
+  `lead_event` occurrence campaign-service records beside it (`idempotency_key composite:lead_event:<member event id>`,
+  its own outcome + deliveries in campaign_service). Diagnose a silent answer there (SOPHIE-SILENT-YOUCREATIVES-1119:
+  the Lead events were held `run_in_flight` 12 min by a lost `/end-run` in campaign-service, crm reported every burst
+  within seconds).
 - **Gmail** (`gmail.ts` + pure `email-thread.ts`, GMAIL-REPLY-ANY-LEAD-1015): same rules on the org's connected
   mailbox, read from OUR Gmail store (`people_message_texts` source gmail, one conversation per (scope, address)),
   right after the freshness watch re-reads it (correspondents + the mailbox's latest 25 messages by sender, so a
