@@ -5,7 +5,7 @@ import { createPlatformRun, updatePlatformRun } from "../lib/runs-client.js";
 import { copilotDestination } from "../lib/copilot/messages.js";
 import { describeRequest, describeResponse, readApiCall, storeApiCalls } from "../lib/api-calls/calls.js";
 import { ApiCallsRequestSchema } from "../schemas.js";
-import { announceApiCallStarts } from "../lib/conversation-pings.js";
+import { kickApiCallPings } from "../lib/api-calls/pings.js";
 import { brandNamesFor } from "../lib/people/timeline.js";
 
 const router = Router();
@@ -38,9 +38,9 @@ router.post("/internal/api-calls", apiKeyAuth, async (req, res) => {
     const { stored, duplicates, skippedNoEmail, newCallIds } = await storeApiCalls(parsed.data.calls, runId);
     await updatePlatformRun(runId, "completed", SERVICE_NAME);
     res.json({ stored, duplicates, skippedNoEmail });
-    // The owner's Telegram ping for each conversation this batch STARTS: after
-    // the answer, never awaited, never throws (lib/conversation-pings.ts).
-    void announceApiCallStarts(newCallIds, runId);
+    // The owner's Telegram line for each new call (TG-EVERY-CALL-1124): after the
+    // answer, never awaited, never throws (lib/api-calls/pings.ts; the loop also runs every 5 s).
+    if (newCallIds.length > 0) kickApiCallPings();
     return;
   } catch (err) {
     await updatePlatformRun(runId, "failed", SERVICE_NAME).catch((e) =>

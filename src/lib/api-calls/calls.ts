@@ -41,8 +41,9 @@ export interface ApiCallInput {
   callId: string;
   channel: ApiCallChannel;
   mcpTool?: string | null;
-  orgId: string | null;
-  userId: string;
+  orgId?: string | null;
+  /** null / absent = the call carried no account yet (an AI agent signing up through the keyless routes). */
+  userId?: string | null;
   /** null when api-service could not resolve the key's user: skipped, counted. */
   email: string | null;
   displayName?: string | null;
@@ -91,8 +92,8 @@ export async function storeApiCalls(
         callId: c.callId,
         channel: c.channel,
         mcpTool: c.mcpTool ? stripNul(c.mcpTool) : null,
-        callerOrgId: c.orgId,
-        callerUserId: c.userId,
+        callerOrgId: c.orgId ?? null,
+        callerUserId: c.userId ?? null,
         email,
         displayName: c.displayName?.trim() ? stripNul(c.displayName.trim()) : null,
         keyFingerprint: c.keyFingerprint ?? null,
@@ -161,7 +162,7 @@ export function apiCallPresences(rows: Pick<ApiCall, "id" | "email" | "displayNa
           channels,
           calls: sorted.length,
           callerOrgIds: [...new Set(sorted.map((c) => c.callerOrgId).filter((x): x is string => !!x))].sort(),
-          callerUserIds: [...new Set(sorted.map((c) => c.callerUserId))].sort(),
+          callerUserIds: [...new Set(sorted.map((c) => c.callerUserId).filter((x): x is string => !!x))].sort(),
         },
       };
     });
@@ -266,6 +267,17 @@ function capitalize(s: string): string {
 }
 
 /**
+ * The gateway's keyless routes an AI agent opens an account through (TG-EVERY-CALL-1124): their path shape reads as
+ * nonsense generically ("Listed approve"), so they are said in words.
+ */
+const AGENT_SIGNUP_ACTIONS: Record<string, string> = {
+  "POST agent-signups/start": "Agent signup: asked for a sign-in code by email",
+  "POST agent-signups/complete": "Agent signup: sent the code or checked the approval",
+  "GET agent-signups/approve": "Agent signup: opened the approve link",
+  "POST agent-signups/approve": "Agent signup: approved the account",
+};
+
+/**
  * PURE: what the client asked, in plain words. "GET /v1/emails?brandId=…" →
  * "Listed emails for brand AscendQE". Built from the method and the path's
  * shape; the brand is named when the call named one and its name is known.
@@ -289,7 +301,9 @@ export function describeRequest(
   const method = call.method.toUpperCase();
 
   let phrase: string;
-  if (segs.length === 0) phrase = `Called the API root`;
+  const known = AGENT_SIGNUP_ACTIONS[`${method} ${segs.join("/")}`];
+  if (known) phrase = known;
+  else if (segs.length === 0) phrase = `Called the API root`;
   else if (segs.length === 1 && last === "me") phrase = "Asked who they are and what they can reach";
   else if (method === "GET") {
     phrase = lastIsId ? `Read ${singular(resource)} ${last.slice(0, 8)}` : parent && segs.some(isIdSegment) ? `Read the ${resource} of ${singular(parent)}` : `Listed ${resource}`;

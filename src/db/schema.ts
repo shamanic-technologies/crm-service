@@ -2298,7 +2298,8 @@ export const apiCalls = pgTable(
     mcpTool: text("mcp_tool"),
     // Who called: the org the call acted in (null when it named none), the key's user, their email (the match key).
     callerOrgId: uuid("caller_org_id"),
-    callerUserId: uuid("caller_user_id").notNull(),
+    // null = a call that carried no account yet (an AI agent signing up through the keyless routes, TG-EVERY-CALL-1124).
+    callerUserId: uuid("caller_user_id"),
     email: text("email").notNull(),
     displayName: text("display_name"),
     // One-way fingerprint of the key (never the key).
@@ -2326,8 +2327,50 @@ export const apiCalls = pgTable(
   (table) => [
     uniqueIndex("api_calls_call_uq").on(table.callId),
     index("api_calls_scope_email_idx").on(table.orgId, table.brandId, table.email, table.calledAt),
+    index("api_calls_received_idx").on(table.receivedAt),
   ],
 );
+
+/**
+ * One row per stored API / MCP call the owner's Telegram was (or was not) told about (TG-EVERY-CALL-1124, owner
+ * 2026-11-24: one line per call, every call). The table is the outbox: `api_calls` received after the watch start
+ * with no row here are classified (staff = `skipped`), then sent within the chat's per-minute budget, one message per
+ * call or one GROUPED message for a burst (`message_group` = the Telegram message the call went out in). A failed
+ * send goes back to `pending` (backoff), never lost; past 24 h it is `failed`, logged.
+ */
+export const apiCallPings = pgTable(
+  "api_call_pings",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    callId: text("call_id").notNull(),
+    email: text("email").notNull(),
+    calledAt: timestamp("called_at", { withTimezone: true }).notNull(),
+    // 'pending' | 'sending' | 'sent' | 'skipped' | 'unconfigured' | 'failed'
+    status: text("status").notNull().default("pending"),
+    // skipped: 'staff'
+    reason: text("reason"),
+    // 'line' (its own message) | 'grouped' (listed in a burst message) | 'summary' (counted in a per-person summary)
+    mode: text("mode"),
+    messageGroup: uuid("message_group"),
+    telegramMessageId: integer("telegram_message_id"),
+    attempts: integer("attempts").notNull().default(0),
+    nextAt: timestamp("next_at", { withTimezone: true }).notNull().defaultNow(),
+    error: text("error"),
+    sentAt: timestamp("sent_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("api_call_pings_call_uq").on(table.callId),
+    index("api_call_pings_sent_idx").on(table.sentAt),
+  ],
+);
+
+/** When the per-call pings started: calls received before it are history, never pinged (set by the migration). */
+export const apiCallPingWatch = pgTable("api_call_ping_watch", {
+  id: integer("id").primaryKey(),
+  since: timestamp("since", { withTimezone: true }).notNull(),
+});
 
 /**
  * One row per conversation START the owner was told about on Telegram (owner
