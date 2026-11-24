@@ -2305,7 +2305,7 @@ skippedNoEmail }`; 503 when the staff scope is unset. Idempotent on `callId`.
   "Refused (403): …"). `ref.callId` opens the whole call
   (`GET /orgs/people/api-calls/{callId}?brandId=`), `ref.sessionId` = first call of a
   burst (same channel, gaps under 30 min).
-- No cost (platform run), no facts, not in the message search index.
+- No cost (platform run), no facts, not in the message search index. Each call = one owner Telegram line (below).
 
 ## Credit ran out / restored — the staff Unibox's account events (`src/lib/credit-events/`, CREDIT-RAN-OUT-UNIBOX-EVENT-1024)
 
@@ -2450,33 +2450,25 @@ NOT typed `pro_ai` (pro_human, personal_human, untyped: never inferred), whateve
 message recorded `own_line`, never sent. PERSO-TG-PING-1023 (10-23) read the line's NUMBER against the sales rep / members
 and missed his pro line (+33680478702, pro_human, automation on): 38 pings in 3 days.
 
-## Owner Telegram ping at each conversation START (`src/lib/conversation-pings.ts`)
+## Owner Telegram line for EVERY external API / MCP call (`src/lib/api-calls/pings.ts` + pure `ping-text.ts`)
 
-Owner 2026-10-12: a Telegram message each time someone starts a conversation with
-us through our API / MCP (the Copilot moved to the per-message ping above). Same bot and chat as the fleet's owner
-alerts (`TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_CHAT_ID`); names and the Unibox
-link come from client-service (`CLIENT_SERVICE_URL` / `_API_KEY`).
-
-- **One conversation** = one person's API / MCP calls on one channel, gaps under 30 min (same as
-  `sessionsOf`). One ping per START, never per message or call.
-- **Staff never pings:** a staff address (`isStaffEmail`, mirrored from
-  client-service / billing) or a user id EVER stored with one (copilot_messages or
-  api_calls), so a session of a person ever him stays silent under any address.
-- **Never twice:** the start is written to `conversation_pings` under
-  `pg_advisory_xact_lock` per conversation BEFORE the send; a candidate is skipped
-  when the conversation had activity in the 30 min before it OR a ping within
-  30 min either side (out-of-order and concurrent batches). At most once: a failed
-  send is marked `failed` with the error, never retried.
-- **Never slows the push:** the routes answer, then run the announce unawaited; it
-  never throws. Each lookup (org name, user name, brand names, link) fails alone:
-  its line is dropped and logged, the ping still goes.
-- **The link** opens the person's thread in the staff Unibox
-  (`/v2/orgs/<staff Clerk org>/brands/<brand>/unibox?person=<personId>`). A brand-new
-  person has no id until the next people build, so the id is minted into
-  `person_ids` exactly as the build would (the build adopts it).
-- **Logged-out visitors** have no AI chat and no API access: the only chat open to
-  them is the landing live chat (human, apps/landing `/api/chat`), which already
-  relays EVERY visitor message to the same Telegram chat. Nothing to add here.
+TG-EVERY-CALL-1124 (owner 2026-11-24, choice « B »: one line per call, every call; replaced the once-per-conversation
+START ping of 2026-10-12, `conversation_pings` kept as history, `conversation-pings.ts` now only shared helpers: staff,
+`readOrg` / `readUserName`, `mintPersonId`, thread link). External only by construction: api-service pushes ONLY
+client-key calls, MCP calls for a client's assistant and its keyless agent-signup calls.
+- **Outbox = `api_calls`**: a loop every 5 s (+ a kick after each push, never on the request path; `API_CALL_PINGS=off`
+  stops both) gives every call received after `api_call_ping_watch.since` (set by migration 0091: never history), within
+  24 h, one `api_call_pings` row: `skipped / staff` (staff address, kevin@pressbeat.io, a user id ever seen with one:
+  99 % of the calls) or `pending`. A crash after the push answered loses nothing.
+- **Budget** `API_CALL_PING_BUDGET_PER_MINUTE` (6; the owner chat also gets the fleet's other pings, Telegram ~20/min/chat),
+  counted on stored `sent_at` per Telegram message (`message_group`). Pending ≤ budget left − 1 = one message per call
+  (`API call · Jane Doe (jane@acme.com) · Acme` / `Did: tool x · Listed emails` / `Result: ✅ …|❌ Refused (403): …` /
+  `Thread: …`); more = ONE grouped message listing every call per person, or a per-person summary with counts (+ "N more
+  people, M calls") under 4000 chars. Every call ends `sent` with its message. Failed send = `pending` again with backoff
+  (Telegram `retry after` honoured), `failed` past 24 h (logged); no bot = `unconfigured`.
+- **Agent signup (no account yet)**: `userId` null / absent on `POST /internal/api-calls`, `email` = the address the agent
+  typed; stored (`caller_user_id` nullable), staff by address only, line ends `no account yet`, actions said in words
+  (`AGENT_SIGNUP_ACTIONS` in `calls.ts`). client-service still sends its own 2 signup lines (code asked, account opened).
 
 ## Brand transfer (`POST /internal/transfer-brand`, fleet contract)
 
