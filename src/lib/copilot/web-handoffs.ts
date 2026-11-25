@@ -31,7 +31,12 @@ import { CampaignRefusal, FINAL_REFUSAL_STATUSES, campaignServiceConfigured, dia
 import { COPILOT_SENDER_NAME, WEB_CHAT_CHANNEL, copilotDestination, readWebConversation } from "./messages.js";
 
 const SERVICE_NAME = "crm-service";
-/** The Lead event member a web hand-off is reported as (the same one an unjudged reply uses). */
+/**
+ * The Lead event member a web hand-off is reported as (the same one an unjudged reply uses). campaign-service records
+ * this member as `skipped / no_leg` (no campaign heads it) and runs the answer on the `lead_event` composite it records
+ * beside it (`composite:lead_event:<campaignEventId>`): `reported` here = the door accepted it; read the composite for
+ * whether a campaign ran (WEB-HANDOFF-LEAD-EVENT-1125).
+ */
 export const WEB_HANDOFF_TRIGGER = "message_received";
 export const WEB_HANDOFF_INTERVAL_MS = Number(process.env.WEB_CHAT_HANDOFF_INTERVAL_MS) || 60_000;
 const MAX_BACKOFF_MS = 60 * 60_000;

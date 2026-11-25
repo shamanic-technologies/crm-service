@@ -2272,6 +2272,12 @@ status}`; 503 when the staff scope (or its people scope) is not set up.
   channel: "web", text, personId, conversationId, visitorId, firstMessageAt, lastMessageAt, messages (the visitor's words
   since the assistant last spoke), thread (the page conversation, latest 40)}`. The Lead event campaign writes next (by
   email); their reply lands in the same person's thread like any mail. No send here, no per-channel case in the writer.
+  ⚠️ **`reported` = campaign-service's door ACCEPTED it, not that a campaign wrote.** The `message_received` row there
+  always reads `skipped / no_leg` (no campaign heads a member trigger): that is NOT the drop. The answer rides the
+  `lead_event` row keyed `composite:lead_event:<campaignEventId>` (its outcome + `trigger_event_deliveries`). Read that
+  one before calling a hand-off lost (WEB-HANDOFF-LEAD-EVENT-1125: a brief read 4/4 `no_leg` as "never reaches Lead
+  Follow-up"; the 3 composites of 11-17 ran, the 11-25 one was `person_suppressed` because the staff test used
+  kevin.lourd@gmail.com, which carries a Postmark hard bounce since 2026-07-14: test with a `+tag` address).
 - Delivery waits for the person to be built (`person_not_built` → the staff build is kicked → retried); the route kicks a
   build then a pass; loop every 60 s (`WEB_CHAT_HANDOFF_WATCH=off` stops loop + kick). The pass runs when the NEXT build
   ENDS (`afterNextScopeBuild`, build.ts), those waiting hand-offs due at once (DISTRY-WEB-CHAT-EMAIL-1117-PERSON: the staff
