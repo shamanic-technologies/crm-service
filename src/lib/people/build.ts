@@ -392,7 +392,7 @@ async function buildScopePeopleOn(
   });
 
   const [rawGmail, rawInstantly, rawMatrix, rawGhl, rawPosthog, rawStripe, rawClerk, rawCopilot, rawApi, rawBilling, rawTransactional, rawOnboarding, rawManual, rawActivity, rawMailbox, own] = await Promise.all([
-    readGmail(identity),
+    readGmail(identity, scope.id),
     readInstantly(identity),
     readMatrix(scope.orgId, scope.brandId),
     readGoHighLevel(scope.orgId, scope.brandId),

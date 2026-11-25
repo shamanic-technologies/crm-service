@@ -214,12 +214,17 @@ const CORRESPONDENTS_PAGE = 1000;
  *
  * Gmail is connected per ORG (google-service scopes the mailbox to the org, not
  * to a brand), so every brand of the org shares its mailbox's people.
+ *
+ * PLUS the people who WROTE FIRST (GMAIL-WRITES-FIRST-1125, DISTRY-START-DOOR-1125): an address the mailbox never
+ * wrote to whose mail the freshness watch stored after the scope's Gmail watch started (`gmailFirstWriters`): a
+ * stranger writing to the brand's address is a person of the brand, judged like any Gmail person (automated sender,
+ * relevance), so the reply trigger can report their first mail. Never history: only mail after the watch start.
  */
-export async function readGmail(identity: SiblingIdentity): Promise<SourceRead> {
+export async function readGmail(identity: SiblingIdentity, scopeId?: string): Promise<SourceRead> {
   const base = {
     source: "gmail" as const,
     scope: "org" as const,
-    sourceCountBasis: "google-service correspondents total (addresses the mailbox wrote to)",
+    sourceCountBasis: "google-service correspondents total (addresses the mailbox wrote to); people who wrote first are added from our store",
   };
   try {
     const presences: Presence[] = [];
@@ -260,10 +265,56 @@ export async function readGmail(identity: SiblingIdentity): Promise<SourceRead> 
       }
       if (page.correspondents.length < CORRESPONDENTS_PAGE || offset + CORRESPONDENTS_PAGE >= page.total) break;
     }
+    if (scopeId) {
+      const known = new Set(presences.map((p) => p.sourceRef));
+      for (const w of await gmailFirstWriters(scopeId)) if (!known.has(w.sourceRef)) presences.push(w);
+    }
     return { ...base, status: "ok", presences, sourceCount: total, error: null };
   } catch (err) {
     return { ...base, status: "failed", presences: [], sourceCount: null, error: (err as Error).message };
   }
+}
+
+/**
+ * The addresses whose mail our Gmail store holds for this scope, with at least one INBOUND mail dated after the
+ * scope's Gmail watch start (the freshness watch stores a first-time writer's thread: people/freshness.ts). One
+ * presence each, counted from the store. A correspondent is also here when it wrote: the caller keeps the
+ * correspondent's own presence.
+ */
+export async function gmailFirstWriters(scopeId: string): Promise<Presence[]> {
+  const rows = (await db.execute(sql`
+    SELECT t.address,
+           min(t.at) AS first_at, max(t.at) AS last_at,
+           count(*)::int AS messages,
+           count(*) FILTER (WHERE t.direction = 'inbound')::int AS inbound,
+           count(*) FILTER (WHERE t.direction = 'outbound')::int AS outbound
+    FROM people_message_texts t
+    JOIN people_scopes s ON s.id = t.scope_id
+    WHERE t.scope_id = ${scopeId} AND t.source = 'gmail' AND s.gmail_reply_watch_since IS NOT NULL
+    GROUP BY t.address, s.gmail_reply_watch_since
+    HAVING count(*) FILTER (WHERE t.direction = 'inbound' AND t.at >= s.gmail_reply_watch_since) > 0
+  `)) as unknown as { address: string; first_at: Date | string | null; last_at: Date | string | null; messages: number; inbound: number; outbound: number }[];
+  const iso = (v: Date | string | null) => (v === null ? null : new Date(v).toISOString());
+  const out: Presence[] = [];
+  for (const r of rows) {
+    const email = normalizeEmail(r.address);
+    if (!email) continue;
+    out.push({
+      source: "gmail",
+      sourceRef: email,
+      displayName: null,
+      company: null,
+      emails: [email],
+      phones: [],
+      firstActivityAt: iso(r.first_at),
+      lastActivityAt: iso(r.last_at),
+      messageCount: r.messages,
+      inboundCount: r.inbound,
+      outboundCount: r.outbound,
+      detail: { twoWay: r.inbound > 0 && r.outbound > 0, wroteFirst: true },
+    });
+  }
+  return out;
 }
 
 // ─── crm-service silver: every person on our sending mailboxes' messages ────

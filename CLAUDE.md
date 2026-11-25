@@ -1065,7 +1065,7 @@ never writes to them (no write path to any outside tool, by design).
 
 | Source | Who counts as "in conversation" | Read from |
 |--------|--------------------------------|-----------|
-| `gmail` | addresses the org's mailbox WROTE to (Gmail is per ORG) | google-service `GET /orgs/google/correspondents` |
+| `gmail` | addresses the org's mailbox WROTE to (Gmail is per ORG) + anyone who WROTE FIRST to it after the scope's Gmail watch start (GMAIL-WRITES-FIRST-1125) | google-service `GET /orgs/google/correspondents` + own store (`gmailFirstWriters`) |
 | `instantly` | every lead our cold email WROTE to (at least one real send), answered or not (owner 2026-10-09); replied/clicked read only off its `engaged` rows | instantly-service `GET /orgs/written-to-leads?brand_id=` (cursor-paged) |
 | `matrix` | every Matrix conversation of the brand | own silver |
 | `gohighlevel` | every mirrored GoHighLevel contact | own silver |
@@ -1684,6 +1684,14 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
   its own outcome + deliveries in campaign_service). Diagnose a silent answer there (SOPHIE-SILENT-YOUCREATIVES-1119:
   the Lead events were held `run_in_flight` 12 min by a lost `/end-run` in campaign-service, crm reported every burst
   within seconds).
+- **A stranger writing FIRST to the mailbox** (GMAIL-WRITES-FIRST-1125, DISTRY-START-DOOR-1125, owner 2026-11-25: one
+  Distry address, distry@distribute.you, lands through the distribute.you Gandi catch-all in the staff org's connected
+  Gmail): no correspondent, so nothing stored their mail. The freshness watch reads the mailbox's latest 25 messages each
+  minute; a sender with NO stored Gmail thread in the scope, writing after `gmail_reply_watch_since` (never history), not
+  one of our addresses, gets their thread stored at once and a people build kicked (`followUp`); the build makes them a
+  Gmail person from our store (`sources.ts gmailFirstWriters`, `detail.wroteFirst`), judged like any Gmail person
+  (automated sender, relevance, tags), and the next pass reports their burst like any. No address named in code. The
+  answer leaves from the address they wrote to (google-service thread reply: it must be a Gmail send-as of the mailbox).
 - **Gmail** (`gmail.ts` + pure `email-thread.ts`, GMAIL-REPLY-ANY-LEAD-1015): same rules on the org's connected
   mailbox, read from OUR Gmail store (`people_message_texts` source gmail, one conversation per (scope, address)),
   right after the freshness watch re-reads it (correspondents + the mailbox's latest 25 messages by sender, so a
