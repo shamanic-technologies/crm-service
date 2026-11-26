@@ -18,7 +18,10 @@
  *               walked past: the store's daily re-read already covers them.
  *  - gmail      the correspondents read (`GET /orgs/google/correspondents`),
  *               served most-recent-first: the first page says which addresses
- *               have a newer last message than the one we last saw.
+ *               have a newer last message than the one we last saw; and the
+ *               mailbox's latest messages: a stored thread whose person just
+ *               wrote, or a person who wrote FIRST (no thread stored: stored
+ *               now and a people build kicked, GMAIL-WRITES-FIRST-1125).
  *
  * A thread that moved gets `changed_at` = when we learned it, and is re-read
  * right away and once more CHANGE_CONFIRM_MS later (the sibling's own read can
@@ -33,9 +36,10 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { peopleMessageUnits, peopleScopes, type PeopleScope } from "../../db/schema.js";
 import { createRun, SUPPORT_RUNS, updateRun } from "../runs-client.js";
-import { refreshUnits, UNIT_REFRESH_MS, type Unit } from "./search.js";
+import { gmailUnit, refreshUnits, UNIT_REFRESH_MS, type Unit } from "./search.js";
+import { cachedBrandAddresses, isBrandAddress } from "./brand-addresses.js";
 import { siblingGet, type SiblingIdentity } from "./siblings.js";
-import type { BuildSummary } from "./build.js";
+import { runScopeBuild, type BuildSummary } from "./build.js";
 import { deliverDueGmailReplies, detectGmailRepliesWithRun } from "../reply-trigger/gmail.js";
 
 
@@ -143,29 +147,75 @@ async function gmailMoved(scope: PeopleScope, identity: SiblingIdentity): Promis
   return recent.filter((c) => marks.has(c.unit) && (marks.get(c.unit) ?? "") < c.mark);
 }
 
-/**
- * The stored Gmail threads whose person just SENT a mail the store does not hold yet: the
- * mailbox's latest messages, matched on their sender, read after the thread was stored.
- */
-async function gmailSendersMoved(scope: PeopleScope, identity: SiblingIdentity): Promise<{ unit: string }[]> {
+interface LatestMessage {
+  fromEmail: string | null;
+  sentAt: string | null;
+  labels?: string[];
+}
+
+/** The mailbox's latest messages (newest first); null when no mailbox is connected. */
+async function readLatestMessages(identity: SiblingIdentity): Promise<LatestMessage[] | null> {
   const r = await siblingGet("google", `/orgs/google/messages?limit=${GMAIL_LATEST_MESSAGES}`, identity);
-  if (r.status === 404) return [];
+  if (r.status === 404) return null;
   if (r.status !== 200) {
     throw new Error(`google-service messages returned ${r.status}: ${JSON.stringify(r.body).slice(0, 300)}`);
   }
+  return (r.body as { items: LatestMessage[] }).items;
+}
+
+/** PURE: per sender of a message the mailbox RECEIVED (never its own SENT mail), the newest time it wrote. */
+export function latestBySender(items: LatestMessage[]): Map<string, number> {
   const latest = new Map<string, number>();
-  for (const m of (r.body as { items: { fromEmail: string | null; sentAt: string | null }[] }).items) {
+  for (const m of items) {
+    if ((m.labels ?? []).includes("SENT")) continue;
     const from = m.fromEmail?.trim().toLowerCase();
     const at = m.sentAt ? Date.parse(m.sentAt) : NaN;
     if (!from || Number.isNaN(at)) continue;
     latest.set(from, Math.max(latest.get(from) ?? 0, at));
   }
-  if (latest.size === 0) return [];
+  return latest;
+}
+
+/**
+ * PURE (GMAIL-WRITES-FIRST-1125): the senders the store holds NO thread of, who wrote after the scope's Gmail watch
+ * started (never history) and are not the brand's own addresses. A person who writes first to the mailbox is no
+ * correspondent (the owner never wrote to them), so nothing else would ever store their mail: the reply trigger
+ * reads the store, the build makes them a person from it (people/sources.ts `gmailFirstWriters`).
+ */
+export function firstWriters(
+  latest: Map<string, number>,
+  stored: Set<string>,
+  watchSince: number | null,
+  isOwn: (address: string) => boolean,
+): { address: string; at: number }[] {
+  if (watchSince === null) return [];
+  return [...latest]
+    .filter(([address, at]) => !stored.has(address) && at >= watchSince && !isOwn(address))
+    .map(([address, at]) => ({ address, at }));
+}
+
+/**
+ * The mailbox's latest messages, read once per tick: stored Gmail threads whose person just SENT a mail the store
+ * does not hold yet (`moved`), and people who wrote FIRST (`firstWriters`, no thread stored yet).
+ */
+async function gmailSendersMoved(
+  scope: PeopleScope,
+  identity: SiblingIdentity,
+): Promise<{ moved: { unit: string }[]; firstWriters: { address: string; at: number }[] }> {
+  const items = await readLatestMessages(identity);
+  if (!items) return { moved: [], firstWriters: [] };
+  const latest = latestBySender(items);
+  if (latest.size === 0) return { moved: [], firstWriters: [] };
   const known = await db
     .select({ unit: peopleMessageUnits.unit, indexedAt: peopleMessageUnits.indexedAt })
     .from(peopleMessageUnits)
     .where(and(eq(peopleMessageUnits.scopeId, scope.id), eq(peopleMessageUnits.source, "gmail"), inArray(peopleMessageUnits.unit, [...latest.keys()])));
-  return known.filter((k) => k.indexedAt.getTime() < (latest.get(k.unit) ?? 0)).map((k) => ({ unit: k.unit }));
+  const moved = known.filter((k) => k.indexedAt.getTime() < (latest.get(k.unit) ?? 0)).map((k) => ({ unit: k.unit }));
+  const stored = new Set(known.map((k) => k.unit));
+  const watchSince = scope.gmailReplyWatchSince ? scope.gmailReplyWatchSince.getTime() : null;
+  if (firstWriters(latest, stored, watchSince, () => false).length === 0) return { moved, firstWriters: [] };
+  const own = await cachedBrandAddresses(identity);
+  return { moved, firstWriters: firstWriters(latest, stored, watchSince, (a) => isBrandAddress(a, own)) };
 }
 
 /** Record that these stored threads moved now. Threads never stored are left to the open (read on first sight). */
@@ -196,6 +246,8 @@ export interface FreshnessScopeResult {
   moved: number;
   refreshed: number;
   failed: number;
+  /** People who wrote first to the mailbox, stored this pass (GMAIL-WRITES-FIRST-1125). */
+  firstWriters?: number;
   error?: string;
 }
 
@@ -215,16 +267,18 @@ export async function watchScope(scope: PeopleScope): Promise<FreshnessScopeResu
   const gmailStatus = (scope.sourceReads as BuildSummary | null)?.sources.find((s) => s.source === "gmail")?.status;
   const gmailConnected = !!gmailStatus && gmailStatus !== "not_connected";
   const gmail: { unit: string; mark?: string }[] = gmailConnected ? await gmailMoved(scope, pollIdentity) : [];
+  let newWriters: { address: string; at: number }[] = [];
   if (gmailConnected) {
     // Additive to the correspondents read: its failure is logged, never fails the watch.
     const senders = await gmailSendersMoved(scope, pollIdentity).catch((err) => {
       console.error(`[crm-service] people freshness: Gmail latest messages unreadable scope=${scope.id}: ${(err as Error).message}`);
-      return [] as { unit: string }[];
+      return { moved: [] as { unit: string }[], firstWriters: [] as { address: string; at: number }[] };
     });
-    for (const m of senders) if (!gmail.some((g) => g.unit === m.unit)) gmail.push(m);
+    for (const m of senders.moved) if (!gmail.some((g) => g.unit === m.unit)) gmail.push(m);
+    newWriters = senders.firstWriters;
   }
   await markChanged(scope.id, "gmail", gmail);
-  result.moved = instantly.length + gmail.length;
+  result.moved = instantly.length + gmail.length + newWriters.length;
 
   const candidates = await db
     .select()
@@ -240,6 +294,8 @@ export async function watchScope(scope: PeopleScope): Promise<FreshnessScopeResu
       campaignId: c.source === "instantly" ? c.unit.split(":")[0] : null,
       activityAt: c.activityAt,
     }));
+  // A person who wrote first: their thread is stored now (read on first sight), the build makes them a person.
+  for (const w of newWriters) due.push(gmailUnit(w.address, new Date(w.at)));
   if (due.length === 0) return result;
 
   // Re-reading is the work: its own org run, marked support at creation (a product feature: no outcome, LEDGER-RESIDUAL-1025).
@@ -254,6 +310,12 @@ export async function watchScope(scope: PeopleScope): Promise<FreshnessScopeResu
     result.refreshed = r.read;
     result.failed = r.failed;
     await updateRun(run.id, "completed", { orgId: scope.orgId, userId: scope.createdByUserId });
+    if (newWriters.length > 0) {
+      result.firstWriters = newWriters.length;
+      console.log(`[crm-service] people freshness scope=${scope.id}: ${newWriters.length} first-time Gmail writer(s) stored, people build kicked`);
+      // Unawaited: the build holds the watch's own pass otherwise; the reply trigger reports them once they are people.
+      void runScopeBuild(scope, { followUp: true }).catch((err) => console.error(`[crm-service] people build after first writers failed scope=${scope.id}:`, err));
+    }
   } catch (err) {
     await updateRun(run.id, "failed", { orgId: scope.orgId, userId: scope.createdByUserId }).catch((e) =>
       console.error(`[crm-service] failed to close people freshness run ${run.id}:`, e),

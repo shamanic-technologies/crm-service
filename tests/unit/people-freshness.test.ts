@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { changePending, CHANGE_CONFIRM_MS, unitsFromFacts } from "../../src/lib/people/freshness.js";
+import { changePending, CHANGE_CONFIRM_MS, firstWriters, latestBySender, unitsFromFacts } from "../../src/lib/people/freshness.js";
 import { freshFor, freshReadDue, STORE_FORMAT, storedBeforeChange } from "../../src/lib/people/search.js";
 
 const ORG = "aaaaaaaa-2222-4222-8222-000000000001";
@@ -85,5 +85,35 @@ describe("read-through (RIGHT-MOMENT-OR-LATER-1014)", () => {
     expect(freshFor(unit(-500, { status: "failed" }), now, W)).toBe(false);
     expect(freshFor(unit(1_000, { changedAt: new Date(now) }), now, W)).toBe(false);
     expect(freshFor(undefined, now, W)).toBe(false);
+  });
+});
+
+describe("first Gmail writers (GMAIL-WRITES-FIRST-1125)", () => {
+  const since = Date.parse("2026-11-25T10:00:00.000Z");
+  const items = [
+    { fromEmail: "Stranger@Example.org", sentAt: "2026-11-25T11:00:00.000Z", labels: ["INBOX"] },
+    { fromEmail: "stranger@example.org", sentAt: "2026-11-25T11:05:00.000Z", labels: ["INBOX"] },
+    { fromEmail: "owner@brand.example", sentAt: "2026-11-25T11:06:00.000Z", labels: ["SENT"] },
+    { fromEmail: "old@example.org", sentAt: "2026-11-25T09:00:00.000Z", labels: ["INBOX"] },
+    { fromEmail: "known@example.org", sentAt: "2026-11-25T11:00:00.000Z", labels: ["INBOX"] },
+    { fromEmail: "kevin@send-distribute.example", sentAt: "2026-11-25T11:00:00.000Z", labels: ["INBOX"] },
+    { fromEmail: null, sentAt: "2026-11-25T11:00:00.000Z" },
+  ];
+  const own = (a: string) => a === "kevin@send-distribute.example";
+
+  it("latestBySender: newest mail per lowercased sender, never the mailbox's own SENT mail", () => {
+    const latest = latestBySender(items);
+    expect(latest.get("stranger@example.org")).toBe(Date.parse("2026-11-25T11:05:00.000Z"));
+    expect(latest.has("owner@brand.example")).toBe(false);
+  });
+
+  it("a sender with no stored thread, writing after the watch start, not one of ours = a first writer", () => {
+    expect(firstWriters(latestBySender(items), new Set(["known@example.org"]), since, own)).toEqual([
+      { address: "stranger@example.org", at: Date.parse("2026-11-25T11:05:00.000Z") },
+    ]);
+  });
+
+  it("no watch start yet = nobody (never history)", () => {
+    expect(firstWriters(latestBySender(items), new Set(), null, own)).toEqual([]);
   });
 });

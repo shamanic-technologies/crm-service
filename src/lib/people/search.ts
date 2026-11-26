@@ -75,7 +75,7 @@ export interface MessageIndexSummary {
   dropped: number;
 }
 
-const gmailUnit = (email: string, activityAt: Date | null): Unit => ({
+export const gmailUnit = (email: string, activityAt: Date | null): Unit => ({
   source: "gmail",
   unit: email,
   address: email,
