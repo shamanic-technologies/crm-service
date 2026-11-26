@@ -12,6 +12,7 @@
 import { resolveBrandWhatsappPhones, type PhoneResolutionResult } from "../whatsapp/phone-resolution.js";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
+import { buildScopePeopleOffThread } from "./build-worker.js";
 import { contacts, leadStandingObservations, people, peopleScopes, type PeopleScope } from "../../db/schema.js";
 import { SERVICE_NAME } from "../../middleware/auth.js";
 import { createRun, lazyChildRun, SUPPORT_RUNS, updateRun } from "../runs-client.js";
@@ -890,7 +891,8 @@ export async function runScopeBuild(
       taskName: "people.build",
     });
     runId = run.id;
-    const summary = await buildScopePeople(scope, run.id);
+    // CRM-BUILD-WORKER-1126: off the request thread, so a 44k-person build never stalls crm-service's routes.
+    const summary = await buildScopePeopleOffThread(scope, run.id);
     // POSTHOG-RUNCLOSE-1107: the build is done; closing its run is our bookkeeping and never throws.
     await closeRun(run.id, "completed", { orgId: scope.orgId, userId: scope.createdByUserId }, `people build scope ${scope.id}`);
     console.log(
