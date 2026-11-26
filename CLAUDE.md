@@ -68,7 +68,10 @@ no relation), company = evidence (its own domain / CRM website) > Jev reading th
 thread of the point merged, or its record): DEFAULT = the person's known company, `any_known` (2+ known, can't tell) =
 each, `another_company` only when THEIR words show one (our outbound naming our brand never counts) (v2,
 WA-SPLIT-RELATION-1026: "unknown when nothing names it" filed every WhatsApp chat on `:pro`, blind to the company
-row) (`contact_point_org_verdicts`, re-asked when the point or the options move) > the user's correction (`contactPoint` on tag / organization corrections; a
+row) (`contact_point_org_verdicts`, re-asked when the point or the options move; ONE-PERSON-ONE-ROW-1126: the answer
+maps to company-less ONLY when Jev says `another_company` (choice >= 0.5 or its probability >= 0.5), else to the known option
+Jev finds most probable, never to none because Jev hesitated BETWEEN the person's companies: Elias Biondo's WhatsApp, Trilo
+P 0.54 at confidence 0.39, sat on a third Unibox row with his payment; prod 2026-11-26 31 people -> 12) > the user's correction (`contactPoint` on tag / organization corrections; a
 person-level `organization_add` claims every professional point of unknown company). `people.relations` =
 `rel:<personId>:personal | :org:<companyId> | :pro`, each with ONLY its points' emails / phones / keys / tags; fact
 `relation` (snapshot, source crm) on the feed; `GET /orgs/people/timeline?relationKey=` reads only its points.

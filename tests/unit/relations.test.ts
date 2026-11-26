@@ -147,13 +147,24 @@ describe("a professional point without a company speaks for the person's known w
     expect(Object.keys(pointOrgQuestion([daybook, other]).criteria)).toEqual([DAYBOOK, OTHER, ANY_KNOWN, ANOTHER_COMPANY]);
   });
 
-  it("answers: one company, every known one, or none (another company, unsure, a legacy 'unknown')", () => {
+  it("answers: one company, every known one, or none (another company said, a legacy 'unknown')", () => {
     expect(pointOrgAnswer(DAYBOOK, 0.9, [daybook])).toEqual([{ companyId: DAYBOOK, domain: "daybookhealthcare.com", basis: "jev" }]);
     expect(pointOrgAnswer(ANY_KNOWN, 0.9, [daybook, other])!.map((c) => c.companyId)).toEqual([DAYBOOK, OTHER]);
     expect(pointOrgAnswer(ANY_KNOWN, 0.9, [daybook])).toBeNull();
     expect(pointOrgAnswer(ANOTHER_COMPANY, 0.9, [daybook])).toBeNull();
-    expect(pointOrgAnswer(DAYBOOK, 0.2, [daybook])).toBeNull();
     expect(pointOrgAnswer("unknown", 1, [daybook])).toBeNull();
+    expect(pointOrgAnswer(DAYBOOK, 0.9, [])).toBeNull();
+  });
+
+  // ONE-PERSON-ONE-ROW-1126: Jev hesitating BETWEEN the person's companies never files the point under none.
+  it("an unsure answer joins the known option Jev finds most probable; only 'another company' keeps it off", () => {
+    const ids = (a: PointCompany[] | null) => a?.map((c) => c.companyId) ?? null;
+    expect(ids(pointOrgAnswer(DAYBOOK, 0.2, [daybook]))).toEqual([DAYBOOK]);
+    expect(ids(pointOrgAnswer(OTHER, 0.39, [daybook, other], { [DAYBOOK]: 0.07, [OTHER]: 0.54, [ANY_KNOWN]: 0.13, [ANOTHER_COMPANY]: 0.26 }))).toEqual([OTHER]);
+    expect(ids(pointOrgAnswer(DAYBOOK, 0.3, [daybook, other], { [DAYBOOK]: 0.2, [OTHER]: 0.2, [ANY_KNOWN]: 0.35, [ANOTHER_COMPANY]: 0.25 }))).toEqual([DAYBOOK, OTHER]);
+    // A weak "another company" choice with no probabilities: the person's known work (the question's default).
+    expect(ids(pointOrgAnswer(ANOTHER_COMPANY, 0.3, [daybook]))).toEqual([DAYBOOK]);
+    expect(pointOrgAnswer(DAYBOOK, 0.4, [daybook], { [DAYBOOK]: 0.45, [ANOTHER_COMPANY]: 0.55 })).toBeNull();
   });
 
   it("Noah: the WhatsApp chat joins the Daybook relation, no company-less sibling left", () => {
@@ -169,6 +180,36 @@ describe("a professional point without a company speaks for the person's known w
     const rels = personRelations(PID, noahReadings, jev, []);
     expect(keysOf(rels)[`org:${OTHER}`]).toEqual(["matrix:k-wa"]);
     expect(keysOf(rels)[`org:${DAYBOOK}`]).toContain("matrix:k-wa");
+  });
+
+  // Prod 2026-11-26, Elias Biondo on distribute.you: Clerk + PostHog at contato@eliasbiondo.com, the website he typed
+  // usetrilo.com.br, a WhatsApp chat about his signup. Jev read the chat Trilo at P 0.54 (confidence 0.39): the chat
+  // sat on a third, company-less Unibox row with his payment.
+  it("Elias: own-domain email + typed website + WhatsApp chat = his two company rows, no company-less row", () => {
+    const ELIAS = "aaaaaaaa-2222-4222-8222-000000000003";
+    const TRILO = "aaaaaaaa-2222-4222-8222-000000000004";
+    const presences = [
+      presence("clerk", "k-ck", { emails: ["contato@eliasbiondo.com"], phones: ["+5511978399280"], detail: { externalId: "user_eb" } }),
+      presence("posthog", "k-ph", { emails: ["contato@eliasbiondo.com"], phones: ["+5511978399280"], detail: { externalId: "ph-eb", website: "usetrilo.com.br" } }),
+      presence("matrix", "k-wa", { phones: ["+5511978399280"], detail: { kind: "dm", conversationId: "eb-wa", contactId: "k-wa", groups: [] } }),
+    ];
+    const x: TagLookups = { ...lookups, conversations: new Map([["matrix:eb-wa", { tags: ["professional_to_brand"], scores: scores({ professional_to_brand: 0.9 }), userIds: [] }]]) };
+    const k = new Map<string, { kind: DomainKind; confidence: number }>([
+      ["eliasbiondo.com", { kind: "organization", confidence: 0.9 }],
+      ["usetrilo.com.br", { kind: "organization", confidence: 0.9 }],
+    ]);
+    const co = new Map([["eliasbiondo.com", ELIAS], ["usetrilo.com.br", TRILO]]);
+    const website = (p: { source: string; detail: Record<string, unknown> }) => (typeof p.detail.website === "string" ? p.detail.website : null);
+    const readings = readPoints(presences, x, k, co, website);
+    const known = knownCompanies(readings);
+    expect(known.map((c) => c.companyId).sort()).toEqual([ELIAS, TRILO]);
+    const wa = pointOrgAnswer(TRILO, 0.39, known, { [ELIAS]: 0.07, [TRILO]: 0.54, [ANY_KNOWN]: 0.13, [ANOTHER_COMPANY]: 0.26 });
+    const rels = personRelations(PID, readings, new Map([["matrix:k-wa", wa]]), []);
+    expect(keysOf(rels)).toEqual({
+      [`org:${ELIAS}`]: ["clerk:user_eb", "posthog:ph-eb"],
+      [`org:${TRILO}`]: ["matrix:k-wa", "posthog:ph-eb"],
+    });
+    expect(rels.find((r) => r.companyId === TRILO)!.phones).toEqual(["+5511978399280"]);
   });
 
   it("a PERSONAL WhatsApp is never asked and never joins a professional relation (Adam)", async () => {
