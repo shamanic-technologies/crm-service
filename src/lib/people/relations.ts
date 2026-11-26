@@ -151,12 +151,42 @@ export function pointOrgQuestion(known: PointCompany[]): ChoiceQuestion {
   };
 }
 
-/** PURE: the companies a stored or fresh answer gives the point (null = none: another company, or unsure). */
-export function pointOrgAnswer(choice: string, confidence: number, known: PointCompany[]): PointCompany[] | null {
-  if (confidence < ORGANIZATION_MIN_CONFIDENCE) return null;
-  if (choice === ANY_KNOWN) return known.length > 1 ? known.map((k) => ({ companyId: k.companyId, domain: k.domain, basis: "jev" })) : null;
-  const k = known.find((x) => x.companyId === choice);
-  return k ? [{ companyId: k.companyId, domain: k.domain, basis: "jev" }] : null;
+/**
+ * PURE: the companies a stored or fresh answer gives the point (null = none: the point speaks for another company).
+ *
+ * ONE-PERSON-ONE-ROW-1126: the point is ALREADY judged professional and the person already holds known companies,
+ * so the only answer that keeps it off them is Jev saying it speaks for ANOTHER company (its choice, confident, or
+ * that option's own probability >= 0.5). Otherwise it joins the known option Jev finds most probable (`any_known` =
+ * each). Before, a choice under 0.5 confidence filed the point company-less: Elias Biondo's WhatsApp (Trilo at
+ * P 0.54, known work 0.74 in all, confidence 0.39) became a third Unibox row holding his chat and his payment,
+ * beside the Trilo row his signup was on. Jev hesitating BETWEEN his companies is no reason to put him in none.
+ */
+export function pointOrgAnswer(
+  choice: string,
+  confidence: number,
+  known: PointCompany[],
+  probabilities: Record<string, number> = {},
+): PointCompany[] | null {
+  if (known.length === 0) return null;
+  if (choice === ANOTHER_COMPANY && confidence >= ORGANIZATION_MIN_CONFIDENCE) return null;
+  const pOther = probabilities[ANOTHER_COMPANY];
+  if (typeof pOther === "number" && pOther >= ORGANIZATION_MIN_CONFIDENCE) return null;
+  const options = known.length > 1 ? [...known.map((k) => k.companyId), ANY_KNOWN] : known.map((k) => k.companyId);
+  // Jev's most probable known option; with no probability served, its own choice when it is a known option.
+  let pick: string | null = null;
+  let best = -1;
+  for (const o of options) {
+    const p = probabilities[o];
+    if (typeof p === "number" && p > best) {
+      best = p;
+      pick = o;
+    }
+  }
+  if (pick === null) pick = options.includes(choice) ? choice : choice === ANOTHER_COMPANY ? (known.length > 1 ? ANY_KNOWN : known[0].companyId) : null;
+  if (pick === null) return null;
+  if (pick === ANY_KNOWN) return known.map((k) => ({ companyId: k.companyId, domain: k.domain, basis: "jev" }));
+  const k = known.find((x) => x.companyId === pick)!;
+  return [{ companyId: k.companyId, domain: k.domain, basis: "jev" }];
 }
 
 export interface PointToJudge {
@@ -263,7 +293,7 @@ export async function resolvePointCompanies(
     const s = stored.get(t.reading.id);
     const through = contents.get(t.reading.id)!.judgedThrough;
     if (s && s.judgedThrough === through && s.optionsHash === optionsHash(t.known) && s.criteriaVersion === POINT_ORG_CRITERIA_VERSION) {
-      answers.set(t.reading.id, pointOrgAnswer(s.choice, s.confidence, t.known));
+      answers.set(t.reading.id, pointOrgAnswer(s.choice, s.confidence, t.known, (s.probabilities ?? {}) as Record<string, number>));
       summary.reused++;
       return false;
     }
@@ -300,7 +330,7 @@ export async function resolvePointCompanies(
         .insert(contactPointOrgVerdicts)
         .values(values)
         .onConflictDoUpdate({ target: [contactPointOrgVerdicts.orgId, contactPointOrgVerdicts.brandId, contactPointOrgVerdicts.contactPoint], set });
-      answers.set(t.reading.id, pointOrgAnswer(a.choice, a.confidence, t.known));
+      answers.set(t.reading.id, pointOrgAnswer(a.choice, a.confidence, t.known, a.probabilities ?? {}));
       summary.judged++;
     } catch (err) {
       if (errors.length < 3) errors.push((err as Error).message.slice(0, 300));
