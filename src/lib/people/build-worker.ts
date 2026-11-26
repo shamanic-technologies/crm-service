@@ -22,11 +22,18 @@ import { Worker, isMainThread, parentPort } from "node:worker_threads";
 import { buildScopePeople, type BuildSummary } from "./build.js";
 import type { PeopleScope } from "../../db/schema.js";
 
-type Request = { id: number; scope: PeopleScope; runId: string };
+type Request = { kind: typeof KIND; id: number; scope: PeopleScope; runId: string };
 type Reply = { id: number; ok: true; summary: BuildSummary } | { id: number; ok: false; error: string; stack?: string };
 
 /** True when this module was loaded from compiled JS (the worker re-loads this very file). */
 const COMPILED = import.meta.url.endsWith(".js");
+
+/**
+ * Every worker thread loads the whole module graph, so the fact-emission worker's message handler is ALSO registered
+ * in this worker (and this one in that worker): each handler answers only its own kind, or the other one's reply
+ * (a fact summary) settles a build (prod 2026-11-26 17:00: every build failed reading `senderVerdicts`).
+ */
+const KIND = "people-build" as const;
 
 export function buildRunsInWorker(): boolean {
   return COMPILED && process.env.PEOPLE_BUILD_WORKER !== "off";
@@ -37,6 +44,7 @@ export function buildRunsInWorker(): boolean {
 if (!isMainThread && parentPort) {
   const port = parentPort;
   port.on("message", (req: Request) => {
+    if (req?.kind !== KIND) return;
     buildScopePeople(req.scope, req.runId).then(
       (summary) => port.postMessage({ id: req.id, ok: true, summary } satisfies Reply),
       (err: Error) => port.postMessage({ id: req.id, ok: false, error: err?.message ?? String(err), stack: err?.stack } satisfies Reply),
@@ -97,6 +105,6 @@ export function buildScopePeopleOffThread(scope: PeopleScope, runId: string): Pr
   const id = ++nextId;
   return new Promise<BuildSummary>((resolve, reject) => {
     pending.set(id, { resolve, reject });
-    w.postMessage({ id, scope, runId } satisfies Request);
+    w.postMessage({ kind: KIND, id, scope, runId } satisfies Request);
   });
 }
