@@ -391,7 +391,12 @@ export async function indexScopeMessages(
   }
   const wanted = [...wantedMap.values()];
 
-  const stale = existing.filter((e) => !wantedMap.has(`${e.source}|${e.unit}`));
+  // A Gmail unit read and found holding NO message between the address and us (a mail that only named the mailbox,
+  // stored by the freshness watch as a possible first writer) is kept as the record that it was looked at: dropping
+  // it made the watch store it again and kick a build every minute (GMAIL-WRITES-FIRST-1125).
+  const stale = existing.filter(
+    (e) => !wantedMap.has(`${e.source}|${e.unit}`) && !(e.source === "gmail" && e.status === "ok" && e.messages === 0),
+  );
   for (const e of stale) {
     await db.transaction(async (tx) => {
       await tx
