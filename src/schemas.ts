@@ -1,3 +1,4 @@
+import { TRANSLATION_LANGUAGES } from "./lib/people/translation.js";
 import { CONNECTION_TAGS } from "./lib/people/connection-tags.js";
 import { z } from "zod";
 import { extendZodWithOpenApi, OpenAPIRegistry } from "@asteasolutions/zod-to-openapi";
@@ -2909,6 +2910,28 @@ const PeopleListResponseSchema = registry.register(
     .openapi("PeopleListResponse"),
 );
 
+const ItemTranslationSchema = z
+  .object({
+    language: z.enum(TRANSLATION_LANGUAGES),
+    status: z.enum(["translated", "already_english", "failed"]).openapi({
+      description:
+        "translated = subject / text are the English version; already_english = the original is English (subject / text = the original, unchanged); " +
+        "failed = the model could not be asked or answered nonsense (`error`): show the original.",
+    }),
+    sourceLanguage: z.string().nullable().openapi({ description: "ISO 639-1 code of the original's language (`de`, `fr`...). Null when failed." }),
+    basis: z.enum(["detector", "model"]).nullable().openapi({
+      description: "detector = our local language detector read every paragraph as English (no model call, free); model = the model's answer, stored once per (org, words). Null when failed.",
+    }),
+    subject: z.string().nullable().openapi({ description: "What to show as the subject in English (null when the message has none, or failed)." }),
+    text: z.string().nullable().openapi({ description: "What to show as the text in English, line breaks kept (null when the message has no text, or failed)." }),
+    error: z.string().optional(),
+  })
+  .openapi("PersonTimelineItemTranslation", {
+    description:
+      "UNIBOX-TRANSLATE-1126: only when the read asked `translate=en`, on every `kind: message` item carrying a subject or text. The original `subject` / `text` " +
+      "of the item are never changed: the English rides here.",
+  });
+
 const TimelineItemSchema = z
   .object({
     at: z.string().nullable().openapi({ description: "When it was sent / happened. Null = the source gave no date; undated items sort last." }),
@@ -2984,6 +3007,7 @@ const TimelineItemSchema = z
         description:
           "WHO sent an outbound message (ONBOARDING-FICHE-1027), on every served item: automation = one of our machines (a transactional email such as the welcome email, a cold-email sequence step, an automated WhatsApp send, the Copilot, the API); person = a human of the brand typed it (a WhatsApp / Telegram message from the brand's account that is none of our sends); null = inbound, an event, or the source does not say (a Gmail send). A Gmail copy of a transactional email we sent is not served (the transactional item is that email).",
       }),
+    translation: ItemTranslationSchema.optional(),
   })
   .openapi("PersonTimelineItem");
 
@@ -3057,6 +3081,19 @@ const PersonTimelineResponseSchema = registry.register(
         })
         .optional()
         .openapi({ description: "Paged read only (`limit` or `before` given)." }),
+      translation: z
+        .object({
+          language: z.enum(TRANSLATION_LANGUAGES),
+          messages: z.number().int().openapi({ description: "Served message items carrying words." }),
+          translated: z.number().int(),
+          alreadyEnglish: z.number().int(),
+          failed: z.number().int(),
+          fromStore: z.number().int().openapi({ description: "Served from an earlier translation (no model call)." }),
+          modelCalls: z.number().int().openapi({ description: "Messages sent to the model on THIS read (billed to the reading org)." }),
+          model: z.string().nullable().openapi({ description: "The model that answered this read's calls (null when none was asked)." }),
+        })
+        .optional()
+        .openapi({ description: "UNIBOX-TRANSLATE-1126: only when `translate` was asked. Absent otherwise (the response is unchanged)." }),
       items: z.array(TimelineItemSchema).openapi({ description: "Oldest first. On a paged read: the `limit` latest items older than `before`, still oldest first." }),
     })
     .openapi("PersonTimelineResponse"),
@@ -3142,6 +3179,12 @@ registry.registerPath({
         description:
           "TIMELINE-EXCLUDE-SOURCES-1117: comma list of people sources (e.g. `api,copilot`) never read nor served: absent from `sources[]` and `items`. " +
           "A writer reading a thread for its words skips `api` (one staff person carried 34k API / MCP call logs, 26 MB). Unknown source = 400. Absent = every source, unchanged.",
+      }),
+      translate: z.enum(TRANSLATION_LANGUAGES).optional().openapi({
+        description:
+          "UNIBOX-TRANSLATE-1126: `en` = every served message item (the page, on a paged read) also carries `translation` (its English version) and the response a `translation` summary. " +
+          "A message our local detector reads as English is never sent to the model; any other is translated ONCE per (org, words) through chat-service, billed to the reading org, " +
+          "and served from the store on every later read. Absent = the response is unchanged.",
       }),
     }),
   },

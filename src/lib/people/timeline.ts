@@ -49,6 +49,7 @@ import { connectionOwnSenders } from "../matrix/own-senders.js";
 import { cachedBrandAddresses, exchangedWithUs, type BrandAddresses } from "./brand-addresses.js";
 import { isOwnSender, messageWords, photoOf, quoteOf, type PhotoRef, type QuotedMessage } from "../matrix/events.js";
 import type { MatrixEvent } from "../matrix/client.js";
+import type { ItemTranslation } from "./translation.js";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { db } from "../../db/index.js";
 import { describeKeyEvent } from "../posthog/records.js";
@@ -166,6 +167,11 @@ export interface TimelineItem {
    * `📷 Photo: `). Its bytes: `GET /orgs/matrix/media?brandId=&eventId=`.
    */
   photo?: PhotoRef;
+  /**
+   * UNIBOX-TRANSLATE-1126: only when the read asked `translate=en`, on message items carrying words: the English
+   * version beside the untouched original (`people/translation.ts`).
+   */
+  translation?: ItemTranslation;
 }
 
 /** google-service's `bodyCleanStatus`, verbatim. */

@@ -130,8 +130,8 @@ key, so no costs-service catalog row is needed.
 **A CLASSIFICATION goes to Jev, never to a completion model.** chat-service
 `POST /orgs/judgments` (TypeSafe Jev) answers a typed `choice` question with the
 model's own CONFIDENCE, bills input tokens only ($0.21/M org price, output free —
-haiku was $5/$25) and answered 8 stage questions in 1.1s. **Do not use
-`anthropic/haiku` for anything** (owner, 2026-09-24: "very bad and expensive").
+haiku was $5/$25) and answered 8 stage questions in 1.1s. Haiku 4.5 is never used
+(owner 2026-09-24 "very bad and expensive"; the `haiku` alias is Haiku 5.5 since 2026-10-09).
 A completion (`/complete`) is only for work that WRITES text.
 
 There are exactly THREE such calls, all once-per-artifact, never per row:
@@ -151,6 +151,8 @@ There are exactly THREE such calls, all once-per-artifact, never per row:
    (Meet record, matched lead), recorded once (see "Google Calendar meetings");
 7. client satisfaction, one Jev `choice` per message a PAYING client wrote the brand (<= 20 per call, one person per
    call), recorded once per (message, text) (see "Client Satisfied" under Outcomes);
+8. Unibox translation, one `/complete` per message of an opened thread asked `translate=en`, stored once (see "Unibox
+   thread in English");
 
 **Outcomes produced (COST-ACCOUNTING-1023-P1, `lib/reply-trigger/outcome.ts`; doctrine: agent-config skill
 `cost-accounting`):** a reply burst Jev judged POSITIVE (WhatsApp / Matrix, the org's Gmail) is `conversation`
@@ -222,6 +224,27 @@ is an env var holding `"<provider>/<model>"`, so pointing a task at a cheaper
 provider landing in chat-service later is a change on the box with ZERO code
 change here. `CRM_LEAD_READING_CHAT_CONFIG` is the Matrix one. Unset or malformed
 → throws; it never falls back to some default model.
+
+## Unibox thread in English (`src/lib/people/translation.ts`, UNIBOX-TRANSLATE-1126)
+
+Owner 2026-11-26: the Unibox shows each message of an OPENED thread in English (toggle, on by default), the original one
+click away, « payé sur le compte de l'org en question ». `GET /orgs/people/timeline?translate=en` (gateway
+`/v1/orgs/people/timeline`, query forwarded verbatim): every served `kind: message` item with words gets `translation
+{language, status translated|already_english|failed, sourceLanguage, basis detector|model, subject, text, error?}` and the
+response a `translation` summary (`messages, translated, alreadyEnglish, failed, fromStore, modelCalls, model`). Absent
+param = byte-identical response. Only the served items (the page on a paged read); never the people list, never a sweep.
+- A message the local detector (`tinyld`, `readsAsEnglish`) reads as English in EVERY readable paragraph (quote markers
+  stripped: an English reply quoting German goes to the model) is never sent. Anything else (incl. "ok") is.
+- ONE `/complete` per message, 8 in parallel (one call for a whole thread took 30 s), JSON answer, stored in
+  `message_translations` UNIQUE (org, sha256(subject \0 text), language): a later read makes no call. Failures are NOT
+  stored (`failed` + error on the item, retried next read). The original item fields are never changed.
+- Billed to the READER's org: a `people.translate` child run (support `product_feature`) under the request's run, org +
+  user of the request; chat-service declares the cost.
+- Model = `CRM_TRANSLATION_CHAT_CONFIG` (box: `zai/glm-flash` = GLM-5.3-Flash, $0.15 in / $0.50 out per 1M). Owner
+  « le moins cher possible qui peut le faire »: replayed on 6 real Unibox mails (4 German Living Vital, 1 French, 1 English)
+  against Claude Haiku 5.5, DeepSeek V4.1 Flash, Gemini 3.5 Flash-Lite: all four translated correctly; measured cost for
+  the 6: GLM $0.0013, DeepSeek $0.0015-0.0030 (off-peak / peak), Haiku 5.5 $0.0035 (its thinking tokens bill as
+  output), Flash-Lite $0.0060. Open-weight OpenRouter models were removed fleet-wide by the owner 2026-11-25 (too bad).
 
 ## Data layering (bronze / silver / gold)
 
@@ -2645,6 +2668,7 @@ once CI is green, then tag the next version by hand at the merge commit
 `HUMAN_SERVICE_URL`, `HUMAN_SERVICE_API_KEY` (same-human identity; unset = `humanIdentity.status=not_configured`, merges stay local),
 `COPILOT_UNIBOX_ORG_ID`, `COPILOT_UNIBOX_BRAND_ID` (the staff Unibox scope Copilot turns are filed under; unset = 503),
 `TRANSACTIONAL_EMAIL_SERVICE_URL`, `TRANSACTIONAL_EMAIL_SERVICE_API_KEY` (the sent-emails feed; unset = the watch logs a failure each pass),
+`CRM_TRANSLATION_CHAT_CONFIG` (Unibox translation model, `zai/glm-flash`; unset = every translation `failed`),
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_CHAT_ID`, `CLIENT_SERVICE_URL`, `CLIENT_SERVICE_API_KEY` (the owner's conversation pings; unset = logged, nothing sent),
 `CAMPAIGN_SERVICE_URL`, `CAMPAIGN_SERVICE_API_KEY` (the form-trigger reports; unset = detected, not reported),
 `BILLING_SERVICE_URL`, `BILLING_SERVICE_API_KEY` (the credit events feed; unset = not mirrored, logged at boot),

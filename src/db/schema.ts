@@ -3460,3 +3460,30 @@ export const mailboxMessagePeople = pgTable(
     index("mailbox_message_people_thread_idx").on(table.threadKey),
   ],
 );
+
+/**
+ * UNIBOX-TRANSLATE-1126: the English version of a message's words, translated ONCE and served on every later read
+ * (`lib/people/translation.ts`). Keyed on the org + a hash of the ORIGINAL subject and text: the same words opened
+ * twice (another relation, a re-stored message) are never sent to the model again. The original is never touched:
+ * it stays where it lives (message store, Matrix bronze...). Only model answers are stored (a message our local
+ * detector reads as English is never sent and needs no row). `run_id` = the `people.translate` run the spend rides.
+ */
+export const messageTranslations = pgTable(
+  "message_translations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull(),
+    contentHash: text("content_hash").notNull(),
+    targetLanguage: text("target_language").notNull(),
+    // ISO 639-1 code of the language the model read the message in.
+    sourceLanguage: text("source_language").notNull(),
+    // The model read the message as already in the target language (served unchanged).
+    alreadyInTarget: boolean("already_in_target").notNull(),
+    subject: text("subject"),
+    text: text("text"),
+    model: text("model").notNull(),
+    runId: uuid("run_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("message_translations_key_uq").on(table.orgId, table.contentHash, table.targetLanguage)],
+);

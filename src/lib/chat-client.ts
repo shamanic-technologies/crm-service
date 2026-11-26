@@ -1,8 +1,8 @@
 /**
  * HTTP client for chat-service LLM completion (POST /complete).
  *
- * crm-service uses it for ONE thing: reading a Matrix thread into a lead, which
- * writes free text (a next step, a summary). Every CLASSIFICATION (column typing,
+ * crm-service uses it for work that WRITES text: reading a Matrix thread into a lead (a next step, a summary) and
+ * translating a Unibox thread's messages (UNIBOX-TRANSLATE-1126, `people/translation.ts`). Every CLASSIFICATION (column typing,
  * stage meanings) goes through the judgments client instead — cheaper, and it
  * reports its own confidence.
  *
@@ -11,7 +11,7 @@
  * NO LLM SDK and declares NO cost of its own.
  */
 
-export type ChatProvider = "google" | "anthropic";
+export type ChatProvider = "google" | "anthropic" | "zai" | "deepseek";
 export type ChatModel =
   | "flash"
   | "flash-lite"
@@ -19,7 +19,9 @@ export type ChatModel =
   | "pro"
   | "sonnet"
   | "haiku"
-  | "opus";
+  | "opus"
+  | "glm-flash"
+  | "deepseek-flash";
 
 export interface ChatCompleteParams {
   message: string;
@@ -31,6 +33,8 @@ export interface ChatCompleteParams {
   temperature?: number;
   maxTokens?: number;
   disableThinking?: boolean;
+  /** Round-trip ceiling for THIS call (default CHAT_SERVICE_TIMEOUT_MS / 25 s). */
+  timeoutMs?: number;
 }
 
 export interface ChatCompleteResult {
@@ -93,8 +97,9 @@ export async function chatComplete(
     ...(params.disableThinking !== undefined && { disableThinking: params.disableThinking }),
   };
 
+  const timeoutMs = params.timeoutMs ?? COMPLETE_TIMEOUT_MS;
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), COMPLETE_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${baseUrl()}/complete`, {
       method: "POST",
@@ -112,7 +117,7 @@ export async function chatComplete(
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
       throw new Error(
-        `[crm-service][chat-client] POST /complete aborted after ${COMPLETE_TIMEOUT_MS}ms (chat-service unresponsive)`,
+        `[crm-service][chat-client] POST /complete aborted after ${timeoutMs}ms (chat-service unresponsive)`,
       );
     }
     throw err;
