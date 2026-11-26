@@ -1,3 +1,4 @@
+import { TRANSLATION_LANGUAGES, translateItems, type TranslationLanguage, type TranslationSummary } from "../lib/people/translation.js";
 import { CONNECTION_TAGS, type PersonConnectionTag } from "../lib/people/connection-tags.js";
 import { CORRECTION_KINDS, correctionView, listCorrections, stateCorrection, undoCorrection } from "../lib/people/corrections.js";
 import { DOMAIN_KINDS } from "../lib/people/organizations.js";
@@ -473,6 +474,12 @@ function settlementOf(scope: PeopleScope, person: Person, items: TimelineItem[])
   return factFeedSettlement(items, person.emails as string[], scope.factsStatedThrough ?? null);
 }
 
+/** UNIBOX-TRANSLATE-1126: asked = translate the served items on the READER's org + run (the org pays); else nothing. */
+async function translationOf(req: AuthenticatedRequest, brandId: string, items: TimelineItem[], language: TranslationLanguage | undefined): Promise<TranslationSummary | null> {
+  if (!language) return null;
+  return translateItems(items, language, { orgId: req.orgId!, userId: req.userId!, brandId, parentRunId: req.runId! });
+}
+
 const timelineQuerySchema = z
   .object({
     brandId: brandIdSchema,
@@ -497,6 +504,8 @@ const timelineQuerySchema = z
         }
         return sources;
       }),
+    // UNIBOX-TRANSLATE-1126: the English version of each served message, beside the original (opt-in).
+    translate: z.enum(TRANSLATION_LANGUAGES).optional(),
   })
   .refine((q) => [q.personKey, q.personId, q.relationKey].filter((x) => x !== undefined).length === 1, {
     message: "exactly one of personId (uuid), personKey or relationKey is required",
@@ -576,6 +585,7 @@ router.get(
         const page = pageOf(timeline.items, limit, before);
         // Only the page's items get their heavy part (message text, API answer summary).
         await Promise.all([completeItems(page.items), attachFactIds(req.orgId!, brandId, person.emails as string[], page.items)]);
+        const translation = await translationOf(req, brandId, page.items, parsed.data.translate);
         const factFeed = settlementOf(scope, person, page.items);
         return res.json({
           brandId,
@@ -587,10 +597,12 @@ router.get(
           itemCount: page.items.length,
           totalItems: page.totalItems,
           page: { limit, before: parsed.data.before ?? null, hasOlder: page.hasOlder, olderCursor: page.olderCursor },
+          ...(translation ? { translation } : {}),
           items: page.items,
         });
       }
       await attachFactIds(req.orgId!, brandId, person.emails as string[], timeline.items);
+      const translation = await translationOf(req, brandId, timeline.items, parsed.data.translate);
       const factFeed = settlementOf(scope, person, timeline.items);
       res.json({
         brandId,
@@ -600,6 +612,7 @@ router.get(
         factFeed,
         sources: timeline.sources,
         itemCount: timeline.items.length,
+        ...(translation ? { translation } : {}),
         items: timeline.items,
       });
     } catch (err) {

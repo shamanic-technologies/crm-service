@@ -16,7 +16,7 @@ export interface ChatConfig {
   model: ChatModel;
 }
 
-const PROVIDERS: readonly ChatProvider[] = ["google", "anthropic"];
+const PROVIDERS: readonly ChatProvider[] = ["google", "anthropic", "zai", "deepseek"];
 const MODELS: readonly ChatModel[] = [
   "flash",
   "flash-lite",
@@ -25,6 +25,8 @@ const MODELS: readonly ChatModel[] = [
   "sonnet",
   "haiku",
   "opus",
+  "glm-flash",
+  "deepseek-flash",
 ];
 
 /** Parse a `"<provider>/<model>"` config value. Throws on anything else. */
@@ -58,3 +60,15 @@ export function leadReadingChatConfig(): ChatConfig {
   );
 }
 
+
+/**
+ * UNIBOX-TRANSLATE-1126: the config that translates a Unibox thread's messages into English (`people/translation.ts`).
+ * Owner 2026-11-26: « le moins cher possible qui peut le faire ». Box value `zai/glm-flash` (GLM-5.3-Flash, $0.15 in /
+ * $0.50 out per 1M), picked on real German / French Unibox messages against Claude Haiku 5.5, DeepSeek V4.1 Flash and
+ * Gemini 3.5 Flash-Lite (all four translated correctly; GLM was the cheapest MEASURED).
+ */
+export const TRANSLATION_CHAT_CONFIG_ENV = "CRM_TRANSLATION_CHAT_CONFIG";
+
+export function translationChatConfig(): ChatConfig {
+  return parseChatConfig(TRANSLATION_CHAT_CONFIG_ENV, process.env[TRANSLATION_CHAT_CONFIG_ENV]);
+}

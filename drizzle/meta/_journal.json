@@ -645,6 +645,13 @@
       "when": 1794472800000,
       "tag": "0092_whatsapp_send_caller_run",
       "breakpoints": true
+    },
+    {
+      "idx": 93,
+      "version": "7",
+      "when": 1794572800000,
+      "tag": "0093_message_translations",
+      "breakpoints": true
     }
   ]
 }

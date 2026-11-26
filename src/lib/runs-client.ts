@@ -251,6 +251,8 @@ export const SUPPORT_RUNS = {
    */
   identityResolution: { serviceName: "crm-service", taskName: "people.identity", support: { kind: "product_feature", reason: "People registry: which organization a mail domain or a contact point belongs to, and whether two people sharing a name are one human" } },
   /** A person's thread opened in the Unibox with no caller run (the dashboard): a product feature. Read under a caller's run, it rides that run. */
+  /** UNIBOX-TRANSLATE-1126: translating the messages of a thread opened in the Unibox into English, on the reader's org. */
+  translation: { serviceName: "crm-service", taskName: "people.translate", support: { kind: "product_feature", reason: "Unibox thread read in English: translating its messages" } },
   timelineRead: { serviceName: "crm-service", taskName: "people.timeline", support: { kind: "product_feature", reason: "Unibox thread read: a person's timeline opened with no caller run" } },
 } as const satisfies Record<string, { serviceName: string; taskName: string; support: NonNullable<CreateRunParams["support"]> }>;
 
