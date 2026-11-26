@@ -26,6 +26,7 @@ import type { PersonRelevance } from "../lib/people/relevance.js";
 import { decodeCursor, findPerson, pageOf, parseExcludeSources, readTimeline, type TimelineItem } from "../lib/people/timeline.js";
 import { attachFactIds, factFeedSettlement, type FactFeedSettlement } from "../lib/people/fact-ids.js";
 import { completeItems } from "../lib/people/item-fill.js";
+import { threadAbsence, type ThreadAbsence } from "../lib/people/thread-absence.js";
 import { readFacts } from "../lib/people/facts.js";
 import { findPersonById } from "../lib/people/person-id.js";
 import { listTwinVerdicts, rejectTwinVerdict, twinVerdictView } from "../lib/people/name-twins.js";
@@ -537,14 +538,34 @@ router.get(
       return res.status(400).json({ type: "validation", error: "invalid query: before must be an olderCursor this route served" });
     }
     try {
+      // Identity keys are stored lowercased for email: `email:Jane@Acme.com` names the same person.
+      const lookupKey = personKey?.startsWith("email:") ? `email:${personKey.slice(6).trim().toLowerCase()}` : personKey;
       const person = personId
         ? await findPersonById(req.orgId!, brandId, personId)
-        : await findPerson(req.orgId!, brandId, personKey!);
+        : await findPerson(req.orgId!, brandId, lookupKey!);
       if (!person) {
+        // THREAD-OF-EMAILED-PERSON-1126: say whether the brand truly has no thread with this key (`none`:
+        // write a first message) or the index has not caught up yet (`not_known_yet`: read again later).
+        let thread: ThreadAbsence | undefined;
+        if (!personId) {
+          const { scope, created } = await ensureScope(req.orgId!, brandId, req.userId!);
+          thread = await threadAbsence(scope, lookupKey!, { orgId: req.orgId!, userId: req.userId!, runId: req.runId!, brandId });
+          const recordFound = thread.checks.some((c) => c.answer === "found");
+          if (created || recordFound) {
+            setImmediate(() => {
+              runScopeBuild(scope, { followUp: true }).catch((e) => console.error("[crm-service] people build crashed:", e));
+            });
+          }
+        }
         return res.status(404).json({
           type: "not_found",
           reason: "person_not_found",
-          error: `no person holds ${personId ? `id ${personId}` : personKey} for brand ${brandId} (read GET /orgs/people first; the index is built in the background)`,
+          error: thread
+            ? thread.status === "none"
+              ? `no person holds ${lookupKey} for brand ${brandId}: the brand has no thread with them (index built ${thread.indexBuiltAt}, nothing sent to them on record)`
+              : `no person holds ${lookupKey} for brand ${brandId} YET: the brand has a record with them the index has not joined (or a check could not be read); read again in ${thread.retryAfterSeconds}s, do not write a first message`
+            : `no person holds id ${personId} for brand ${brandId} (read GET /orgs/people first; the index is built in the background)`,
+          ...(thread ? { thread } : {}),
         });
       }
       // A relation's thread = the person's thread read over ONLY that relation's contact points.

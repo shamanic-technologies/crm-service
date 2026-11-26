@@ -1364,6 +1364,13 @@ owner had written to. A recorded fact, never an address-shape guess.
   plans can never be read; strict would block every writer on them). A
   background pass after the answer does lead-service campaign discovery only.
   Sources carry `servedFrom: store|mirror` + `readAt` + `refreshing`.
+- **A person read that finds nobody says what it means** (THREAD-OF-EMAILED-PERSON-1126, `thread-absence.ts`): a `personKey`
+  404 carries `thread {status none | not_known_yet, retryAfterSeconds, indexBuiltAt, checks}`. `none` ONLY when the scope is
+  built AND instantly-service `GET /orgs/units/email-sent?emails=&brandId=` holds no email of the brand to the address AND our
+  message store holds nothing with it (phone key: no `whatsapp_sends` sent to it); any record found, a never-built scope or an
+  unreadable check = `not_known_yet` (a rebuild kicked): the writer sends nothing and reads again. Email keys are looked up
+  lowercased. Measured 2026-11-26: 86 refused reads in 36 h, 37 later emailed, ALL 37 emailed after the read (the writer's own
+  first email): no lost follow-up, but the send -> index gap is real (dalaal@livespot360.com emailed 11:47, indexed 11:54).
 - **`excludeSources=api,copilot`** (TIMELINE-EXCLUDE-SOURCES-1117): sources a reader leaves out, never read, absent from
   `sources[]` and `items` (unknown name = 400). A writer reading a team member's thread for its words passes `api`: a staff
   person carried 34k API / MCP call logs (26 MB), over a workflow script's 64 MB, and every « Assistant for brand team » run crashed.

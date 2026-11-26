@@ -3144,6 +3144,28 @@ registry.registerPath({
   },
 });
 
+const PersonNotFoundSchema = z
+  .object({
+    type: z.literal("not_found"),
+    reason: z.literal("person_not_found"),
+    error: z.string(),
+    thread: z
+      .object({
+        status: z.enum(["none", "not_known_yet"]),
+        retryAfterSeconds: z.number().int().optional(),
+        indexBuiltAt: z.string().nullable(),
+        checks: z.array(
+          z.object({
+            check: z.enum(["people_index", "email_sent", "message_store", "whatsapp_sends"]),
+            answer: z.enum(["found", "nothing", "unreadable", "not_built"]),
+            detail: z.string().optional(),
+          }),
+        ),
+      })
+      .optional(),
+  })
+  .openapi("PersonNotFound");
+
 registry.registerPath({
   method: "get",
   path: "/orgs/people/timeline",
@@ -3191,7 +3213,14 @@ registry.registerPath({
   responses: {
     200: { description: "The merged thread", content: { "application/json": { schema: PersonTimelineResponseSchema } } },
     400: { description: "Neither or both of personId / personKey, a personId that is not a uuid, or a `before` this route did not serve" },
-    404: { description: "reason=person_not_found: no person of this brand holds that key / id" },
+    404: {
+      description:
+        "reason=person_not_found: no person of this brand holds that key / id. THREAD-OF-EMAILED-PERSON-1126: a `personKey` read also carries `thread` = what that means. " +
+        "`thread.status: none` = the brand has NO thread with them (index built, instantly-service holds no email of the brand to the address, our message store nothing, no WhatsApp send to the number): write a first message. " +
+        "`thread.status: not_known_yet` = the brand HAS a record with them the index has not joined yet (an email sent minutes ago), the index was never built, or a check could not be read: send nothing, read again after `retryAfterSeconds` (a rebuild is kicked). " +
+        "`thread.checks` lists each check and its answer. A `personId` read carries no `thread`.",
+      content: { "application/json": { schema: PersonNotFoundSchema } },
+    },
   },
 });
 
