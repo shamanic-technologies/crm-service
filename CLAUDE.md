@@ -1432,6 +1432,13 @@ newest first, a person with none absent; a send with no campaign never matches. 
   bridge's own answer); Matrix silver reads it, so the contact carries the phone. A sent
   row with email + phone is merge evidence `whatsapp_send`. After a send the connection is
   synced and the people scope rebuilt (unawaited), so the Unibox shows it within a minute.
+- **Which run asked** (MODEL-TAG-EVERY-AI-MESSAGE-1126, owner 2026-11-26: the Unibox tags every AI message with the model
+  that wrote it, features-service walks the ledger from the run that SENT it): the send row keeps `caller_run_id` = the
+  request's `x-run-id` AS IT ARRIVED (`run_id` is our child run); the message's Matrix `message_out` fact carries
+  `payload.requestedByRunId` only when a sent row with a caller run holds its event id. Absent = no run asked (typed by
+  hand, sent with no run): never guessed by time, no backfill (sends before 2026-11-26 carry none). The fact emitter's
+  inputs mark reads `whatsapp_sends.updated_at`, so a send whose event id lands after the mirror re-states its fact.
+  Our only send route: Gmail / email are sent by google-service / instantly-service, never through crm.
 
 - **Line health for Monitoring** (`lib/whatsapp/line-health.ts` + pure `line-health-core.ts`, WA-LINE-HEALTH-1023): every
   2 min one `/whoami` per linked WhatsApp line (every org / brand, `WHATSAPP_LINE_WATCH=off` stops it) → `whatsapp_line_spans`

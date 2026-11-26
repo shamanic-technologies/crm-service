@@ -95,6 +95,8 @@ export interface SendRequest {
   orgId: string;
   brandId: string;
   runId: string;
+  /** The caller's run as the request arrived (`x-run-id`), null when no run asked (MODEL-TAG-EVERY-AI-MESSAGE-1126). */
+  callerRunId?: string | null;
   campaignId: string | null;
   idempotencyKey: string;
   text: string;
@@ -202,6 +204,7 @@ async function claim(
       text: req.text,
       status: "sending",
       runId: req.runId,
+      callerRunId: req.callerRunId ?? null,
       campaignId: req.campaignId,
       ...(known ? { phone: known.phone, phoneSource: known.phoneSource } : {}),
     })
@@ -213,7 +216,7 @@ async function claim(
   // taken over; anything else is the earlier outcome.
   const retaken = await db
     .update(whatsappSends)
-    .set({ status: "sending", text: req.text, email: req.email, runId: req.runId, error: null, errorCode: null, updatedAt: new Date() })
+    .set({ status: "sending", text: req.text, email: req.email, runId: req.runId, callerRunId: req.callerRunId ?? null, error: null, errorCode: null, updatedAt: new Date() })
     .where(
       and(
         eq(whatsappSends.orgId, req.orgId),

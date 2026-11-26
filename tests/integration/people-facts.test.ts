@@ -26,6 +26,7 @@ import {
   stripeConnections,
   stripeTransactions,
   type PeopleScope,
+  whatsappSends,
 } from "../../src/db/schema.js";
 import { FEED_LOCK, emitScopeFacts, readFacts } from "../../src/lib/people/facts.js";
 import { readFunnelEvents } from "../../src/lib/gohighlevel/funnel-events.js";
@@ -330,7 +331,7 @@ const maxSeq = async () => {
 describe.skipIf(!RUN)("people fact feed (real DB)", () => {
   // Leave nothing behind: other suites share these tables (and once shared a brand id).
   const wipe = () =>
-    db.execute(sql`TRUNCATE people_facts, people_scopes, people, people_message_texts, matrix_raw_events, conversations, matrix_connections, ghl_appointments, ghl_form_submissions, ghl_opportunity_history, ghl_stage_meanings, ghl_opportunities, ghl_connections, posthog_activities, posthog_raw_records, posthog_connections, stripe_transactions, stripe_connections, contact_uploads, contacts, newsletter_sends CASCADE`);
+    db.execute(sql`TRUNCATE people_facts, people_scopes, people, people_message_texts, matrix_raw_events, conversations, matrix_connections, ghl_appointments, ghl_form_submissions, ghl_opportunity_history, ghl_stage_meanings, ghl_opportunities, ghl_connections, posthog_activities, posthog_raw_records, posthog_connections, stripe_transactions, stripe_connections, contact_uploads, contacts, newsletter_sends, whatsapp_sends CASCADE`);
   beforeEach(async () => {
     stubRuns();
     await wipe();
@@ -431,6 +432,28 @@ describe.skipIf(!RUN)("people fact feed (real DB)", () => {
     // DASH-SPEED-1110: the people index did not move, so no fact can change owner: the ownership pass is skipped.
     expect(again.ownershipChecked).toBe(false);
     expect(await maxSeq()).toBe(before);
+  });
+
+  it("MODEL-TAG-EVERY-AI-MESSAGE-1126: a message one of our runs asked us to send names that run; a message typed by hand or sent with no run names none", async () => {
+    const s = await seed();
+    const mx = (await db.select().from(matrixConnections).where(eq(matrixConnections.brandId, BRAND)))[0];
+    // $e2 = our send under a caller run; $e3 = a message the account typed by hand (no send row); $e4 = a send no run asked.
+    await db.insert(matrixRawEvents).values([
+      { orgId: ORG, brandId: BRAND, connectionId: mx.id, eventId: "$e3", roomId: "!room", sender: "@me:hs", eventType: "m.room.message", originServerTs: new Date("2026-09-04T12:06:00Z"), payload: { content: { body: "typed on the phone", msgtype: "m.text" } } },
+      { orgId: ORG, brandId: BRAND, connectionId: mx.id, eventId: "$e4", roomId: "!room", sender: "@me:hs", eventType: "m.room.message", originServerTs: new Date("2026-09-04T12:07:00Z"), payload: { content: { body: "sent with no run", msgtype: "m.text" } } },
+    ]);
+    await db.insert(whatsappSends).values([
+      { orgId: ORG, brandId: BRAND, idempotencyKey: "k-run", text: "Hi Alice", status: "sent", eventId: "$e2", runId: "crm-run-1", callerRunId: "caller-run-1", sentAt: new Date("2026-09-04T12:05:00Z") },
+      { orgId: ORG, brandId: BRAND, idempotencyKey: "k-norun", text: "sent with no run", status: "sent", eventId: "$e4", runId: "crm-run-2", callerRunId: null, sentAt: new Date("2026-09-04T12:07:00Z") },
+    ]);
+    await emitScopeFacts(s.scope);
+    const facts = (await allFacts()).filter((f) => f.source === "matrix");
+    const byRef = (ref: string) => facts.find((f) => f.sourceRef === ref)!;
+    expect(byRef("$e2")).toMatchObject({ type: "message_out", payload: { requestedByRunId: "caller-run-1" } });
+    expect(byRef("$e3").type).toBe("message_out");
+    expect(byRef("$e3").payload).not.toHaveProperty("requestedByRunId");
+    expect(byRef("$e4").payload).not.toHaveProperty("requestedByRunId");
+    expect(byRef("$e1").payload).not.toHaveProperty("requestedByRunId");
   });
 
   it("DASH-SPEED-1110: the ownership pass runs again only when a person's keys or presences move, never for other fields", async () => {

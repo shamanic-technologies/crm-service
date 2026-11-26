@@ -784,12 +784,17 @@ async function matrixCandidates(orgId: string, brandId: string): Promise<Candida
     own_sent: boolean;
     voice_status: string | null;
     voice_text: string | null;
+    requested_by_run_id: string | null;
   }>(sql`
     SELECT e.event_id, e.room_id, e.sender, e.origin_server_ts,
            e.payload->'content'->>'body' AS body, e.payload->'content'->>'msgtype' AS msgtype,
            v.channel, c.id AS contact_id, c.channel_handle, c.full_name, mc.matrix_user_id AS own_mxid,
            ${ownSenderSql(sql`e.sender`, sql`e.connection_id`)} AS own_sent,
-           t.status AS voice_status, t.text AS voice_text
+           t.status AS voice_status, t.text AS voice_text,
+           (SELECT s.caller_run_id FROM whatsapp_sends s
+             WHERE s.event_id = e.event_id AND s.org_id = e.org_id AND s.brand_id = e.brand_id
+               AND s.status = 'sent' AND s.caller_run_id IS NOT NULL
+             ORDER BY s.created_at LIMIT 1) AS requested_by_run_id
     FROM matrix_raw_events e
     JOIN conversations v ON v.connection_id = e.connection_id AND v.room_id = e.room_id
     JOIN contacts c ON c.id = v.contact_id
@@ -807,7 +812,16 @@ async function matrixCandidates(orgId: string, brandId: string): Promise<Candida
     crmContactId: e.contact_id,
     occurredAt: iso(e.origin_server_ts),
     dateBasis: "sent_at",
-    payload: { channel: e.channel, threadId: e.room_id, text: messageText(e), msgtype: e.msgtype },
+    payload: {
+      channel: e.channel,
+      threadId: e.room_id,
+      text: messageText(e),
+      msgtype: e.msgtype,
+      // MODEL-TAG-EVERY-AI-MESSAGE-1126: the run that asked us to send this message (its `x-run-id` on our send route,
+      // recorded on the send row). Absent when no run asked (typed by a person, sent with no run): the key is left out
+      // so every other fact's content hash is unchanged.
+      ...(e.own_sent && e.requested_by_run_id ? { requestedByRunId: e.requested_by_run_id } : {}),
+    },
     subject: presenceSubject("matrix", e.channel_handle, e.full_name),
   }));
 }

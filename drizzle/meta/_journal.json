@@ -638,6 +638,13 @@
       "when": 1794386400000,
       "tag": "0091_api_call_pings",
       "breakpoints": true
+    },
+    {
+      "idx": 92,
+      "version": "7",
+      "when": 1794472800000,
+      "tag": "0092_whatsapp_send_caller_run",
+      "breakpoints": true
     }
   ]
 }

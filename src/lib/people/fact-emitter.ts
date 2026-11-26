@@ -80,6 +80,7 @@ export async function inputsMark(scope: EmitScope): Promise<string> {
       (SELECT max(last_rebuilt_at) FROM posthog_activities WHERE ${ob}),
       (SELECT max(last_rebuilt_at) FROM stripe_transactions WHERE ${ob}),
       (SELECT max(ingested_at) FROM matrix_raw_events WHERE ${ob}),
+      (SELECT max(updated_at) FROM whatsapp_sends WHERE ${ob}),
       (SELECT max(last_rebuilt_at) FROM conversations WHERE ${ob}),
       (SELECT max(at) FROM people_message_texts WHERE scope_id = ${id}),
       (SELECT max(last_rebuilt_at) FROM ghl_appointments WHERE ${ob}),

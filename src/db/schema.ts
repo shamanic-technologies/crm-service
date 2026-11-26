@@ -2484,6 +2484,9 @@ export const whatsappSends = pgTable(
     errorCode: text("error_code"),
     error: text("error"),
     runId: text("run_id"),
+    // MODEL-TAG-EVERY-AI-MESSAGE-1126: the caller's run (`x-run-id` as the send request arrived), null when no run
+    // asked. `run_id` is OUR run (its child). Stated on the message's `message_out` fact as `requestedByRunId`.
+    callerRunId: text("caller_run_id"),
     campaignId: text("campaign_id"),
     sentAt: timestamp("sent_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -2493,6 +2496,7 @@ export const whatsappSends = pgTable(
     uniqueIndex("whatsapp_sends_idem_uq").on(table.orgId, table.brandId, table.idempotencyKey),
     index("whatsapp_sends_brand_email_idx").on(table.brandId, table.email),
     index("whatsapp_sends_brand_phone_idx").on(table.brandId, table.phone),
+    index("whatsapp_sends_event_idx").on(table.eventId),
   ],
 );
 

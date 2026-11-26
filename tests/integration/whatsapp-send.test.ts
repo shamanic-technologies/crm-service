@@ -347,6 +347,26 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
     expect(follow.body.previousSends).toBe(1);
   });
 
+  it("records the caller's run as the request arrived (x-run-id), none when no run asked (MODEL-TAG-EVERY-AI-MESSAGE-1126)", async () => {
+    await linkAccount();
+    await seedPeople([{ key: "email:ann@x.com", phones: ["+33600000001"], presences: [clerk(["+33600000001"])], at: "2026-09-01T00:00:00Z" }]);
+    const withRun = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set({ ...headers, "x-run-id": "aaaa1126-1111-4111-8111-000000000001" })
+      .send({ brandId: BRAND, email: "ann@x.com", text: "Hi Ann", idempotencyKey: "run:ann" });
+    expect(withRun.status).toBe(200);
+    const noRun = await request(app())
+      .post("/orgs/whatsapp/messages")
+      .set(headers)
+      .send({ brandId: BRAND, email: "ann@x.com", text: "Hi again", idempotencyKey: "norun:ann" });
+    expect(noRun.status).toBe(200);
+    const [a] = await db.select().from(whatsappSends).where(eq(whatsappSends.id, withRun.body.sendId));
+    const [b] = await db.select().from(whatsappSends).where(eq(whatsappSends.id, noRun.body.sendId));
+    expect(a.callerRunId).toBe("aaaa1126-1111-4111-8111-000000000001");
+    expect(a.runId).not.toBe(a.callerRunId);
+    expect(b.callerRunId).toBeNull();
+  });
+
   it("opens the DM when there is none, with the phone the caller gives", async () => {
     await linkAccount();
     const res = await request(app())
