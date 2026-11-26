@@ -20,11 +20,14 @@ import { Worker, isMainThread, parentPort } from "node:worker_threads";
 import { emitScopeFacts, type FactEmissionSummary } from "./facts.js";
 
 type EmitScope = { id: string; orgId: string; brandId: string };
-type Request = { id: number; scope: EmitScope };
+type Request = { kind: typeof KIND; id: number; scope: EmitScope };
 type Reply = { id: number; ok: true; summary: FactEmissionSummary } | { id: number; ok: false; error: string; stack?: string };
 
 /** True when this module was loaded from compiled JS (the worker re-loads this very file). */
 const COMPILED = import.meta.url.endsWith(".js");
+
+/** Each worker answers only its own kind: the people build worker loads this module too (CRM-BUILD-WORKER-1126). */
+const KIND = "fact-emission" as const;
 
 export function emissionRunsInWorker(): boolean {
   return COMPILED && process.env.FACT_EMIT_WORKER !== "off";
@@ -35,6 +38,7 @@ export function emissionRunsInWorker(): boolean {
 if (!isMainThread && parentPort) {
   const port = parentPort;
   port.on("message", (req: Request) => {
+    if (req?.kind !== KIND) return;
     emitScopeFacts(req.scope).then(
       (summary) => port.postMessage({ id: req.id, ok: true, summary } satisfies Reply),
       (err: Error) => port.postMessage({ id: req.id, ok: false, error: err?.message ?? String(err), stack: err?.stack } satisfies Reply),
@@ -95,6 +99,6 @@ export function emitScopeFactsOffThread(scope: EmitScope): Promise<FactEmissionS
   const id = ++nextId;
   return new Promise<FactEmissionSummary>((resolve, reject) => {
     pending.set(id, { resolve, reject });
-    w.postMessage({ id, scope: { id: scope.id, orgId: scope.orgId, brandId: scope.brandId } } satisfies Request);
+    w.postMessage({ kind: KIND, id, scope: { id: scope.id, orgId: scope.orgId, brandId: scope.brandId } } satisfies Request);
   });
 }
