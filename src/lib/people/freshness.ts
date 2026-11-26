@@ -310,9 +310,14 @@ export async function watchScope(scope: PeopleScope): Promise<FreshnessScopeResu
     result.refreshed = r.read;
     result.failed = r.failed;
     await updateRun(run.id, "completed", { orgId: scope.orgId, userId: scope.createdByUserId });
-    if (newWriters.length > 0) {
-      result.firstWriters = newWriters.length;
-      console.log(`[crm-service] people freshness scope=${scope.id}: ${newWriters.length} first-time Gmail writer(s) stored, people build kicked`);
+    // Only a writer whose thread holds a message between them and us is a person: the others build nobody.
+    const wrote = newWriters.length === 0 ? [] : await db
+      .select({ unit: peopleMessageUnits.unit })
+      .from(peopleMessageUnits)
+      .where(and(eq(peopleMessageUnits.scopeId, scope.id), eq(peopleMessageUnits.source, "gmail"), inArray(peopleMessageUnits.unit, newWriters.map((w) => w.address)), sql`${peopleMessageUnits.messages} > 0`));
+    if (wrote.length > 0) {
+      result.firstWriters = wrote.length;
+      console.log(`[crm-service] people freshness scope=${scope.id}: ${wrote.length} first-time Gmail writer(s) stored, people build kicked`);
       // Unawaited: the build holds the watch's own pass otherwise; the reply trigger reports them once they are people.
       void runScopeBuild(scope, { followUp: true }).catch((err) => console.error(`[crm-service] people build after first writers failed scope=${scope.id}:`, err));
     }
