@@ -102,3 +102,81 @@ describe("the budget", () => {
     expect(telegramRetryAfterSeconds("Telegram refused 502: Bad Gateway")).toBeNull();
   });
 });
+
+import { composeDigestText, digestDayLabel, digestDaysDue, liveReason, type DigestCall } from "../../src/lib/api-calls/ping-text.js";
+
+describe("TG-DAILY-DIGEST-1127: what stays live", () => {
+  it("a signup call pings live, paying or not, ok or not", () => {
+    expect(liveReason({ noAccount: true, status: 200 }, false)).toBe("signup");
+    expect(liveReason({ noAccount: true, status: 500 }, false)).toBe("signup");
+  });
+  it("an error from a paying client pings live", () => {
+    expect(liveReason({ noAccount: false, status: 402 }, true)).toBe("paying_error");
+    expect(liveReason({ noAccount: false, status: 500 }, true)).toBe("paying_error");
+  });
+  it("a non-paying error and every normal call wait for the digest", () => {
+    expect(liveReason({ noAccount: false, status: 402 }, false)).toBeNull();
+    expect(liveReason({ noAccount: false, status: 200 }, true)).toBeNull();
+    expect(liveReason({ noAccount: false, status: 200 }, false)).toBeNull();
+  });
+});
+
+describe("TG-DAILY-DIGEST-1127: the daily digest", () => {
+  const call = (email: string, orgName: string | null, did: string, status = 200): DigestCall => ({ email, orgName, noAccount: false, did, status });
+  const CONNECT = "Asked who they are and what they can reach";
+
+  it("the owner's example: one message, per person, most calls first, thread links kept", () => {
+    const calls = [
+      call("v.erhard@b2bsignals.ai", "b2bsignals.ai", CONNECT),
+      call("v.erhard@b2bsignals.ai", "b2bsignals.ai", CONNECT),
+      call("nigamaakash101@gmail.com", "Nigamaakash", CONNECT),
+      call("nigamaakash101@gmail.com", "Nigamaakash", CONNECT),
+      ...Array.from({ length: 4 }, () => call("jane@acme.com", "Acme", "Listed emails")),
+      call("jane@acme.com", "Acme", "Started a plan", 402),
+      call("jane@acme.com", "Acme", CONNECT),
+      call("jane@acme.com", "Acme", CONNECT),
+    ];
+    const urls = new Map([
+      ["jane@acme.com", "https://dashboard.distribute.you/jane"],
+      ["v.erhard@b2bsignals.ai", "https://dashboard.distribute.you/v"],
+      ["nigamaakash101@gmail.com", null],
+    ]);
+    expect(composeDigestText(calls, urls, "yesterday")).toBe(
+      [
+        "API / MCP yesterday: 3 people, 11 calls",
+        "jane@acme.com · Acme: 7 calls, Listed emails x4, Started a plan x1, 1 error (402)",
+        "Thread: https://dashboard.distribute.you/jane",
+        "nigamaakash101@gmail.com · Nigamaakash: 2 calls, connected only",
+        "v.erhard@b2bsignals.ai · b2bsignals.ai: 2 calls, connected only",
+        "Thread: https://dashboard.distribute.you/v",
+      ].join("\n"),
+    );
+  });
+
+  it("a day with zero calls sends nothing", () => {
+    expect(composeDigestText([], new Map(), "yesterday")).toBeNull();
+  });
+
+  it("errors by status, no dash anywhere, every call counted", () => {
+    const calls = [call("a@x.io", null, "Listed emails — all", 500), call("a@x.io", null, "Listed emails — all", 500), call("a@x.io", null, "Created campaign", 400)];
+    const text = composeDigestText(calls, new Map(), "yesterday")!;
+    expect(text).toContain("a@x.io: 3 calls, Listed emails - all x2, Created campaign x1, 3 errors (400, 500 x2)");
+    expect(text).not.toMatch(/[—–]/);
+  });
+
+  it("due days: yesterday after 08:00 UTC, never before the deploy day, never one already told", () => {
+    const at = (iso: string) => new Date(iso);
+    expect(digestDaysDue(at("2026-11-28T07:59:00Z"), "2026-11-27", new Set())).toEqual([]);
+    expect(digestDaysDue(at("2026-11-28T08:00:00Z"), "2026-11-27", new Set())).toEqual(["2026-11-27"]);
+    // A restart after the send: the stored marker keeps it from going twice.
+    expect(digestDaysDue(at("2026-11-28T09:00:00Z"), "2026-11-27", new Set(["2026-11-27"]))).toEqual([]);
+    // The box was down a whole day: the missed day is caught up, oldest first.
+    expect(digestDaysDue(at("2026-11-30T08:01:00Z"), "2026-11-27", new Set(["2026-11-27"]))).toEqual(["2026-11-28", "2026-11-29"]);
+    expect(digestDaysDue(at("2026-11-30T08:01:00Z"), null, new Set())).toEqual([]);
+  });
+
+  it("labels", () => {
+    expect(digestDayLabel("2026-11-27", new Date("2026-11-28T08:00:00Z"))).toBe("yesterday");
+    expect(digestDayLabel("2026-11-26", new Date("2026-11-28T08:00:00Z"))).toBe("on Nov 26");
+  });
+});

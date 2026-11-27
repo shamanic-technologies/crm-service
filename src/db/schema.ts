@@ -2347,9 +2347,11 @@ export const apiCallPings = pgTable(
     calledAt: timestamp("called_at", { withTimezone: true }).notNull(),
     // 'pending' | 'sending' | 'sent' | 'skipped' | 'unconfigured' | 'failed'
     status: text("status").notNull().default("pending"),
-    // skipped: 'staff'
+    // + 'digest' (TG-DAILY-DIGEST-1127: waits for the daily digest, never pinged live)
+    // skipped: 'staff'; pending (live): 'signup' | 'paying_error'; digest: null | 'paying_unknown'
     reason: text("reason"),
     // 'line' (its own message) | 'grouped' (listed in a burst message) | 'summary' (counted in a per-person summary)
+    // | 'digest' (told in the daily digest)
     mode: text("mode"),
     messageGroup: uuid("message_group"),
     telegramMessageId: integer("telegram_message_id"),
@@ -2370,6 +2372,27 @@ export const apiCallPings = pgTable(
 export const apiCallPingWatch = pgTable("api_call_ping_watch", {
   id: integer("id").primaryKey(),
   since: timestamp("since", { withTimezone: true }).notNull(),
+  // TG-DAILY-DIGEST-1127: the first UTC day the daily digest tells (the deploy day; set by migration 0095).
+  digestSince: date("digest_since", { mode: "string" }),
+});
+
+/**
+ * TG-DAILY-DIGEST-1127: one row per UTC day the owner's API / MCP digest covered. Written BEFORE the send (claimed
+ * `sending`), so a restart or a second pass never sends a day twice and never skips one.
+ */
+export const apiCallDigests = pgTable("api_call_digests", {
+  day: date("day", { mode: "string" }).primaryKey(),
+  // 'sending' | 'sent' | 'empty' (no external call that day: nothing sent) | 'failed' (retried) | 'unconfigured'
+  status: text("status").notNull(),
+  calls: integer("calls").notNull().default(0),
+  people: integer("people").notNull().default(0),
+  telegramMessageId: integer("telegram_message_id"),
+  attempts: integer("attempts").notNull().default(0),
+  nextAt: timestamp("next_at", { withTimezone: true }).notNull().defaultNow(),
+  error: text("error"),
+  sentAt: timestamp("sent_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
 /**

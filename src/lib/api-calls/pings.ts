@@ -1,6 +1,11 @@
 /**
- * The owner's Telegram line for EVERY external API / MCP call (TG-EVERY-CALL-1124, owner 2026-11-24, choice « B »:
- * « one Telegram message for every API or MCP call made by anyone »; replaces the once-per-conversation ping).
+ * The owner's Telegram for external API / MCP calls.
+ *
+ * TG-DAILY-DIGEST-1127 (owner 2026-11-27 « Je suis trop de ce type de message », then « un message par day all users »):
+ * replaces TG-EVERY-CALL-1124's line per call. Every external call is told in ONE daily digest (`digest.ts`); only a
+ * call that is part of an agent SIGNUP (no account yet) or an ERROR from a PAYING client (billing-service cash > 0,
+ * `paying.ts`) still pings live, through the budgeted sender below. The per-call record and the Unibox source are
+ * unchanged.
  *
  * External only, by construction: api-service pushes ONLY calls made with a client's own key, the MCP server's calls
  * for a client's assistant, and the keyless agent-signup calls (an AI agent opening an account). Our service-to-service
@@ -9,8 +14,9 @@
  * Flow (`apiCallPingPass`, in-process loop every 5 s + one kick after each push, never on the request path):
  *  1. CLASSIFY: every `api_calls` row received after the watch start (`api_call_ping_watch`, set by the migration:
  *     never history) and in the last 24 h with no `api_call_pings` row gets one: `skipped / staff` (a staff address,
- *     kevin@pressbeat.io, or a user id ever seen with one: the owner's own actions never alert; 99 % of the calls) or
- *     `pending`. The `api_calls` table is the outbox: a crash after the push answered loses nothing.
+ *     kevin@pressbeat.io, or a user id ever seen with one: the owner's own actions never alert; 99 % of the calls),
+ *     `pending` (live: `signup` | `paying_error`) or `digest` (the daily digest tells it). Billing unreadable on an
+ *     error = asked again for 10 min, then `digest / paying_unknown`, logged. The `api_calls` table is the outbox: a crash after the push answered loses nothing.
  *  2. SEND within the chat's budget (`API_CALL_PING_BUDGET_PER_MINUTE`, default 6: the owner chat also gets the
  *     fleet's other pings, Telegram allows about 20 a minute per chat), counted on what this service sent in the last
  *     60 s (stored, so a restart keeps it). Few pending calls = one message each; more than the budget left = ONE
@@ -33,7 +39,8 @@ import { isStaffActor, mintPersonId, readOrg, readUserName, uniboxThreadUrl } fr
 import { createPlatformRun, updatePlatformRun } from "../runs-client.js";
 import { SERVICE_NAME } from "../../middleware/auth.js";
 import { describeRequest, describeResponse, type ApiCallChannel } from "./calls.js";
-import { composeCallText, composeGroupedText, planSend, telegramRetryAfterSeconds, type CallLine } from "./ping-text.js";
+import { composeCallText, composeGroupedText, liveReason, planSend, telegramRetryAfterSeconds, type CallLine } from "./ping-text.js";
+import { isPayingOrg } from "./paying.js";
 
 export const API_CALL_PING_INTERVAL_MS = 5_000;
 const WINDOW_MS = 60_000;
@@ -53,9 +60,12 @@ const q = async <T>(query: ReturnType<typeof sql>) => (await db.execute(query)) 
 
 // ─── 1. classify ────────────────────────────────────────────────────────────
 
-async function classify(now: Date): Promise<{ pending: number; staff: number }> {
-  const rows = await q<{ call_id: string; email: string; caller_user_id: string | null; called_at: Date | string }>(sql`
-    SELECT a.call_id, a.email, a.caller_user_id, a.called_at
+/** A call whose paying status billing-service cannot tell is retried this long, then left to the digest (logged). */
+const PAYING_UNKNOWN_GRACE_MS = 10 * 60 * 1000;
+
+async function classify(now: Date): Promise<{ pending: number; staff: number; digest: number }> {
+  const rows = await q<{ call_id: string; email: string; caller_user_id: string | null; caller_org_id: string | null; status: number; called_at: Date | string; received_at: Date | string }>(sql`
+    SELECT a.call_id, a.email, a.caller_user_id, a.caller_org_id, a.status, a.called_at, a.received_at
     FROM api_calls a, api_call_ping_watch w
     WHERE w.id = 1
       AND a.received_at >= w.since
@@ -63,25 +73,43 @@ async function classify(now: Date): Promise<{ pending: number; staff: number }> 
       AND NOT EXISTS (SELECT 1 FROM api_call_pings p WHERE p.call_id = a.call_id)
     ORDER BY a.received_at, a.call_id
     LIMIT ${CLASSIFY_LIMIT}`);
-  if (rows.length === 0) return { pending: 0, staff: 0 };
+  if (rows.length === 0) return { pending: 0, staff: 0, digest: 0 };
   const staffBy = new Map<string, boolean>();
-  const values = [];
+  const payingBy = new Map<string, boolean | Error>();
+  const values: (typeof apiCallPings.$inferInsert)[] = [];
   for (const r of rows) {
     const k = `${r.caller_user_id ?? ""}|${r.email}`;
     if (!staffBy.has(k)) staffBy.set(k, r.caller_user_id ? await isStaffActor(r.email, r.caller_user_id) : isStaffEmail(r.email));
-    const staff = staffBy.get(k)!;
-    values.push({
-      callId: r.call_id,
-      email: r.email,
-      calledAt: new Date(r.called_at),
-      status: staff ? "skipped" : "pending",
-      reason: staff ? "staff" : null,
-      nextAt: now,
-    });
+    const base = { callId: r.call_id, email: r.email, calledAt: new Date(r.called_at), nextAt: now };
+    if (staffBy.get(k)) {
+      values.push({ ...base, status: "skipped", reason: "staff" });
+      continue;
+    }
+    const noAccount = r.caller_user_id == null;
+    // Paying is asked only where it decides something: an error made inside an org.
+    let paying = false;
+    let unknown = false;
+    if (!noAccount && r.status >= 400 && r.caller_org_id) {
+      if (!payingBy.has(r.caller_org_id)) {
+        payingBy.set(r.caller_org_id, await isPayingOrg(r.caller_org_id).catch((e: Error) => e));
+      }
+      const p = payingBy.get(r.caller_org_id)!;
+      if (p instanceof Error) {
+        if (now.getTime() - new Date(r.received_at).getTime() < PAYING_UNKNOWN_GRACE_MS) {
+          console.error(`[crm-service][api-call-pings] call ${r.call_id}: paying client unknown, asked again next pass: ${p.message}`);
+          continue;
+        }
+        console.error(`[crm-service][api-call-pings] call ${r.call_id}: paying client still unknown after 10 min, left to the daily digest: ${p.message}`);
+        unknown = true;
+      } else paying = p;
+    }
+    const live = liveReason({ noAccount, status: r.status }, paying);
+    values.push({ ...base, status: live ? "pending" : "digest", reason: live ?? (unknown ? "paying_unknown" : null) });
   }
+  if (values.length === 0) return { pending: 0, staff: 0, digest: 0 };
   await db.insert(apiCallPings).values(values).onConflictDoNothing({ target: apiCallPings.callId });
-  const staff = values.filter((v) => v.status === "skipped").length;
-  return { pending: values.length - staff, staff };
+  const count = (st: string) => values.filter((v) => v.status === st).length;
+  return { pending: count("pending"), staff: count("skipped"), digest: count("digest") };
 }
 
 // ─── 2. send ────────────────────────────────────────────────────────────────
@@ -117,7 +145,7 @@ async function countPending(now: Date): Promise<number> {
 }
 
 /** Each lookup on its own: one that fails drops its part of the line, logged, never the line. */
-async function attempt<T>(what: string, fn: () => Promise<T>): Promise<T | null> {
+export async function attempt<T>(what: string, fn: () => Promise<T>): Promise<T | null> {
   try {
     return await fn();
   } catch (err) {
@@ -126,14 +154,14 @@ async function attempt<T>(what: string, fn: () => Promise<T>): Promise<T | null>
   }
 }
 
-interface PassContext {
+export interface PassContext {
   dest: CopilotDestination;
   /** Who reads are filed under when the call has no user (the staff scope's creator). */
   fallbackUserId: string | null;
   runId: () => Promise<string>;
 }
 
-function identityFor(ctx: PassContext, call: ApiCall, runId: string): SiblingIdentity | null {
+export function identityFor(ctx: PassContext, call: ApiCall, runId: string): SiblingIdentity | null {
   const userId = call.callerUserId ?? ctx.fallbackUserId;
   return userId ? { orgId: ctx.dest.orgId, userId, runId, brandId: ctx.dest.brandId } : null;
 }
@@ -168,7 +196,7 @@ async function lineFor(ctx: PassContext, call: ApiCall): Promise<CallLine> {
   };
 }
 
-async function threadUrl(ctx: PassContext, email: string, call: ApiCall): Promise<string | null> {
+export async function threadUrl(ctx: PassContext, email: string, call: ApiCall): Promise<string | null> {
   const identity = identityFor(ctx, call, await ctx.runId());
   if (!identity) return null;
   const staffOrg = await attempt("staff org Clerk id", () => readOrg(ctx.dest.orgId, identity));
@@ -211,7 +239,7 @@ async function settle(
 }
 
 export interface ApiCallPingPassResult {
-  classified: { pending: number; staff: number };
+  classified: { pending: number; staff: number; digest: number };
   messages: number;
   callsSent: number;
   waiting: number;
@@ -222,7 +250,7 @@ export async function apiCallPingPass(opts: { now?: Date; budget?: number } = {}
   const now = opts.now ?? new Date();
   const budget = opts.budget ?? budgetPerMinute();
   const dest = copilotDestination();
-  const out: ApiCallPingPassResult = { classified: { pending: 0, staff: 0 }, messages: 0, callsSent: 0, waiting: 0 };
+  const out: ApiCallPingPassResult = { classified: { pending: 0, staff: 0, digest: 0 }, messages: 0, callsSent: 0, waiting: 0 };
   if (!dest) return out;
   out.classified = await classify(now);
 
