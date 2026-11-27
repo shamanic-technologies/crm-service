@@ -2388,7 +2388,7 @@ skippedNoEmail }`; 503 when the staff scope is unset. Idempotent on `callId`.
   "Refused (403): …"). `ref.callId` opens the whole call
   (`GET /orgs/people/api-calls/{callId}?brandId=`), `ref.sessionId` = first call of a
   burst (same channel, gaps under 30 min).
-- No cost (platform run), no facts, not in the message search index. Each call = one owner Telegram line (below).
+- No cost (platform run), no facts, not in the message search index. Owner Telegram: one daily digest (below).
 
 ## Credit ran out / restored — the staff Unibox's account events (`src/lib/credit-events/`, CREDIT-RAN-OUT-UNIBOX-EVENT-1024)
 
@@ -2533,25 +2533,29 @@ NOT typed `pro_ai` (pro_human, personal_human, untyped: never inferred), whateve
 message recorded `own_line`, never sent. PERSO-TG-PING-1023 (10-23) read the line's NUMBER against the sales rep / members
 and missed his pro line (+33680478702, pro_human, automation on): 38 pings in 3 days.
 
-## Owner Telegram line for EVERY external API / MCP call (`src/lib/api-calls/pings.ts` + pure `ping-text.ts`)
+## Owner Telegram for external API / MCP calls: ONE daily digest, live only for signups + paying errors (`src/lib/api-calls/`)
 
-TG-EVERY-CALL-1124 (owner 2026-11-24, choice « B »: one line per call, every call; replaced the once-per-conversation
-START ping of 2026-10-12, `conversation_pings` kept as history, `conversation-pings.ts` now only shared helpers: staff,
-`readOrg` / `readUserName`, `mintPersonId`, thread link). External only by construction: api-service pushes ONLY
-client-key calls, MCP calls for a client's assistant and its keyless agent-signup calls.
-- **Outbox = `api_calls`**: a loop every 5 s (+ a kick after each push, never on the request path; `API_CALL_PINGS=off`
-  stops both) gives every call received after `api_call_ping_watch.since` (set by migration 0091: never history), within
-  24 h, one `api_call_pings` row: `skipped / staff` (staff address, kevin@pressbeat.io, a user id ever seen with one:
-  99 % of the calls) or `pending`. A crash after the push answered loses nothing.
-- **Budget** `API_CALL_PING_BUDGET_PER_MINUTE` (6; the owner chat also gets the fleet's other pings, Telegram ~20/min/chat),
-  counted on stored `sent_at` per Telegram message (`message_group`). Pending ≤ budget left − 1 = one message per call
-  (`API call · Jane Doe (jane@acme.com) · Acme` / `Did: tool x · Listed emails` / `Result: ✅ …|❌ Refused (403): …` /
-  `Thread: …`); more = ONE grouped message listing every call per person, or a per-person summary with counts (+ "N more
-  people, M calls") under 4000 chars. Every call ends `sent` with its message. Failed send = `pending` again with backoff
-  (Telegram `retry after` honoured), `failed` past 24 h (logged); no bot = `unconfigured`.
-- **Agent signup (no account yet)**: `userId` null / absent on `POST /internal/api-calls`, `email` = the address the agent
-  typed; stored (`caller_user_id` nullable), staff by address only, line ends `no account yet`, actions said in words
-  (`AGENT_SIGNUP_ACTIONS` in `calls.ts`). client-service still sends its own 2 signup lines (code asked, account opened).
+TG-DAILY-DIGEST-1127 (owner 2026-11-27 « Je suis trop de ce type de message », then « un message par day all users »;
+replaces TG-EVERY-CALL-1124's line per call; `conversation_pings` kept as history, `conversation-pings.ts` = shared helpers:
+staff, `readOrg` / `readUserName`, `mintPersonId`, thread link). External only by construction: api-service pushes ONLY
+client-key calls, MCP calls for a client's assistant and its keyless agent-signup calls. The per-call record + Unibox
+source are unchanged; only the Telegram delivery changed.
+- **Classify** (`pings.ts`, loop every 5 s + a kick after each push; `API_CALL_PINGS=off`): every call received after
+  `api_call_ping_watch.since`, within 24 h, gets one `api_call_pings` row: `skipped / staff` (staff address,
+  kevin@pressbeat.io, a user id ever seen with one), `pending` = LIVE (`liveReason`: `signup` = no account yet;
+  `paying_error` = status >= 400 from an org billing-service says PAID: `GET /internal/accounts/by-org/:id/cash`
+  `cash_paid_cents > 0`, `paying.ts`, cached 10 min; unreadable = asked again 10 min, then `digest / paying_unknown`,
+  logged), else `digest`. Never a per-person-per-session live line (rejected by the owner).
+- **Live** (only `pending`): budget `API_CALL_PING_BUDGET_PER_MINUTE` (6) on stored `sent_at` per `message_group`; few =
+  one message per call, more = ONE grouped / summary message (`composeGroupedText`). Failed = backoff, `failed` past 24 h.
+- **Daily digest** (`digest.ts`, every 60 s, first tick 60 s after boot, `API_CALL_DIGEST=off`): at 08:00 UTC, day D-1
+  (missed days caught up 3 days, never before `api_call_ping_watch.digest_since` = the deploy day). Counts EVERY non-staff
+  call of the day (the live ones too), per person most calls first, each with its Unibox thread link
+  (`composeDigestText`: `API / MCP yesterday: 3 people, 11 calls` / `jane@acme.com · Acme: 7 calls, Listed emails x4,
+  1 error (402)` / `... connected only` when only the identity read MCP clients make at connect). Long = split by
+  `sendOwnerTelegram`, never cut. `api_call_digests` (one row per day) claimed `sending` BEFORE the send (atomic upsert):
+  `sent` | `empty` (zero calls: no message) | `failed` (retried with backoff) | `unconfigured`; a restart never sends a day
+  twice nor skips one. Calls that waited end `sent`, mode `digest`.
 
 ## Brand transfer (`POST /internal/transfer-brand`, fleet contract)
 
@@ -2707,7 +2711,7 @@ once CI is green, then tag the next version by hand at the merge commit
 `CRM_TRANSLATION_CHAT_CONFIG` (Unibox translation model, `zai/glm-flash`; unset = every translation `failed`),
 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_CHAT_ID`, `CLIENT_SERVICE_URL`, `CLIENT_SERVICE_API_KEY` (the owner's conversation pings; unset = logged, nothing sent),
 `CAMPAIGN_SERVICE_URL`, `CAMPAIGN_SERVICE_API_KEY` (the form-trigger reports; unset = detected, not reported),
-`BILLING_SERVICE_URL`, `BILLING_SERVICE_API_KEY` (the credit events feed; unset = not mirrored, logged at boot),
+`BILLING_SERVICE_URL`, `BILLING_SERVICE_API_KEY` (the credit events feed + the paying-client check of the API call pings; unset = not mirrored, logged at boot),
 `MATRIX_WHATSAPP_PROVISIONING_URL`, `MATRIX_WHATSAPP_PROVISIONING_SECRET`
 (+ `MATRIX_TELEGRAM_*` once its bridge runs).
 See `.env.example`. The four Matrix ones are REQUIRED for the sync to run at all —

@@ -1,6 +1,9 @@
 /**
- * PURE: the owner's Telegram text for external API / MCP calls (TG-EVERY-CALL-1124, owner 2026-11-24, choice « B »:
- * one line per call, every call). Two shapes:
+ * PURE: the owner's Telegram text for external API / MCP calls.
+ *
+ * TG-DAILY-DIGEST-1127 (owner 2026-11-27 « Je suis trop de ce type de message », then « un message par day all users »):
+ * every external call is told in ONE daily digest (`composeDigestText`); only a call that is part of an agent SIGNUP or
+ * an ERROR from a PAYING client still pings live (`liveReason`), with the shapes of TG-EVERY-CALL-1124 below:
  *
  *  - ONE call, one message, readable in 2 seconds (who, what, result, thread):
  *
@@ -170,3 +173,102 @@ export function telegramRetryAfterSeconds(error: string): number | null {
   const m = /retry after (\d+)/i.exec(error);
   return m ? Number(m[1]) : null;
 }
+
+// ─── TG-DAILY-DIGEST-1127: what stays live, the daily digest ─────────────────
+
+/**
+ * PURE: why a call still pings at once, or null (it waits for the daily digest). Live = an AI agent signing up (no
+ * account yet), or an error (status >= 400) from an org that PAID us (billing-service's cash, read by the caller).
+ */
+export function liveReason(c: { noAccount: boolean; status: number }, orgPaying: boolean): "signup" | "paying_error" | null {
+  if (c.noAccount) return "signup";
+  if (c.status >= 400 && orgPaying) return "paying_error";
+  return null;
+}
+
+/** The digest is sent at this UTC hour, for the previous UTC day. */
+export const DIGEST_HOUR_UTC = 8;
+/** A day missed (box down at 08:00) is still told this many days later; older ones are left. */
+export const DIGEST_CATCH_UP_DAYS = 3;
+
+const dayOf = (d: Date) => d.toISOString().slice(0, 10);
+const addDays = (day: string, n: number) => dayOf(new Date(Date.parse(`${day}T00:00:00Z`) + n * 86_400_000));
+
+/**
+ * PURE: the UTC days whose digest is due now, oldest first: every day from `since` (the deploy day) on, whose next
+ * day's DIGEST_HOUR_UTC has passed, within the catch-up window, not already told (`done`).
+ */
+export function digestDaysDue(now: Date, since: string | null, done: Set<string>): string[] {
+  if (!since) return [];
+  const today = dayOf(now);
+  const latest = now.getUTCHours() >= DIGEST_HOUR_UTC ? addDays(today, -1) : addDays(today, -2);
+  const out: string[] = [];
+  for (let d = addDays(latest, -(DIGEST_CATCH_UP_DAYS - 1)); d <= latest; d = addDays(d, 1)) {
+    if (d >= since && !done.has(d)) out.push(d);
+  }
+  return out;
+}
+
+export interface DigestCall {
+  email: string;
+  orgName: string | null;
+  noAccount: boolean;
+  /** describeRequest's plain words, WITHOUT the brand (so the same action adds up across brands). */
+  did: string;
+  status: number;
+}
+
+/** describeRequest's words for the identity read every MCP client makes when it connects. */
+export const CONNECT_READ = "Asked who they are and what they can reach";
+
+function personDigestLine(email: string, calls: DigestCall[]): string {
+  const orgs = [...new Set(calls.map((c) => c.orgName).filter((o): o is string => !!o))];
+  const head = [email, ...orgs, ...(calls.every((c) => c.noAccount) ? ["no account yet"] : [])].join(" · ");
+  const parts = [`${calls.length} call${calls.length === 1 ? "" : "s"}`];
+  const actions = new Map<string, number>();
+  for (const c of calls) if (c.did !== CONNECT_READ) actions.set(clip(c.did, 60), (actions.get(clip(c.did, 60)) ?? 0) + 1);
+  const errors = calls.filter((c) => c.status >= 400);
+  if (actions.size === 0 && errors.length === 0) parts.push("connected only");
+  const ranked = [...actions].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+  for (const [k, n] of ranked.slice(0, 5)) parts.push(`${k} x${n}`);
+  if (ranked.length > 5) parts.push(`${ranked.length - 5} other actions`);
+  if (errors.length > 0) {
+    const byStatus = new Map<number, number>();
+    for (const e of errors) byStatus.set(e.status, (byStatus.get(e.status) ?? 0) + 1);
+    const list = [...byStatus].sort((a, b) => a[0] - b[0]).map(([s, n]) => (n === 1 ? `${s}` : `${s} x${n}`)).join(", ");
+    parts.push(`${errors.length} error${errors.length === 1 ? "" : "s"} (${list})`);
+  }
+  return `${head}: ${parts.join(", ")}`;
+}
+
+/**
+ * PURE: the daily digest, or null when the day had no external call (nothing is sent). Grouped per person, most calls
+ * first; each person keeps their Unibox thread link. Every call is counted. A long digest is split into several
+ * Telegram messages by the sender, never cut.
+ *
+ *   API / MCP yesterday: 3 people, 11 calls
+ *   jane@acme.com · Acme: 7 calls, Listed emails x4, Started a plan x1, 1 error (402)
+ *   Thread: https://dashboard.distribute.you/...
+ */
+export function composeDigestText(calls: DigestCall[], threadUrls: Map<string, string | null>, dayLabel: string): string | null {
+  if (calls.length === 0) return null;
+  const byEmail = new Map<string, DigestCall[]>();
+  for (const c of calls) byEmail.set(c.email, [...(byEmail.get(c.email) ?? []), c]);
+  const people = [...byEmail].sort((a, b) => b[1].length - a[1].length || (a[0] < b[0] ? -1 : 1));
+  const lines = [`API / MCP ${dayLabel}: ${people.length} ${people.length === 1 ? "person" : "people"}, ${calls.length} call${calls.length === 1 ? "" : "s"}`];
+  for (const [email, own] of people) {
+    lines.push(personDigestLine(email, own));
+    const url = threadUrls.get(email);
+    if (url) lines.push(`Thread: ${url}`);
+  }
+  return flatLines(lines.join("\n"));
+}
+
+/** "yesterday" for the day before `now`, else "on Nov 25". */
+export function digestDayLabel(day: string, now: Date): string {
+  if (day === addDays(dayOf(now), -1)) return "yesterday";
+  const d = new Date(`${day}T00:00:00Z`);
+  return `on ${d.toLocaleString("en-US", { month: "short", timeZone: "UTC" })} ${d.getUTCDate()}`;
+}
+
+const flatLines = (s: string) => s.replace(/[—–]/g, "-");

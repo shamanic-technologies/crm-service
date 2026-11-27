@@ -39,6 +39,7 @@ import { startCalendarWatch } from "./lib/calendar/feed.js";
 import { startWebHandoffWatch } from "./lib/copilot/web-handoffs.js";
 import { startCreditWatch } from "./lib/credit-events/feed.js";
 import { startApiCallPings } from "./lib/api-calls/pings.js";
+import { startApiCallDigest } from "./lib/api-calls/digest.js";
 import { startRefusalWatch } from "./lib/payment-refusals/watch.js";
 import { startTxEmailWatch } from "./lib/transactional/sent-emails.js";
 import { startNewsletterWatch } from "./lib/transactional/newsletters.js";
@@ -157,6 +158,8 @@ if (process.env.NODE_ENV !== "test") {
         // Mirrors billing-service's credit events: "Credit ran out" / "Credit restored" on the client's staff Unibox thread.
         startCreditWatch();
 startApiCallPings();
+        // One owner Telegram a day with every external API / MCP call of the day before (TG-DAILY-DIGEST-1127).
+        startApiCallDigest();
         // Reports each web chat conversation a visitor handed over with their email as a Lead event (DISTRY-WEB-CHAT-EMAIL-1117).
         startWebHandoffWatch();
         // Reports each refused charge on a brand's Stripe as a Lead event for the person who paid.

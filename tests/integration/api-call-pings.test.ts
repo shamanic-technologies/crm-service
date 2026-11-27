@@ -1,14 +1,16 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
-import { apiCallPings } from "../../src/db/schema.js";
+import { apiCallDigests, apiCallPings } from "../../src/db/schema.js";
 import { storeApiCalls, type ApiCallInput } from "../../src/lib/api-calls/calls.js";
 import { apiCallPingPass } from "../../src/lib/api-calls/pings.js";
+import { apiCallDigestPass } from "../../src/lib/api-calls/digest.js";
+import { resetPayingCache } from "../../src/lib/api-calls/paying.js";
 import { ApiCallsRequestSchema } from "../../src/schemas.js";
 
 /**
- * TG-EVERY-CALL-1124: one owner Telegram line per external API / MCP call, grouped beyond the chat's budget, never
- * lost, never for staff. Real Postgres (gated on CRM_TEST_DB); Telegram, client-service, brand-service and
+ * TG-DAILY-DIGEST-1127 (was TG-EVERY-CALL-1124): every external API / MCP call is told in ONE daily digest; a signup
+ * call and a paying client's error still ping live (grouped beyond the chat's budget, never lost); never for staff. Real Postgres (gated on CRM_TEST_DB); Telegram, client-service, brand-service and
  * runs-service stubbed at `fetch`.
  */
 const RUN = !!process.env.CRM_TEST_DB;
@@ -29,16 +31,23 @@ process.env.BRAND_SERVICE_URL = "http://brand.test";
 process.env.BRAND_SERVICE_API_KEY = "b";
 process.env.TELEGRAM_BOT_TOKEN = "bot-token";
 process.env.TELEGRAM_OWNER_CHAT_ID = "42";
+process.env.BILLING_SERVICE_URL = "http://billing.test";
+process.env.BILLING_SERVICE_API_KEY = "bk";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
 let sent: string[] = [];
 let telegramDown = false;
+let chatOrgPaid = 0;
+let billingDown = false;
 
 function installFetchStub() {
   sent = [];
   telegramDown = false;
+  chatOrgPaid = 0;
+  billingDown = false;
+  resetPayingCache();
   vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input));
     if (url.host === "api.telegram.org") {
@@ -57,6 +66,10 @@ function installFetchStub() {
     }
     if (url.host === "client.test" && url.pathname === `/internal/users/${USER_JANE}`) {
       return json({ user: { id: USER_JANE, email: "jane@prospect.io", firstName: "Jane", lastName: "Doe" } });
+    }
+    if (url.host === "billing.test" && url.pathname === `/internal/accounts/by-org/${CHAT_ORG}/cash`) {
+      if (billingDown) return json({ error: "down" }, 502);
+      return json({ org_id: CHAT_ORG, cash_paid_cents: chatOrgPaid, credited_cents: chatOrgPaid, non_cash_credit_cents: 0 });
     }
     if (url.host === "brand.test" && url.pathname === `/internal/brands/${CALLED_BRAND}`) return json({ brand: { name: "AscendQE" } });
     throw new Error(`unexpected fetch ${url}`);
@@ -84,6 +97,10 @@ const apiCall = (callId: string, seconds: number, over: Partial<ApiCallInput> = 
   ...over,
 });
 
+/** An AI agent signing up: no account yet (pings live). */
+const signupCall = (callId: string, seconds: number, email = "newbie@startup.io"): ApiCallInput =>
+  apiCall(callId, seconds, { orgId: null, userId: null, email, brandIds: [], method: "POST", path: "/v1/agent-signups/start", responseBody: "{}" });
+
 const pass = (seconds: number) => apiCallPingPass({ now: at(seconds), budget: BUDGET });
 const pingsOf = (callId: string) => db.select().from(apiCallPings).where(eq(apiCallPings.callId, callId));
 
@@ -91,6 +108,7 @@ async function wipe() {
   await db.execute(sql`DELETE FROM api_calls WHERE org_id = ${STAFF_ORG}`);
   await db.execute(sql`DELETE FROM person_ids WHERE org_id = ${STAFF_ORG}`);
   await db.execute(sql`DELETE FROM api_call_pings`);
+  await db.execute(sql`DELETE FROM api_call_digests`);
 }
 
 describe.skipIf(!RUN)("owner Telegram line for every external API / MCP call", () => {
@@ -98,39 +116,52 @@ describe.skipIf(!RUN)("owner Telegram line for every external API / MCP call", (
     installFetchStub();
     await wipe();
     // Calls other suites left behind are history for this one.
-    await db.execute(sql`UPDATE api_call_ping_watch SET since = now() WHERE id = 1`);
+    await db.execute(sql`UPDATE api_call_ping_watch SET since = now(), digest_since = (now() AT TIME ZONE 'UTC')::date WHERE id = 1`);
     base = Date.now() + 1000;
   });
   afterAll(wipe);
 
-  it("a non-staff call: exactly one line naming who, what and the result", async () => {
+  it("a normal call does not ping live: it waits for the daily digest", async () => {
     await storeApiCalls([apiCall("one-1", 0)], "run-1");
     await pass(1);
     await pass(2);
-    expect(sent).toHaveLength(1);
-    expect(sent[0]).toBe(
-      [
-        "API call · Jane Doe (jane@prospect.io) · Prospect Inc",
-        "Did: Listed emails for brand AscendQE",
-        "Result: ✅ Answered: 3 emails (200, 120 ms)",
-        sent[0].split("\n")[3],
-      ].join("\n"),
-    );
-    expect(sent[0].split("\n")[3]).toMatch(/^Thread: https:\/\/dashboard\.distribute\.you\/v2\/orgs\/org_staff\/brands\/.+\/unibox\?person=/);
-    const [row] = await pingsOf("one-1");
-    expect(row).toMatchObject({ status: "sent", mode: "line", telegramMessageId: 1001 });
+    expect(sent).toHaveLength(0);
+    expect((await pingsOf("one-1"))[0]).toMatchObject({ status: "digest", reason: null });
   }, 30_000);
 
-  it("an MCP call names the tool; an error names its status", async () => {
+  it("an error from a PAYING client pings live: one line naming who, the tool and the status", async () => {
+    chatOrgPaid = 10_000;
     await storeApiCalls(
       [apiCall("mcp-1", 0, { channel: "mcp", mcpTool: "distribute_list_emails", status: 403, responseBody: JSON.stringify({ error: "Not a member" }) })],
       "run-1",
     );
     await pass(1);
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toContain("MCP call · Jane Doe");
+    expect(sent[0]).toContain("MCP call · Jane Doe (jane@prospect.io) · Prospect Inc");
     expect(sent[0]).toContain("Did: tool distribute_list_emails · Listed emails");
     expect(sent[0]).toContain("Result: ❌ Refused (403): Not a member");
+    expect(sent[0].split("\n")[3]).toMatch(/^Thread: https:\/\/dashboard\.distribute\.you\/v2\/orgs\/org_staff\/brands\/.+\/unibox\?person=/);
+    expect((await pingsOf("mcp-1"))[0]).toMatchObject({ status: "sent", mode: "line", reason: "paying_error" });
+  }, 30_000);
+
+  it("an error from a client who never paid does NOT ping live", async () => {
+    chatOrgPaid = 0;
+    await storeApiCalls([apiCall("np-1", 0, { status: 402, responseBody: JSON.stringify({ error: "No credit" }) })], "run-1");
+    await pass(1);
+    expect(sent).toHaveLength(0);
+    expect((await pingsOf("np-1"))[0]).toMatchObject({ status: "digest" });
+  }, 30_000);
+
+  it("billing unreadable on an error: asked again, never guessed", async () => {
+    billingDown = true;
+    await storeApiCalls([apiCall("bd-1", 0, { status: 500, responseBody: "{}" })], "run-1");
+    await pass(1);
+    expect(await pingsOf("bd-1")).toHaveLength(0);
+    billingDown = false;
+    chatOrgPaid = 1;
+    await pass(5);
+    expect((await pingsOf("bd-1"))[0]).toMatchObject({ status: "sent", reason: "paying_error" });
+    expect(sent).toHaveLength(1);
   }, 30_000);
 
   it("staff never pings: a staff address, kevin@pressbeat.io, a user id ever seen with one", async () => {
@@ -150,9 +181,9 @@ describe.skipIf(!RUN)("owner Telegram line for every external API / MCP call", (
     for (const id of ["k-0", "k-1", "k-2", "k-3"]) expect((await pingsOf(id))[0]).toMatchObject({ status: "skipped", reason: "staff" });
   }, 30_000);
 
-  it("50 calls in a minute from one person: grouped, all 50 accounted for, never more messages a minute than the budget", async () => {
+  it("50 signup calls in a minute from one agent: grouped, all 50 accounted for, never more messages a minute than the budget", async () => {
     for (let i = 0; i < 50; i += 1) {
-      await storeApiCalls([apiCall(`b-${String(i).padStart(2, "0")}`, i)], "run-1");
+      await storeApiCalls([signupCall(`b-${String(i).padStart(2, "0")}`, i)], "run-1");
       await pass(i + 0.5);
     }
     // Within the first minute: at most the budget.
@@ -166,6 +197,7 @@ describe.skipIf(!RUN)("owner Telegram line for every external API / MCP call", (
     const grouped = sent.filter((t) => /^\d+ API \/ MCP calls by 1 person/.test(t));
     expect(grouped.length).toBeGreaterThanOrEqual(1);
     const lines = sent.filter((t) => t.startsWith("API call · "));
+    expect(rows.every((r) => r.reason === "signup")).toBe(true);
     const listed = grouped.reduce((n, t) => n + Number(/^(\d+) API/.exec(t)![1]), 0);
     expect(lines.length + listed).toBe(50);
     // Every 60 s window holds at most BUDGET messages.
@@ -205,7 +237,7 @@ describe.skipIf(!RUN)("owner Telegram line for every external API / MCP call", (
 
   it("a Telegram failure loses nothing: the call is sent on a later pass", async () => {
     telegramDown = true;
-    await storeApiCalls([apiCall("f-1", 0)], "run-1");
+    await storeApiCalls([signupCall("f-1", 0)], "run-1");
     await expect(pass(1)).resolves.toBeDefined();
     expect((await pingsOf("f-1"))[0]).toMatchObject({ status: "pending", attempts: 1 });
     telegramDown = false;
@@ -213,4 +245,66 @@ describe.skipIf(!RUN)("owner Telegram line for every external API / MCP call", (
     expect(sent).toHaveLength(1);
     expect((await pingsOf("f-1"))[0]).toMatchObject({ status: "sent" });
   }, 30_000);
+
+  describe("the daily digest", () => {
+    const day = () => new Date(base).toISOString().slice(0, 10);
+    const tomorrowAt = (hh: string) => new Date(Date.parse(`${day()}T00:00:00Z`) + 86_400_000 + Date.parse(`1970-01-01T${hh}Z`));
+
+    it("one message the next day at 08:00 UTC, every external call counted, never twice across a restart", async () => {
+      chatOrgPaid = 0;
+      await storeApiCalls(
+        [
+          apiCall("d-1", 0, { path: "/v1/me", brandIds: [] }),
+          apiCall("d-2", 1, { path: "/v1/me", brandIds: [] }),
+          apiCall("d-3", 2),
+          apiCall("d-4", 3, { status: 402, responseBody: JSON.stringify({ error: "No credit" }) }),
+          signupCall("d-5", 4),
+          apiCall("d-6", 5, { userId: USER_KEVIN, email: "kevin@distribute.you" }),
+        ],
+        "run-1",
+      );
+      await pass(6);
+      expect(sent).toHaveLength(1); // the signup, live
+      sent = [];
+
+      expect(await apiCallDigestPass({ now: tomorrowAt("07:59:00") })).toEqual([]);
+      const r = await apiCallDigestPass({ now: tomorrowAt("08:00:30") });
+      expect(r).toEqual([{ day: day(), status: "sent", calls: 5, people: 2 }]);
+      expect(sent).toHaveLength(1);
+      const lines = sent[0].split("\n");
+      expect(lines[0]).toBe("API / MCP yesterday: 2 people, 5 calls");
+      expect(lines[1]).toBe("jane@prospect.io · Prospect Inc: 4 calls, Listed emails x2, 1 error (402)");
+      expect(lines[2]).toMatch(/^Thread: https:\/\/dashboard\.distribute\.you\/v2\/orgs\/org_staff\//);
+      expect(lines[3]).toBe("newbie@startup.io · no account yet: 1 call, Agent signup: asked for a sign-in code by email x1");
+
+      // A restart, then later passes the same day and the next: the day is never told twice.
+      expect(await apiCallDigestPass({ now: tomorrowAt("08:01:30") })).toEqual([]);
+      expect(await apiCallDigestPass({ now: tomorrowAt("23:00:00") })).toEqual([]);
+      expect(sent).toHaveLength(1);
+      for (const id of ["d-1", "d-2", "d-3", "d-4"]) expect((await pingsOf(id))[0]).toMatchObject({ status: "sent", mode: "digest" });
+      expect((await pingsOf("d-5"))[0]).toMatchObject({ status: "sent", mode: "line" });
+      expect((await pingsOf("d-6"))[0]).toMatchObject({ status: "skipped" });
+    }, 30_000);
+
+    it("a day with zero external calls sends nothing and is marked told", async () => {
+      await storeApiCalls([apiCall("z-1", 0, { userId: USER_KEVIN, email: "kevin@distribute.you" })], "run-1");
+      await pass(1);
+      const r = await apiCallDigestPass({ now: tomorrowAt("08:05:00") });
+      expect(r).toEqual([{ day: day(), status: "empty", calls: 0, people: 0 }]);
+      expect(sent).toHaveLength(0);
+      const [row] = await db.select().from(apiCallDigests);
+      expect(row).toMatchObject({ day: day(), status: "empty" });
+    }, 30_000);
+
+    it("a failed send is retried later, then sent once", async () => {
+      await storeApiCalls([apiCall("t-1", 0)], "run-1");
+      await pass(1);
+      telegramDown = true;
+      expect((await apiCallDigestPass({ now: tomorrowAt("08:00:00") }))[0].status).toBe("failed");
+      telegramDown = false;
+      expect(await apiCallDigestPass({ now: tomorrowAt("08:00:30") })).toEqual([]); // still in its backoff
+      expect((await apiCallDigestPass({ now: tomorrowAt("08:10:00") }))[0].status).toBe("sent");
+      expect(sent).toHaveLength(1);
+    }, 30_000);
+  });
 });

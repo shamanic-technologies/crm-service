@@ -659,6 +659,13 @@
       "when": 1794672800000,
       "tag": "0094_matrix_send_channel",
       "breakpoints": true
+    },
+    {
+      "idx": 95,
+      "version": "7",
+      "when": 1794772800000,
+      "tag": "0095_api_call_digest",
+      "breakpoints": true
     }
   ]
 }
