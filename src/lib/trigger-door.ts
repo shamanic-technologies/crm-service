@@ -1,7 +1,7 @@
 /**
  * campaign-service's generic trigger door (`POST /internal/trigger-events`), the
  * ONE way crm-service tells campaign-service "this happened to this person"
- * (named by email, else by E.164 phone: `doorPersonKey`):
+ * (named by email, else by E.164 phone, else by messaging handle: `doorPersonKey`):
  * a new CRM form fill (`form_submitted`, lib/form-trigger/) and a person
  * answering a thread a campaign opened on a personal channel
  * (`positive_reply_received`, lib/reply-trigger/). Nothing here is specific to
@@ -41,16 +41,41 @@ export function dialablePhone(phones: (string | null | undefined)[]): string | n
 }
 
 /**
- * How the door names a person (campaign-service v0.75.81, any trigger): by
- * email when one is held, else by an E.164 phone (`+` + country code). The
- * phone travels only when it is DIALABLE (`dialablePhone`): a national number
- * carries no country, an impossible one reaches nobody. Null = neither: nobody
- * campaign-service can file. Never an email made up from a phone.
+ * A messaging handle the door accepts (LEAD-REPLY-CHANNEL-1127, campaign-service `person.handle`): the
+ * `msg:<network>:<id>` key the people layer states to human-service (`handleKey`), network a lowercase token.
+ * Any network, never a rule on which. Null when the value is no such handle (logged, never offered).
  */
-export function doorPersonKey(email: string | null | undefined, phone: string | null | undefined): { email: string | null; phone: string | null } | null {
+const DOOR_HANDLE_RE = /^msg:[a-z0-9][a-z0-9_.-]{0,49}:\S.{0,248}$/;
+export function doorHandle(handles: (string | null | undefined)[]): string | null {
+  for (const raw of handles) {
+    if (!raw) continue;
+    const h = raw.trim();
+    if (DOOR_HANDLE_RE.test(h)) return h;
+    console.warn(`[crm-service][trigger-door] handle ${JSON.stringify(raw)} is not a messaging handle the door accepts: never offered to campaign-service`);
+  }
+  return null;
+}
+
+/**
+ * How the door names a person (campaign-service v0.75.81, any trigger): by
+ * email when one is held, else by an E.164 phone (`+` + country code), else
+ * (LEAD-REPLY-CHANNEL-1127) by their messaging handle `msg:<network>:<id>`. The
+ * phone travels only when it is DIALABLE (`dialablePhone`): a national number
+ * carries no country, an impossible one reaches nobody. The handle travels only
+ * when neither an email nor a dialable phone names them (an email / phone body
+ * stays byte-identical). Null = none of the three: nobody campaign-service can
+ * file. Never an email or a phone made up from a handle.
+ */
+export function doorPersonKey(
+  email: string | null | undefined,
+  phone: string | null | undefined,
+  handles: (string | null | undefined)[] = [],
+): { email: string | null; phone: string | null; handle: string | null } | null {
   const dial = dialablePhone([phone]);
-  if (email) return { email, phone: dial };
-  return dial ? { email: null, phone: dial } : null;
+  if (email) return { email, phone: dial, handle: null };
+  if (dial) return { email: null, phone: dial, handle: null };
+  const handle = doorHandle(handles);
+  return handle ? { email: null, phone: null, handle } : null;
 }
 
 export interface DoorIdentity {

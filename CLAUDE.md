@@ -1558,8 +1558,10 @@ new room.
   `GET /orgs/whatsapp/messages` + `/sends/query` read `channel = 'whatsapp'` only.
 - The WhatsApp routes stay (first outreach by phone, the pro_ai pick, the founder hello). A Lead event's `line.answeringLine`
   only names a line of the SAME app (`brandLines` reads the connection's channel).
-- ⚠️ A Telegram / LinkedIn writer known by NO email and NO phone is not reported to the door (`no_email_or_phone`:
-  campaign-service names a person by email or E.164 only). Known by either = a Lead event like WhatsApp.
+- A writer known by NO email and NO dialable phone (Telegram / LinkedIn, a WhatsApp LID) is a Lead event named by their
+  messaging handle (LEAD-REPLY-CHANNEL-1127-CRM, `trigger-door.ts doorPersonKey`): `person {handle: "msg:<network>:<id>"
+  (the thread's own, else the person's), humanId?, crmPersonId?}`, any network; an email / phone body never carries it
+  (byte-identical). `no_email_or_phone` only when none of the three. Never an email or phone made up from a handle.
 
 ## Form trigger — a new CRM form fill starts the AI meeting booking (`src/lib/form-trigger/`)
 
@@ -1740,7 +1742,8 @@ skip `person_not_admitted`), never filtered here. Same door as the form trigger 
 - **Body**: `person {email?, name?, phone?}` (email = the address our sends used when held, else the person's first;
   none = named by E.164 phone + name, REPLY-PHONE-ONLY-1015: most WhatsApp writers hold no email, campaign-service
   v0.75.81 accepts it; neither = `no_email_or_phone`, older rows `no_email`. ONE rule for every trigger:
-  `trigger-door.ts` `doorPersonKey`; never an email made up from a phone) + `item {kind: "reply", source, channel, campaignId (null = no campaign wrote), openedBy
+  `trigger-door.ts` `doorPersonKey`; never an email made up from a phone; neither but a messaging handle = named by
+  `handle` + `humanId` + `crmPersonId`, LEAD-REPLY-CHANNEL-1127-CRM) + `item {kind: "reply", source, channel, campaignId (null = no campaign wrote), openedBy
   campaign|not_campaign, personId, conversationId, roomId, firstMessageAt, lastMessageAt, messages, line, sender, thread}`
   (latest 10, 2000 chars each). Delivery waits until `people` hold the conversation (`person_not_built` → rebuild → deliver).
   Retries 1→60 min for 24h; 400/422 final. Read: `GET /orgs/matrix/reply-triggers?brandId=`.
