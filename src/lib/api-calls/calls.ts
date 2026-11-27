@@ -187,19 +187,16 @@ export async function readApiCallPresenceRows(orgId: string, brandId: string) {
     .where(and(eq(apiCalls.orgId, orgId), eq(apiCalls.brandId, brandId)));
 }
 
-/** Everything a thread item needs: the bodies only to summarise them, never served whole on the thread. */
-export async function readApiCallThread(
-  orgId: string,
-  brandId: string,
-  emails: string[],
-  opts: { withoutBodies?: boolean } = {},
-): Promise<ApiCall[]> {
+/**
+ * Everything a thread item needs, WITHOUT the request / response bodies (CRM-TIMELINE-OOM-1127): the
+ * staff person carries 39k calls and 723 MB of stored answers; one whole-thread read loading them took
+ * crm-service down for every caller (V8 heap out of memory, then the kernel's OOM kill, 2026-11-27).
+ * The answers are summarised afterwards in bounded batches (`describeApiAnswers`). Never select the
+ * bodies of a whole thread again.
+ */
+export async function readApiCallThread(orgId: string, brandId: string, emails: string[]): Promise<ApiCall[]> {
   if (!isCopilotDestination(orgId, brandId) || emails.length === 0) return [];
-  // withoutBodies (a paged thread read, DASH-LATENCY-1014): the request / response bodies stay
-  // in the database (null here); the page's answers are summarised from them afterwards.
-  const columns = opts.withoutBodies
-    ? { ...getTableColumns(apiCalls), requestBody: sql<string | null>`NULL::text`, responseBody: sql<string | null>`NULL::text` }
-    : getTableColumns(apiCalls);
+  const columns = { ...getTableColumns(apiCalls), requestBody: sql<string | null>`NULL::text`, responseBody: sql<string | null>`NULL::text` };
   return db
     .select(columns)
     .from(apiCalls)
@@ -211,6 +208,34 @@ export async function readApiCallThread(
       ),
     )
     .orderBy(asc(apiCalls.calledAt), asc(apiCalls.id));
+}
+
+/** Calls whose stored answers are read at once: <= 200 x 256 KB in memory, whatever the thread's size. */
+export const API_ANSWER_BATCH = 200;
+
+/**
+ * The plain-words answer of each call (`describeResponse`), read from the stored response bodies
+ * API_ANSWER_BATCH calls at a time, each batch released before the next is read. A call no longer
+ * stored is absent from the map.
+ */
+export async function describeApiAnswers(orgId: string, brandId: string, callIds: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const ids = [...new Set(callIds)];
+  for (let i = 0; i < ids.length; i += API_ANSWER_BATCH) {
+    const rows = await db
+      .select({
+        callId: apiCalls.callId,
+        status: apiCalls.status,
+        responseBody: apiCalls.responseBody,
+        responseBodyBytes: apiCalls.responseBodyBytes,
+        responseBodyTruncated: apiCalls.responseBodyTruncated,
+        durationMs: apiCalls.durationMs,
+      })
+      .from(apiCalls)
+      .where(and(eq(apiCalls.orgId, orgId), eq(apiCalls.brandId, brandId), inArray(apiCalls.callId, ids.slice(i, i + API_ANSWER_BATCH))));
+    for (const r of rows) out.set(r.callId, describeResponse(r));
+  }
+  return out;
 }
 
 /** One call, whole (request and response as stored), in the staff scope only. */

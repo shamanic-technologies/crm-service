@@ -6,6 +6,7 @@ import { db } from "../../src/db/index.js";
 import { apiCalls, people } from "../../src/db/schema.js";
 import { ensureScope, runScopeBuild } from "../../src/lib/people/build.js";
 import apiCallsRoutes from "../../src/routes/api-calls.js";
+import { API_ANSWER_BATCH, readApiCallThread } from "../../src/lib/api-calls/calls.js";
 import peopleRoutes from "../../src/routes/people.js";
 import { noLeadsByAddress } from "../helpers/lead-by-address.js";
 
@@ -179,6 +180,35 @@ describe.skipIf(!RUN)("API / MCP calls on the staff Unibox", () => {
       response: { status: 200, body: JSON.stringify({ emails: [{ id: "e1" }, { id: "e2" }] }), bodyTruncated: false },
     });
   }, 30_000);
+
+  it("a thread holding more calls than one answer batch is summarised whole, bodies never selected with the thread (CRM-TIMELINE-OOM-1127)", async () => {
+    const n = API_ANSWER_BATCH + 5;
+    const all = Array.from({ length: n }, (_, i) =>
+      call({
+        callId: `oom-${String(i).padStart(4, "0")}`,
+        requestId: `oom-req-${i}`,
+        at: new Date(Date.parse("2026-10-12T10:00:00.000Z") + i * 1000).toISOString(),
+        responseBody: JSON.stringify({ emails: Array.from({ length: (i % 3) + 1 }, (_, k) => ({ id: `e${k}` })) }),
+      }),
+    );
+    for (let i = 0; i < all.length; i += 100) expect((await push(all.slice(i, i + 100))).status).toBe(200);
+
+    const rows = await readApiCallThread(STAFF_ORG, BRAND, ["jane@prospect.io"]);
+    expect(rows).toHaveLength(n);
+    expect(rows.every((r) => r.requestBody === null && r.responseBody === null)).toBe(true);
+
+    const { scope } = await ensureScope(STAFF_ORG, BRAND, USER);
+    expect((await runScopeBuild(scope)).ok).toBe(true);
+    const tl = await timeline(STAFF_ORG);
+    expect(tl.status).toBe(200);
+    const answers = tl.body.items.filter((i: { source: string; direction: string }) => i.source === "api" && i.direction === "outbound");
+    expect(answers).toHaveLength(n);
+    answers.forEach((a: { text: string; ref: { callId: string } }) => {
+      const i = Number(a.ref.callId.slice(4));
+      const k = (i % 3) + 1;
+      expect(a.text).toBe(`Answered: ${k} emails (200, 120 ms)`);
+    });
+  }, 60_000);
 
   it("a customer org carrying the same brand id sees nothing", async () => {
     await push([call({ callId: "call-9" })]);

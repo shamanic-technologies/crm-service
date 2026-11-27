@@ -10,8 +10,8 @@
  */
 import { inArray, and, eq, or } from "drizzle-orm";
 import { db } from "../../db/index.js";
-import { apiCalls, peopleMessageTexts } from "../../db/schema.js";
-import { describeResponse } from "../api-calls/calls.js";
+import { peopleMessageTexts } from "../../db/schema.js";
+import { describeApiAnswers } from "../api-calls/calls.js";
 import type { TimelineItem } from "./timeline.js";
 
 /**
@@ -112,22 +112,11 @@ export async function completeItems(items: TimelineItem[]): Promise<void> {
     (async () => {
       if (api.size === 0) return;
       const [{ orgId, brandId }] = [...api.values()];
-      const rows = await db
-        .select({
-          callId: apiCalls.callId,
-          status: apiCalls.status,
-          responseBody: apiCalls.responseBody,
-          responseBodyBytes: apiCalls.responseBodyBytes,
-          responseBodyTruncated: apiCalls.responseBodyTruncated,
-          durationMs: apiCalls.durationMs,
-        })
-        .from(apiCalls)
-        .where(and(eq(apiCalls.orgId, orgId), eq(apiCalls.brandId, brandId), inArray(apiCalls.callId, [...api.keys()])));
-      const byCall = new Map(rows.map((r) => [r.callId, r]));
+      const answers = await describeApiAnswers(orgId, brandId, [...api.keys()]);
       for (const [callId, e] of api) {
-        const call = byCall.get(callId);
+        const text = answers.get(callId);
         for (const it of e.items) {
-          if (call) it.text = describeResponse(call);
+          if (text !== undefined) it.text = text;
           pending.delete(it);
         }
       }
