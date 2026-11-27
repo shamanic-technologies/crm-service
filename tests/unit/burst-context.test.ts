@@ -46,12 +46,21 @@ describe("JEV-WHOLE-THREAD-1109: what Jev reads to judge a burst", () => {
     ]);
   });
 
-  it("the thread is cut to Jev's context: the oldest go first, the new ones never", () => {
+  it("the thread is cut to Jev's context: the oldest go first, the new ones last", () => {
     const line = (i: number, isNew = false): BurstThreadLine => ({ at: null, byThePerson: true, text: `m${i} ${"x".repeat(1000)}`, ...(isNew ? { new: true } : {}) });
     const thread = [...Array.from({ length: 10 }, (_, i) => line(i)), line(10, true)];
     const { lines, olderOmitted } = fitThread(thread, 4 * 1300);
     expect(lines.map((l) => l.text.split(" ")[0])).toEqual(["m7", "m8", "m9", "m10"]);
     expect(olderOmitted).toBe(7);
+  });
+
+  it("MON-REPLY-TRIGGER-1127: new messages alone over the budget keep the latest new ones (94 unanswered newsletters overflowed Jev)", () => {
+    const line = (i: number): BurstThreadLine => ({ at: null, byThePerson: true, text: `m${i} ${"x".repeat(1000)}`, new: true });
+    const { lines, olderOmitted } = fitThread(Array.from({ length: 10 }, (_, i) => line(i)), 3 * 1300);
+    expect(lines.map((l) => l.text.split(" ")[0])).toEqual(["m7", "m8", "m9"]);
+    expect(olderOmitted).toBe(7);
+    // One new message larger than the whole budget is still judged.
+    expect(fitThread([line(0)], 10).lines).toHaveLength(1);
   });
 
   it("Jev's 'not written to this business' skips the burst; a positive reply still rings", () => {

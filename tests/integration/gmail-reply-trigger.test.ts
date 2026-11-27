@@ -207,6 +207,21 @@ describe.skipIf(!RUN)("Gmail reply trigger", () => {
     expect(row).toMatchObject({ status: "reported", source: "gmail", channel: "email", address: PERSON, email: PERSON, offerBasis: "only_offer" });
   });
 
+  it("MON-REPLY-TRIGGER-1127: a burst opening on a mail older than a day is still delivered (retry window from detection)", async () => {
+    scope = await startWatch(scope);
+    const threeDaysAgo = new Date(Date.now() - 3 * 86_400_000);
+    await db.update(peopleScopes).set({ gmailReplyWatchSince: threeDaysAgo }).where(eq(peopleScopes.id, scope.id));
+    [scope] = await db.select().from(peopleScopes).where(eq(peopleScopes.id, scope.id));
+    await mail(scope.id, "m-old", new Date(Date.now() - 2 * 86_400_000), "Hi, would you be interested?");
+    await mail(scope.id, "m-new", min(1), "Following up on my note.");
+
+    expect((await detectGmailReplies(scope, run1)).detected).toBe(1);
+    await deliverDueGmailReplies();
+    expect(campaignCalls).toHaveLength(1);
+    const [row] = await reports();
+    expect(row).toMatchObject({ status: "reported", anchorEventId: "m-old", attempts: 1 });
+  });
+
   it("an answer typed by us ends the burst: the person's next mail is a new report", async () => {
     scope = await startWatch(scope);
     await mail(scope.id, "m1", min(1), "Is this still available?");

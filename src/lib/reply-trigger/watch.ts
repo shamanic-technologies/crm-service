@@ -107,6 +107,11 @@ export const MESSAGE_RECEIVED_TRIGGER = "message_received";
 
 /** A thread is re-read while it moved in this window (a failed pass heals on the next). */
 export const REPLY_LOOKBACK_MS = 24 * 3_600_000;
+/**
+ * A recorded burst is retried for this long after it was DETECTED (MON-REPLY-TRIGGER-1127). Keyed on `detected_at`,
+ * never on the burst's first message: a burst that opens on an old mail (a stranger's month of unanswered mail, read
+ * the first time on 2026-11-26) was recorded `pending` already outside a first-message window and never attempted.
+ */
 export const REPORT_RETRY_WINDOW_MS = 24 * 3_600_000;
 const MAX_BACKOFF_MS = 60 * 60_000;
 const IN_FLIGHT_MS = 2 * 60_000;
@@ -1086,7 +1091,7 @@ export async function dueReports(now: number, source: string): Promise<ReplyTrig
         eq(replyTriggerReports.source, source),
         inArray(replyTriggerReports.status, [REPLY_STATUS.PENDING, REPLY_STATUS.FAILED]),
         or(isNull(replyTriggerReports.reason), ne(replyTriggerReports.reason, REPLY_REASONS.CAMPAIGN_REFUSED)),
-        gt(replyTriggerReports.firstMessageAt, new Date(now - REPORT_RETRY_WINDOW_MS)),
+        gt(replyTriggerReports.detectedAt, new Date(now - REPORT_RETRY_WINDOW_MS)),
       ),
     )
     .orderBy(replyTriggerReports.firstMessageAt, replyTriggerReports.id);
