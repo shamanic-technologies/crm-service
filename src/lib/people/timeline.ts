@@ -86,8 +86,8 @@ import {
 import {
   API_SENDER_NAME,
   describeRequest,
-  describeResponse,
   readApiCallThread,
+  describeApiAnswers,
   sessionsOf,
 } from "../api-calls/calls.js";
 import { siblingGetOk } from "./siblings.js";
@@ -860,7 +860,9 @@ export async function apiCallItems(
   if (!isCopilotDestination(person.orgId, person.brandId)) return notConnected();
   const emails = person.emails as string[];
   // deferAnswers (paged read): the answer summary is computed for the page's items only (item-fill.ts).
-  const rows = await readApiCallThread(person.orgId, person.brandId, emails, { withoutBodies: opts.deferAnswers });
+  const rows = await readApiCallThread(person.orgId, person.brandId, emails);
+  // A whole read summarises every answer, in bounded batches (CRM-TIMELINE-OOM-1127).
+  const answers = opts.deferAnswers ? null : await describeApiAnswers(person.orgId, person.brandId, rows.map((r) => r.callId));
   const sessions = sessionsOf(rows);
   const brandNames = await brandNamesFor([...new Set(rows.flatMap((r) => (r.brandIds as string[]) ?? []))], identity);
   const items = rows.flatMap((c): TimelineItem[] => {
@@ -884,7 +886,7 @@ export async function apiCallItems(
       kind: "message",
       direction: "outbound",
       subject: null,
-      text: opts.deferAnswers ? null : describeResponse(c),
+      text: answers ? (answers.get(c.callId) ?? null) : null,
       from: API_SENDER_NAME,
       to: [c.email],
       ref,

@@ -2389,6 +2389,11 @@ skippedNoEmail }`; 503 when the staff scope is unset. Idempotent on `callId`.
   (`GET /orgs/people/api-calls/{callId}?brandId=`), `ref.sessionId` = first call of a
   burst (same channel, gaps under 30 min).
 - No cost (platform run), no facts, not in the message search index. Owner Telegram: one daily digest (below).
+- **A thread read never selects the bodies** (CRM-TIMELINE-OOM-1127): `readApiCallThread` returns calls with request /
+  response bodies NULL; answers are summarised by `describeApiAnswers`, 200 calls at a time (each batch released). Prod
+  2026-11-27: the staff person holds 39k calls / 723 MB of stored answers; one whole-thread read without `excludeSources=api`
+  OOM'd crm-service twice for every caller (V8 heap fatal, then a SILENT kernel kill: exit 137, docker `oom` event, no log
+  line; the container cap is 2 GB and worker threads hold their own heaps).
 
 ## Credit ran out / restored — the staff Unibox's account events (`src/lib/credit-events/`, CREDIT-RAN-OUT-UNIBOX-EVENT-1024)
 
