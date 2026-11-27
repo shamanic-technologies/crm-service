@@ -2090,6 +2090,12 @@ opens a scope or builds, no vendor call, no model, no cost.
   reasons[], reachedFrom, reachedTo (+ toBeforeFrom), excluded {contactedByUs,
   automated, notBusiness} }`. Each end = `{ people, undated, byDay [{day (UTC),
   people}], sources [{source, people}] }`; `byDay` sum + `undated` = `people`.
+- **Load (CRM-LEG-REACH-LOAD-1127)**: ONE statement per computation (the evidence CTE read once; it was 7 parallel
+  statements each re-scanning ~260k facts, 15-28 s each on distribute.you), counts cached per (org, brand, from, to)
+  (`LEG_REACH_COUNTS_FRESH_MS` 2 min, stale up to 15 min while ONE refresh runs: identical reads never stack), and at
+  most `LEG_REACH_MAX_CONCURRENT` (2) computations at once process-wide. Prod 2026-11-27: features-service's 4 legs per
+  brand x 7 filled the 10-connection pool, Postgres at ~1200 % CPU and every Unibox thread read timed out at the gateway.
+  Never send these statements in parallel again (pinned in `tests/integration/people-leg-reach.test.ts`).
 - `GET /internal/people/leg-reach/brands` → every people scope with `connectedSources`
   + `recordedSteps` (the steps a leg can start or end on): the fleet scope.
 - **`lead_found`** (FROM only; TO = `to_step_not_recorded`): every person the people

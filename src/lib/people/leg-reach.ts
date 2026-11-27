@@ -327,8 +327,7 @@ export async function readLegReach(brandId: string, orgId: string | null, from: 
   if (reasons.length > 0 || !scope) {
     return { ...base, available: false, reason: reasons[0].code, reasons };
   }
-  const served = await cachedServedEmails(scope.orgId, brandId, scope.createdByUserId);
-  const counts = await countLeg(scope.orgId, brandId, from, to, served);
+  const counts = await cachedLegCounts(scope, brandId, from, to);
   return { ...base, available: true, reason: null, reasons: [], ...counts };
 }
 
@@ -399,6 +398,54 @@ function cachedServedEmails(orgId: string, brandId: string, userId: string): Pro
 /** Tests: forget the cached served lists. */
 export function clearLegReachCache(): void {
   servedCache.clear();
+  countsCache.clear();
+}
+
+/**
+ * CRM-LEG-REACH-LOAD-1127: one read of a distribute.you leg scanned ~260k live facts for 10-15 s, and features-service
+ * asks 4 legs at once per brand, from several catalogue / pipe-stats reads at once: 11-14 copies of the same heavy query
+ * held the shared Postgres at ~1200 % CPU (prod 2026-11-27). So the counts of one (org, brand, from, to) are:
+ *  - cached (stale-while-revalidate, `LEG_REACH_COUNTS_FRESH_MS` 2 min fresh, served up to
+ *    `LEG_REACH_COUNTS_MAX_STALE_MS` 15 min while ONE refresh runs): identical reads share ONE computation, never N;
+ *  - computed under a process-wide cap (`LEG_REACH_MAX_CONCURRENT`, 2): distinct legs queue in crm, never on the database.
+ * Same figures: only WHEN they are computed changes (features-service caches each answer 5 min anyway).
+ */
+const countsFreshMs = () => Number(process.env.LEG_REACH_COUNTS_FRESH_MS) || 120_000;
+const countsMaxStaleMs = () => Number(process.env.LEG_REACH_COUNTS_MAX_STALE_MS) || 900_000;
+type LegCounts = Awaited<ReturnType<typeof countLeg>>;
+const countsCache = new SwrCache<LegCounts>("leg reach counts", countsFreshMs, countsMaxStaleMs, { maxEntries: 500 });
+
+const maxConcurrent = () => Math.max(1, Number(process.env.LEG_REACH_MAX_CONCURRENT) || 2);
+let running = 0;
+const waiting: (() => void)[] = [];
+
+/** Run `work` once fewer than `maxConcurrent()` leg computations are running (FIFO). */
+async function withLegSlot<T>(work: () => Promise<T>): Promise<T> {
+  if (running >= maxConcurrent()) await new Promise<void>((resolve) => waiting.push(resolve));
+  running++;
+  try {
+    return await work();
+  } finally {
+    running--;
+    waiting.shift()?.();
+  }
+}
+
+/** Tests: how many leg count computations ran (the heavy query), since the last reset. */
+export const legCountStats = { computed: 0, maxRunning: 0 };
+/** Tests: work run inside a slot before the count (a slow query standing for prod's 15-200 s one). */
+export const legCountTestHooks: { inSlot?: () => Promise<void> } = {};
+
+function cachedLegCounts(scope: ScopeRow, brandId: string, from: LegStep, to: LegStep): Promise<LegCounts> {
+  return countsCache.get(`${scope.orgId}|${brandId}|${from}|${to}`, () =>
+    withLegSlot(async () => {
+      legCountStats.computed++;
+      legCountStats.maxRunning = Math.max(legCountStats.maxRunning, running);
+      if (legCountTestHooks.inSlot) await legCountTestHooks.inSlot();
+      const served = await cachedServedEmails(scope.orgId, brandId, scope.createdByUserId);
+      return countLeg(scope.orgId, brandId, from, to, served);
+    }),
+  );
 }
 
 async function countLeg(orgId: string, brandId: string, from: LegStep, to: LegStep, served: string[]) {
@@ -442,28 +489,47 @@ async function countLeg(orgId: string, brandId: string, from: LegStep, to: LegSt
     )
   `;
   const day = (col: string) => sql.raw(`to_char(${col} AT TIME ZONE 'UTC', 'YYYY-MM-DD')`);
-  const [excluded, fromDays, fromSources, toDays, toSources, before, toCohort] = await Promise.all([
-    rows<{ contacted: number; automated: number; not_business: number; group_only: number }>(sql`${base}
-      SELECT count(*) FILTER (WHERE contacted)::int AS contacted,
-             count(*) FILTER (WHERE NOT contacted AND automated)::int AS automated,
-             count(*) FILTER (WHERE NOT contacted AND NOT automated AND not_business)::int AS not_business,
-             count(*) FILTER (WHERE NOT contacted AND NOT automated AND NOT not_business AND group_only)::int AS group_only
-      FROM tagged`),
-    rows<{ day: string | null; people: number }>(sql`${base}
-      SELECT ${day("from_at")} AS day, count(*)::int AS people FROM pop GROUP BY 1 ORDER BY 1 NULLS LAST`),
-    rows<{ source: string; people: number }>(sql`${base}
-      SELECT e.source, count(DISTINCT e.pk)::int AS people
-      FROM e JOIN pop ON pop.pk = e.pk WHERE e.end_ = 'from' GROUP BY e.source ORDER BY people DESC, e.source`),
-    rows<{ day: string | null; people: number }>(sql`${base}
-      SELECT ${day("to_at")} AS day, count(*)::int AS people FROM toers GROUP BY 1 ORDER BY 1 NULLS LAST`),
-    rows<{ source: string; people: number }>(sql`${base}
-      SELECT source, count(DISTINCT pk)::int AS people FROM to_ev WHERE counts GROUP BY source ORDER BY people DESC, source`),
-    rows<{ n: number }>(sql`${base}
-      SELECT count(DISTINCT pk)::int AS n FROM to_ev WHERE pk NOT IN (SELECT pk FROM toers)`),
-    rows<{ day: string | null; people: number }>(sql`${base}
-      SELECT ${day("pop.from_at")} AS day, count(*)::int AS people
-      FROM toers JOIN pop ON pop.pk = toers.pk GROUP BY 1 ORDER BY 1 NULLS LAST`),
-  ]);
+  // ONE statement (CRM-LEG-REACH-LOAD-1127): the evidence CTE is computed once and every figure is read off it.
+  // It was seven statements sent in parallel, each re-scanning the same facts: 7 heavy queries per read.
+  const list = (inner: SQL, order: SQL) => sql`(SELECT COALESCE(json_agg(x ORDER BY ${order}), '[]'::json) FROM (${inner}) x)`;
+  const [one] = await rows<{
+    excluded: { contacted: number; automated: number; not_business: number; group_only: number };
+    from_days: { day: string | null; people: number }[];
+    from_sources: { source: string; people: number }[];
+    to_days: { day: string | null; people: number }[];
+    to_sources: { source: string; people: number }[];
+    before: number;
+    to_cohort: { day: string | null; people: number }[];
+  }>(sql`${base}
+    SELECT
+      (SELECT json_build_object(
+         'contacted', count(*) FILTER (WHERE contacted)::int,
+         'automated', count(*) FILTER (WHERE NOT contacted AND automated)::int,
+         'not_business', count(*) FILTER (WHERE NOT contacted AND NOT automated AND not_business)::int,
+         'group_only', count(*) FILTER (WHERE NOT contacted AND NOT automated AND NOT not_business AND group_only)::int)
+       FROM tagged) AS excluded,
+      ${list(sql`SELECT ${day("from_at")} AS day, count(*)::int AS people FROM pop GROUP BY 1`, sql`x.day NULLS LAST`)} AS from_days,
+      ${list(
+        sql`SELECT e.source, count(DISTINCT e.pk)::int AS people FROM e JOIN pop ON pop.pk = e.pk WHERE e.end_ = 'from' GROUP BY e.source`,
+        sql`x.people DESC, x.source`,
+      )} AS from_sources,
+      ${list(sql`SELECT ${day("to_at")} AS day, count(*)::int AS people FROM toers GROUP BY 1`, sql`x.day NULLS LAST`)} AS to_days,
+      ${list(
+        sql`SELECT source, count(DISTINCT pk)::int AS people FROM to_ev WHERE counts GROUP BY source`,
+        sql`x.people DESC, x.source`,
+      )} AS to_sources,
+      (SELECT count(DISTINCT pk)::int FROM to_ev WHERE pk NOT IN (SELECT pk FROM toers)) AS before,
+      ${list(
+        sql`SELECT ${day("pop.from_at")} AS day, count(*)::int AS people FROM toers JOIN pop ON pop.pk = toers.pk GROUP BY 1`,
+        sql`x.day NULLS LAST`,
+      )} AS to_cohort`);
+  const excluded = [one.excluded];
+  const fromDays = one.from_days;
+  const fromSources = one.from_sources;
+  const toDays = one.to_days;
+  const toSources = one.to_sources;
+  const before = [{ n: one.before }];
+  const toCohort = one.to_cohort;
   const end = (days: { day: string | null; people: number }[], sources: { source: string; people: number }[]): LegEnd => ({
     people: days.reduce((n, d) => n + d.people, 0),
     undated: days.filter((d) => d.day === null).reduce((n, d) => n + d.people, 0),
