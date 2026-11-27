@@ -714,6 +714,8 @@ interface PersonRow {
   phones: string[];
   presences: Presence[];
   identityKeys: string[];
+  /** human-service's human (null until it answered, or for a person it was never stated). */
+  humanId: string | null;
 }
 
 /** The brand's merged person holding this mirrored conversation, or null when not built yet. */
@@ -726,6 +728,7 @@ async function personOfConversation(orgId: string, brandId: string, conversation
       phones: people.phones,
       presences: people.presences,
       identityKeys: people.identityKeys,
+      humanId: people.humanId,
     })
     .from(people)
     .where(
@@ -744,6 +747,7 @@ async function personOfConversation(orgId: string, brandId: string, conversation
     phones: row.phones as string[],
     presences: row.presences as Presence[],
     identityKeys: row.identityKeys as string[],
+    humanId: row.humanId ?? null,
   };
 }
 
@@ -893,8 +897,11 @@ export function replyOccurrenceBody(input: {
   brandId: string;
   offerId: string;
   report: Pick<ReplyTriggerReport, "anchorEventId" | "channel" | "campaignId" | "conversationId" | "roomId" | "source">;
-  /** Email when held; else `phone` is the E.164 number the door names them by (`doorPersonKey`). */
-  person: { email: string | null; name: string | null; phone: string | null; personId: string | null };
+  /**
+   * Email when held; else `phone` is the E.164 number the door names them by; else `handle` is their messaging
+   * handle `msg:<network>:<id>` (`doorPersonKey`, LEAD-REPLY-CHANNEL-1127), with `humanId` + the person id beside it.
+   */
+  person: { email: string | null; name: string | null; phone: string | null; personId: string | null; handle?: string | null; humanId?: string | null };
   messages: BurstMessage[];
   /** The line written to, the line answering (with its persona), who wrote, the thread before (./line-context.ts). */
   context?: LineContext;
@@ -903,6 +910,12 @@ export function replyOccurrenceBody(input: {
   if (input.person.email) person.email = input.person.email;
   if (input.person.name) person.name = input.person.name.slice(0, 300);
   if (input.person.phone) person.phone = input.person.phone.slice(0, 50);
+  // Named by neither: their messaging handle (LEAD-REPLY-CHANNEL-1127). An email / phone body stays byte-identical.
+  if (!input.person.email && !input.person.phone && input.person.handle) {
+    person.handle = input.person.handle;
+    if (input.person.humanId) person.humanId = input.person.humanId;
+    if (input.person.personId) person.crmPersonId = input.person.personId;
+  }
   // The latest words of a long burst: what there is to answer.
   const messages = input.messages.slice(-MAX_REPORT_MESSAGES);
   const first = messages[0];
@@ -1001,13 +1014,17 @@ export async function deliverReply(
   // The thread's own number first, else the person's: the first DIALABLE one (never an id read as a phone).
   const threadPhones = person.presences.find((p) => p.source === "matrix" && p.detail.conversationId === r.conversationId)?.phones ?? [];
   const phone = dialablePhone([...threadPhones, ...person.phones]);
-  // Named by email when held, else by their E.164 phone (a WhatsApp writer usually has only that).
-  const key = doorPersonKey(email, phone);
+  // The thread's own messaging handle first, else the person's (any network: a Telegram / LinkedIn writer often has
+  // nothing else, LEAD-REPLY-CHANNEL-1127).
+  const threadHandles = (person.presences.find((p) => p.source === "matrix" && p.detail.conversationId === r.conversationId)?.keys ?? []).filter((k) => k.startsWith("msg:"));
+  const handles = [...threadHandles, ...person.identityKeys.filter((k) => k.startsWith("msg:")).sort()];
+  // Named by email when held, else by their E.164 phone (a WhatsApp writer usually has only that), else by handle.
+  const key = doorPersonKey(email, phone, handles);
   const who = { personId: person.personId, fullName: person.displayName, email, phone: key?.phone ?? phone, conversationId: r.conversationId };
   if (!key) {
     console.warn(
       `[crm-service][reply-trigger] ${person.displayName ?? phone ?? "a person"} (brand ${r.brandId}) wrote${r.campaignId ? ` after campaign ${r.campaignId}` : ""} ` +
-        `on ${r.channel} but holds neither an email nor an international phone: not reported (campaign-service cannot name them). Report ${r.id}`,
+        `on ${r.channel} but holds neither an email, an international phone nor a messaging handle: not reported (campaign-service cannot name them). Report ${r.id}`,
     );
     await settle(r, now, { ...who, status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.NO_EMAIL_OR_PHONE, lastError: null, runId: identity.runId });
     return { status: REPLY_STATUS.SKIPPED, reason: REPLY_REASONS.NO_EMAIL_OR_PHONE };
@@ -1044,7 +1061,7 @@ export async function deliverReply(
     brandId: r.brandId,
     offerId,
     report: r,
-    person: { email: key.email, name: person.displayName, phone: key.phone, personId: person.personId },
+    person: { email: key.email, name: person.displayName, phone: key.phone, personId: person.personId, handle: key.handle, humanId: person.humanId },
     messages: inWords,
     context,
   });
@@ -1066,7 +1083,7 @@ export async function deliverReply(
       campaignOutcome: recorded.event,
     });
     console.log(
-      `[crm-service][reply-trigger] reported ${messages.length} message(s) as ${triggerId} from ${key.email ?? key.phone} (brand ${r.brandId}, offer ${offerId}, ` +
+      `[crm-service][reply-trigger] reported ${messages.length} message(s) as ${triggerId} from ${key.email ?? key.phone ?? key.handle} (brand ${r.brandId}, offer ${offerId}, ` +
         `campaign ${r.campaignId ?? "-"}, offer from ${offerBasis}) as event ${recorded.eventId}${recorded.replayed ? " (replayed)" : ""}: first message ` +
         `${messages[0].at}, detected ${r.detectedAt.toISOString()}, reported ${reportedAt.toISOString()}, outcome ` +
         `${String(recorded.event.outcome ?? recorded.event.status ?? "-")}${recorded.event.skipReason ? `/${String(recorded.event.skipReason)}` : ""}`,

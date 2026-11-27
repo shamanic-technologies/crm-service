@@ -166,6 +166,30 @@ describe("replyOccurrenceBody", () => {
     expect(body.triggerId).toBe("positive_reply_received");
   });
 
+  it("names a writer with neither email nor phone by handle + humanId + crmPersonId (LEAD-REPLY-CHANNEL-1127)", () => {
+    const body = replyOccurrenceBody({
+      triggerId: "message_received",
+      brandId: "b",
+      offerId: "of",
+      report: { anchorEventId: "$t", channel: "telegram", campaignId: null, conversationId: "c1", roomId: "!r", source: "matrix" },
+      person: { email: null, name: "Ana", phone: null, personId: "p1", handle: "msg:telegram:123456789", humanId: "h1" },
+      messages: [{ eventId: "$t", at: "2026-11-27T10:00:00.000Z", text: "Hi" }],
+    });
+    expect(body.person).toEqual({ name: "Ana", handle: "msg:telegram:123456789", humanId: "h1", crmPersonId: "p1" });
+  });
+
+  it("an email / phone-named body never carries the handle (byte-identical)", () => {
+    const body = replyOccurrenceBody({
+      triggerId: "message_received",
+      brandId: "b",
+      offerId: "of",
+      report: { anchorEventId: "$t", channel: "whatsapp", campaignId: null, conversationId: "c1", roomId: "!r", source: "matrix" },
+      person: { email: null, name: null, phone: "+447911123123", personId: "p1", handle: null, humanId: "h1" },
+      messages: [{ eventId: "$t", at: "2026-11-27T10:00:00.000Z", text: "Hi" }],
+    });
+    expect(body.person).toEqual({ phone: "+447911123123" });
+  });
+
   it("is campaign-service's strict body: positive_reply_received, person by email, the burst as item", () => {
     const body = replyOccurrenceBody({
       triggerId: "positive_reply_received",

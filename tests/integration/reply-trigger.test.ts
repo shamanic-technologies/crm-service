@@ -563,8 +563,31 @@ describe.skipIf(!RUN)("reply trigger", () => {
     const warn = vi.spyOn(console, "warn");
     await deliverDueReplies();
     expect(campaignCalls).toHaveLength(2);
-    expect(warn.mock.calls.some((c) => String(c[0]).includes("Kevin (WA)") && String(c[0]).includes("neither an email nor an international phone"))).toBe(true);
+    expect(warn.mock.calls.some((c) => String(c[0]).includes("Kevin (WA)") && String(c[0]).includes("neither an email, an international phone nor a messaging handle"))).toBe(true);
     expect((await reports()).find((r) => r.anchorEventId === "$n")).toMatchObject({ status: "skipped", reason: "no_email_or_phone" });
+
+    // Only a messaging handle (a Telegram / LinkedIn writer): reported by handle + humanId + our person id
+    // (LEAD-REPLY-CHANNEL-1127), never an email or a phone made up from it.
+    const HUMAN = "bbbbbbbb-9999-4999-8999-000000000001";
+    const [built] = await db.select({ personId: people.personId }).from(people).where(eq(people.brandId, BRAND));
+    await db
+      .update(people)
+      .set({ humanId: HUMAN, identityKeys: ["msg:telegram:123456789"], presences: [{ source: "matrix", sourceRef: "x", displayName: "Kevin (WA)", company: null, emails: [], phones: [],
+        keys: ["msg:telegram:123456789"], firstActivityAt: null, lastActivityAt: null, messageCount: 1, inboundCount: 1, outboundCount: 1, detail: { conversationId } }] })
+      .where(eq(people.brandId, BRAND));
+    await send("$r3", min(7), null);
+    await event("$r3", OWN, min(7), "answer");
+    await event("$h", GHOST, min(8), "handle only");
+    expect((await detectReplies(conn, run1)).detected).toBe(1);
+    await deliverDueReplies();
+    expect(campaignCalls).toHaveLength(3);
+    expect(campaignCalls[2].body.person).toEqual({
+      name: "Kevin (WA)",
+      handle: "msg:telegram:123456789",
+      humanId: HUMAN,
+      ...(built.personId ? { crmPersonId: built.personId } : {}),
+    });
+    expect((await reports()).find((r) => r.anchorEventId === "$h")).toMatchObject({ status: "reported", email: null, phone: null });
   });
 
   describe("every line is ONE path: every burst a person writes is ONE Lead event occurrence (ONE-AI-CONVERSES-1029)", () => {
