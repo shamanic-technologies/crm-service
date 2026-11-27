@@ -4421,6 +4421,132 @@ registry.registerPath({
   },
 });
 
+// ─── Conversation reach / send: answer a person in their own conversation, any bridged app (LEAD-REPLY-CHANNEL-1127) ───
+
+const ConversationPersonFields = {
+  brandId: z.string().uuid().optional().openapi({ description: "The brand. Or the x-brand-id header." }),
+  conversationId: z.string().uuid().optional().openapi({
+    description:
+      "The conversation to answer in: a Lead event's `item.conversationId` (a timeline item's `ref.conversationId`). Wins over `email` / `phone`. Without it, the person's conversation holding their LATEST message, any app.",
+  }),
+  email: z.string().optional().openapi({ description: "The person, by email (any address the brand's people index holds for them)." }),
+  phone: z.string().optional().openapi({ description: "The person, by phone, international form (+<country><number>)." }),
+};
+
+export const ConversationReachRequestSchema = registry.register(
+  "ConversationReachRequest",
+  z.object(ConversationPersonFields).openapi("ConversationReachRequest"),
+);
+
+const ConversationViewSchema = z.object({
+  conversationId: z.string().uuid(),
+  channel: z.string().openapi({ description: "The app the conversation is on (`whatsapp`, `telegram`, `linkedin`, ...), as the linked account's connection states it." }),
+  roomId: z.string(),
+  phone: z.string().nullable().openapi({ description: "The person's number when the conversation itself states one (a WhatsApp conversation does), E.164." }),
+  name: z.string().nullable().openapi({ description: "The person's name as the app shows it." }),
+  lastInboundAt: z.string().nullable().openapi({ description: "When the person last wrote in it (ISO)." }),
+});
+
+const ConversationAccountSchema = z.object({
+  linkId: z.string().uuid().nullable(),
+  account: z.string().nullable().openapi({ description: "The brand's account holding the conversation, as the app names it (a number in E.164 on WhatsApp / Telegram, a member id on LinkedIn)." }),
+  accountName: z.string().nullable(),
+  accountType: z.enum(["pro_human", "personal_human", "pro_ai"]).nullable().openapi({ description: "The type the brand gave the account (ACCOUNT-TYPES-1028), null when not typed." }),
+  persona: SenderPersonaSchema,
+});
+
+const CONVERSATION_REFUSAL_CODE_LIST = [
+  "no_conversation",
+  "automation_not_allowed",
+  "account_not_linked",
+  "account_not_connected",
+  "human_in_conversation",
+  "stated_not_to_brand",
+] as const;
+
+export const ConversationReachResponseSchema = registry.register(
+  "ConversationReachResponse",
+  z
+    .union([
+      z.object({ reachable: z.literal(true), conversation: ConversationViewSchema, fromAccount: ConversationAccountSchema }),
+      z.object({
+        reachable: z.literal(false),
+        code: z.enum(CONVERSATION_REFUSAL_CODE_LIST).openapi({
+          description:
+            "`no_conversation` (the person never wrote on a linked account, or the conversation named is not the brand's) | `automation_not_allowed` (the account holding it is a personal line or the brand turned automated sends off on it: nothing is ever written from another account or app in its place) | `account_not_linked` | `account_not_connected` (the app logged the account out) | `human_in_conversation` (someone of the brand typed to them by hand on that account, not a pro_ai one) | `stated_not_to_brand`.",
+        }),
+        error: z.string().openapi({ description: "The reason in plain words, naming the app and the account." }),
+        conversation: ConversationViewSchema.nullable().openapi({ description: "The conversation the answer is about, when one was found." }),
+        fromAccount: ConversationAccountSchema.nullable(),
+      }),
+    ])
+    .openapi("ConversationReachResponse"),
+);
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/conversations/reach",
+  summary: "Can automation answer this person in their own conversation (any bridged app), and from which account? (checks only)",
+  description:
+    "LEAD-REPLY-CHANNEL-1127. Finds the conversation (the one named by `conversationId`, else the person's conversation holding their latest message on ANY app the brand links: WhatsApp, Telegram, LinkedIn...) and runs every check of POST /orgs/conversations/messages without sending: the account HOLDING the conversation must allow automated sends and not be a personal line (ACCOUNT-TYPES-1028), no human of the brand typed to the person by hand on it (a pro_ai account excepted), the brand never stated the person is not theirs, and the app has not logged the account out. Never another account or another app: the answer is about that one conversation. No message, no row, no cost. Requires x-api-key, x-org-id; brand from body or x-brand-id.",
+  request: { body: { content: { "application/json": { schema: ConversationReachRequestSchema } }, required: true } },
+  responses: {
+    200: { description: "Reachable (the conversation + the account that writes) or not (a named code)", content: { "application/json": { schema: ConversationReachResponseSchema } } },
+    400: { description: "Bad request (`code: invalid_request`)", content: { "application/json": { schema: ErrorResponseSchema } } },
+    502: { description: "The app's bridge failed (`code: bridge_error`), or run tracking failed", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
+export const ConversationSendRequestSchema = registry.register(
+  "ConversationSendRequest",
+  z
+    .object({
+      ...ConversationPersonFields,
+      text: z.string().min(1).max(4096).optional().openapi({ description: "ONE message. Exactly one of `text` or `messages`." }),
+      messages: z.array(z.string().min(1).max(4096)).min(1).max(5).optional().openapi({
+        description: "1 to 5 short messages, sent in order into the same conversation, a few seconds apart with typing shown between them (as on POST /orgs/whatsapp/messages).",
+      }),
+      idempotencyKey: z.string().min(1).max(200).openapi({ description: "A retry with the same key answers the first outcome and never sends twice (shared key space with POST /orgs/whatsapp/messages)." }),
+      replyToEventId: z.string().min(1).max(255).optional().openapi({ description: "Quote this message of the conversation (the app's « Reply »). Not in the conversation = sent without the quote, `replyTo.quoted` false." }),
+    })
+    .refine((b) => (b.text === undefined) !== (b.messages === undefined), { message: "exactly one of `text` or `messages` is required" })
+    .openapi("ConversationSendRequest"),
+);
+
+export const ConversationSendResponseSchema = registry.register(
+  "ConversationSendResponse",
+  z
+    .object({
+      reachable: z.literal(true),
+      conversation: ConversationViewSchema,
+      fromAccount: ConversationAccountSchema,
+      sendId: z.string().uuid(),
+      status: z.literal("sent"),
+      duplicate: z.boolean(),
+      eventId: z.string(),
+      sentAt: z.string(),
+      messages: z.array(z.object({ index: z.number().int(), sendId: z.string().uuid(), eventId: z.string(), sentAt: z.string(), duplicate: z.boolean() })),
+      replyTo: z.object({ eventId: z.string(), quoted: z.boolean(), reason: z.enum(["not_in_room", "already_sent"]).nullable() }).optional(),
+    })
+    .openapi("ConversationSendResponse"),
+);
+
+registry.registerPath({
+  method: "post",
+  path: "/orgs/conversations/messages",
+  summary: "Write to a person in their own conversation, on the app they wrote on, from the account they wrote to",
+  description:
+    "LEAD-REPLY-CHANNEL-1127. The checks of POST /orgs/conversations/reach, then the text (or 1..5 paced messages) into that conversation as the brand's account holding it, on any bridged app (WhatsApp, Telegram, LinkedIn...). One path for every app: the message is a Matrix message in the person's own room, relayed by that app's bridge. Never another account, another app or a new thread. Refusals answer 422 with the reach's `code` (409 `send_in_progress` for a key in flight). The message then shows in the person's Unibox thread and counts as ours everywhere (one row per message in the brand's automated sends). No cost. Requires x-api-key, x-org-id; brand from body or x-brand-id; `x-campaign-id` recorded.",
+  request: { body: { content: { "application/json": { schema: ConversationSendRequestSchema } }, required: true } },
+  responses: {
+    200: { description: "Sent", content: { "application/json": { schema: ConversationSendResponseSchema } } },
+    400: { description: "Bad request (`code: invalid_request`)", content: { "application/json": { schema: ErrorResponseSchema } } },
+    409: { description: "`send_in_progress`", content: { "application/json": { schema: ErrorResponseSchema } } },
+    422: { description: "Refused with a named `code` (see POST /orgs/conversations/reach)", content: { "application/json": { schema: ErrorResponseSchema } } },
+    502: { description: "The app's bridge or the homeserver failed (`code: bridge_error` / `send_failed`); the same key retries", content: { "application/json": { schema: ErrorResponseSchema } } },
+  },
+});
+
 export const TeamMembershipRequestSchema = registry.register(
   "TeamMembershipRequest",
   z

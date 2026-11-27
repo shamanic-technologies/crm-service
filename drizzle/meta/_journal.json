@@ -652,6 +652,13 @@
       "when": 1794572800000,
       "tag": "0093_message_translations",
       "breakpoints": true
+    },
+    {
+      "idx": 94,
+      "version": "7",
+      "when": 1794672800000,
+      "tag": "0094_matrix_send_channel",
+      "breakpoints": true
     }
   ]
 }

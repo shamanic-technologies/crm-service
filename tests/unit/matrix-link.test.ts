@@ -56,7 +56,7 @@ describe("read-only by design, one send path", () => {
     expect(files.filter((f) => /create_dm/.test(read(f)))).toEqual(["bridge.ts"]);
   });
 
-  it("only the WhatsApp send module calls them", () => {
+  it("only the send modules call them: WhatsApp's and the conversation send (LEAD-REPLY-CHANNEL-1127)", () => {
     const src = join(__dirname, "../../src");
     const callers: string[] = [];
     const walk = (d: string) => {
@@ -69,6 +69,6 @@ describe("read-only by design, one send path", () => {
       }
     };
     walk(src);
-    expect(callers).toEqual(["lib/whatsapp/send.ts"]);
+    expect(callers.sort()).toEqual(["lib/matrix/conversation-send.ts", "lib/whatsapp/send.ts"]);
   });
 });
