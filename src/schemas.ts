@@ -3007,6 +3007,27 @@ const TimelineItemSchema = z
         description:
           "WHO sent an outbound message (ONBOARDING-FICHE-1027), on every served item: automation = one of our machines (a transactional email such as the welcome email, a cold-email sequence step, an automated WhatsApp send, the Copilot, the API); person = a human of the brand typed it (a WhatsApp / Telegram message from the brand's account that is none of our sends); null = inbound, an event, or the source does not say (a Gmail send). A Gmail copy of a transactional email we sent is not served (the transactional item is that email).",
       }),
+    line: z
+      .object({
+        connectionId: z.string().openapi({ description: "The mirrored connection the message was read from." }),
+        linkId: z.string().nullable().openapi({ description: "The brand's link of that account (PATCH /orgs/matrix/links/{linkId}); null = a hand-registered connection." }),
+        channel: z.string().openapi({ example: "whatsapp", description: "whatsapp | telegram | linkedin | discord ... (the line's app)." }),
+        account: z.string().nullable().openapi({
+          example: "+33612345678",
+          description:
+            "The brand's account the message is on. WhatsApp: its number in E.164, exactly what `fromAccount` takes on POST /orgs/whatsapp/reach, /messages and /typing (a personal line answers `automation_not_allowed` there). Other channels: the bridge's login id, verbatim. Null when the link holds none.",
+        }),
+        accountType: z.enum(["pro_human", "personal_human", "pro_ai"]).nullable().openapi({ description: "The type the brand picked for the account; null = not typed." }),
+        automationAllowed: z.boolean().openapi({
+          description:
+            "May automation write from this account: linked, automation allowed by the brand, and not a personal line (the WhatsApp send's own rule). Today only WhatsApp has an automated send route.",
+        }),
+      })
+      .optional()
+      .openapi({
+        description:
+          "Matrix messages only (WhatsApp, Telegram, LinkedIn..., one-to-one and group; LEAD-REPLY-CHANNEL-1127): WHICH of the brand's linked accounts (lines) the message is on, received on or sent from. An answer continues the conversation on this line; absent on every other source and when the connection is gone.",
+      }),
     translation: ItemTranslationSchema.optional(),
   })
   .openapi("PersonTimelineItem");

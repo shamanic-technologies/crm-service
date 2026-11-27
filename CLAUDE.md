@@ -1794,6 +1794,11 @@ photo, and was silent 3 min while thinking. Every field below is OPTIONAL / addi
   WhatsApp « Reply » of it (Matrix `m.in_reply_to`, bridged natively; `messages` = bubble 1 quotes). Only a message of the
   room the send goes to is quoted (a line with `account` = another number cannot be): else the text still goes, answer
   `replyTo {eventId, quoted: false, reason: "not_in_room"}`; a duplicate key = `reason: "already_sent"`; absent when not asked.
+- **Which line a message is on** (`lib/matrix/line.ts`, LEAD-REPLY-CHANNEL-1127, owner rule 2026-10-13 « never another thread nor
+  another persona »): every Matrix item of the person timeline (1:1 and group, any app) carries `line {connectionId, linkId, channel,
+  account, accountType, automationAllowed}` = the brand's linked account it was received on / sent from. `account` = WhatsApp E.164
+  (what reach / send / typing take as `fromAccount`: a personal line answers `automation_not_allowed`), else the bridge login id;
+  `automationAllowed` = `automationOn` on a linked link (false for a hand-registered connection). A writer answers on that line.
 - **« typing… »** (`lib/whatsapp/typing.ts`): `POST /orgs/whatsapp/typing {brandId?, phone|email, fromAccount?|fromAccountType?,
   state: "start"|"stop"}`. `start` = the send's own checks (422 with the send's codes: nobody we would not write to sees it) +
   the send's account and room (may open the DM like a send), typing re-sent every 20 s, held until `stop`, a send into that

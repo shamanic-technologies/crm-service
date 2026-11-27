@@ -98,6 +98,7 @@ import { ACTIVITY_CHANNEL, activityLine, readActivityThread } from "../account-a
 import { deferApiAnswer } from "./item-fill.js";
 import { ACCOUNT_CHANNEL, creditDateBasis, creditEventText } from "../credit-events/rules.js";
 import { readVoiceTranscripts, voiceNoteText } from "../matrix/voice-notes.js";
+import { readLines, type MessageLine } from "../matrix/line.js";
 import { cachedOnboardingRecords, ONBOARDING_CHANNEL, ONBOARDING_STEP, recordText } from "../onboarding/record.js";
 
 export const TIMELINE_SOURCE_STATUSES = ["ok", "empty", "not_connected", "failed"] as const;
@@ -167,6 +168,12 @@ export interface TimelineItem {
    * `📷 Photo: `). Its bytes: `GET /orgs/matrix/media?brandId=&eventId=`.
    */
   photo?: PhotoRef;
+  /**
+   * Matrix messages only (LEAD-REPLY-CHANNEL-1127), one-to-one and group: the brand's linked account the message is
+   * on (received on / sent from), its type and whether automation may write from it. `line.account` is what the
+   * WhatsApp reach / send take as `fromAccount`, so an answer continues on the line the person wrote to.
+   */
+  line?: MessageLine;
   /**
    * UNIBOX-TRANSLATE-1126: only when the read asked `translate=en`, on message items carrying words: the English
    * version beside the untouched original (`people/translation.ts`).
@@ -246,7 +253,16 @@ async function withVoiceNoteWords(items: TimelineItem[]): Promise<void> {
   }
 }
 
-async function matrixItems(presences: Presence[]): Promise<SourceResult> {
+/** Each Matrix item gets the brand line its connection mirrors (LEAD-REPLY-CHANNEL-1127). */
+async function withLines(items: TimelineItem[], connectionOfItem: Map<TimelineItem, string>): Promise<void> {
+  const lines = await readLines([...connectionOfItem.values()]);
+  for (const i of items) {
+    const line = lines.get(connectionOfItem.get(i) ?? "");
+    if (line) i.line = line;
+  }
+}
+
+export async function matrixItems(presences: Presence[]): Promise<SourceResult> {
   const conversationIds = presences
     .map((p) => p.detail.conversationId)
     .filter((c): c is string => typeof c === "string");
@@ -255,6 +271,7 @@ async function matrixItems(presences: Presence[]): Promise<SourceResult> {
     .filter((p) => Array.isArray(p.detail.groups) && (p.detail.groups as { authoredCount?: number }[]).some((g) => (g.authoredCount ?? 0) > 0))
     .map((p) => ({ handle: p.detail.channelHandle as string, channel: p.detail.channel as string, groups: p.detail.groups as { roomId: string; name: string | null; authoredCount: number }[] }));
   const groupItems: TimelineItem[] = [];
+  const connectionOfItem = new Map<TimelineItem, string>();
   for (const g of groupHandles) {
     const rooms = g.groups.filter((x) => x.authoredCount > 0);
     if (!g.handle || rooms.length === 0) continue;
@@ -285,9 +302,11 @@ async function matrixItems(presences: Presence[]): Promise<SourceResult> {
         outreachFact: null,
         event: null,
       });
+      connectionOfItem.set(groupItems[groupItems.length - 1], e.connectionId);
     }
   }
   if (conversationIds.length === 0) {
+    await withLines(groupItems, connectionOfItem);
     await withVoiceNoteWords(groupItems);
     return { status: groupItems.length ? "ok" : "empty", items: groupItems, error: null, asked: [] };
   }
@@ -339,9 +358,11 @@ async function matrixItems(presences: Presence[]): Promise<SourceResult> {
         outreachFact: null,
         event: null,
       });
+      connectionOfItem.set(items[items.length - 1], c.connectionId);
     }
   }
   items.push(...groupItems);
+  await withLines(items, connectionOfItem);
   await withVoiceNoteWords(items);
   return { status: items.length ? "ok" : "empty", items, error: null, asked: conversationIds };
 }

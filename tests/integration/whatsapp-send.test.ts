@@ -572,6 +572,44 @@ describe.skipIf(!RUN)("WhatsApp send (DB)", () => {
     expect((await reach({})).body).toMatchObject({ reachable: false, code: "automation_not_allowed" });
   });
 
+  it("each Matrix message of the person thread names the brand line it is on; that line handed to the reach check decides (LEAD-REPLY-CHANNEL-1127)", async () => {
+    const personal = await linkAccount(ACCOUNT, { linkedAt: new Date("2026-10-01T00:00:00Z") });
+    const ai = await linkAccount(ACCOUNT_PRO, { linkedAt: new Date("2026-10-02T00:00:00Z") });
+    const type = (linkId: string, body: Record<string, unknown>) => request(app()).patch(`/orgs/matrix/links/${linkId}`).set(headers).send({ brandId: BRAND, ...body });
+    await type(personal.linkId, { accountType: "personal_human" }).expect(200);
+    await type(ai.linkId, { accountType: "pro_ai" }).expect(200);
+    // The person wrote on both lines of the brand.
+    const ghost = "@whatsapp_lid-1:matrix.test";
+    const conversationIds: string[] = [];
+    for (const [conn, eventId] of [[personal.connectionId, "$in-personal"], [ai.connectionId, "$in-ai"]] as const) {
+      const contactId = await mirroredThread(conn, ghost, 1);
+      const [c] = await db.select().from(conversations).where(eq(conversations.contactId, contactId));
+      conversationIds.push(c.id);
+      await db.insert(matrixRawEvents).values({
+        orgId: ORG, brandId: BRAND, connectionId: conn, eventId, roomId: `!room-${conn}`, sender: ghost, eventType: "m.room.message",
+        originServerTs: new Date("2026-09-02T00:00:00Z"),
+        payload: { event_id: eventId, type: "m.room.message", sender: ghost, origin_server_ts: Date.parse("2026-09-02T00:00:00Z"), content: { msgtype: "m.text", body: "hello" } },
+      });
+    }
+    const { matrixItems } = await import("../../src/lib/people/timeline.js");
+    const presences = conversationIds.map((conversationId) => ({
+      source: "matrix", sourceRef: conversationId, displayName: null, company: null, emails: [], phones: [],
+      firstActivityAt: null, lastActivityAt: null, messageCount: 1, inboundCount: 1, outboundCount: 0, detail: { conversationId },
+    }));
+    const { items } = await matrixItems(presences as never);
+    const lineOfEvent = (id: string) => items.find((i) => i.ref.eventId === id)!.line;
+    expect(lineOfEvent("$in-personal")).toEqual({
+      connectionId: personal.connectionId, linkId: personal.linkId, channel: "whatsapp", account: "+33611111111", accountType: "personal_human", automationAllowed: false,
+    });
+    expect(lineOfEvent("$in-ai")).toEqual({
+      connectionId: ai.connectionId, linkId: ai.linkId, channel: "whatsapp", account: "+33622222222", accountType: "pro_ai", automationAllowed: true,
+    });
+    // The line handed back as `fromAccount`: crm-service's own rules answer.
+    const reach = (fromAccount: string) => request(app()).post("/orgs/whatsapp/reach").set(headers).send({ brandId: BRAND, phone: "+33600000001", fromAccount });
+    expect((await reach(lineOfEvent("$in-personal")!.account!)).body).toMatchObject({ reachable: false, code: "automation_not_allowed" });
+    expect((await reach(lineOfEvent("$in-ai")!.account!)).body).toMatchObject({ reachable: true, fromAccount: "+33622222222" });
+  });
+
   it("a hand-typed message keeps only the human's own account: the brand's other accounts (its pro_ai line) still reach the person (SOPHIE-NEVER-SENT-1119)", async () => {
     const founder = await linkAccount(ACCOUNT, { linkedAt: new Date("2026-10-01T00:00:00Z") });
     await mirroredThread(founder.connectionId, "@whatsapp_lid-1:matrix.test", 3);
