@@ -11,7 +11,7 @@
  * other brands), what the brand's own tools know about the person, and the WHOLE conversation we hold, every
  * message with who wrote it and to whom (From / To / Cc as stored), the new ones marked. No rule of ours decides who
  * a message is written to: Jev answers it (`not_to_business` in `REPLY_KINDS`). The thread is cut only to fit Jev's
- * context (32k tokens per question, docs.typesafe.ai/models.md): the oldest messages go first, the new ones never.
+ * context (32k tokens per question, docs.typesafe.ai/models.md): the oldest messages go first, the new ones last.
  */
 import { clipEnds } from "../people/relevance.js";
 import type { BrandContext, PersonView } from "../people/relevance.js";
@@ -56,17 +56,23 @@ export const BURST_LINE_CHARS = 4000;
  */
 export const BURST_THREAD_CHAR_BUDGET = 60_000;
 
-/** PURE: the thread cut to the budget: every new message kept, then the latest older ones; the count dropped said. */
+/**
+ * PURE: the thread cut to the budget: the new messages first (the latest ones when they alone exceed it: a stranger's
+ * 94 unanswered newsletters overflowed Jev, `max_tokens_exceeded`, MON-REPLY-TRIGGER-1127), then the latest older ones;
+ * the count dropped said. The latest new message is always kept.
+ */
 export function fitThread(lines: BurstThreadLine[], budget: number = BURST_THREAD_CHAR_BUDGET): { lines: BurstThreadLine[]; olderOmitted: number } {
   const clipped = lines.map((l) => ({ ...l, text: clipEnds(l.text, BURST_LINE_CHARS - 1000, 1000) }));
   const size = (l: BurstThreadLine) => l.text.length + (l.subject?.length ?? 0) + 200;
-  let used = clipped.filter((l) => l.new).reduce((s, l) => s + size(l), 0);
-  const keep = new Set<number>(clipped.flatMap((l, i) => (l.new ? [i] : [])));
-  for (let i = clipped.length - 1; i >= 0; i--) {
-    if (keep.has(i)) continue;
-    if (used + size(clipped[i]) > budget) continue;
-    used += size(clipped[i]);
-    keep.add(i);
+  let used = 0;
+  const keep = new Set<number>();
+  for (const wantNew of [true, false]) {
+    for (let i = clipped.length - 1; i >= 0; i--) {
+      if (keep.has(i) || !!clipped[i].new !== wantNew) continue;
+      if (keep.size > 0 && used + size(clipped[i]) > budget) continue;
+      used += size(clipped[i]);
+      keep.add(i);
+    }
   }
   const kept = clipped.filter((_, i) => keep.has(i));
   return { lines: kept, olderOmitted: clipped.length - kept.length };
