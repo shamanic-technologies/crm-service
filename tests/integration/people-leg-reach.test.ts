@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach, afterAll, vi } from "vitest";
 import express from "express";
 import request from "supertest";
-import { inArray } from "drizzle-orm";
+import { inArray, sql } from "drizzle-orm";
 import { db } from "../../src/db/index.js";
 import { ghlConnections, ghlRawRecords, people, peopleFacts, peopleScopes } from "../../src/db/schema.js";
 import peopleRoutes from "../../src/routes/people.js";
-import { clearLegReachCache } from "../../src/lib/people/leg-reach.js";
+import { clearLegReachCache, legCountStats, legCountTestHooks } from "../../src/lib/people/leg-reach.js";
 import { noLeadsByAddress } from "../helpers/lead-by-address.js";
 
 /**
@@ -219,6 +219,62 @@ describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
     expect(r.body.excluded).toEqual({ contactedByUs: 1, automated: 0, notBusiness: 0, groupOnly: 0 });
   });
 
+  it("CRM-LEG-REACH-LOAD-1127: a burst of identical reads runs the heavy query once; distinct legs never exceed the cap", async () => {
+    await seedGhl();
+    legCountStats.computed = 0;
+    legCountStats.maxRunning = 0;
+    const burst = await Promise.all(Array.from({ length: 12 }, () => get({ brandId: BRAND, from: "form_submission", to: "meeting_booked" })));
+    expect(burst.every((r) => r.status === 200)).toBe(true);
+    expect(legCountStats.computed).toBe(1);
+    for (const r of burst) expect(r.body).toEqual(burst[0].body);
+    expect(burst[0].body.reachedFrom.people).toBe(6);
+    // Distinct legs at once: each computed once, at most 2 at a time.
+    const legs = [
+      ["form_submission", "meeting_booked"],
+      ["form_submission", "meeting_attended"],
+      ["form_submission", "sale"],
+      ["meeting_booked", "sale"],
+      ["meeting_booked", "meeting_attended"],
+    ];
+    clearLegReachCache();
+    legCountStats.computed = 0;
+    const mixed = await Promise.all(legs.flatMap(([from, to]) => [get({ brandId: BRAND, from, to }), get({ brandId: BRAND, from, to })]));
+    expect(mixed.every((r) => r.status === 200)).toBe(true);
+    expect(legCountStats.computed).toBe(legs.length);
+    expect(legCountStats.maxRunning).toBeLessThanOrEqual(2);
+  });
+
+  it("CRM-LEG-REACH-LOAD-1127: while slow leg reads run, a person timeline read of the brand still answers at once", async () => {
+    await seedGhl();
+    // Each leg computation holds a database connection 3 s (prod: 15-200 s). Before, 4 legs x 7 statements
+    // filled the 10-connection pool and the Unibox thread timed out at the gateway (Beyond Logic, 2026-11-27).
+    legCountTestHooks.inSlot = async () => {
+      await db.execute(sql`SELECT pg_sleep(3)`);
+    };
+    legCountStats.maxRunning = 0;
+    try {
+      const steps = ["form_submission", "meeting_booked", "meeting_attended", "sale"];
+      const legs = steps.flatMap((from) => steps.filter((to) => to !== from).map((to) => ({ from, to })));
+      const burst = Promise.all(legs.map((l) => get({ brandId: BRAND, ...l })));
+      await new Promise((r) => setTimeout(r, 200)); // the leg reads are in flight
+      const t0 = Date.now();
+      const thread = await request(app())
+        .get(`/orgs/people/timeline?brandId=${BRAND}&personKey=${encodeURIComponent("email:a@x.com")}`)
+        .set("x-api-key", API_KEY)
+        .set("x-org-id", ORG)
+        .set("x-user-id", "1e91e91e-1111-4111-8111-0000000000ee");
+      const took = Date.now() - t0;
+      console.log(`timeline during leg reads: ${took} ms`);
+      expect(thread.status).toBe(200);
+      expect(took).toBeLessThan(2000); // answered before even one slow leg read ends
+      const done = await burst;
+      expect(done.every((r) => r.status === 200)).toBe(true);
+      expect(legCountStats.maxRunning).toBeLessThanOrEqual(2);
+    } finally {
+      legCountTestHooks.inSlot = undefined;
+    }
+  }, 60_000);
+
   it("OUTCOMES-CONTACTED-1027: a person lead-service holds but our campaigns never served stays in the team's population; lead-service down = 502", async () => {
     await seedGhl();
     // f carries state_source lead_service (lead-service holds every signup) and was never served.
@@ -276,6 +332,7 @@ describe.skipIf(!RUN)("people leg reach (the brand's own team per leg)", () => {
 
     // Without the calendar record, h's submission is a form step like any other.
     await db.delete(ghlRawRecords).where(inArray(ghlRawRecords.connectionId, [conn.id]));
+    clearLegReachCache(); // the counts of one leg are cached a few minutes (CRM-LEG-REACH-LOAD-1127)
     const raw = await get({ brandId: BRAND, from: "form_submitted", to: "meeting_booked" });
     expect(raw.body.reachedFrom.people).toBe(9);
   });
