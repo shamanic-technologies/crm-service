@@ -115,6 +115,11 @@ export interface SendRequest {
    * the text still goes out, `replyTo.quoted = false`. With `messages`, the first bubble quotes it.
    */
   replyToEventId?: string | null;
+  /**
+   * The bridged app the send goes out on (LEAD-REPLY-CHANNEL-1127): absent = `whatsapp`. Set by the conversation send
+   * (lib/matrix/conversation-send.ts), which writes into an existing conversation on any app.
+   */
+  channel?: string;
 }
 
 export interface SendResult {
@@ -168,7 +173,7 @@ export function txnIdFor(orgId: string, brandId: string, key: string): string {
   return `crmwa-${createHash("sha256").update(`${orgId}|${brandId}|${key}`).digest("hex").slice(0, 40)}`;
 }
 
-type SendRow = typeof whatsappSends.$inferSelect;
+export type SendRow = typeof whatsappSends.$inferSelect;
 
 function resultOf(row: SendRow, duplicate: boolean, previousSends: number, persona: SenderPersona | null): SendResult {
   return {
@@ -190,7 +195,7 @@ function resultOf(row: SendRow, duplicate: boolean, previousSends: number, perso
  * Claim the idempotency key. Returns the row to send under, or the earlier
  * outcome (sent → its result; refused → the same refusal).
  */
-async function claim(
+export async function claim(
   req: SendRequest,
   known: { phone: string; phoneSource: string } | null = null,
 ): Promise<{ row: SendRow } | { earlier: SendRow }> {
@@ -206,6 +211,7 @@ async function claim(
       runId: req.runId,
       callerRunId: req.callerRunId ?? null,
       campaignId: req.campaignId,
+      channel: req.channel ?? "whatsapp",
       ...(known ? { phone: known.phone, phoneSource: known.phoneSource } : {}),
     })
     .onConflictDoNothing({ target: [whatsappSends.orgId, whatsappSends.brandId, whatsappSends.idempotencyKey] })
@@ -241,7 +247,7 @@ async function claim(
   return { earlier };
 }
 
-async function finish(id: string, set: Partial<SendRow>): Promise<SendRow> {
+export async function finish(id: string, set: Partial<SendRow>): Promise<SendRow> {
   const [row] = await db
     .update(whatsappSends)
     .set({ ...set, updatedAt: new Date() })
@@ -923,7 +929,7 @@ export async function sendWhatsAppBubbles(
  * Close rows that did not go out: a named refusal is recorded (and alerted) as
  * the single send does; anything else is `failed`, so the same key retries.
  */
-async function recordUnsent(rows: SendRow[], err: unknown, req: SendRequest): Promise<void> {
+export async function recordUnsent(rows: SendRow[], err: unknown, req: SendRequest): Promise<void> {
   for (const row of rows) {
     if (err instanceof SendRefusal) {
       await finish(row.id, { status: "refused", errorCode: err.code, error: err.message });

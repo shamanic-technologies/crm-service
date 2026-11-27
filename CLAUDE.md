@@ -1535,6 +1535,32 @@ onboarding writes `public_metadata.phone`: 12 of 96 users, 0 Clerk phone numbers
 tagged `phoneSources [{phone, via}]`. brand-service sales-rep phones (5 phones fleet-wide,
 1 matching a signup) are NOT read.
 
+## Answer a person in their own conversation, any bridged app (`src/lib/matrix/conversation-send.ts`, LEAD-REPLY-CHANNEL-1127)
+
+Owner 2026-10-13 « never another thread nor another persona » + 2026-10-10 « NE CRÉE PLUS JAMAIS DES CAS PARTICULIERS »: a
+client wrote on Telegram, the only automated write was the WhatsApp send, the writer answered on WhatsApp from Sophie's line.
+ONE path for every app (no per-app branch): a conversation IS a Matrix room the person wrote in, held by ONE linked account
+(its connection); writing = `m.room.message` into that room as that account, the app's bridge relays it. No phone resolve, no
+new room.
+- `POST /orgs/conversations/reach {brandId, conversationId? | email? | phone?}` → 200 `{reachable: true, conversation
+  {conversationId, channel, roomId, phone, name, lastInboundAt}, fromAccount {linkId, account, accountName, accountType,
+  persona}}` | `{reachable: false, code, error, conversation|null, fromAccount|null}`. `conversationId` (a Lead event's
+  `item.conversationId`) wins; else the person's conversation holding their LATEST inbound message, any app.
+- `POST /orgs/conversations/messages` (same + `text` | `messages[1..5]`, `idempotencyKey`, `replyToEventId?`, `x-campaign-id`
+  recorded) → the reach answer + `sendId, duplicate, eventId, sentAt, messages[], replyTo?`; refusals 422 / 409.
+- Codes: `no_conversation` | `automation_not_allowed` (the account holding it is `personal_human` or automation off: never
+  another account/app in its place) | `account_not_linked` | `account_not_connected` (bridge says logged out; reconnecting =
+  sent, the homeserver holds it) | `human_in_conversation` (hand-typed on a non-pro_ai account) | `stated_not_to_brand` |
+  `send_in_progress`. No staff alert on a refusal (a brand's choice, not a breakage).
+- Rows in `whatsapp_sends` with `channel` (0094, default `whatsapp`): every reader of our own sends (echo, hand-typed, pings,
+  message_sent, sent-after) sees them. The conversation is found BEFORE the key is claimed (the row carries its app); no
+  conversation = refused, no row. Phone = the conversation contact's own (a WhatsApp ghost), else null.
+  `GET /orgs/whatsapp/messages` + `/sends/query` read `channel = 'whatsapp'` only.
+- The WhatsApp routes stay (first outreach by phone, the pro_ai pick, the founder hello). A Lead event's `line.answeringLine`
+  only names a line of the SAME app (`brandLines` reads the connection's channel).
+- ⚠️ A Telegram / LinkedIn writer known by NO email and NO phone is not reported to the door (`no_email_or_phone`:
+  campaign-service names a person by email or E.164 only). Known by either = a Lead event like WhatsApp.
+
 ## Form trigger — a new CRM form fill starts the AI meeting booking (`src/lib/form-trigger/`)
 
 Owner 2026-10-12 (Doc Dinners' Meta Ads form, FORM-TRIGGER-1012): every NEW form submission

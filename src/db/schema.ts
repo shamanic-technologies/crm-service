@@ -2488,6 +2488,10 @@ export const whatsappSends = pgTable(
     // asked. `run_id` is OUR run (its child). Stated on the message's `message_out` fact as `requestedByRunId`.
     callerRunId: text("caller_run_id"),
     campaignId: text("campaign_id"),
+    // LEAD-REPLY-CHANNEL-1127: the bridged app the message went out on ('whatsapp' | 'telegram' | 'linkedin' | ...).
+    // Every automated Matrix send of the brand is a row here, whatever the app, so every reader matching our own
+    // sends (echo, hand-typed, pings, message_sent) sees it. The phone-keyed WhatsApp reads filter on 'whatsapp'.
+    channel: text("channel").notNull().default("whatsapp"),
     sentAt: timestamp("sent_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

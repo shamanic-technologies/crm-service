@@ -194,6 +194,8 @@ router.get("/orgs/whatsapp/messages", apiKeyAuth, requireOrg("whatsapp.sends.lis
       and(
         eq(whatsappSends.orgId, req.orgId!),
         eq(whatsappSends.brandId, brandId),
+        // WhatsApp sends only: a conversation send on another app (LEAD-REPLY-CHANNEL-1127) is not one of them.
+        eq(whatsappSends.channel, "whatsapp"),
         email ? eq(whatsappSends.email, email) : eq(whatsappSends.phone, phone!),
       ),
     )
@@ -249,6 +251,7 @@ router.post("/orgs/whatsapp/sends/query", apiKeyAuth, requireOrg("whatsapp.sends
             eq(whatsappSends.orgId, req.orgId!),
             eq(whatsappSends.brandId, brandId),
             eq(whatsappSends.campaignId, campaignId),
+            eq(whatsappSends.channel, "whatsapp"),
             inArray(whatsappSends.email, [...wanted]),
           ),
         )
