@@ -4853,9 +4853,13 @@ registry.registerPath({
     "with `reasons` when: `sync_error` (the sync fails), `sync_late` (no good sync for 2 h), `quiet_unusual` (nothing new for longer " +
     "than the connection's own longest quiet stretch over the 180 days before, at least 3 days, only with 20+ active days of history). " +
     "A sync that succeeds while the account takes in nothing is therefore red, never healthy. Paused = `paused`, never red. " +
+    "GMAIL-SYNC-STALL-1128: every Google connection google-service holds (`source` gmail | google-calendar | google-search-console, " +
+    "`brandId` null for a mailbox / calendar) is listed too, with google-service's OWN verdict served as-is (reason codes include " +
+    "`reconnect_required`); google-service unreadable = one red row `source: google`, `syncStatus: unreadable`, reason " +
+    "`source_unreadable`, + `unreadableSources`, never a silent omission. " +
     "Nothing is emailed: red on the Monitoring hub is the alert. Staff-only behind the gateway.",
   request: { query: z.object({ days: z.coerce.number().int().min(1).max(90).optional().describe("Window in days, default 30") }) },
-  responses: { 200: { description: "`{generatedAt, days, rule: {historyDays, minActiveDays, minQuietDays, syncLateAfterMinutes}, status, connections: [{source, connectionId, orgId, brandId, brandName, account, syncStatus, lastSyncedAt, lastError, status: ok|red|paused, reasons: [{code, text}], newestRecordDay, quietDays, usualLongestQuietDays, activeDaysInHistory, waiting: {until, since} | null (the vendor asked us to wait: PostHog's hourly read limit; never red alone, red only once the mirror is 2 h behind), byDay: [{day, records}]}]}`" }, 400: { description: "Invalid days" } },
+  responses: { 200: { description: "`{generatedAt, days, rule: {historyDays, minActiveDays, minQuietDays, syncLateAfterMinutes}, status, unreadableSources: [{source, producer, error}], connections: [{source, connectionId, orgId (null on a source_unreadable row), brandId (nullable), brandName, account, syncStatus, lastSyncedAt, lastError, status: ok|red|paused, reasons: [{code, text}], newestRecordDay, quietDays, usualLongestQuietDays, activeDaysInHistory, waiting: {until, since} | null (the vendor asked us to wait: PostHog's hourly read limit; never red alone, red only once the mirror is 2 h behind), byDay: [{day, records}]}]}`" }, 400: { description: "Invalid days" } },
 });
 
 registry.registerPath({

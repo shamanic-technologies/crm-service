@@ -8,6 +8,7 @@ import { sql } from "drizzle-orm";
 import { db } from "../db/index.js";
 import { brandNames } from "./trigger-health.js";
 import { assessIntake, dailySeries, HISTORY_DAYS, MIN_ACTIVE_DAYS, MIN_QUIET_DAYS, SYNC_LATE_AFTER_MS, type IntakeAssessment } from "./connector-intake-core.js";
+import { readGoogleIntake, type GoogleIntake } from "./google-intake.js";
 
 /**
  * Each source: its connection table, its bronze table, and per bronze kind the payload key holding the vendor's own
@@ -59,18 +60,88 @@ export interface ConnectorIntake {
   days: number;
   rule: { historyDays: number; minActiveDays: number; minQuietDays: number; syncLateAfterMinutes: number };
   status: "ok" | "red";
-  connections: ({
+  /**
+   * A producer whose connections could not be read this time (GMAIL-SYNC-STALL-1128: google-service). Also served as a
+   * red row in `connections` (`source_unreadable`), so the hub shows it: never a silent omission.
+   */
+  unreadableSources: { source: string; producer: string; error: string }[];
+  connections: IntakeConnection[];
+}
+
+export type IntakeConnection = {
     source: string;
     connectionId: string;
-    orgId: string;
-    brandId: string;
+    /** null only on a producer's `source_unreadable` row. */
+    orgId: string | null;
+    /** null when the connection has no brand (a Gmail mailbox, a Google Calendar: per org). */
+    brandId: string | null;
     brandName: string | null;
     account: string | null;
     syncStatus: string;
     lastSyncedAt: string | null;
     lastError: string | null;
     byDay: { day: string; records: number }[];
-  } & IntakeAssessment)[];
+  } & Omit<IntakeAssessment, "reasons"> & { reasons: { code: string; text: string }[] };
+
+/**
+ * Fold google-service's Google connections (Gmail, Calendar, Search Console) in, its verdict served AS-IS (never
+ * re-graded here). Unreadable = one red `source_unreadable` row + `unreadableSources`. Pure.
+ */
+export function foldGoogleIntake(
+  google: GoogleIntake,
+  names: Map<string, string | null>,
+  days: number,
+  now: number,
+): { connections: IntakeConnection[]; unreadable: ConnectorIntake["unreadableSources"] } {
+  if (!google.ok) {
+    const text = `Google connections (Gmail, Calendar, Search Console) could not be read from google-service: ${google.error}`;
+    return {
+      unreadable: [{ source: "google", producer: "google-service", error: google.error }],
+      connections: [
+        {
+          source: "google",
+          connectionId: "google-service",
+          orgId: null,
+          brandId: null,
+          brandName: null,
+          account: null,
+          syncStatus: "unreadable",
+          lastSyncedAt: null,
+          lastError: google.error,
+          status: "red",
+          reasons: [{ code: "source_unreadable", text }],
+          newestRecordDay: null,
+          quietDays: null,
+          usualLongestQuietDays: null,
+          activeDaysInHistory: 0,
+          waiting: null,
+          byDay: dailySeries(new Map(), days, now),
+        },
+      ],
+    };
+  }
+  return {
+    unreadable: [],
+    connections: google.connections.map((c) => ({
+      source: c.source,
+      connectionId: c.connectionId,
+      orgId: c.orgId,
+      brandId: c.brandId,
+      brandName: c.brandId ? (names.get(c.brandId) ?? null) : null,
+      account: c.account,
+      syncStatus: c.syncStatus,
+      lastSyncedAt: c.lastSyncedAt,
+      lastError: c.lastError,
+      status: c.status,
+      reasons: c.reasons,
+      newestRecordDay: c.newestRecordDay,
+      quietDays: c.quietDays,
+      usualLongestQuietDays: c.usualLongestQuietDays,
+      activeDaysInHistory: c.activeDaysInHistory,
+      waiting: null,
+      byDay: c.byDay,
+    })),
+  };
 }
 
 const rows = async <T>(q: ReturnType<typeof sql>) => (await db.execute(q)) as unknown as T[];
@@ -82,6 +153,7 @@ const DAY_OF = (v: string) => `CASE
 END`;
 
 export async function readConnectorIntake(days: number, now: number = Date.now()): Promise<ConnectorIntake> {
+  const googleRead = readGoogleIntake(days);
   const since = new Date(now - (HISTORY_DAYS + days + 1) * 86_400_000).toISOString().slice(0, 10);
   const connections: ConnectorIntake["connections"] = [];
   for (const s of SOURCES) {
@@ -131,11 +203,16 @@ export async function readConnectorIntake(days: number, now: number = Date.now()
       });
     }
   }
+  const google = await googleRead;
+  const googleNames = google.ok ? await brandNames(google.connections.flatMap((c) => (c.brandId ? [c.brandId] : []))) : new Map<string, string | null>();
+  const folded = foldGoogleIntake(google, googleNames, days, now);
+  connections.push(...folded.connections);
   return {
     generatedAt: new Date(now).toISOString(),
     days,
     rule: { historyDays: HISTORY_DAYS, minActiveDays: MIN_ACTIVE_DAYS, minQuietDays: MIN_QUIET_DAYS, syncLateAfterMinutes: SYNC_LATE_AFTER_MS / 60_000 },
     status: connections.some((c) => c.status === "red") ? "red" : "ok",
+    unreadableSources: folded.unreadable,
     connections,
   };
 }
