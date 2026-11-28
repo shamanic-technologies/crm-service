@@ -42,7 +42,7 @@ interface FeedPage {
 }
 
 /** The identity the cross-org feed read is filed under: the staff org and its Unibox scope's creator. */
-async function feedIdentity(): Promise<{ orgId: string; userId: string }> {
+export async function feedIdentity(): Promise<{ orgId: string; userId: string }> {
   const orgId = process.env.COPILOT_UNIBOX_ORG_ID;
   const brandId = process.env.COPILOT_UNIBOX_BRAND_ID;
   if (!orgId || !brandId) throw new Error("[crm-service][calendar] COPILOT_UNIBOX_ORG_ID and COPILOT_UNIBOX_BRAND_ID are required to read the calendar feed");

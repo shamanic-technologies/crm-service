@@ -964,7 +964,11 @@ took in nothing 2026-10-20 → 10-28 while "active"; GoHighLevel's own API said 
 activity 10-20 20:47): no mirror bug, the account went quiet, unseen. `GET /internal/ops/connector-intake?days=` (staff,
 Monitoring hub) = per mirror connection (GoHighLevel, PostHog, Stripe, auth) records the VENDOR dates per UTC day, read
 from bronze; red on `sync_error`, `sync_late` (2 h), `quiet_unusual` (quieter than its own longest stretch over the 180
-days before, >= 3 days, only with 20+ active days). Sends nothing. ⚠️ Probing GoHighLevel by hand: key-service decrypt
+days before, >= 3 days, only with 20+ active days). Sends nothing. **Google connections too** (GMAIL-SYNC-STALL-1128, `lib/google-intake.ts`:
+2026-11-27 every Gmail grant revoked at Google, mirror frozen 23 h, nothing red): google-service `GET /internal/connector-intake`
+(staff-org identity + one run per read, shared 60 s, one in flight) = every Gmail / Calendar / Search Console connection with
+google-SERVICE's verdict served AS-IS (never re-graded; `brandId` null = per org). Unreadable = one red row `source: google`
+`source_unreadable` + `unreadableSources`, never an empty list. ⚠️ Probing GoHighLevel by hand: key-service decrypt
 needs `X-Caller-Service/Method/Path`, else 400 and a token-less call reads GHL's "401 Invalid JWT" (not a dead token).
 
 ### Funnel evidence — appointments, stage history, stage meanings
